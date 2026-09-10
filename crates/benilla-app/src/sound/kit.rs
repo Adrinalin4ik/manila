@@ -671,7 +671,7 @@ pub(super) fn play_kit_ext(
                 if kits.reported_missing.insert(id) {
                     return Err(anyhow!("unknown sound kit"));
                 }
-                return Ok(());
+                return Ok(false);
             };
             k
         }
