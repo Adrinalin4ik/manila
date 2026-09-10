@@ -46,7 +46,13 @@ const SECTION_HAIR: u8 = 3;
 /// A CharSections availability key: `(race, sex, sectionType, variation, color)`.
 type SectionKey = (u8, u8, u8, u8, u8);
 
-/// The 8 playable races (ChrRaces ids 1–8); higher rows (Goblin = 9) aren't character-creatable.
+/// The 8 playable vanilla races (ChrRaces ids 1–8). The **runtime** playable set is derived from
+/// the data instead — every ChrRaces row that also has a CharBaseInfo row (the intersection):
+/// on 5875 data that is exactly these 8 (vanilla's file carries non-playable extras like row 9
+/// Goblin, which have no CharBaseInfo rows and drop out), and on a Turtle-derived DBC it includes
+/// the client's added races (9 Goblin, 10 BloodElf) with their displays and dial ranges. This
+/// frozen array remains only for the 5875 contract test.
+#[cfg(test)]
 const PLAYABLE_RACES: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 
 /// The 8 playable races' ChrRaces client fileStrings (col 15), a **frozen fact** of the build — the
@@ -127,6 +133,11 @@ pub struct CharCreateCatalog {
     /// (race, class, sex) → the level-1 starting-outfit items the create preview dresses in
     /// (CharStartOutfit, decision 0527) — worn slots only, DisplayId + InventoryType.
     start_outfits: HashMap<(u8, u8, u8), Vec<StartOutfitItem>>,
+    /// Races whose parsed CharBaseInfo combos differ from the frozen 1.12 table — set by
+    /// [`Self::self_check`] instead of failing the load, because a Turtle-derived DBC legitimately
+    /// adds combos (and its parse is provably right: the ids it reports are real class ids). The
+    /// app logs this once at startup; callers just get the DBC's truth.
+    pub modified_combos: Vec<u8>,
 }
 
 impl CharCreateCatalog {
@@ -193,10 +204,12 @@ impl CharCreateCatalog {
     }
 
     /// Load the character-creation catalog from the patch chain (ChrRaces + CharBaseInfo +
-    /// CharSections + CharHairGeosets + CharacterFacialHairStyles). Two load-time self-checks fail
-    /// loudly on a misparse: the parsed combos must equal the frozen 1.12 table (guards the 2-byte
-    /// CharBaseInfo layout), and every playable (race, sex) must have a body display + all five
-    /// ranges nonzero.
+    /// CharSections + CharHairGeosets + CharacterFacialHairStyles). Load-time self-checks fail
+    /// loudly on a misparse; the combo check compares against the frozen 1.12 table but only
+    /// **warns** on a difference — a Turtle-derived DBC adds race/class combos, and its parse is
+    /// provably right (the ids it reports are real ones), so modified data must not sink the
+    /// catalog. The remaining guards (race fileStrings, start-outfit layout, per-race displays
+    /// and customization ranges) still pin their layouts.
     pub fn load(chain: &mut Chain) -> Result<Self> {
         let (displays, files, custom_tokens) = load_races(chain)?;
         let combos = load_combos(chain)?;
@@ -205,8 +218,21 @@ impl CharCreateCatalog {
         let hair_geo = load_hair_geosets(chain)?;
         let facial = load_facial_hair_styles(chain)?;
 
+        // The playable set is the data's own intersection: a ChrRaces row (displays + fileString)
+        // that CharBaseInfo actually offers classes for. 5875 data → races 1–8; a Turtle-derived
+        // DBC adds 9 (Goblin) and 10 (BloodElf) here, which is exactly its client's create grid.
+        let playable = {
+            let mut v: Vec<u8> = displays
+                .keys()
+                .copied()
+                .filter(|r| combos.iter().any(|&(rr, _)| rr == *r))
+                .collect();
+            v.sort_unstable();
+            v
+        };
+
         let mut ranges = HashMap::new();
-        for race in PLAYABLE_RACES {
+        for race in playable {
             for sex in [0u8, 1] {
                 ranges.insert(
                     (race, sex),
@@ -222,37 +248,44 @@ impl CharCreateCatalog {
             combos,
             ranges,
             start_outfits,
+            modified_combos: Vec::new(),
         };
         catalog.self_check()?;
         for combo in UNUSED_COMBOS {
             catalog.combos.remove(&combo);
         }
-        // **A race is known completely or not at all.** `load_races` keeps only [`PLAYABLE_RACES`],
-        // so anything outside it has no body displayId, no fileString, no customization tokens and
-        // no dial ranges — while `CharBaseInfo` is read whole, so its combos survive. A server that
-        // adds races (Turtle WoW ships two, ids 9 and 10) therefore produced a catalog that offered
-        // a race the rest of it could not describe: the create screen drew slots for them with no
-        // art and its authored layout overflowed.
+        // **The added races used to be dropped here, and that fix is now retired.** It existed
+        // because `load_races` kept only the vanilla eight, so a Turtle install offered a race the
+        // rest of the catalog could not describe — no displayId, no fileString, no tokens, no dial
+        // ranges — and the create screen drew empty slots and overflowed its authored layout.
         //
-        // Dropping them here rather than teaching `load_races` to keep them is the honest half of
-        // the fix: the client cannot render those races today (`scene_token` and the geoset tables
-        // are 1..=8 as well), and offering something that cannot be created is worse than not
-        // offering it. On a vanilla install this removes nothing — there is no race outside 1..=8.
-        catalog
-            .combos
-            .retain(|&(race, _)| PLAYABLE_RACES.contains(&race));
+        // `load_races` now captures every ChrRaces row and the playable set is derived above as
+        // ChrRaces × CharBaseInfo, so all four of those are supplied for 9 and 10. The premise the
+        // drop rested on is gone, and keeping it would delete exactly the races the rest of this
+        // work exists to support.
         Ok(catalog)
     }
 
     /// Load-time misparse guards (see [`Self::load`]).
-    fn self_check(&self) -> Result<()> {
+    fn self_check(&mut self) -> Result<()> {
         for (race, classes) in KNOWN_COMBOS {
             let got = self.classes_for_race(race);
+            // **Both halves, because they answer different questions.** A modified DBC legitimately
+            // ADDS combos (Turtle gives humans hunters, trolls warlocks), so equality is the wrong
+            // test and the fork that dropped it was right about that. But a misparse of the 2-byte
+            // race/class layout shows up as combos going MISSING, and recording-without-bailing
+            // catches none of that — it would trade a loud failure on broken data for a silent one.
+            //
+            // So: containment still bails (a known combo that vanished is a layout defect, on any
+            // data), and the surplus is recorded for the app to log rather than judged here.
             if !covers_vanilla(&got, classes) {
                 bail!(
                     "CharBaseInfo misparse: race {race} classes {got:?} do not cover known \
                      {classes:?} (check the 2-byte race/class layout)"
                 );
+            }
+            if got != classes {
+                self.modified_combos.push(race);
             }
         }
         for (race, file) in KNOWN_FILES {
@@ -288,7 +321,15 @@ impl CharCreateCatalog {
                 );
             }
         }
-        for race in PLAYABLE_RACES {
+        // The display/token/dial guard runs over the same data-derived playable set as
+        // [`Self::load`]'s ranges derivation (see there).
+        for race in self
+            .displays
+            .keys()
+            .copied()
+            .filter(|r| self.combos.iter().any(|&(rr, _)| rr == *r))
+            .collect::<Vec<u8>>()
+        {
             for sex in [0u8, 1] {
                 if self.body_display(race, sex).unwrap_or(0) == 0 {
                     bail!("ChrRaces: race {race} sex {sex} has no body displayId");
@@ -347,9 +388,9 @@ fn load_races(
     for r in rs.records() {
         let Some(race) = u32_at(r, 0) else { continue };
         let race = race as u8;
-        if !PLAYABLE_RACES.contains(&race) {
-            continue;
-        }
+        // No playability filter here: the file carries extra rows (5875's row 9 Goblin; Turtle's
+        // added races 9/10), and the playable set is the caller's ChrRaces × CharBaseInfo
+        // intersection — capturing every row keeps that derivation possible.
         if let (Some(male), Some(female)) = (u32_at(r, 4), u32_at(r, 5)) {
             displays.insert(race, (male, female));
         }

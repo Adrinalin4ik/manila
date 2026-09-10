@@ -120,6 +120,10 @@ pub struct TerrainStreamer {
     /// map's WDT grid says so **once** rather than every frame. `None` while the focus is on the
     /// grid (so re-entering the state re-reports).
     off_grid_reported: Option<(i32, i32)>,
+    /// The last map id whose directory the catalog could not name — the once-per-map warn gate
+    /// (a Turtle custom map id on an install whose Map.dbc predates it stays warned-once, not
+    /// warned every frame of a permanent void).
+    unknown_map: Option<u32>,
 }
 
 /// The placement id the map-global WMO is registered under. A WMO-only map authors **no** ADT tiles
@@ -714,6 +718,46 @@ fn stream_terrain(
     let placements = placements.into_inner();
     let map_id = focus.map(current_map.map(|m| m.0));
     let Some(dir) = map_catalog.0.directory(map_id).map(str::to_string) else {
+        // A server-side map the client data does not describe — no Map.dbc row, so no directory,
+        // no WDT, and no tiles that could ever exist. The reference client has nothing to draw
+        // here either, but what must NOT happen is the loading screen waiting on a world that
+        // cannot exist: with the old silent return, nothing published residency, `total` stayed
+        // 0 (and `is_ready` requires `total > 0`), and the settle hold pushed its stall deadline
+        // forever because `world_stale` could never clear — a permanent cover. Drop whatever map
+        // we still hold, warn once per unknown map, and publish vacuous residency (the map-edge
+        // law: ground that isn't there counts as resident) so the screen clears, the hold ends,
+        // and the settle release pays the worldport ack the server is waiting for.
+        if state.unknown_map != Some(map_id) {
+            warn!(
+                "terrain: map {map_id} has no Map.dbc directory — no world to stream (cover released by vacuity)"
+            );
+            state.unknown_map = Some(map_id);
+        }
+        if state.map_dir.is_some() || !state.tiles.is_empty() {
+            drop_streamed_world(
+                &mut commands,
+                &mut state,
+                placements,
+                &mut welds,
+                &mut static_merge,
+                staticgx.as_deref_mut(),
+                &mut activity,
+            );
+            state.map_dir = None;
+        }
+        // The tile the avatar stands in, computed exactly as the publish block below does —
+        // `focus_matches` in the settle release keys on it, so it must name THIS map's coords,
+        // never the map we left.
+        let center = focus.resolve(camera.single().ok().map(|c| c.translation));
+        let (cx, cy) = benilla_formats::world_to_tile(center[0], center[1]);
+        if let Some(p) = load_progress.as_mut() {
+            p.total = 1;
+            p.ready = 1;
+            p.focus_tile = Some((cx as i32, cy as i32));
+            p.focus_resident = true;
+            p.scene_ready = true;
+            p.placements_pending = 0;
+        }
         return;
     };
 

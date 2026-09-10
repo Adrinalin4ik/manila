@@ -1121,7 +1121,16 @@ fn setup_entities(
         Err(e) => warn!("char sections unavailable, player bodies stay untextured: {e:#}"),
     }
     match CharCreateCatalog::load(&mut chain) {
-        Ok(catalog) => commands.insert_resource(CharCreate(catalog)),
+        Ok(catalog) => {
+            if !catalog.modified_combos.is_empty() {
+                warn!(
+                    "char-create catalog: CharBaseInfo races {:?} have class combos the frozen \
+                     1.12 table does not (a Turtle-derived DBC) — trusting the DBC",
+                    catalog.modified_combos
+                );
+            }
+            commands.insert_resource(CharCreate(catalog));
+        }
         Err(e) => warn!("char-create catalog unavailable, the create screen is disabled: {e:#}"),
     }
     match load_item_display_catalog(&mut chain) {

@@ -16,7 +16,7 @@
 //! drivers). Remaining INTERIM: out-of-range looping channels stop (audible again = restart by
 //! the trigger) rather than pause/resume-virtualize.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Context, Result};
 use bevy::prelude::*;
@@ -85,6 +85,12 @@ pub(crate) struct SoundKits {
     pending: HashMap<String, deferred::PendingSfx>,
     pick: HashMap<u32, PickState>,
     rng: Rng,
+    /// Kit ids whose first miss has been reported. The catalog loads once and never grows, so a
+    /// kit that is not in it will never arrive — the first miss warns (through the caller's
+    /// context), every later play of the same id is playable-as-nothing, like a file-less kit. A
+    /// Turtle server references kit ids its client DBC does not ship, and a looping GO event
+    /// re-fires every cycle: this set is what keeps that from being a per-frame warn.
+    reported_missing: HashSet<u32>,
 }
 
 impl SoundKits {
@@ -659,10 +665,21 @@ pub(super) fn play_kit_ext(
         return Ok(false);
     }
     let kit = match kit_ref {
-        KitRef::Id(id) => kits.catalog.get(id),
-        KitRef::Name(name) => kits.catalog.by_name(name),
-    }
-    .ok_or_else(|| anyhow!("unknown sound kit"))?;
+        KitRef::Id(id) => {
+            let Some(k) = kits.catalog.get(id) else {
+                // One report per id — see [`SoundKits::reported_missing`].
+                if kits.reported_missing.insert(id) {
+                    return Err(anyhow!("unknown sound kit"));
+                }
+                return Ok(());
+            };
+            k
+        }
+        KitRef::Name(name) => kits
+            .catalog
+            .by_name(name)
+            .ok_or_else(|| anyhow!("unknown sound kit"))?,
+    };
 
     let (id, volume, flags, min_dist, cutoff, eax_def) = (
         kit.id,
@@ -1075,6 +1092,7 @@ impl SoundKits {
             pending: HashMap::new(),
             pick: HashMap::new(),
             rng: Rng(0x9e37_79b9),
+            reported_missing: HashSet::new(),
         }
     }
 

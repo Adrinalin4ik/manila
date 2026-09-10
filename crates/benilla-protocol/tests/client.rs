@@ -38,7 +38,9 @@ fn client_bodies_golden() {
     let proof: [u8; 20] = std::array::from_fn(|i| (i as u8).wrapping_mul(3).wrapping_add(7));
     // The tail is the addon-info block: `342` uncompressed + the zlib stream of the stock twelve
     // (decision 1497). Byte-identical to a real 1.12.1.5875 client's — the same 130 compressed
-    // bytes as the 2006 retail capture wow-5875-re verified this against.
+    // bytes as the 2006 retail capture wow-5875-re verified this against. It is also what keeps a
+    // Turtle-derived (namreeb) anticheat from closing the connection on an empty addon block — see
+    // `messages::auth_session`'s doc comment.
     assert_eq!(
         messages::auth_session(
             5875,
@@ -63,7 +65,8 @@ fn client_bodies_golden() {
         hx("f31600000000000054455354555345520044332211070a0d101316191c1f2225282b2e3134373a3d40"),
         "CMSG_AUTH_SESSION body with no secure addons"
     );
-    // Zero-appearance body (the create-if-empty starter): name + [race,class,gender] + 5 zeros + 0.
+    // Zero-appearance body (the create-if-empty starter): name + [race,class,gender] + 5 zeros +
+    // outfit 0 + the trailing Turtle challengeMask 0.
     assert_eq!(
         messages::char_create(&messages::CharCreateReq {
             name: "Benilla".into(),
@@ -76,12 +79,13 @@ fn client_bodies_golden() {
             hair_color: 0,
             facial_hair: 0,
         }),
-        hx("42656e696c6c6100010100000000000000"),
+        hx("42656e696c6c610001010000000000000000000000"),
         "CMSG_CHAR_CREATE body (zero appearance)"
     );
     // Distinct appearance dials (3/4/5/6/7) — a misplaced byte can't pass. Body is name + nul +
     // race(01) class(01) gender(00) skin(03) face(04) hairStyle(05) hairColor(06) facialHair(07)
-    // outfit(00), matching vmangos's read order (`Packets/Character.cpp:4-19`).
+    // outfit(00) + challengeMask(00000000) — vmangos's read order (`Packets/Character.cpp:4-19`)
+    // plus Turtle's trailing field.
     assert_eq!(
         messages::char_create(&messages::CharCreateReq {
             name: "Benilla".into(),
@@ -94,7 +98,7 @@ fn client_bodies_golden() {
             hair_color: 6,
             facial_hair: 7,
         }),
-        hx("42656e696c6c6100010100030405060700"),
+        hx("42656e696c6c610001010003040506070000000000"),
         "CMSG_CHAR_CREATE body (distinct appearance)"
     );
     assert_eq!(

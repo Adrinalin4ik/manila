@@ -6,9 +6,11 @@
 //! palette (`GlueFonts.xml` / the Lua color table). Every field is optional — with no client data
 //! the screens degrade to plain text buttons.
 
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 
-use benilla_assets::WorldAssets;
+use benilla_assets::{LockRecover, WorldAssets};
 
 use super::add_material::AddUiMaterial;
 use super::backdrop::BackdropEdges;
@@ -87,6 +89,12 @@ pub(crate) struct ScrollArt {
 pub(crate) struct GlueArt {
     tried: bool,
     pub(crate) races: Option<(Handle<Image>, Vec2)>,
+    /// The client's own `RACE_ICON_TCOORDS` cells (race → [male, female] normalized rects),
+    /// parsed from its `CharacterCreate.lua` at load — a Turtle-derived client extends the sheet
+    /// with a fifth column (Goblin / BloodElf), and its table carries those rects, so the
+    /// selection grid draws the install's real art whatever the build. `None` when the file or
+    /// parse is unavailable: [`Self::race_tc`] falls back to the frozen vanilla layout.
+    race_cells: Option<HashMap<u8, [[f32; 4]; 2]>>,
     pub(crate) classes: Option<(Handle<Image>, Vec2)>,
     pub(crate) gender: Option<(Handle<Image>, Vec2)>,
     pub(crate) factions: Option<(Handle<Image>, Vec2)>,
@@ -212,6 +220,16 @@ impl GlueArt {
             return;
         }
         self.tried = true;
+        // The client's own icon-cell table (see the field): read once, parse, and let `race_tc`
+        // prefer it over the frozen vanilla math.
+        self.race_cells = assets
+            .chain
+            .lock_recover()
+            .read_file("Interface\\GlueXML\\CharacterCreate.lua")
+            .ok()
+            .as_deref()
+            .map(String::from_utf8_lossy)
+            .and_then(|t| parse_race_icon_tcoords(&t));
         fn sized(
             assets: &mut WorldAssets,
             path: &str,
@@ -508,6 +526,17 @@ impl GlueArt {
             self.checkbox.is_some(),
         );
     }
+
+    /// A race icon's texcoords for a (race, sex) — the client's own authored rect when its
+    /// `CharacterCreate.lua` parsed, the frozen vanilla 4-column math otherwise.
+    pub(crate) fn race_tc(&self, race: u8, sex: u8) -> Option<[f32; 4]> {
+        if let Some([male, female]) = self.race_cells.as_ref().and_then(|c| c.get(&race)) {
+            return Some(if sex == 0 { *male } else { *female });
+        }
+        let (c, r) = race_cell(race)?;
+        let r = r + if sex == 1 { 2.0 } else { 0.0 };
+        Some([c * 0.25, (c + 1.0) * 0.25, r * 0.25, (r + 1.0) * 0.25])
+    }
 }
 
 // ── WoW `alphaMode="ADD"` overlays ───────────────────────────────────────────────────────────────
@@ -535,7 +564,66 @@ fn add_overlay(
 
 // ── The frozen icon-cell tables (CharacterCreate.lua's *_ICON_TCOORDS, verbatim) ─────────────────
 
-/// A race's cell in `UI-CharacterCreate-Races` (col, row; female = row + 2) — `RACE_ICON_TCOORDS`.
+/// ChrRaces client fileStrings for races 1–10 — the vanilla eight plus Turtle's two additions. Used
+/// only to key the client-authored icon cells back to race ids (`parse_race_icon_tcoords`); the
+/// playable set itself is the catalog's.
+const RACE_FILES: [(u8, &str); 10] = [
+    (1, "Human"),
+    (2, "Orc"),
+    (3, "Dwarf"),
+    (4, "NightElf"),
+    (5, "Scourge"),
+    (6, "Tauren"),
+    (7, "Gnome"),
+    (8, "Troll"),
+    (9, "Goblin"),
+    (10, "BloodElf"),
+];
+
+/// Parse the client's `RACE_ICON_TCOORDS` table out of its own `CharacterCreate.lua` — the
+/// 4-column vanilla table, or the Turtle extension that appends a fifth column (Goblin, BloodElf).
+/// Entries are the fixed shape `["NAME_MALE"] = {a, b, c, d},`; unknown names are skipped (the
+/// file is the player's, not ours), and `None` when no entry parses.
+fn parse_race_icon_tcoords(text: &str) -> Option<HashMap<u8, [[f32; 4]; 2]>> {
+    let block = text.find("RACE_ICON_TCOORDS")?;
+    let block = &text[block..];
+    let end = block.find("};")?;
+    let mut cells: HashMap<u8, [[f32; 4]; 2]> = HashMap::new();
+    for line in block[..end].lines() {
+        let Some(eq) = line.find('=') else { continue };
+        let Some(key_end) = line[..eq].find("\"]") else { continue };
+        let key = &line[..key_end + 1];
+        let Some(key_start) = key.find("[\"") else { continue };
+        let key = &key[key_start + 2..key.len() - 1];
+        let Some((name, sex)) = key.rsplit_once('_') else { continue };
+        let (Some(race), Some(sex_idx)) = (
+            RACE_FILES
+                .iter()
+                .find(|(_, n)| n.eq_ignore_ascii_case(name))
+                .map(|(r, _)| *r),
+            match sex {
+                "MALE" => Some(0usize),
+                "FEMALE" => Some(1),
+                _ => None,
+            },
+        ) else {
+            continue;
+        };
+        let Some(open) = line.find('{') else { continue };
+        let Some(close) = line.find('}') else { continue };
+        let nums: Option<Vec<f32>> = line[open + 1..close]
+            .split(',')
+            .map(|p| p.trim().parse::<f32>().ok())
+            .collect();
+        let Some(nums) = nums else { continue };
+        let rect: [f32; 4] = nums[..4].try_into().ok()?;
+        cells.entry(race).or_insert([[0.0; 4]; 2])[sex_idx] = rect;
+    }
+    if cells.is_empty() { None } else { Some(cells) }
+}
+
+/// A race's cell in `UI-CharacterCreate-Races` (col, row; female = row + 2) — `RACE_ICON_TCOORDS`
+/// as frozen in 5875: the fallback when the client's own table could not be parsed.
 fn race_cell(race: u8) -> Option<(f32, f32)> {
     Some(match race {
         1 => (0.0, 0.0), // Human
@@ -548,13 +636,6 @@ fn race_cell(race: u8) -> Option<(f32, f32)> {
         2 => (3.0, 1.0), // Orc
         _ => return None,
     })
-}
-
-/// A race icon's texcoords for a (race, sex).
-pub(crate) fn race_tc(race: u8, sex: u8) -> Option<[f32; 4]> {
-    let (c, r) = race_cell(race)?;
-    let r = r + if sex == 1 { 2.0 } else { 0.0 };
-    Some([c * 0.25, (c + 1.0) * 0.25, r * 0.25, (r + 1.0) * 0.25])
 }
 
 /// A class icon's texcoords in `UI-CharacterCreate-Classes` — `CLASS_ICON_TCOORDS`, verbatim.

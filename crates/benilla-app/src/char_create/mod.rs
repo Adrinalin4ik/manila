@@ -46,12 +46,16 @@ use crate::sound::GlueSound;
 /// Horde, ascending race id within each. (`RACE_ICON_TCOORDS` is a name→UV lookup; its literal table
 /// order never reaches layout — reading it as the button order is what got this wrong before.)
 ///
+/// Turtle's two added races append in the same ascending-id law — BloodElf (10) to the Alliance
+/// column, Goblin (9) to the Horde column. The grid spawner filters the columns to the races the
+/// loaded catalog actually offers, so a vanilla install still shows exactly the first four of each.
+///
 /// `pub(crate)` on the Alliance half because it is also the race→side split
 /// `ui_unit::race_faction_group` answers `UnitFactionGroup("player")` with during world entry —
 /// one home for the mapping, pinned by [`tests::race_columns_match_the_reference_screen`], rather
 /// than a second copy that can disagree with this one.
-pub(crate) const ALLIANCE: [u8; 4] = [1, 3, 4, 7]; // Human, Dwarf, Night Elf, Gnome
-const HORDE: [u8; 4] = [2, 5, 6, 8]; // Orc, Scourge, Tauren, Troll
+pub(crate) const ALLIANCE: [u8; 5] = [1, 3, 4, 7, 10]; // Human, Dwarf, Night Elf, Gnome, Blood Elf
+const HORDE: [u8; 5] = [2, 5, 6, 8, 9]; // Orc, Scourge, Tauren, Troll, Goblin
 /// The ref's initial model facing (`SetCharacterCreateFacing(-15)`), reset on every race switch.
 const INITIAL_FACING: f32 = -15.0 * std::f32::consts::PI / 180.0;
 
@@ -771,18 +775,23 @@ mod tests {
 
     /// The race grid's column order, pinned against the reference screen (director's screenshot,
     /// 2026-07-19): Alliance reads Human · Dwarf · Night Elf · Gnome, Horde reads Orc · Scourge ·
-    /// Tauren · Troll. This is a *regression* test with history: the columns were previously ordered
+    /// Tauren · Troll — with Turtle's two additions appended in the same ascending-id law (BloodElf
+    /// 10 to Alliance, Goblin 9 to Horde; the grid spawner hides them on a vanilla install's
+    /// catalog). This is a *regression* test with history: the columns were previously ordered
     /// off `RACE_ICON_TCOORDS`'s table order, which is a name→UV lookup that never reaches layout —
     /// the real order is whatever `GetAvailableRaces()` enumerates into buttons 1–8, which the XML
     /// chains 1–4 down column A and 5–8 down column B.
     #[test]
     fn race_columns_match_the_reference_screen() {
-        assert_eq!(ALLIANCE, [1, 3, 4, 7], "Human, Dwarf, Night Elf, Gnome");
-        assert_eq!(HORDE, [2, 5, 6, 8], "Orc, Scourge, Tauren, Troll");
-        // Together the columns are exactly the eight playable races, no repeats.
+        assert_eq!(ALLIANCE, [1, 3, 4, 7, 10], "Human, Dwarf, Night Elf, Gnome, Blood Elf");
+        assert_eq!(HORDE, [2, 5, 6, 8, 9], "Orc, Scourge, Tauren, Troll, Goblin");
+        // The vanilla prefix is the frozen reference layout — the two additions never reorder it.
+        assert_eq!(&ALLIANCE[..4], [1, 3, 4, 7]);
+        assert_eq!(&HORDE[..4], [2, 5, 6, 8]);
+        // Together the columns are exactly the ten playable races, no repeats.
         let mut all: Vec<u8> = ALLIANCE.iter().chain(&HORDE).copied().collect();
         all.sort_unstable();
-        assert_eq!(all, (1..=8).collect::<Vec<u8>>());
+        assert_eq!(all, (1..=10).collect::<Vec<u8>>());
         // Each column ascends by race id — the engine's per-faction enumeration order.
         assert!(ALLIANCE.windows(2).all(|w| w[0] < w[1]));
         assert!(HORDE.windows(2).all(|w| w[0] < w[1]));

@@ -161,6 +161,27 @@ pub(super) fn spawn_loaded_placements(
         // 1. Spawn the model's own geometry once, on first load. For a WMO, also resolve its doodad
         //    props (`p.doodads`) — spawned individually in step 2 as each prop's M2 asset arrives.
         if !p.spawned {
+            // A model missing from the mounted MPQ chain fails the asset load outright — and `get`
+            // then returns None forever, which is exactly what once held the loading screen open on
+            // a zone whose data references a file it does not ship. The reference client draws
+            // nothing for a doodad it cannot resolve, so neither do we: mark the placement up,
+            // empty, and let residency complete.
+            let failed = match &p.model {
+                ModelHandle::M2(h) => {
+                    matches!(asset_server.load_state(h), bevy::asset::LoadState::Failed(_))
+                }
+                ModelHandle::Wmo(h) => {
+                    matches!(asset_server.load_state(h), bevy::asset::LoadState::Failed(_))
+                }
+            };
+            if failed {
+                warn_once!(
+                    "placement {unique_id}: model asset failed to load — spawning nothing, as the reference client does"
+                );
+                p.spawned = true;
+                p.entities = Vec::new();
+                continue; // a failed placement resolves no props; step 2's loop stays empty
+            }
             let entities = match &p.model {
                 ModelHandle::M2(h) => {
                     let Some(m) = m2s.get(h) else {
@@ -699,6 +720,16 @@ pub(super) fn spawn_loaded_placements(
         let portal_instance = p.portal_instance;
         for d in &mut p.doodads {
             if d.spawned {
+                continue;
+            }
+            // Same missing-asset law as the owning placement: a prop whose M2 never arrives (absent
+            // from the data dir) is not drawn by the reference client — mark it up so the
+            // placement's residency can complete.
+            if matches!(
+                asset_server.load_state(&d.handle),
+                bevy::asset::LoadState::Failed(_)
+            ) {
+                d.spawned = true;
                 continue;
             }
             let Some(m) = m2s.get(&d.handle) else {

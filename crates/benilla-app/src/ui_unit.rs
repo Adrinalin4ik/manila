@@ -679,6 +679,8 @@ pub(crate) fn race_names(race: u8) -> Option<(&'static str, &'static str)> {
         6 => ("Tauren", "Tauren"),
         7 => ("Gnome", "Gnome"),
         8 => ("Troll", "Troll"),
+        9 => ("Goblin", "Goblin"),
+        10 => ("High Elf", "BloodElf"),
         _ => return None,
     })
 }
@@ -713,11 +715,12 @@ pub(crate) fn class_names(class: u8) -> Option<(&'static str, &'static str)> {
 /// side is 24 corpus addons stopping on `attempt to concatenate local 'faction'`
 /// (`addon_harness::seat_a_session`, decision 1195, which seats exactly this in the survey's VM).
 ///
-/// Every playable race has a fixed side in 1.12, so this is a lookup rather than a guess — and it
-/// reads the [`crate::char_create::ALLIANCE`] column the create screen already keeps, so the two
-/// cannot drift apart.
+/// Every playable race has a fixed side — 1.12's eight, plus Turtle's two additions (Goblin →
+/// Horde, BloodElf → Alliance) — so this is a lookup rather than a guess, and it reads the
+/// [`crate::char_create::ALLIANCE`] column the create screen already keeps, so the two cannot
+/// drift apart.
 pub(crate) fn race_faction_group(race: u8) -> Option<&'static str> {
-    if !(1..=8).contains(&race) {
+    if !(1..=10).contains(&race) {
         return None;
     }
     Some(if crate::char_create::ALLIANCE.contains(&race) {

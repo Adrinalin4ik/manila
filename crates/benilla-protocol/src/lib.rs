@@ -36,7 +36,7 @@ use crate::transport::Conn;
 /// The realmd (auth/login) server port — the stock one a vmangos `realmd` listens on, which our
 /// deploy maps straight through (`3724:3724` in the compose file at `vmangos-deploy`).
 pub const AUTH_PORT: u16 = 3724;
-/// The 1.12.1 client build we present to the server.
+/// The 1.12.1 client build we present to the **world server** (mangosd).
 pub const CLIENT_BUILD: u16 = 5875;
 /// The build presented to **realmd only** — the world server still gets [`CLIENT_BUILD`].
 ///
@@ -52,6 +52,16 @@ pub const CLIENT_BUILD: u16 = 5875;
 /// realmd challenge because the two servers read the build independently — the same run reached
 /// `SMSG_AUTH_SESSION` on the world at 5875 and was admitted. Reverting to `CLIENT_BUILD` restores
 /// stock behaviour and costs nothing on a server that is not in strict mode.
+///
+/// **`benilla-twow` reached a different number here — 7272 — and it is kept out on purpose.** Its
+/// reasoning is sound and worth recording: a Turtle-derived realmd gates the *proof* stage on the
+/// build (`AuthSocket::_HandleLogonProof` → `FindBuildInfo`) and accepts only builds ≥ its own,
+/// which for that fork is 7272; a stock vanilla realmd accepts anything ≥ 5875 through the same
+/// path, so 7272 is safe on both in theory. The reason it does not land is evidentiary rather than
+/// technical: 12340 was *measured* against a live Turtle-derived realmd, by a sweep that found
+/// 8606, 11801 and 12340 all admitted and 5875 refused, and it is what logs in today. 7272 has not
+/// been dialed from here. Swapping a working measured value for an unmeasured reasoned one is the
+/// wrong direction of trade — if 7272 is dialed and answers, this comment is the place it changes.
 pub const REALMD_BUILD: u16 = 12340;
 /// How many logon challenges [`logon`] will ask for while looking for a `B` both serialization
 /// conventions read the same way (see the redial comment there). One dial in ~137 comes back

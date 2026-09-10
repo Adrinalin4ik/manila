@@ -385,10 +385,16 @@ pub(in crate::entities) fn ensure_item_model(
         Some(d) if d.model[col].is_some() => {
             let mut model = d.model[col].clone().unwrap();
             if let ItemModelKind::Helm { race, sex } = kind {
-                // Race id 1–8 → Hu Or Dw Ni Sc Ta Gn Tr; M/F by sex. All 16 variants ship for
-                // every helm stem (verified against the full MPQ listing).
-                const RACE_PREFIX: [&str; 8] = ["Hu", "Or", "Dw", "Ni", "Sc", "Ta", "Gn", "Tr"];
-                let prefix = RACE_PREFIX[(race.clamp(1, 8) - 1) as usize];
+                // Race id 1–10 → Hu Or Dw Ni Sc Ta Gn Tr Go Be; M/F by sex. All sixteen vanilla
+                // variants ship for every helm stem (verified against the full MPQ listing), and a
+                // Turtle-derived client ships its added races' pair too (`_GoM.m2` / `_BeM.m2`,
+                // verified against its listing). Anything outside the playable range falls back to
+                // the Human stem rather than indexing garbage.
+                const RACE_PREFIX: [&str; 10] = ["Hu", "Or", "Dw", "Ni", "Sc", "Ta", "Gn", "Tr", "Go", "Be"];
+                let prefix = RACE_PREFIX
+                    .get((race.clamp(1, 10) - 1) as usize)
+                    .copied()
+                    .unwrap_or("Hu");
                 let letter = if sex == 1 { 'F' } else { 'M' };
                 let stem = model.strip_suffix(".m2").unwrap_or(&model).to_string();
                 model = format!("{stem}_{prefix}{letter}.m2");

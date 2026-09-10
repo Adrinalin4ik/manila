@@ -287,6 +287,15 @@ pub fn write_logon_proof(
 pub async fn read_proof_reply(r: &mut impl ReadExactAsync) -> Result<[u8; 20]> {
     let opcode = read_u8_async(r).await?;
     if opcode != CMD_AUTH_LOGON_PROOF {
+        // mangos-family quirk: a build realmd will not accept is rejected at the proof stage with a
+        // *challenge-shaped* reply — `CMD_AUTH_LOGON_CHALLENGE, 0x00, WOW_FAIL_VERSION_INVALID`
+        // (vmangos `AuthSocket::_HandleLogonProof`, the no-patch arm; byte-identical in
+        // Turtle-derived cores). Surface the trailing result byte instead of a baffling "got 0x0".
+        if opcode == CMD_AUTH_LOGON_CHALLENGE {
+            let _padding = read_u8_async(r).await?;
+            let result = read_u8_async(r).await?;
+            return Err(AuthReject { code: result }.into());
+        }
         bail!("expected CMD_AUTH_LOGON_PROOF (0x01), got {opcode:#x}");
     }
     let result = read_u8_async(r).await?;
@@ -442,6 +451,22 @@ mod tests {
         let mut salt = MANGOS_VERSION_CHALLENGE;
         salt[0] ^= 0xff;
         assert_eq!(version_proof(&salt, &test_public_key()), [0u8; 20]);
+    }
+
+    /// A proof-stage "invalid build" rejection arrives as `0x00, 0x00, 0x09` (`WOW_FAIL_VERSION_INVALID`
+    /// — mangos/Turtle realmd, the no-patch arm) and must surface as an [`AuthReject`], not as a
+    /// wrong-opcode transport error.
+    #[test]
+    fn the_challenge_shaped_build_reject_surfaces_its_result() {
+        // Awaited through the file's own `Cursor` fixture — these readers are async in this
+        // tree (the browser reads its socket off the event loop), which the fork's sync
+        // spelling could not know.
+        let err = futures_lite::future::block_on(read_proof_reply(&mut Cursor(&[
+            0x00, 0x00, 0x09,
+        ])))
+        .unwrap_err();
+        let reject = err.downcast_ref::<AuthReject>().expect("AuthReject");
+        assert_eq!(reject.code, 0x09);
     }
 
     /// The proof packet carries the answer at the offset realmd reads it from: `opcode · A[32] ·

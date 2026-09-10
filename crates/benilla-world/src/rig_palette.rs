@@ -45,6 +45,7 @@
 //! themselves collapse.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bevy::ecs::lifecycle::HookContext;
 use bevy::ecs::world::DeferredWorld;
@@ -64,6 +65,10 @@ use crate::vis_chain::VisChainOnly;
 /// bones + ~1.6 k doodad-rig bones; 128 k is head-room, at 48 B/bone = 6 MB of the shared buffer.
 /// Mirrored by `wow_model.wgsl`'s region declaration — keep in sync.
 pub(crate) const MAX_PALETTE_BONES: usize = 131_072;
+
+/// How often the exhaustion warn may re-fire while the table stays pegged (see
+/// [`RigPalettes::last_denied_warn`]).
+const DENIED_WARN_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Bytes per bone in the palette region: 3 × vec4 rows of the affine.
 const BONE_BYTES: u64 = 48;
@@ -146,6 +151,11 @@ pub struct RigPalettes {
     /// Allocations refused since the last census line (`WOW_RIG_CENSUS`) — the exhaustion
     /// diagnosis's live denial rate (decision 0863). Read-and-reset by [`census_rig_palettes`].
     denied: u32,
+    /// When the exhaustion warn last fired. A pegged table refuses every claim that streams in
+    /// (a dense zone's per-frame attempt is a per-frame line), so the warn is episode-gated:
+    /// once on the episode's edge, then at most every [`DENIED_WARN_INTERVAL`] while it lasts.
+    /// `denied` keeps the count honest between reports — nothing is dropped.
+    last_denied_warn: Option<Instant>,
     /// `WOW_RIG_COST` meters (decision 0736 premise check): whole-vec deep copies this frame
     /// (`Arc::make_mut` clones when the extract still holds last publish's reference), the µs
     /// they took, and the rows (bones) written. Printed + reset by [`publish_rig_palettes`].
@@ -174,6 +184,7 @@ impl Default for RigPalettes {
             peak_bones: 0,
             live_bones: 0,
             denied: 0,
+            last_denied_warn: None,
             cost_copies: 0,
             cost_copy_us: 0.0,
             cost_rows: 0,
@@ -724,11 +735,22 @@ impl RigSkin {
             }),
             None => {
                 palettes.denied += 1;
-                let (s, b, ps, pb) = palettes.occupancy();
-                warn!(
-                    "rig palette exhausted ({bones} bones wanted; live {s} slots / {b} bones, \
-                     peak {ps}/{pb}) — rig renders at bind pose"
-                );
+                // Episode-gated (see the field): report on the episode's edge and at most every
+                // [`DENIED_WARN_INTERVAL`] after — not once per refused claim. `denied` rides the
+                // census's read-and-reset, so the printed count is refusals since the last report.
+                let now = Instant::now();
+                if palettes
+                    .last_denied_warn
+                    .is_none_or(|t| now.duration_since(t) >= DENIED_WARN_INTERVAL)
+                {
+                    palettes.last_denied_warn = Some(now);
+                    let (s, b, ps, pb) = palettes.occupancy();
+                    warn!(
+                        "rig palette exhausted ({bones} bones wanted; live {s} slots / {b} bones, \
+                         peak {ps}/{pb}; {denied} refused since the census) — rig renders at bind pose",
+                        denied = palettes.denied,
+                    );
+                }
                 None
             }
         }

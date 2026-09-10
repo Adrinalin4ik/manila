@@ -9,6 +9,12 @@ use super::{CharCreateReq, MovementInfo};
 /// **addon-info block** — `addons`' uncompressed size plus its zlib stream, exactly as the writer
 /// at `0x51d910` appends it (see [`super::addons`], decision 1497). Pass
 /// [`super::STOCK_SECURE_ADDONS`] for what a stock install sends.
+///
+/// This also covers the Turtle-derived (namreeb) anticheat's requirement that the block be
+/// non-empty: `STOCK_SECURE_ADDONS` includes the four `Blizzard_*` addons namreeb's
+/// `sFingerprintAddons` keys its client fingerprint on, all sent with `flags = 1` — below the
+/// `> 0x02` threshold that would claim a server-granted fingerprint — so a stock addon block
+/// reads as "no fingerprint yet" there exactly as it does to vmangos/cmangos.
 pub fn auth_session(
     build: u32,
     username: &str,
@@ -29,11 +35,16 @@ pub fn auth_session(
 }
 
 /// `CMSG_CHAR_CREATE` body: name (CString), then race/class/gender + the 5 appearance bytes
-/// (skin/face/hair_style/hair_color/facial_hair) + `outfit_id`. Matches vmangos's read exactly
-/// (`Packets/Character.cpp:4-19`): name + 9 bytes. `outfit_id` is always 0 — the server reads and
-/// ignores it (`CharacterHandler.cpp:310`) and recomputes start gear (decision 0423).
+/// (skin/face/hair_style/hair_color/facial_hair) + `outfit_id`, then a trailing
+/// **`challengeMask` u32** — a Turtle-WoW field vanilla does not have. Its read is at the end of
+/// `HandleCharCreateOpcode` (`CharacterHandler.cpp:213`), so a body that ends at `outfit_id`
+/// throws on the read and the anticheat's bad-packet kick is the "disconnect on Accept" Turtle
+/// servers greet a vanilla-shaped create with. 0 = no challenge mode (bit 0 would be Hardcore);
+/// a stock vmangos handler stops reading after `outfit_id` and simply never consumes the four
+/// bytes, so sending them there is inert. `outfit_id` is always 0 — the server reads and ignores
+/// it and recomputes start gear (decision 0423).
 pub fn char_create(req: &CharCreateReq) -> Vec<u8> {
-    let mut body = Vec::with_capacity(req.name.len() + 10);
+    let mut body = Vec::with_capacity(req.name.len() + 14);
     body.extend_from_slice(req.name.as_bytes());
     body.push(0);
     // race, class, gender, skin, face, hair_style, hair_color, facial_hair, outfit_id(0).
@@ -48,6 +59,7 @@ pub fn char_create(req: &CharCreateReq) -> Vec<u8> {
         req.facial_hair,
         0,
     ]);
+    body.extend_from_slice(&0u32.to_le_bytes()); // challengeMask (Turtle): no challenge mode
     body
 }
 
