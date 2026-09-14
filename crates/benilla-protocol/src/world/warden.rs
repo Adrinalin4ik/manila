@@ -228,3 +228,228 @@ pub fn parse_server_message(body: &[u8]) -> Option<ServerMessage> {
         },
     })
 }
+
+// --- the scan lane -------------------------------------------------------------------------------
+//
+// Everything above is the transport. What follows is what a scan request MEANS, and it is written
+// against a contract this client cannot read off the wire on its own: the byte that names a check's
+// type is `module->opcodes[type] ^ xor` (`WardenScan.cpp`'s builders), and that table lives inside
+// the module. A client that does not execute the module therefore cannot dispatch a request built
+// the stock way — so this lane is written for a server profile that fixes the encoding instead, and
+// [`CheckType`] is the mapping it proposes.
+
+/// The scan types, numbered as `WindowsScanType` numbers them (`WardenScan.hpp:42-53`). The wire
+/// byte is NOT this value on a stock server — see the note above — but the enum is the server's, so
+/// a fixed-encoding profile has an obvious mapping to adopt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckType {
+    ReadMemory = 0,
+    FindModuleByName = 1,
+    FindMemImageCodeByHash = 2,
+    FindCodeByHash = 3,
+    HashClientFile = 4,
+    GetLuaVariable = 5,
+    ApiCheck = 6,
+    FindDriverByName = 7,
+    CheckTimingValues = 8,
+}
+
+impl CheckType {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        Some(match v {
+            0 => CheckType::ReadMemory,
+            1 => CheckType::FindModuleByName,
+            2 => CheckType::FindMemImageCodeByHash,
+            3 => CheckType::FindCodeByHash,
+            4 => CheckType::HashClientFile,
+            5 => CheckType::GetLuaVariable,
+            6 => CheckType::ApiCheck,
+            7 => CheckType::FindDriverByName,
+            8 => CheckType::CheckTimingValues,
+            _ => return None,
+        })
+    }
+
+    /// Can this client witness the answer *about itself*?
+    ///
+    /// The three `false` rows are not unimplemented work — they are questions about the contents of
+    /// a `WoW.exe` process image, asked of a client that is not one. There is no state in this
+    /// program that constitutes an answer, so the only way to produce one is to copy it from
+    /// somewhere else, and a copied answer says nothing about the client that sent it. They are
+    /// therefore permanently [`ScanOutcome::Unanswerable`], and a profile that includes them is
+    /// asking for an answer that could not mean anything.
+    pub fn is_witnessable(self) -> bool {
+        match self {
+            // Reads of a PE image this client does not have.
+            CheckType::ReadMemory | CheckType::FindMemImageCodeByHash | CheckType::FindCodeByHash => {
+                false
+            }
+            // Real files we hold, and our own Lua VM: these say something about us.
+            CheckType::HashClientFile | CheckType::GetLuaVariable => true,
+            // Process/driver/API surfaces a browser sandbox does not have. Answerable truthfully —
+            // the honest answer is always "absent" — but that makes them free to pass and therefore
+            // worth nothing as checks. Reported so a profile author can see they are noise.
+            CheckType::FindModuleByName | CheckType::FindDriverByName | CheckType::ApiCheck => true,
+            CheckType::CheckTimingValues => true,
+        }
+    }
+}
+
+/// What answering one check produced.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ScanOutcome {
+    /// The bytes to put in `CHEAT_CHECKS_RESULT` for this check, in request order.
+    Answered(Vec<u8>),
+    /// No answer exists for this client. Carries the reason so it reaches a log rather than
+    /// becoming a silent zero — a silent wrong answer is indistinguishable from a cheat.
+    Unanswerable(&'static str),
+}
+
+/// What a check asked for, decoded under a fixed-encoding profile.
+#[derive(Debug)]
+pub struct ScanRequest {
+    pub check: CheckType,
+    /// The check's string parameter: a file path for `HashClientFile`, a global's name for
+    /// `GetLuaVariable`, a module/driver name for the lookups.
+    pub param: String,
+}
+
+/// What the client can consult to answer a check about itself.
+pub trait ScanWitness {
+    /// SHA-1 of the named client file as this client actually holds it, or `None` if it holds no
+    /// such file. Hashing what we DOWNLOADED (not what a host says it served) is the whole point:
+    /// the answer has to be a fact about this client.
+    fn hash_client_file(&self, path: &str) -> Option<[u8; 20]>;
+    /// The value of a Lua global in this client's own VM, or `None` when it is not set.
+    fn lua_variable(&self, name: &str) -> Option<String>;
+}
+
+/// Answer one check. Unanswerable types are named rather than faked.
+pub fn answer(request: &ScanRequest, witness: &dyn ScanWitness) -> ScanOutcome {
+    match request.check {
+        CheckType::ReadMemory => {
+            ScanOutcome::Unanswerable("READ_MEMORY reads a WoW.exe process image; this client has none")
+        }
+        CheckType::FindMemImageCodeByHash | CheckType::FindCodeByHash => {
+            ScanOutcome::Unanswerable("code-by-hash scans search a WoW.exe image; this client has none")
+        }
+        CheckType::HashClientFile => match witness.hash_client_file(&request.param) {
+            // `WindowsFileHashScan`'s checker reads a found/not-found byte (0 = found) and then the
+            // digest, so the reply carries both.
+            Some(hash) => {
+                let mut out = Vec::with_capacity(21);
+                out.push(0);
+                out.extend_from_slice(&hash);
+                ScanOutcome::Answered(out)
+            }
+            None => ScanOutcome::Answered(vec![1]),
+        },
+        CheckType::GetLuaVariable => match witness.lua_variable(&request.param) {
+            Some(value) => {
+                let mut out = Vec::with_capacity(2 + value.len());
+                out.push(0);
+                out.push(value.len().min(u8::MAX as usize) as u8);
+                out.extend_from_slice(&value.as_bytes()[..value.len().min(u8::MAX as usize)]);
+                ScanOutcome::Answered(out)
+            }
+            None => ScanOutcome::Answered(vec![1]),
+        },
+        // Truthfully absent in a browser: no process modules, no drivers, no detourable API.
+        CheckType::FindModuleByName | CheckType::FindDriverByName | CheckType::ApiCheck => {
+            ScanOutcome::Answered(vec![0])
+        }
+        CheckType::CheckTimingValues => ScanOutcome::Answered(vec![0]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A witness standing in for a real client: it holds one game file and one Lua global.
+    struct TestWitness;
+
+    impl ScanWitness for TestWitness {
+        fn hash_client_file(&self, path: &str) -> Option<[u8; 20]> {
+            (path == r"Interface\FrameXML\FrameXML.toc").then(|| Sha1::digest(b"toc").into())
+        }
+        fn lua_variable(&self, name: &str) -> Option<String> {
+            (name == "UIParent").then(|| "table".to_string())
+        }
+    }
+
+    /// Every scan type, answered. The three memory types must come back `Unanswerable` and the rest
+    /// must produce bytes — this is the line the whole lane is built around, and a change that lets
+    /// a memory scan return `Answered` has broken it.
+    #[test]
+    fn memory_scans_are_unanswerable_and_the_rest_are_witnessed() {
+        let all = [
+            CheckType::ReadMemory,
+            CheckType::FindModuleByName,
+            CheckType::FindMemImageCodeByHash,
+            CheckType::FindCodeByHash,
+            CheckType::HashClientFile,
+            CheckType::GetLuaVariable,
+            CheckType::ApiCheck,
+            CheckType::FindDriverByName,
+            CheckType::CheckTimingValues,
+        ];
+        let mut unanswerable = Vec::new();
+        for check in all {
+            let param = match check {
+                CheckType::HashClientFile => r"Interface\FrameXML\FrameXML.toc",
+                CheckType::GetLuaVariable => "UIParent",
+                _ => "Cheat Engine",
+            }
+            .to_string();
+            let outcome = answer(&ScanRequest { check, param }, &TestWitness);
+            match outcome {
+                ScanOutcome::Unanswerable(reason) => {
+                    assert!(!check.is_witnessable(), "{check:?} claims to be witnessable");
+                    unanswerable.push((check, reason));
+                }
+                ScanOutcome::Answered(bytes) => {
+                    assert!(check.is_witnessable(), "{check:?} answered but is not witnessable");
+                    assert!(!bytes.is_empty(), "{check:?} answered with nothing");
+                }
+            }
+        }
+        let failed: Vec<_> = unanswerable.iter().map(|(c, _)| *c).collect();
+        assert_eq!(
+            failed,
+            vec![
+                CheckType::ReadMemory,
+                CheckType::FindMemImageCodeByHash,
+                CheckType::FindCodeByHash
+            ],
+            "exactly the WoW.exe-image scans must fail, no more and no fewer"
+        );
+    }
+
+    /// A file the client does not hold answers "not found" rather than inventing a digest, and one
+    /// it does hold answers with its real SHA-1 — the found/not-found byte is 0 for found, matching
+    /// `WindowsFileHashScan`'s checker.
+    #[test]
+    fn a_file_hash_answers_from_what_the_client_actually_holds() {
+        let held = answer(
+            &ScanRequest {
+                check: CheckType::HashClientFile,
+                param: r"Interface\FrameXML\FrameXML.toc".into(),
+            },
+            &TestWitness,
+        );
+        let expected: [u8; 20] = Sha1::digest(b"toc").into();
+        let mut want = vec![0u8];
+        want.extend_from_slice(&expected);
+        assert_eq!(held, ScanOutcome::Answered(want));
+
+        let absent = answer(
+            &ScanRequest {
+                check: CheckType::HashClientFile,
+                param: r"Interface\NotHere.blp".into(),
+            },
+            &TestWitness,
+        );
+        assert_eq!(absent, ScanOutcome::Answered(vec![1]));
+    }
+}
