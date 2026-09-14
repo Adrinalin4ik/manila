@@ -305,147 +305,283 @@ pub enum ScanOutcome {
     Unanswerable(&'static str),
 }
 
-/// What a check asked for, decoded under a fixed-encoding profile.
+/// What one check asked for, with the fields ITS layout carries.
+///
+/// Not a single string: each scan has its own request shape (`WardenScan.cpp`'s builders), and
+/// flattening them would throw away the fields an answer has to be computed from — the HMAC seed a
+/// module lookup is keyed by, the offset and width a memory read wants, the two string indices an
+/// API check uses.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ScanParams {
+    /// `READ_MEMORY`, `FIND_CODE_BY_HASH`, `FIND_MEM_IMAGE_CODE_BY_HASH` — everything that reads a
+    /// `WoW.exe` process image. The fields are carried for logging only; there is no answer.
+    Image,
+    /// `HASH_CLIENT_FILE`: `u8 string_index`.
+    FileHash { path: String },
+    /// `GET_LUA_VARIABLE`: `u8 string_index`.
+    LuaVariable { name: String },
+    /// `FIND_MODULE_BY_NAME`: `u32 seed`, then `HMAC-SHA1(seed, UPPERCASE NAME)[20]`. The name
+    /// itself never crosses the wire.
+    ModulePresence { seed: u32, name_digest: [u8; 20] },
+    /// `FIND_DRIVER_BY_NAME`: `u32 seed`, `HMAC-SHA1(seed, target path)[20]`, `u8 string_index`
+    /// naming the device.
+    DriverPresence {
+        seed: u32,
+        path_digest: [u8; 20],
+        name: String,
+    },
+    /// `API_CHECK`: `u32 seed`, `hash[20]`, `u8 module_index`, `u8 proc_index`, `u32 offset`,
+    /// `u8 length` — both indices 1-based, and the module's is `strings.size() - 1` because the
+    /// builder pushes the module then the proc.
+    ApiCheck {
+        module: String,
+        proc: String,
+        hash: [u8; 20],
+        offset: u32,
+        length: u8,
+    },
+    /// `CHECK_TIMING_VALUES`: no payload.
+    Timing,
+}
+
+/// A decoded check: its type, and the fields its own layout carries.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ScanRequest {
     pub check: CheckType,
-    /// The check's string parameter: a file path for `HashClientFile`, a global's name for
-    /// `GetLuaVariable`, a module/driver name for the lookups.
-    pub param: String,
+    pub params: ScanParams,
 }
 
 /// What one attestation produced.
 ///
-/// `Absent` and `NotImplemented` are kept apart on purpose, and the distinction is the whole point
-/// of this type: "there is no such file" is an ANSWER the client witnessed, while "we never wrote
-/// the file-hashing path" is a GAP. Collapsing them would make every unimplemented check report a
-/// clean result — a silent no-op that reads as a pass, which is the one failure mode this lane must
-/// not have.
+/// `NotImplemented` is kept as its own state on purpose: "there is no such file" is an ANSWER the
+/// client witnessed, while "we never wrote the file-hashing path" is a GAP. Collapsing them would
+/// make every unimplemented check report a clean result — a silent no-op that reads as a pass,
+/// which is the one failure mode this lane must not have.
+///
+/// There is deliberately no `Absent` variant. A witness that looked and found nothing still returns
+/// `Present`, with the "not found" state expressed INSIDE the scan's own reply structure, because
+/// the server reads a fixed number of bytes per scan and matches them positionally. A shorter reply
+/// does not read as "nothing found" — it desynchronises every scan after it in the same packet.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Attestation<T> {
-    /// The client looked and found it.
+    /// The client looked, and this is what it saw — including "not there", expressed inside `T`.
     Present(T),
-    /// The client looked and it is genuinely not there.
-    Absent,
     /// The client cannot say. Never becomes an answer; it becomes an
     /// [`ScanOutcome::Unanswerable`] that names itself.
     NotImplemented,
 }
 
+/// The marker three scans use for "found", and it is NOT 1: `WindowsModuleScan::ModuleFound`,
+/// `WindowsDriverScan::Found` and `WindowsHookScan::Detoured` are all `0x4A` (`WardenScan.hpp:112`,
+/// `:201`, `:183`), and their checkers test equality against it. Anything else means not found.
+pub const FOUND_0X4A: u8 = 0x4A;
+const NOT_0X4A: u8 = 0x00;
+
+/// The two string-shaped scans invert that: their checkers read `found = !buff.read<uint8>()`
+/// (`WardenScan.cpp:224`, `:264`), so ZERO means found.
+const ZERO_MEANS_FOUND: u8 = 0x00;
+const NONZERO_MEANS_ABSENT: u8 = 0x01;
+
+/// `HASH_CLIENT_FILE`'s reply: a found byte then the digest.
+///
+/// The digest is sent even when `found` is false, because the server sizes this reply as
+/// `sizeof(uint8) + SHA_DIGEST_LENGTH` — a fixed 21 bytes — and results are positional. Zeroes are
+/// the honest filler there: not an answer to anything, just the unread remainder of a reply whose
+/// width the server already decided.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FileHash {
+    pub found: bool,
+    pub sha1: [u8; 20],
+}
+
+/// `GET_LUA_VARIABLE`'s reply: a found byte, then a length-prefixed value when found.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LuaValue {
+    pub found: bool,
+    pub value: String,
+}
+
+/// `FIND_MODULE_BY_NAME`'s reply — one byte, compared against `0x4A`.
+///
+/// Note what the request does NOT carry: the module's name never goes over the wire. The server
+/// sends a `u32` seed and `HMAC-SHA1(seed, NAME)` (`WardenScan.cpp:30-36`), so a client answers by
+/// running that HMAC over the names it knows and looking for the digest. A witness that cannot
+/// enumerate its own modules can therefore only ever say "not found", which is exactly why this
+/// scan is free to pass in a browser and worth nothing there as a check.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ModulePresence {
+    pub found: bool,
+}
+
+/// `FIND_DRIVER_BY_NAME`'s reply — one byte against `0x4A`. Same HMAC'd-name shape as
+/// [`ModulePresence`], plus a string index carrying the device name.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DriverPresence {
+    pub found: bool,
+}
+
+/// `API_CHECK`'s reply — one byte against `0x4A`, true when the examined export is detoured.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ApiIntegrity {
+    pub detoured: bool,
+}
+
+/// `CHECK_TIMING_VALUES`' reply — `u8 + u32`, five bytes, per the scan's declared reply size. The
+/// scan calls the game's own clock and `GetTickCount`; `WindowsTimeScan`'s own comment notes that a
+/// mismatch is NOT by itself grounds to call it a hack.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TimingValues {
+    pub mismatch: bool,
+    pub ticks: u32,
+}
+
 /// What the client can consult to answer a check about itself.
 ///
-/// One method per witnessable scan type, every one defaulting to
-/// [`Attestation::NotImplemented`] so an implementor adds them at their own pace and an unwritten
-/// one is NAMED rather than silently passing. There is deliberately no method for `READ_MEMORY`,
-/// `FIND_CODE_BY_HASH` or `FIND_MEM_IMAGE_CODE_BY_HASH`: those ask for the contents of a `WoW.exe`
-/// process image, and no implementation of this trait can witness one, so a stub for them would be
-/// a slot for a value copied from elsewhere rather than a gap waiting to be filled. They are
-/// answered as permanently unanswerable in [`answer`], with the reason attached.
+/// One method per witnessable scan type, every one defaulting to [`Attestation::NotImplemented`] so
+/// an implementor adds them at their own pace and an unwritten one is NAMED rather than silently
+/// passing. Each returns the scan's own reply STRUCTURE rather than a boolean, so every field the
+/// server reads has to be produced deliberately: the widths are fixed and the results positional,
+/// so a missing field is not a blank, it is a shifted packet.
+///
+/// There is deliberately no method for `READ_MEMORY`, `FIND_CODE_BY_HASH` or
+/// `FIND_MEM_IMAGE_CODE_BY_HASH`: those ask for the contents of a `WoW.exe` process image, and no
+/// implementation of this trait can witness one, so a stub for them would be a slot for a value
+/// copied from elsewhere rather than a gap waiting to be filled.
 pub trait ScanWitness {
     /// SHA-1 of the named client file as this client actually holds it. Hash what was DOWNLOADED,
     /// not what a host says it served — the answer has to be a fact about this client.
-    fn hash_client_file(&self, _path: &str) -> Attestation<[u8; 20]> {
+    fn hash_client_file(&self, _path: &str) -> Attestation<FileHash> {
         Attestation::NotImplemented
     }
 
     /// The value of a Lua global in this client's own VM.
-    fn lua_variable(&self, _name: &str) -> Attestation<String> {
+    fn lua_variable(&self, _name: &str) -> Attestation<LuaValue> {
         Attestation::NotImplemented
     }
 
-    /// Is a module of this name loaded in the client's process?
-    ///
-    /// A browser has no process modules, so a web client's honest answer is always `Absent` — which
-    /// makes this check free to pass and therefore worth nothing as a check. Left implementable
-    /// rather than hard-wired, because a native build of this client could answer it meaningfully.
-    fn module_loaded(&self, _name: &str) -> Attestation<()> {
+    /// Is a module whose name HMACs to `name_digest` under `seed` loaded in this client? See
+    /// [`ModulePresence`] for why the name itself is not available.
+    fn module_loaded(&self, _seed: u32, _name_digest: &[u8; 20]) -> Attestation<ModulePresence> {
         Attestation::NotImplemented
     }
 
-    /// Is a driver of this name present? Same standing as [`Self::module_loaded`].
-    fn driver_loaded(&self, _name: &str) -> Attestation<()> {
+    /// The driver form of [`Self::module_loaded`]. `name` is the device name the request carried in
+    /// its string table; the target path is the HMAC'd part.
+    fn driver_loaded(
+        &self,
+        _seed: u32,
+        _path_digest: &[u8; 20],
+        _name: &str,
+    ) -> Attestation<DriverPresence> {
         Attestation::NotImplemented
     }
 
-    /// Has the named API entry point been detoured? `Absent` means "not detoured".
-    fn api_detoured(&self, _name: &str) -> Attestation<()> {
+    /// Has `proc` in `module` been detoured? `hash` is the digest the server expects over `length`
+    /// bytes at `offset` past the jump target.
+    fn api_detoured(
+        &self,
+        _module: &str,
+        _proc: &str,
+        _hash: &[u8; 20],
+        _offset: u32,
+        _length: u8,
+    ) -> Attestation<ApiIntegrity> {
         Attestation::NotImplemented
     }
 
-    /// The client's timing values, in the shape the profile asks for.
-    fn timing_values(&self) -> Attestation<Vec<u8>> {
+    /// The client's clock comparison.
+    fn timing_values(&self) -> Attestation<TimingValues> {
         Attestation::NotImplemented
-    }
-}
-
-/// The found/not-found byte both witnessable scans lead with: the server's checkers read `0` as
-/// found (`WindowsFileHashScan`/`WindowsLuaScan`: `auto const found = !buff.read<uint8>()`).
-const FOUND: u8 = 0;
-const NOT_FOUND: u8 = 1;
-
-/// A presence-only answer, for the scans whose reply is just the found byte.
-fn presence(attestation: Attestation<()>, gap: &'static str) -> ScanOutcome {
-    match attestation {
-        Attestation::Present(()) => ScanOutcome::Answered(vec![FOUND]),
-        Attestation::Absent => ScanOutcome::Answered(vec![NOT_FOUND]),
-        Attestation::NotImplemented => ScanOutcome::Unanswerable(gap),
     }
 }
 
 /// Answer one check. Gaps and structural impossibilities are both named, never faked.
 pub fn answer(request: &ScanRequest, witness: &dyn ScanWitness) -> ScanOutcome {
-    match request.check {
-        CheckType::ReadMemory => ScanOutcome::Unanswerable(
-            "READ_MEMORY reads a WoW.exe process image; this client has none",
+    match &request.params {
+        ScanParams::Image => ScanOutcome::Unanswerable(
+            "this scan reads a WoW.exe process image; this client has none",
         ),
-        CheckType::FindMemImageCodeByHash | CheckType::FindCodeByHash => ScanOutcome::Unanswerable(
-            "code-by-hash scans search a WoW.exe image; this client has none",
-        ),
-        CheckType::HashClientFile => match witness.hash_client_file(&request.param) {
-            Attestation::Present(hash) => {
-                let mut out = Vec::with_capacity(1 + hash.len());
-                out.push(FOUND);
-                out.extend_from_slice(&hash);
+        ScanParams::FileHash { path } => match witness.hash_client_file(path) {
+            Attestation::Present(r) => {
+                let mut out = Vec::with_capacity(1 + r.sha1.len());
+                out.push(if r.found {
+                    ZERO_MEANS_FOUND
+                } else {
+                    NONZERO_MEANS_ABSENT
+                });
+                out.extend_from_slice(&r.sha1);
                 ScanOutcome::Answered(out)
             }
-            Attestation::Absent => ScanOutcome::Answered(vec![NOT_FOUND]),
             Attestation::NotImplemented => {
                 ScanOutcome::Unanswerable("ScanWitness::hash_client_file is not implemented")
             }
         },
-        CheckType::GetLuaVariable => match witness.lua_variable(&request.param) {
-            Attestation::Present(value) => {
-                let len = value.len().min(u8::MAX as usize);
+        ScanParams::LuaVariable { name } => match witness.lua_variable(name) {
+            Attestation::Present(r) if !r.found => {
+                ScanOutcome::Answered(vec![NONZERO_MEANS_ABSENT])
+            }
+            Attestation::Present(r) => {
+                let len = r.value.len().min(u8::MAX as usize);
                 let mut out = Vec::with_capacity(2 + len);
-                out.push(FOUND);
+                out.push(ZERO_MEANS_FOUND);
                 out.push(len as u8);
-                out.extend_from_slice(&value.as_bytes()[..len]);
+                out.extend_from_slice(&r.value.as_bytes()[..len]);
                 ScanOutcome::Answered(out)
             }
-            Attestation::Absent => ScanOutcome::Answered(vec![NOT_FOUND]),
             Attestation::NotImplemented => {
                 ScanOutcome::Unanswerable("ScanWitness::lua_variable is not implemented")
             }
         },
-        CheckType::FindModuleByName => presence(
-            witness.module_loaded(&request.param),
-            "ScanWitness::module_loaded is not implemented",
-        ),
-        CheckType::FindDriverByName => presence(
-            witness.driver_loaded(&request.param),
-            "ScanWitness::driver_loaded is not implemented",
-        ),
-        CheckType::ApiCheck => presence(
-            witness.api_detoured(&request.param),
-            "ScanWitness::api_detoured is not implemented",
-        ),
-        CheckType::CheckTimingValues => match witness.timing_values() {
-            Attestation::Present(bytes) => ScanOutcome::Answered(bytes),
-            Attestation::Absent => ScanOutcome::Answered(vec![NOT_FOUND]),
+        ScanParams::ModulePresence { seed, name_digest } => {
+            match witness.module_loaded(*seed, name_digest) {
+                Attestation::Present(r) => ScanOutcome::Answered(vec![marker(r.found)]),
+                Attestation::NotImplemented => {
+                    ScanOutcome::Unanswerable("ScanWitness::module_loaded is not implemented")
+                }
+            }
+        }
+        ScanParams::DriverPresence {
+            seed,
+            path_digest,
+            name,
+        } => match witness.driver_loaded(*seed, path_digest, name) {
+            Attestation::Present(r) => ScanOutcome::Answered(vec![marker(r.found)]),
+            Attestation::NotImplemented => {
+                ScanOutcome::Unanswerable("ScanWitness::driver_loaded is not implemented")
+            }
+        },
+        ScanParams::ApiCheck {
+            module,
+            proc,
+            hash,
+            offset,
+            length,
+        } => match witness.api_detoured(module, proc, hash, *offset, *length) {
+            Attestation::Present(r) => ScanOutcome::Answered(vec![marker(r.detoured)]),
+            Attestation::NotImplemented => {
+                ScanOutcome::Unanswerable("ScanWitness::api_detoured is not implemented")
+            }
+        },
+        ScanParams::Timing => match witness.timing_values() {
+            Attestation::Present(r) => {
+                let mut out = Vec::with_capacity(5);
+                out.push(u8::from(r.mismatch));
+                out.extend_from_slice(&r.ticks.to_le_bytes());
+                ScanOutcome::Answered(out)
+            }
             Attestation::NotImplemented => {
                 ScanOutcome::Unanswerable("ScanWitness::timing_values is not implemented")
             }
         },
+    }
+}
+
+/// The one-byte reply the `0x4A` scans use.
+fn marker(found: bool) -> u8 {
+    if found {
+        FOUND_0X4A
+    } else {
+        NOT_0X4A
     }
 }
 
@@ -483,6 +619,11 @@ pub enum RequestError {
 }
 
 /// Parse a decrypted `CHEAT_CHECKS_REQUEST` body (opcode byte already stripped).
+///
+/// Every layout below is read off the matching builder in `WardenScan.cpp`, because the scan block
+/// carries NO per-scan length: the walk advances by exactly what each type's fields occupy, so a
+/// width taken on trust does not fail here — it turns every later scan in the packet into
+/// plausible nonsense. The two code-by-hash scans are the one gap, and they stop the walk.
 pub fn parse_checks_request(
     body: &[u8],
     decode_type: &dyn Fn(u8) -> Option<CheckType>,
@@ -502,6 +643,37 @@ pub fn parse_checks_request(
         at = end;
     }
 
+    // 1-based, because every builder takes `strings.size()` AFTER pushing its own.
+    let pick = |index: u8, strings: &Vec<String>| -> Result<String, RequestError> {
+        strings
+            .get((index as usize).wrapping_sub(1))
+            .cloned()
+            .ok_or(RequestError::BadStringIndex(index))
+    };
+    let take = |at: &mut usize, n: usize| -> Result<Vec<u8>, RequestError> {
+        let out = body
+            .get(*at..*at + n)
+            .ok_or(RequestError::Truncated("scan field"))?
+            .to_vec();
+        *at += n;
+        Ok(out)
+    };
+    let u8_at = |at: &mut usize| -> Result<u8, RequestError> {
+        let v = *body.get(*at).ok_or(RequestError::Truncated("scan field"))?;
+        *at += 1;
+        Ok(v)
+    };
+    let u32_at = |at: &mut usize| -> Result<u32, RequestError> {
+        let b = take(at, 4)?;
+        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let digest_at = |at: &mut usize| -> Result<[u8; 20], RequestError> {
+        let b = take(at, 20)?;
+        let mut d = [0u8; 20];
+        d.copy_from_slice(&b);
+        Ok(d)
+    };
+
     let mut out = Vec::new();
     loop {
         let byte = *body.get(at).ok_or(RequestError::Truncated("scan block"))?;
@@ -510,18 +682,55 @@ pub fn parse_checks_request(
             return Ok(out);
         }
         let check = decode_type(byte).ok_or(RequestError::UnknownType(byte))?;
-        match check {
-            CheckType::HashClientFile | CheckType::GetLuaVariable => {
-                let index = *body.get(at).ok_or(RequestError::Truncated("string index"))?;
-                at += 1;
-                let param = strings
-                    .get((index as usize).wrapping_sub(1))
-                    .ok_or(RequestError::BadStringIndex(index))?
-                    .clone();
-                out.push(ScanRequest { check, param });
+        let params = match check {
+            CheckType::HashClientFile => ScanParams::FileHash {
+                path: pick(u8_at(&mut at)?, &strings)?,
+            },
+            CheckType::GetLuaVariable => ScanParams::LuaVariable {
+                name: pick(u8_at(&mut at)?, &strings)?,
+            },
+            CheckType::FindModuleByName => ScanParams::ModulePresence {
+                seed: u32_at(&mut at)?,
+                name_digest: digest_at(&mut at)?,
+            },
+            CheckType::FindDriverByName => {
+                let seed = u32_at(&mut at)?;
+                let path_digest = digest_at(&mut at)?;
+                ScanParams::DriverPresence {
+                    seed,
+                    path_digest,
+                    name: pick(u8_at(&mut at)?, &strings)?,
+                }
             }
-            other => return Err(RequestError::UnmodelledPayload(other)),
-        }
+            CheckType::ApiCheck => {
+                let _seed = u32_at(&mut at)?;
+                let hash = digest_at(&mut at)?;
+                let module = pick(u8_at(&mut at)?, &strings)?;
+                let proc = pick(u8_at(&mut at)?, &strings)?;
+                ScanParams::ApiCheck {
+                    module,
+                    proc,
+                    hash,
+                    offset: u32_at(&mut at)?,
+                    length: u8_at(&mut at)?,
+                }
+            }
+            CheckType::CheckTimingValues => ScanParams::Timing,
+            // `u8 string_index` (0 when the form carries no module), `u32 offset`, `u8 length`. The
+            // fields are consumed so the walk stays aligned even though the scan is unanswerable.
+            CheckType::ReadMemory => {
+                let _module_index = u8_at(&mut at)?;
+                let _offset = u32_at(&mut at)?;
+                let _length = u8_at(&mut at)?;
+                ScanParams::Image
+            }
+            // The code scans' builder is the one we have not read; guessing its width would
+            // silently corrupt the rest of the block, so the walk stops instead.
+            other @ (CheckType::FindCodeByHash | CheckType::FindMemImageCodeByHash) => {
+                return Err(RequestError::UnmodelledPayload(other))
+            }
+        };
+        out.push(ScanRequest { check, params });
     }
 }
 
@@ -563,63 +772,121 @@ pub fn build_checks_result(outcomes: &[ScanOutcome]) -> Result<Vec<u8>, &'static
 mod tests {
     use super::*;
 
-    /// A witness standing in for a fully implemented client: it holds one game file, one Lua
-    /// global, and can speak to the browser-shaped surfaces (all absent).
+    /// A profile's fixed encoding, standing in for the module's `opcodes[]` table. Deliberately not
+    /// the identity map, so a mapping or index bug cannot hide behind a coincidence.
+    const XOR: u8 = 0x5a;
+    const TERMINATOR: u8 = 0xff ^ XOR;
+
+    fn decode(byte: u8) -> Option<CheckType> {
+        CheckType::from_u8(byte ^ XOR)
+    }
+
+    const TOC: &str = r"Interface\FrameXML\FrameXML.toc";
+
+    /// A fully implemented witness: it holds one file, one Lua global, no modules or drivers, an
+    /// undetoured API and a clean clock.
     struct TestWitness;
 
     impl ScanWitness for TestWitness {
-        fn hash_client_file(&self, path: &str) -> Attestation<[u8; 20]> {
-            if path == r"Interface\FrameXML\FrameXML.toc" {
-                Attestation::Present(Sha1::digest(b"toc").into())
+        fn hash_client_file(&self, path: &str) -> Attestation<FileHash> {
+            Attestation::Present(if path == TOC {
+                FileHash {
+                    found: true,
+                    sha1: Sha1::digest(b"toc").into(),
+                }
             } else {
-                Attestation::Absent
-            }
+                FileHash {
+                    found: false,
+                    sha1: [0u8; 20],
+                }
+            })
         }
-        fn lua_variable(&self, name: &str) -> Attestation<String> {
-            if name == "UIParent" {
-                Attestation::Present("table".to_string())
+        fn lua_variable(&self, name: &str) -> Attestation<LuaValue> {
+            Attestation::Present(if name == "UIParent" {
+                LuaValue {
+                    found: true,
+                    value: "table".into(),
+                }
             } else {
-                Attestation::Absent
-            }
+                LuaValue {
+                    found: false,
+                    value: String::new(),
+                }
+            })
         }
-        fn module_loaded(&self, _name: &str) -> Attestation<()> {
-            Attestation::Absent
+        fn module_loaded(&self, _seed: u32, _digest: &[u8; 20]) -> Attestation<ModulePresence> {
+            Attestation::Present(ModulePresence { found: false })
         }
-        fn driver_loaded(&self, _name: &str) -> Attestation<()> {
-            Attestation::Absent
+        fn driver_loaded(
+            &self,
+            _seed: u32,
+            _digest: &[u8; 20],
+            _name: &str,
+        ) -> Attestation<DriverPresence> {
+            Attestation::Present(DriverPresence { found: false })
         }
-        fn api_detoured(&self, _name: &str) -> Attestation<()> {
-            Attestation::Absent
+        fn api_detoured(
+            &self,
+            _module: &str,
+            _proc: &str,
+            _hash: &[u8; 20],
+            _offset: u32,
+            _length: u8,
+        ) -> Attestation<ApiIntegrity> {
+            Attestation::Present(ApiIntegrity { detoured: false })
         }
-        fn timing_values(&self) -> Attestation<Vec<u8>> {
-            Attestation::Present(vec![0])
+        fn timing_values(&self) -> Attestation<TimingValues> {
+            Attestation::Present(TimingValues {
+                mismatch: false,
+                ticks: 0x0123_4567,
+            })
         }
     }
 
     /// The default trait bodies: a client that has implemented nothing must produce NAMED gaps, not
-    /// clean passes. This is the regression that matters most in this file — a silent `Answered`
-    /// here would mean every unimplemented check reports "nothing wrong".
+    /// clean passes. A silent `Answered` here would mean every unimplemented check reports "nothing
+    /// wrong", which is the worst possible failure for an anticheat lane.
     struct EmptyWitness;
     impl ScanWitness for EmptyWitness {}
 
+    fn ask(params: ScanParams, check: CheckType, witness: &dyn ScanWitness) -> ScanOutcome {
+        answer(&ScanRequest { check, params }, witness)
+    }
+
     #[test]
     fn an_unimplemented_witness_names_its_gaps_instead_of_passing() {
-        for check in [
-            CheckType::HashClientFile,
-            CheckType::GetLuaVariable,
-            CheckType::FindModuleByName,
-            CheckType::FindDriverByName,
-            CheckType::ApiCheck,
-            CheckType::CheckTimingValues,
-        ] {
-            let outcome = answer(
-                &ScanRequest {
-                    check,
-                    param: "x".into(),
+        let cases = [
+            (CheckType::HashClientFile, ScanParams::FileHash { path: TOC.into() }),
+            (
+                CheckType::GetLuaVariable,
+                ScanParams::LuaVariable { name: "UIParent".into() },
+            ),
+            (
+                CheckType::FindModuleByName,
+                ScanParams::ModulePresence { seed: 1, name_digest: [0; 20] },
+            ),
+            (
+                CheckType::FindDriverByName,
+                ScanParams::DriverPresence {
+                    seed: 1,
+                    path_digest: [0; 20],
+                    name: "npf".into(),
                 },
-                &EmptyWitness,
-            );
-            match outcome {
+            ),
+            (
+                CheckType::ApiCheck,
+                ScanParams::ApiCheck {
+                    module: "Kernel32.dll".into(),
+                    proc: "GetTickCount".into(),
+                    hash: [0; 20],
+                    offset: 0,
+                    length: 8,
+                },
+            ),
+            (CheckType::CheckTimingValues, ScanParams::Timing),
+        ];
+        for (check, params) in cases {
+            match ask(params, check, &EmptyWitness) {
                 ScanOutcome::Unanswerable(reason) => assert!(
                     reason.contains("not implemented"),
                     "{check:?} gap must name itself: {reason}"
@@ -631,51 +898,195 @@ mod tests {
         }
     }
 
-    /// A profile's fixed encoding, standing in for the module's `opcodes[]` table: here the wire
-    /// byte is the scan type plus an offset, xored, so the test exercises a real indirection rather
-    /// than an identity mapping that would hide an index bug.
-    const XOR: u8 = 0x5a;
-    const TERMINATOR: u8 = 0xff ^ XOR;
+    /// Every field of every reply structure, against the server's own constants. The presence
+    /// scans are the ones this pins hardest: their "found" marker is `0x4A`, NOT 1, and a reply of
+    /// 1 would read to the server as "not found" — plausible, wrong, and invisible.
+    #[test]
+    fn each_reply_structure_serialises_field_by_field() {
+        // HASH_CLIENT_FILE: found byte 0, then the digest. Fixed 21 bytes either way.
+        let hit = ask(
+            ScanParams::FileHash { path: TOC.into() },
+            CheckType::HashClientFile,
+            &TestWitness,
+        );
+        let expected: [u8; 20] = Sha1::digest(b"toc").into();
+        let ScanOutcome::Answered(bytes) = hit else {
+            panic!("file hash must answer")
+        };
+        assert_eq!(bytes.len(), 21, "the server sizes this reply at 1 + 20");
+        assert_eq!(bytes[0], ZERO_MEANS_FOUND, "zero means found for this scan");
+        assert_eq!(&bytes[1..], &expected, "the digest must be the real one");
 
-    fn decode(byte: u8) -> Option<CheckType> {
-        CheckType::from_u8(byte ^ XOR)
+        let miss = ask(
+            ScanParams::FileHash { path: "nope".into() },
+            CheckType::HashClientFile,
+            &TestWitness,
+        );
+        let ScanOutcome::Answered(bytes) = miss else {
+            panic!("a missing file is still an answer")
+        };
+        assert_eq!(bytes.len(), 21, "width is fixed even when not found");
+        assert_eq!(bytes[0], NONZERO_MEANS_ABSENT);
+        assert_eq!(&bytes[1..], &[0u8; 20], "no digest to report");
+
+        // GET_LUA_VARIABLE: found byte, length, value.
+        let lua = ask(
+            ScanParams::LuaVariable { name: "UIParent".into() },
+            CheckType::GetLuaVariable,
+            &TestWitness,
+        );
+        assert_eq!(
+            lua,
+            ScanOutcome::Answered(vec![
+                ZERO_MEANS_FOUND,
+                5,
+                b't', b'a', b'b', b'l', b'e'
+            ])
+        );
+
+        // The three 0x4A scans: one byte, and it must be 0x4A only when found.
+        for (check, params) in [
+            (
+                CheckType::FindModuleByName,
+                ScanParams::ModulePresence { seed: 7, name_digest: [1; 20] },
+            ),
+            (
+                CheckType::FindDriverByName,
+                ScanParams::DriverPresence {
+                    seed: 7,
+                    path_digest: [1; 20],
+                    name: "npf".into(),
+                },
+            ),
+            (
+                CheckType::ApiCheck,
+                ScanParams::ApiCheck {
+                    module: "Kernel32.dll".into(),
+                    proc: "GetTickCount".into(),
+                    hash: [1; 20],
+                    offset: 4,
+                    length: 8,
+                },
+            ),
+        ] {
+            let out = ask(params, check, &TestWitness);
+            let ScanOutcome::Answered(bytes) = out else {
+                panic!("{check:?} must answer")
+            };
+            assert_eq!(bytes.len(), 1, "{check:?} replies with exactly one byte");
+            assert_ne!(
+                bytes[0], FOUND_0X4A,
+                "{check:?} witness reported absent, so the byte must not be the found marker"
+            );
+        }
+        assert_eq!(marker(true), 0x4A, "found is 0x4A, not 1");
+        assert_ne!(marker(false), 0x4A);
+
+        // CHECK_TIMING_VALUES: u8 + u32 little-endian, five bytes.
+        let timing = ask(ScanParams::Timing, CheckType::CheckTimingValues, &TestWitness);
+        let ScanOutcome::Answered(bytes) = timing else {
+            panic!("timing must answer")
+        };
+        assert_eq!(bytes.len(), 5, "the server sizes this reply at 1 + 4");
+        assert_eq!(bytes[0], 0, "no mismatch reported");
+        assert_eq!(
+            u32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]),
+            0x0123_4567
+        );
     }
 
-    /// Build a request the way `Warden::RequestScans` does, walk it back, answer it, and assemble
-    /// the reply — the whole lane, end to end, without a server.
+    /// The image scans are unanswerable whatever the witness — this is a property, not a gap.
+    #[test]
+    fn the_image_scans_are_unanswerable_for_any_witness() {
+        for check in [
+            CheckType::ReadMemory,
+            CheckType::FindCodeByHash,
+            CheckType::FindMemImageCodeByHash,
+        ] {
+            match ask(ScanParams::Image, check, &TestWitness) {
+                ScanOutcome::Unanswerable(reason) => {
+                    assert!(reason.contains("WoW.exe"), "{check:?}: {reason}")
+                }
+                ScanOutcome::Answered(b) => panic!("{check:?} answered {b:?}"),
+            }
+        }
+    }
+
+    /// Build a request the way `Warden::RequestScans` does — string table, scan block, terminator —
+    /// walk it back, and check every decoded field. The module and API scans matter most here:
+    /// their fields are a seed and digests that never appear in the string table.
     #[test]
     fn a_request_round_trips_into_a_checksummed_result() {
         let mut body = Vec::new();
-        for s in [r"Interface\FrameXML\FrameXML.toc", "UIParent"] {
+        for s in [TOC, "UIParent", "Kernel32.dll", "GetTickCount"] {
             body.push(s.len() as u8);
             body.extend_from_slice(s.as_bytes());
         }
         body.push(0); // end of string table
+
         body.push(CheckType::HashClientFile as u8 ^ XOR);
-        body.push(1); // 1-based index into the table
+        body.push(1);
         body.push(CheckType::GetLuaVariable as u8 ^ XOR);
         body.push(2);
+        body.push(CheckType::FindModuleByName as u8 ^ XOR);
+        body.extend_from_slice(&7u32.to_le_bytes());
+        body.extend_from_slice(&[0xAB; 20]);
+        body.push(CheckType::ApiCheck as u8 ^ XOR);
+        body.extend_from_slice(&9u32.to_le_bytes());
+        body.extend_from_slice(&[0xCD; 20]);
+        body.push(3); // module index
+        body.push(4); // proc index
+        body.extend_from_slice(&16u32.to_le_bytes());
+        body.push(8);
+        body.push(CheckType::CheckTimingValues as u8 ^ XOR);
         body.push(TERMINATOR);
 
         let requests = parse_checks_request(&body, &decode, TERMINATOR).expect("parse");
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].check, CheckType::HashClientFile);
-        assert_eq!(requests[0].param, r"Interface\FrameXML\FrameXML.toc");
-        assert_eq!(requests[1].check, CheckType::GetLuaVariable);
-        assert_eq!(requests[1].param, "UIParent");
+        assert_eq!(requests.len(), 5, "every scan in the block must be walked");
+        assert_eq!(
+            requests[0].params,
+            ScanParams::FileHash { path: TOC.into() }
+        );
+        assert_eq!(
+            requests[1].params,
+            ScanParams::LuaVariable { name: "UIParent".into() }
+        );
+        assert_eq!(
+            requests[2].params,
+            ScanParams::ModulePresence { seed: 7, name_digest: [0xAB; 20] },
+            "the seed and digest are the only way to identify the module asked about"
+        );
+        assert_eq!(
+            requests[3].params,
+            ScanParams::ApiCheck {
+                module: "Kernel32.dll".into(),
+                proc: "GetTickCount".into(),
+                hash: [0xCD; 20],
+                offset: 16,
+                length: 8,
+            },
+            "both string indices are 1-based and the module's comes first"
+        );
+        assert_eq!(requests[4].params, ScanParams::Timing);
 
-        let outcomes: Vec<_> = requests
-            .iter()
-            .map(|r| answer(r, &TestWitness))
-            .collect();
-        let packet = build_checks_result(&outcomes).expect("both are witnessable");
+        let outcomes: Vec<_> = requests.iter().map(|r| answer(r, &TestWitness)).collect();
+        let packet = build_checks_result(&outcomes).expect("all witnessable");
 
         assert_eq!(packet[0], client_op::CHEAT_CHECKS_RESULT);
         let len = u16::from_le_bytes([packet[1], packet[2]]) as usize;
         let sum = u32::from_le_bytes([packet[3], packet[4], packet[5], packet[6]]);
         let payload = &packet[7..];
         assert_eq!(payload.len(), len, "declared length must match the payload");
-        assert_eq!(sum, checks_result_checksum(payload), "server recomputes this and kicks on a mismatch");
+        assert_eq!(
+            sum,
+            checks_result_checksum(payload),
+            "the server recomputes this and kicks on a mismatch"
+        );
+        assert_eq!(
+            payload.len(),
+            21 + 7 + 1 + 1 + 5,
+            "file hash + lua + module + api + timing, at their fixed widths"
+        );
     }
 
     /// A memory scan in the set must stop the reply being built at all, carrying its reason out —
@@ -684,102 +1095,41 @@ mod tests {
     fn a_memory_scan_blocks_the_whole_reply() {
         let outcomes = vec![
             ScanOutcome::Answered(vec![0]),
-            answer(
-                &ScanRequest {
-                    check: CheckType::ReadMemory,
-                    param: String::new(),
-                },
-                &TestWitness,
-            ),
+            ask(ScanParams::Image, CheckType::ReadMemory, &TestWitness),
         ];
         let err = build_checks_result(&outcomes).expect_err("must refuse");
         assert!(err.contains("WoW.exe"), "the reason must name why: {err}");
     }
 
-    /// A type we recognise but whose payload we have not modelled stops the walk instead of
-    /// guessing its width — the scan block has no per-scan length, so a wrong guess turns the rest
-    /// of the packet into nonsense rather than into an error.
+    /// A memory scan's FIELDS are still consumed, so the scans after it in the same packet stay
+    /// aligned — the block has no per-scan length, so skipping it by guesswork would corrupt them.
+    #[test]
+    fn a_memory_scan_is_walked_past_without_being_answered() {
+        let mut body = vec![0u8]; // empty string table
+        body.push(CheckType::ReadMemory as u8 ^ XOR);
+        body.push(0); // no module string
+        body.extend_from_slice(&0x0084_6be4u32.to_le_bytes());
+        body.push(6);
+        body.push(CheckType::CheckTimingValues as u8 ^ XOR);
+        body.push(TERMINATOR);
+
+        let requests = parse_checks_request(&body, &decode, TERMINATOR).expect("parse");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].params, ScanParams::Image);
+        assert_eq!(
+            requests[1].params,
+            ScanParams::Timing,
+            "the scan after a memory read must still decode"
+        );
+    }
+
+    /// A type whose payload we have not read stops the walk instead of guessing its width.
     #[test]
     fn an_unmodelled_payload_stops_the_walk() {
-        let body = vec![0u8, CheckType::ReadMemory as u8 ^ XOR, 0, 0, 0, 0];
+        let body = vec![0u8, CheckType::FindCodeByHash as u8 ^ XOR, 0, 0, 0, 0];
         assert_eq!(
             parse_checks_request(&body, &decode, TERMINATOR),
-            Err(RequestError::UnmodelledPayload(CheckType::ReadMemory))
+            Err(RequestError::UnmodelledPayload(CheckType::FindCodeByHash))
         );
-    }
-
-    /// Every scan type, answered. The three memory types must come back `Unanswerable` and the rest
-    /// must produce bytes — this is the line the whole lane is built around, and a change that lets
-    /// a memory scan return `Answered` has broken it.
-    #[test]
-    fn memory_scans_are_unanswerable_and_the_rest_are_witnessed() {
-        let all = [
-            CheckType::ReadMemory,
-            CheckType::FindModuleByName,
-            CheckType::FindMemImageCodeByHash,
-            CheckType::FindCodeByHash,
-            CheckType::HashClientFile,
-            CheckType::GetLuaVariable,
-            CheckType::ApiCheck,
-            CheckType::FindDriverByName,
-            CheckType::CheckTimingValues,
-        ];
-        let mut unanswerable = Vec::new();
-        for check in all {
-            let param = match check {
-                CheckType::HashClientFile => r"Interface\FrameXML\FrameXML.toc",
-                CheckType::GetLuaVariable => "UIParent",
-                _ => "Cheat Engine",
-            }
-            .to_string();
-            let outcome = answer(&ScanRequest { check, param }, &TestWitness);
-            match outcome {
-                ScanOutcome::Unanswerable(reason) => {
-                    assert!(!check.is_witnessable(), "{check:?} claims to be witnessable");
-                    unanswerable.push((check, reason));
-                }
-                ScanOutcome::Answered(bytes) => {
-                    assert!(check.is_witnessable(), "{check:?} answered but is not witnessable");
-                    assert!(!bytes.is_empty(), "{check:?} answered with nothing");
-                }
-            }
-        }
-        let failed: Vec<_> = unanswerable.iter().map(|(c, _)| *c).collect();
-        assert_eq!(
-            failed,
-            vec![
-                CheckType::ReadMemory,
-                CheckType::FindMemImageCodeByHash,
-                CheckType::FindCodeByHash
-            ],
-            "exactly the WoW.exe-image scans must fail, no more and no fewer"
-        );
-    }
-
-    /// A file the client does not hold answers "not found" rather than inventing a digest, and one
-    /// it does hold answers with its real SHA-1 — the found/not-found byte is 0 for found, matching
-    /// `WindowsFileHashScan`'s checker.
-    #[test]
-    fn a_file_hash_answers_from_what_the_client_actually_holds() {
-        let held = answer(
-            &ScanRequest {
-                check: CheckType::HashClientFile,
-                param: r"Interface\FrameXML\FrameXML.toc".into(),
-            },
-            &TestWitness,
-        );
-        let expected: [u8; 20] = Sha1::digest(b"toc").into();
-        let mut want = vec![FOUND];
-        want.extend_from_slice(&expected);
-        assert_eq!(held, ScanOutcome::Answered(want));
-
-        let absent = answer(
-            &ScanRequest {
-                check: CheckType::HashClientFile,
-                param: r"Interface\NotHere.blp".into(),
-            },
-            &TestWitness,
-        );
-        assert_eq!(absent, ScanOutcome::Answered(vec![NOT_FOUND]));
     }
 }
