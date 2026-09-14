@@ -8,6 +8,7 @@ use crate::transport::Conn;
 use super::movement::{client_uptime_ms, movement_info, MOVEMENT_FLAG_FORWARD};
 use super::reader::WorldReader;
 use super::writer::WorldWriter;
+use super::warden;
 use super::{recv_packet, send_packet};
 
 /// Socket read timeout for the handshake phase only (connect → `player_login`), where each step
@@ -100,6 +101,15 @@ pub struct WorldSession {
     /// answers our addon block, which is the state that keeps the Lua index space empty
     /// (decision 2175). Read by [`Self::take_addon_info`].
     addon_info: Option<Vec<u8>>,
+    /// Kept because Warden's ciphers are derived from it (`warden::WardenCrypto::from_session_key`)
+    /// and the first `SMSG_WARDEN_DATA` can arrive before the handshake even finishes — there is no
+    /// later point at which the caller could hand it back.
+    session_key: [u8; SESSION_KEY_LENGTH],
+    /// Built on the first Warden packet rather than at connect, so a server that never runs Warden
+    /// pays nothing for it.
+    warden: Option<warden::WardenCrypto>,
+    /// Decrypted Warden messages, in arrival order, for [`Self::take_warden_messages`].
+    warden_inbox: Vec<warden::ServerMessage>,
 }
 
 impl WorldSession {
@@ -219,6 +229,9 @@ impl WorldSession {
             billing_time_rested: 0,
             tutorial_flags: None,
             addon_info: None,
+            session_key,
+            warden: None,
+            warden_inbox: Vec::new(),
         };
 
         // 4. Wait for SMSG_AUTH_RESPONSE. Usually the first encrypted packet, but not always first
@@ -265,9 +278,12 @@ impl WorldSession {
                 ServerPacket::AuthResponse { result, .. } => {
                     return Err(WorldAuthReject { code: result }.into())
                 }
-                ServerPacket::Other {
-                    opcode: opcode::SMSG_WARDEN_DATA,
-                } => return Err(WardenRequired.into()),
+                // Decrypted and parked rather than refused: the exchange is implemented now, and
+                // Warden routinely lands before SMSG_AUTH_RESPONSE, so bailing here would refuse
+                // every Warden server before it ever said what it wanted.
+                ServerPacket::WardenData { body } => {
+                    session.absorb_warden(body);
+                }
                 _ => continue,
             }
         }
@@ -341,6 +357,27 @@ impl WorldSession {
         send_packet(&mut self.conn, Some(self.crypto.encrypter()), opcode, body)
     }
 
+    /// Decrypt one `SMSG_WARDEN_DATA` body and park what it says.
+    ///
+    /// Infallible on purpose: a Warden message we cannot parse must not tear down a live world
+    /// session, and the parse failure is itself the diagnosis — an opcode outside `server_op`'s
+    /// `0..=4` is what a mis-keyed cipher looks like, so it is recorded as
+    /// [`warden::ServerMessage::Unknown`] and read back rather than thrown.
+    fn absorb_warden(&mut self, mut body: Vec<u8>) {
+        let crypto = self
+            .warden
+            .get_or_insert_with(|| warden::WardenCrypto::from_session_key(&self.session_key));
+        crypto.decrypt(&mut body);
+        if let Some(msg) = warden::parse_server_message(&body) {
+            self.warden_inbox.push(msg);
+        }
+    }
+
+    /// Take the Warden messages received so far, leaving the inbox empty.
+    pub fn take_warden_messages(&mut self) -> Vec<warden::ServerMessage> {
+        std::mem::take(&mut self.warden_inbox)
+    }
+
     /// Request the character list (blocking) — the native twin of [`Self::char_enum_async`].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn char_enum(&mut self) -> Result<Vec<Character>> {
@@ -358,10 +395,11 @@ impl WorldSession {
                     return Ok(characters);
                 }
                 // Warden can land either side of SMSG_AUTH_RESPONSE depending on when the server
-                // arms it, so the roster step refuses it too — same reason as `connect`.
-                ServerPacket::Other {
-                    opcode: opcode::SMSG_WARDEN_DATA,
-                } => return Err(WardenRequired.into()),
+                // arms it, so the roster step absorbs it too — same reason as `connect`.
+                ServerPacket::WardenData { body } => {
+                    self.absorb_warden(body);
+                    continue;
+                }
                 // The tutorial bank, if the server sends it this early (1976): kept for the world
                 // entry — skipped here it would be lost to the roster loop.
                 ServerPacket::TutorialFlags(flags) => {

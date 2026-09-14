@@ -1652,6 +1652,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_ADDON_INFO => ServerPacket::AddonInfo {
             statuses: read_addon_info(&mut r),
         },
+        opcode::SMSG_WARDEN_DATA => ServerPacket::WardenData {
+            body: body.to_vec(),
+        },
         other => ServerPacket::Other { opcode: other },
     })
 }
