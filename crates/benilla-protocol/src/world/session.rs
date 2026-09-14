@@ -282,7 +282,7 @@ impl WorldSession {
                 // Warden routinely lands before SMSG_AUTH_RESPONSE, so bailing here would refuse
                 // every Warden server before it ever said what it wanted.
                 ServerPacket::WardenData { body } => {
-                    session.absorb_warden(body);
+                    session.absorb_warden(body)?;
                 }
                 _ => continue,
             }
@@ -363,14 +363,30 @@ impl WorldSession {
     /// session, and the parse failure is itself the diagnosis — an opcode outside `server_op`'s
     /// `0..=4` is what a mis-keyed cipher looks like, so it is recorded as
     /// [`warden::ServerMessage::Unknown`] and read back rather than thrown.
-    fn absorb_warden(&mut self, mut body: Vec<u8>) {
+    fn absorb_warden(&mut self, mut body: Vec<u8>) -> Result<()> {
         let crypto = self
             .warden
             .get_or_insert_with(|| warden::WardenCrypto::from_session_key(&self.session_key));
         crypto.decrypt(&mut body);
-        if let Some(msg) = warden::parse_server_message(&body) {
-            self.warden_inbox.push(msg);
+        let Some(msg) = warden::parse_server_message(&body) else {
+            return Ok(());
+        };
+        // A module offer is the one Warden shape this client provably cannot complete, and it is
+        // worth failing on immediately rather than 30 s later. `MODULE_USE` is followed by the
+        // module transfer and then `HASH_REQUEST`, whose answer is the `reply` field of a
+        // challenge/response entry the server keeps in its own `cr` file and never sends us
+        // (`WardenModule`'s third constructor argument). The real client obtains it by EXECUTING
+        // the module — x86 code, which this client has no way to run — so the challenge cannot be
+        // answered, and `HandleChallengeResponse` kicks on a wrong reply.
+        //
+        // Module-less Warden is a different matter and is NOT refused here: `Warden::Warden` only
+        // sends `MODULE_USE` `if (_module)`, and a server configured without one goes straight to
+        // the scans, which is the exchange this client can take part in.
+        if matches!(msg, warden::ServerMessage::ModuleUse { .. }) {
+            return Err(WardenRequired.into());
         }
+        self.warden_inbox.push(msg);
+        Ok(())
     }
 
     /// Take the Warden messages received so far, leaving the inbox empty.
@@ -397,7 +413,7 @@ impl WorldSession {
                 // Warden can land either side of SMSG_AUTH_RESPONSE depending on when the server
                 // arms it, so the roster step absorbs it too — same reason as `connect`.
                 ServerPacket::WardenData { body } => {
-                    self.absorb_warden(body);
+                    self.absorb_warden(body)?;
                     continue;
                 }
                 // The tutorial bank, if the server sends it this early (1976): kept for the world
