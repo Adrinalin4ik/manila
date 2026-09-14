@@ -783,9 +783,42 @@ mod tests {
 
     const TOC: &str = r"Interface\FrameXML\FrameXML.toc";
 
-    /// A fully implemented witness: it holds one file, one Lua global, no modules or drivers, an
-    /// undetoured API and a clean clock.
-    struct TestWitness;
+    /// One entry of [`TestWitness::detoured_apis`]: a detour is only reported when EVERY field of
+    /// the request matches, so a test that changes one field proves that field reached the witness.
+    struct DetouredApi {
+        module: String,
+        proc: String,
+        hash: [u8; 20],
+        offset: u32,
+        length: u8,
+    }
+
+    /// A fully implemented witness, configured per test rather than hard-wired: it holds one file
+    /// and one Lua global, and its module/driver/API/clock answers come from these fields. The
+    /// default is the state a browser client would honestly report — nothing loaded, nothing
+    /// detoured, a clock that agrees with itself.
+    struct TestWitness {
+        /// Digests of the module names this client would own, matched against the request's
+        /// `name_digest` — the name itself never crosses the wire.
+        loaded_modules: Vec<[u8; 20]>,
+        /// The driver equivalent, matched against the request's `path_digest`.
+        loaded_drivers: Vec<[u8; 20]>,
+        detoured_apis: Vec<DetouredApi>,
+        timing_mismatch: bool,
+        timing_ticks: u32,
+    }
+
+    impl Default for TestWitness {
+        fn default() -> Self {
+            TestWitness {
+                loaded_modules: Vec::new(),
+                loaded_drivers: Vec::new(),
+                detoured_apis: Vec::new(),
+                timing_mismatch: false,
+                timing_ticks: 0x0123_4567,
+            }
+        }
+    }
 
     impl ScanWitness for TestWitness {
         fn hash_client_file(&self, path: &str) -> Attestation<FileHash> {
@@ -801,6 +834,7 @@ mod tests {
                 }
             })
         }
+
         fn lua_variable(&self, name: &str) -> Attestation<LuaValue> {
             Attestation::Present(if name == "UIParent" {
                 LuaValue {
@@ -814,34 +848,59 @@ mod tests {
                 }
             })
         }
-        fn module_loaded(&self, _seed: u32, _digest: &[u8; 20]) -> Attestation<ModulePresence> {
-            Attestation::Present(ModulePresence { found: false })
+
+        fn module_loaded(
+            &self,
+            _seed: u32,
+            name_digest: &[u8; 20],
+        ) -> Attestation<ModulePresence> {
+            Attestation::Present(ModulePresence {
+                found: self.loaded_modules
+                    .iter()
+                    .any(|digest| digest == name_digest),
+            })
         }
+
         fn driver_loaded(
             &self,
             _seed: u32,
-            _digest: &[u8; 20],
+            path_digest: &[u8; 20],
             _name: &str,
         ) -> Attestation<DriverPresence> {
-            Attestation::Present(DriverPresence { found: false })
+            Attestation::Present(DriverPresence {
+                found: self.loaded_drivers
+                    .iter()
+                    .any(|digest| digest == path_digest),
+            })
         }
+
         fn api_detoured(
             &self,
-            _module: &str,
-            _proc: &str,
-            _hash: &[u8; 20],
-            _offset: u32,
-            _length: u8,
+            module: &str,
+            proc: &str,
+            hash: &[u8; 20],
+            offset: u32,
+            length: u8,
         ) -> Attestation<ApiIntegrity> {
-            Attestation::Present(ApiIntegrity { detoured: false })
+            let detoured = self.detoured_apis.iter().any(|api| {
+                api.module == module
+                    && api.proc == proc
+                    && api.hash == *hash
+                    && api.offset == offset
+                    && api.length == length
+            });
+
+            Attestation::Present(ApiIntegrity { detoured })
         }
+
         fn timing_values(&self) -> Attestation<TimingValues> {
             Attestation::Present(TimingValues {
-                mismatch: false,
-                ticks: 0x0123_4567,
+                mismatch: self.timing_mismatch,
+                ticks: self.timing_ticks,
             })
         }
     }
+
 
     /// The default trait bodies: a client that has implemented nothing must produce NAMED gaps, not
     /// clean passes. A silent `Answered` here would mean every unimplemented check reports "nothing
@@ -907,7 +966,7 @@ mod tests {
         let hit = ask(
             ScanParams::FileHash { path: TOC.into() },
             CheckType::HashClientFile,
-            &TestWitness,
+            &TestWitness::default(),
         );
         let expected: [u8; 20] = Sha1::digest(b"toc").into();
         let ScanOutcome::Answered(bytes) = hit else {
@@ -920,7 +979,7 @@ mod tests {
         let miss = ask(
             ScanParams::FileHash { path: "nope".into() },
             CheckType::HashClientFile,
-            &TestWitness,
+            &TestWitness::default(),
         );
         let ScanOutcome::Answered(bytes) = miss else {
             panic!("a missing file is still an answer")
@@ -933,7 +992,7 @@ mod tests {
         let lua = ask(
             ScanParams::LuaVariable { name: "UIParent".into() },
             CheckType::GetLuaVariable,
-            &TestWitness,
+            &TestWitness::default(),
         );
         assert_eq!(
             lua,
@@ -969,7 +1028,7 @@ mod tests {
                 },
             ),
         ] {
-            let out = ask(params, check, &TestWitness);
+            let out = ask(params, check, &TestWitness::default());
             let ScanOutcome::Answered(bytes) = out else {
                 panic!("{check:?} must answer")
             };
@@ -983,7 +1042,7 @@ mod tests {
         assert_ne!(marker(false), 0x4A);
 
         // CHECK_TIMING_VALUES: u8 + u32 little-endian, five bytes.
-        let timing = ask(ScanParams::Timing, CheckType::CheckTimingValues, &TestWitness);
+        let timing = ask(ScanParams::Timing, CheckType::CheckTimingValues, &TestWitness::default());
         let ScanOutcome::Answered(bytes) = timing else {
             panic!("timing must answer")
         };
@@ -995,6 +1054,96 @@ mod tests {
         );
     }
 
+    /// The POSITIVE side of the presence scans, which the default witness never reaches: a client
+    /// that really does hold the module, the driver and a detoured export must answer `0x4A` for
+    /// each. Without this the matching logic is never executed and only the "absent" byte is ever
+    /// checked — a witness that always answered "not found" would pass every other test in here.
+    #[test]
+    fn a_witness_that_found_something_answers_with_the_0x4a_marker() {
+        let witness = TestWitness {
+            loaded_modules: vec![[0xAB; 20]],
+            loaded_drivers: vec![[0xCD; 20]],
+            detoured_apis: vec![DetouredApi {
+                module: "Kernel32.dll".into(),
+                proc: "GetTickCount".into(),
+                hash: [0xEF; 20],
+                offset: 16,
+                length: 8,
+            }],
+            timing_mismatch: true,
+            timing_ticks: 99,
+        };
+
+        let module = ask(
+            ScanParams::ModulePresence {
+                seed: 1,
+                name_digest: [0xAB; 20],
+            },
+            CheckType::FindModuleByName,
+            &witness,
+        );
+        assert_eq!(module, ScanOutcome::Answered(vec![FOUND_0X4A]));
+
+        let driver = ask(
+            ScanParams::DriverPresence {
+                seed: 1,
+                path_digest: [0xCD; 20],
+                name: "npf.sys".into(),
+            },
+            CheckType::FindDriverByName,
+            &witness,
+        );
+        assert_eq!(driver, ScanOutcome::Answered(vec![FOUND_0X4A]));
+
+        let api = ScanParams::ApiCheck {
+            module: "Kernel32.dll".into(),
+            proc: "GetTickCount".into(),
+            hash: [0xEF; 20],
+            offset: 16,
+            length: 8,
+        };
+        assert_eq!(
+            ask(api, CheckType::ApiCheck, &witness),
+            ScanOutcome::Answered(vec![FOUND_0X4A])
+        );
+
+        // One field off is a different question, and must answer "not detoured" — this is what
+        // proves every field actually reached the witness rather than being ignored.
+        let wrong_offset = ScanParams::ApiCheck {
+            module: "Kernel32.dll".into(),
+            proc: "GetTickCount".into(),
+            hash: [0xEF; 20],
+            offset: 17,
+            length: 8,
+        };
+        let ScanOutcome::Answered(bytes) = ask(wrong_offset, CheckType::ApiCheck, &witness) else {
+            panic!("must answer")
+        };
+        assert_ne!(bytes[0], FOUND_0X4A, "a different offset is a different question");
+
+        // A digest the witness does not hold: still an answer, just not the found marker.
+        let absent = ask(
+            ScanParams::ModulePresence {
+                seed: 1,
+                name_digest: [0x11; 20],
+            },
+            CheckType::FindModuleByName,
+            &witness,
+        );
+        let ScanOutcome::Answered(bytes) = absent else {
+            panic!("must answer")
+        };
+        assert_ne!(bytes[0], FOUND_0X4A);
+
+        // And the clock, reported as the witness saw it.
+        let timing = ask(ScanParams::Timing, CheckType::CheckTimingValues, &witness);
+        assert_eq!(
+            timing,
+            ScanOutcome::Answered(vec![1, 99, 0, 0, 0]),
+            "mismatch byte then the tick count, little-endian"
+        );
+    }
+
     /// The image scans are unanswerable whatever the witness — this is a property, not a gap.
     #[test]
     fn the_image_scans_are_unanswerable_for_any_witness() {
@@ -1003,7 +1152,7 @@ mod tests {
             CheckType::FindCodeByHash,
             CheckType::FindMemImageCodeByHash,
         ] {
-            match ask(ScanParams::Image, check, &TestWitness) {
+            match ask(ScanParams::Image, check, &TestWitness::default()) {
                 ScanOutcome::Unanswerable(reason) => {
                     assert!(reason.contains("WoW.exe"), "{check:?}: {reason}")
                 }
@@ -1069,7 +1218,7 @@ mod tests {
         );
         assert_eq!(requests[4].params, ScanParams::Timing);
 
-        let outcomes: Vec<_> = requests.iter().map(|r| answer(r, &TestWitness)).collect();
+        let outcomes: Vec<_> = requests.iter().map(|r| answer(r, &TestWitness::default())).collect();
         let packet = build_checks_result(&outcomes).expect("all witnessable");
 
         assert_eq!(packet[0], client_op::CHEAT_CHECKS_RESULT);
@@ -1095,7 +1244,7 @@ mod tests {
     fn a_memory_scan_blocks_the_whole_reply() {
         let outcomes = vec![
             ScanOutcome::Answered(vec![0]),
-            ask(ScanParams::Image, CheckType::ReadMemory, &TestWitness),
+            ask(ScanParams::Image, CheckType::ReadMemory, &TestWitness::default()),
         ];
         let err = build_checks_result(&outcomes).expect_err("must refuse");
         assert!(err.contains("WoW.exe"), "the reason must name why: {err}");
