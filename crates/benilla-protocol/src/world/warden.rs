@@ -768,6 +768,110 @@ pub fn build_checks_result(outcomes: &[ScanOutcome]) -> Result<Vec<u8>, &'static
     Ok(packet)
 }
 
+/// A complete [`ScanWitness`] for this client, built from the three things only the client can
+/// supply. Everything else — hashing, the reply shapes, what is truthfully absent — is decided here
+/// so no caller has to get it right twice.
+///
+/// The seam is closures rather than concrete types because `benilla-protocol` has no business
+/// depending on the MPQ chain or the Lua VM; the app hands in `Chain::read` and a globals lookup.
+pub struct ClientWitness {
+    read_file: Box<dyn Fn(&str) -> Option<Vec<u8>> + Send>,
+    lua_global: Box<dyn Fn(&str) -> Option<String> + Send>,
+    clocks: Box<dyn Fn() -> (u32, u32) + Send>,
+}
+
+impl ClientWitness {
+    /// `read_file` reads a client file as this client holds it; `lua_global` reads a global from its
+    /// own Lua state; `clocks` returns the game's own millisecond clock and an independent one.
+    pub fn new(
+        read_file: Box<dyn Fn(&str) -> Option<Vec<u8>> + Send>,
+        lua_global: Box<dyn Fn(&str) -> Option<String> + Send>,
+        clocks: Box<dyn Fn() -> (u32, u32) + Send>,
+    ) -> Self {
+        ClientWitness {
+            read_file,
+            lua_global,
+            clocks,
+        }
+    }
+}
+
+impl ScanWitness for ClientWitness {
+    /// Hash what the client HOLDS. The bytes come from the same reader the client renders from, so
+    /// the digest describes the client that is running rather than what a host meant to serve it —
+    /// which is the only reading under which this check means anything.
+    fn hash_client_file(&self, path: &str) -> Attestation<FileHash> {
+        Attestation::Present(match (self.read_file)(path) {
+            Some(bytes) => FileHash {
+                found: true,
+                sha1: Sha1::digest(&bytes).into(),
+            },
+            None => FileHash {
+                found: false,
+                sha1: [0u8; 20],
+            },
+        })
+    }
+
+    fn lua_variable(&self, name: &str) -> Attestation<LuaValue> {
+        Attestation::Present(match (self.lua_global)(name) {
+            Some(value) => LuaValue { found: true, value },
+            None => LuaValue {
+                found: false,
+                value: String::new(),
+            },
+        })
+    }
+
+    /// Always absent, and that is the TRUE answer rather than a convenient one: this client is not a
+    /// Windows process with a module list — in a browser there is no such list at all, and natively
+    /// it is a Rust binary whose modules have nothing to do with the ones these scans hunt for.
+    ///
+    /// Worth stating plainly for whoever builds a scan profile: a check whose answer is fixed
+    /// regardless of the client's state detects nothing. Including it costs a round trip and buys
+    /// no assurance. The same goes for [`Self::driver_loaded`] and [`Self::api_detoured`].
+    fn module_loaded(&self, _seed: u32, _name_digest: &[u8; 20]) -> Attestation<ModulePresence> {
+        Attestation::Present(ModulePresence { found: false })
+    }
+
+    /// Always absent — see [`Self::module_loaded`]. The scan asks `QueryDosDevice` about a driver;
+    /// there is no such call to make here.
+    fn driver_loaded(
+        &self,
+        _seed: u32,
+        _path_digest: &[u8; 20],
+        _name: &str,
+    ) -> Attestation<DriverPresence> {
+        Attestation::Present(DriverPresence { found: false })
+    }
+
+    /// Never detoured — see [`Self::module_loaded`]. The scan walks a Windows export looking for a
+    /// `JMP` patched over its prologue; this client has no such export to walk.
+    fn api_detoured(
+        &self,
+        _module: &str,
+        _proc: &str,
+        _hash: &[u8; 20],
+        _offset: u32,
+        _length: u8,
+    ) -> Attestation<ApiIntegrity> {
+        Attestation::Present(ApiIntegrity { detoured: false })
+    }
+
+    /// The one browser-shaped scan that says something real. The scan exists because the reference
+    /// client's own clock and `GetTickCount` should agree, and a hooked timer makes them diverge; two
+    /// independent clocks here carry the same meaning. `WindowsTimeScan`'s own comment warns that a
+    /// mismatch is NOT by itself grounds to call it a hack, so this reports the disagreement and
+    /// leaves the judgement to the server.
+    fn timing_values(&self) -> Attestation<TimingValues> {
+        let (game, independent) = (self.clocks)();
+        Attestation::Present(TimingValues {
+            mismatch: game != independent,
+            ticks: game,
+        })
+    }
+}
+
 /// A server profile's fixed check encoding, plus the client's witness — everything
 /// [`crate::WorldSession`] needs to take part in a scan round.
 ///
