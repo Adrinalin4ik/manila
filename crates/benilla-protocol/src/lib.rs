@@ -38,6 +38,21 @@ use crate::transport::Conn;
 pub const AUTH_PORT: u16 = 3724;
 /// The 1.12.1 client build we present to the server.
 pub const CLIENT_BUILD: u16 = 5875;
+/// The build presented to **realmd only** — the world server still gets [`CLIENT_BUILD`].
+///
+/// Measured against `logon.ravencraft.io` (2026-09-14): that realmd runs with `StrictVersionCheck`
+/// on, and its build table has 5875 filled in with the hash of its own custom client, so every
+/// digest we can compute — the published 5875 constant and one derived from a local install alike —
+/// is answered `00 00 09` (`CMD_AUTH_LOGON_CHALLENGE` opcode carrying `WOW_FAIL_VERSION_INVALID`,
+/// the shape `examples/version_check_probe.rs` documents). A sweep found 8606, 11801 and 12340
+/// accepted with *any* `crc_hash`, including zeros: mangos's `VerifyVersion` returns true outright
+/// for a build whose hash the operator left unfilled. 12340 is the one picked here.
+///
+/// **This is a divergence from the reference and it is not a protocol fact.** It only affects the
+/// realmd challenge because the two servers read the build independently — the same run reached
+/// `SMSG_AUTH_SESSION` on the world at 5875 and was admitted. Reverting to `CLIENT_BUILD` restores
+/// stock behaviour and costs nothing on a server that is not in strict mode.
+pub const REALMD_BUILD: u16 = 12340;
 /// How many logon challenges [`logon`] will ask for while looking for a `B` both serialization
 /// conventions read the same way (see the redial comment there). One dial in ~137 comes back
 /// ambiguous, so eight is already a probability of about 10⁻¹⁷ of running out.
@@ -264,7 +279,7 @@ pub async fn logon_async(host: &str, username: &str, password: &str) -> Result<L
         let mut dialed = None;
         for _ in 0..MAX_CHALLENGE_DIALS {
             let mut stream = dial(host, port).await?;
-            auth::write_logon_challenge(&mut stream, &username.to_uppercase(), CLIENT_BUILD)
+            auth::write_logon_challenge(&mut stream, &username.to_uppercase(), REALMD_BUILD)
                 .context("sending logon challenge")?;
             let reply = auth::read_challenge_reply(&mut stream)
                 .await
