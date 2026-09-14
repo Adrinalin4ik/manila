@@ -111,12 +111,18 @@ impl Rc4 {
 /// The bytes generated per direction (`Warden::Warden`'s `KeyLength`).
 const KEY_LENGTH: usize = 16;
 
-/// Both directions of one Warden session.
+/// Both directions of one Warden session, plus the byte the scan encoding is masked with.
 pub struct WardenCrypto {
     /// Applied to what we SEND — the server decrypts it with its `_inputCrypto`.
     outgoing: Rc4,
     /// Applied to what we RECEIVE — the server encrypted it with its `_outputCrypto`.
     incoming: Rc4,
+    /// `Warden::_xor`. Every byte naming a check type, and the scan block's terminator, is written
+    /// as `value ^ xor` (`WardenScan.cpp`'s builders, `Warden.cpp:270`), so a request cannot be read
+    /// without it. It is NOT a secret the server has to send: it is `inputKey[0]`
+    /// (`Warden.cpp:76`), the first byte of the first key `SHA1Randx` yields — which this client
+    /// derives itself. That is why a profile only has to state the TABLE.
+    xor: u8,
 }
 
 impl WardenCrypto {
@@ -130,7 +136,13 @@ impl WardenCrypto {
         WardenCrypto {
             outgoing: Rc4::new(&first),
             incoming: Rc4::new(&second),
+            xor: first[0],
         }
+    }
+
+    /// The mask the scan encoding is written under — see [`Self::xor`]'s field note.
+    pub fn scan_xor(&self) -> u8 {
+        self.xor
     }
 
     /// Re-key from a loaded module's own pair (`Warden.cpp:141-142`). `client_key` is the one the
@@ -138,6 +150,9 @@ impl WardenCrypto {
     pub fn rekey(&mut self, client_key: &[u8], server_key: &[u8]) {
         self.outgoing = Rc4::new(client_key);
         self.incoming = Rc4::new(server_key);
+        // The server moves the mask with the keys: `_xor = _crk->clientKey[0]`
+        // (`Warden.cpp:145`). Unreachable while module offers are refused, but wrong to leave stale.
+        self.xor = client_key[0];
     }
 
     pub fn decrypt(&mut self, buf: &mut [u8]) {
@@ -893,13 +908,22 @@ pub struct WardenProfile {
 }
 
 impl WardenProfile {
-    /// Wire byte -> check type. `None` for a byte the profile does not define, which stops the walk
-    /// rather than letting a misread request be answered.
-    pub fn decode(&self, byte: u8) -> Option<CheckType> {
+    /// Wire byte -> check type, under the session's mask. `None` for a byte the profile does not
+    /// define, which stops the walk rather than letting a misread request be answered.
+    ///
+    /// `xor` comes from [`WardenCrypto::scan_xor`], not from the profile: the mask is per-session
+    /// and derived from the session key, while the table is the server's fixed choice.
+    pub fn decode(&self, byte: u8, xor: u8) -> Option<CheckType> {
+        let value = byte ^ xor;
         self.opcodes
             .iter()
-            .position(|&b| b == byte)
+            .position(|&b| b == value)
             .and_then(|i| CheckType::from_u8(i as u8))
+    }
+
+    /// The scan block's terminator as it appears on the wire for this session.
+    pub fn terminator_on_wire(&self, xor: u8) -> u8 {
+        self.terminator ^ xor
     }
 }
 

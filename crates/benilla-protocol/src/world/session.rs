@@ -418,13 +418,19 @@ impl WorldSession {
             .warden
             .get_or_insert_with(|| warden::WardenCrypto::from_session_key(&self.session_key));
         crypto.decrypt(&mut body);
+        // The scan encoding is masked with a byte derived from the session key, not sent by the
+        // server, so it is read off our own cipher rather than carried in the profile.
+        let xor = crypto.scan_xor();
         let message = warden::parse_server_message(&body);
 
         let reply = match (&message, &self.warden_profile) {
             (Some(warden::ServerMessage::CheatChecksRequest { body }), Some(profile)) => {
-                let requests =
-                    warden::parse_checks_request(body, &|b| profile.decode(b), profile.terminator)
-                        .map_err(|e| anyhow!("unreadable Warden scan request: {e:?}"))?;
+                let requests = warden::parse_checks_request(
+                    body,
+                    &|b| profile.decode(b, xor),
+                    profile.terminator_on_wire(xor),
+                )
+                .map_err(|e| anyhow!("unreadable Warden scan request: {e:?}"))?;
                 let outcomes: Vec<_> = requests
                     .iter()
                     .map(|r| warden::answer(r, profile.witness.as_ref()))

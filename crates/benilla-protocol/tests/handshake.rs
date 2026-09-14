@@ -143,16 +143,32 @@ fn test_profile() -> WardenProfile {
 /// A `CHEAT_CHECKS_REQUEST` body as `Warden::RequestScans` builds one — string table, scan block,
 /// terminator — then put under the keystream the client will decrypt with. RC4 is symmetric, so
 /// applying the client's *incoming* cipher here is what produces ciphertext it can read back.
+///
+/// The type byte and the terminator are written as `value ^ xor`, exactly as the server's builders
+/// do, with `xor` taken from the session's own key stream. Building them WITHOUT the mask would
+/// make this test pass against a client that ignored the mask too — and then the first real server
+/// would send something neither of them could read.
 fn warden_checks_request(cipher: &mut warden::WardenCrypto) -> Vec<u8> {
+    let xor = cipher.scan_xor();
     let mut body = vec![warden::server_op::CHEAT_CHECKS_REQUEST];
     body.push("realmlist.wtf".len() as u8);
     body.extend_from_slice(b"realmlist.wtf");
     body.push(0); // end of string table
-    body.push(WIRE_BASE + CheckType::HashClientFile as u8);
+    body.push((WIRE_BASE + CheckType::HashClientFile as u8) ^ xor);
     body.push(1); // 1-based index into that table
-    body.push(WIRE_TERMINATOR);
+    body.push(WIRE_TERMINATOR ^ xor);
     cipher.decrypt(&mut body);
     body
+}
+
+/// The mask must not be zero, or the test above would prove nothing about applying it.
+#[test]
+fn the_scan_mask_is_derived_and_non_trivial() {
+    let xor = warden::WardenCrypto::from_session_key(&SESSION_KEY).scan_xor();
+    assert_ne!(
+        xor, 0,
+        "a zero mask would make the masked and unmasked encodings identical"
+    );
 }
 
 /// **The wiring test.** A server that asks for a scan this client can witness must get an ANSWER
