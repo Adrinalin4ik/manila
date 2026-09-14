@@ -90,6 +90,9 @@ pub const SMSG_AUTH_RESPONSE: u16 = 0x01EE;
 /// in the world. benilla does not implement Warden; [`crate::WorldSession::connect`] refuses such
 /// a server at the handshake rather than entering a 30-second kick/reconnect cycle.
 pub const SMSG_WARDEN_DATA: u16 = 0x02E6;
+/// The client's half of the Warden exchange (`Opcodes_1_12_1.h`: `CMSG_WARDEN_DATA = 0x2E7`). Its
+/// body is RC4 ciphertext under the session's Warden keys, not a plaintext packet body.
+pub const CMSG_WARDEN_DATA: u16 = 0x02E7;
 /// The server's answer to `CMSG_AUTH_SESSION`'s addon block — one record per `## Secure:` addon we
 /// sent, in the order we sent them, with no count and no names (decision 2175).
 pub const SMSG_ADDON_INFO: u16 = 0x02EF;

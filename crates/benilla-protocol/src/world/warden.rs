@@ -768,6 +768,46 @@ pub fn build_checks_result(outcomes: &[ScanOutcome]) -> Result<Vec<u8>, &'static
     Ok(packet)
 }
 
+/// A server profile's fixed check encoding, plus the client's witness — everything
+/// [`crate::WorldSession`] needs to take part in a scan round.
+///
+/// This exists because the stock encoding is unavailable to us: the byte naming a check's type is
+/// `module->opcodes[type] ^ xor`, and that table lives inside the Warden module, which a
+/// from-scratch client cannot load. A server willing to admit such a client fixes the encoding
+/// instead, and states it here. `opcodes` is indexed by [`CheckType`], exactly mirroring the
+/// module's own table so a profile author has an obvious thing to copy.
+///
+/// A session without a profile refuses Warden outright — which is the right default, because
+/// guessing an encoding does not fail, it silently misreads every request.
+pub struct WardenProfile {
+    /// Wire byte for each [`CheckType`], indexed by its discriminant.
+    pub opcodes: [u8; 9],
+    /// The byte that ends the scan block (`module->scanTerminator ^ xor` on a stock server).
+    pub terminator: u8,
+    /// What the client can say about itself.
+    pub witness: Box<dyn ScanWitness + Send>,
+}
+
+impl WardenProfile {
+    /// Wire byte -> check type. `None` for a byte the profile does not define, which stops the walk
+    /// rather than letting a misread request be answered.
+    pub fn decode(&self, byte: u8) -> Option<CheckType> {
+        self.opcodes
+            .iter()
+            .position(|&b| b == byte)
+            .and_then(|i| CheckType::from_u8(i as u8))
+    }
+}
+
+impl std::fmt::Debug for WardenProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WardenProfile")
+            .field("opcodes", &self.opcodes)
+            .field("terminator", &self.terminator)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
