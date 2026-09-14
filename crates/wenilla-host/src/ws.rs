@@ -59,8 +59,25 @@ async fn upgrade(
     };
     let host_label = params.get("host").cloned().unwrap_or_default();
     ws.on_upgrade(move |socket| async move {
-        if let Err(e) = relay(socket, &upstream, port).await {
-            tracing::warn!(error = %e, host = %host_label, port, "ws proxy session ended");
+        // Opening and closing are both logged at INFO because the two failures a player hits are
+        // indistinguishable from the client: the upgrade is accepted before the upstream is dialed,
+        // so an unreachable realmd reaches the login screen as a socket that opened and then died —
+        // the same generic `LOGIN_FAILED` ("Unable to connect") a refusal produces. The byte counts
+        // are what separate them: 0 down means nothing answered, a few bytes down is realmd
+        // refusing, and `first_down` names the refusal outright.
+        tracing::info!(host = %host_label, port, "ws proxy session opening");
+        match relay(socket, &upstream, port).await {
+            Ok(stats) => tracing::info!(
+                host = %host_label,
+                port,
+                up = stats.up,
+                down = stats.down,
+                first_down = %stats.first_down,
+                "ws proxy session closed",
+            ),
+            Err(e) => {
+                tracing::warn!(error = %e, host = %host_label, port, "ws proxy session ended")
+            }
         }
     })
 }
@@ -78,7 +95,17 @@ async fn upgrade(
 /// receiving a WS Close (or a read error) shuts down our TCP write half, which the upstream reads
 /// as EOF and — for a well-behaved peer — closes its own side, which our TCP read then sees as
 /// EOF and answers with our own Close frame back to the client.
-async fn relay(ws: WebSocket, upstream: &str, port: u16) -> anyhow::Result<()> {
+/// What one relayed session moved, for the log line in [`upgrade`]. `first_down` is the head of the
+/// upstream's first chunk in hex — for realmd that is the whole diagnosis (`00 00 04` is a logon
+/// challenge refused as an unknown account), and it is bounded so a world stream cannot flood the log.
+#[derive(Default)]
+struct RelayStats {
+    up: u64,
+    down: u64,
+    first_down: String,
+}
+
+async fn relay(ws: WebSocket, upstream: &str, port: u16) -> anyhow::Result<RelayStats> {
     let tcp = TcpStream::connect((upstream, port)).await?;
     tcp.set_nodelay(true)?;
     let (mut tcp_r, mut tcp_w) = tcp.into_split();
@@ -86,6 +113,8 @@ async fn relay(ws: WebSocket, upstream: &str, port: u16) -> anyhow::Result<()> {
 
     let tcp_to_ws = async {
         let mut buf = [0u8; 65536];
+        let mut down: u64 = 0;
+        let mut first_down = String::new();
         loop {
             match tcp_r.read(&mut buf).await {
                 Ok(0) | Err(_) => {
@@ -105,6 +134,14 @@ async fn relay(ws: WebSocket, upstream: &str, port: u16) -> anyhow::Result<()> {
                     break;
                 }
                 Ok(n) => {
+                    down += n as u64;
+                    if first_down.is_empty() {
+                        first_down = buf[..n.min(8)]
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                    }
                     if ws_tx
                         .send(Message::binary(buf[..n].to_vec()))
                         .await
@@ -115,17 +152,21 @@ async fn relay(ws: WebSocket, upstream: &str, port: u16) -> anyhow::Result<()> {
                 }
             }
         }
+        (down, first_down)
     };
 
     let ws_to_tcp = async {
+        let mut up: u64 = 0;
         loop {
             match ws_rx.next().await {
                 Some(Ok(Message::Binary(data))) => {
+                    up += data.len() as u64;
                     if tcp_w.write_all(&data).await.is_err() {
                         break;
                     }
                 }
                 Some(Ok(Message::Text(text))) => {
+                    up += text.len() as u64;
                     if tcp_w.write_all(text.as_bytes()).await.is_err() {
                         break;
                     }
@@ -136,8 +177,13 @@ async fn relay(ws: WebSocket, upstream: &str, port: u16) -> anyhow::Result<()> {
         }
         // Half-close our write side so the upstream sees EOF, not just a dangling socket.
         let _ = tcp_w.shutdown().await;
+        up
     };
 
-    tokio::join!(tcp_to_ws, ws_to_tcp);
-    Ok(())
+    let ((down, first_down), up) = tokio::join!(tcp_to_ws, ws_to_tcp);
+    Ok(RelayStats {
+        up,
+        down,
+        first_down,
+    })
 }
