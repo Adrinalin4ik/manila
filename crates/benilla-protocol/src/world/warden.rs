@@ -314,51 +314,138 @@ pub struct ScanRequest {
     pub param: String,
 }
 
-/// What the client can consult to answer a check about itself.
-pub trait ScanWitness {
-    /// SHA-1 of the named client file as this client actually holds it, or `None` if it holds no
-    /// such file. Hashing what we DOWNLOADED (not what a host says it served) is the whole point:
-    /// the answer has to be a fact about this client.
-    fn hash_client_file(&self, path: &str) -> Option<[u8; 20]>;
-    /// The value of a Lua global in this client's own VM, or `None` when it is not set.
-    fn lua_variable(&self, name: &str) -> Option<String>;
+/// What one attestation produced.
+///
+/// `Absent` and `NotImplemented` are kept apart on purpose, and the distinction is the whole point
+/// of this type: "there is no such file" is an ANSWER the client witnessed, while "we never wrote
+/// the file-hashing path" is a GAP. Collapsing them would make every unimplemented check report a
+/// clean result — a silent no-op that reads as a pass, which is the one failure mode this lane must
+/// not have.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Attestation<T> {
+    /// The client looked and found it.
+    Present(T),
+    /// The client looked and it is genuinely not there.
+    Absent,
+    /// The client cannot say. Never becomes an answer; it becomes an
+    /// [`ScanOutcome::Unanswerable`] that names itself.
+    NotImplemented,
 }
 
-/// Answer one check. Unanswerable types are named rather than faked.
+/// What the client can consult to answer a check about itself.
+///
+/// One method per witnessable scan type, every one defaulting to
+/// [`Attestation::NotImplemented`] so an implementor adds them at their own pace and an unwritten
+/// one is NAMED rather than silently passing. There is deliberately no method for `READ_MEMORY`,
+/// `FIND_CODE_BY_HASH` or `FIND_MEM_IMAGE_CODE_BY_HASH`: those ask for the contents of a `WoW.exe`
+/// process image, and no implementation of this trait can witness one, so a stub for them would be
+/// a slot for a value copied from elsewhere rather than a gap waiting to be filled. They are
+/// answered as permanently unanswerable in [`answer`], with the reason attached.
+pub trait ScanWitness {
+    /// SHA-1 of the named client file as this client actually holds it. Hash what was DOWNLOADED,
+    /// not what a host says it served — the answer has to be a fact about this client.
+    fn hash_client_file(&self, _path: &str) -> Attestation<[u8; 20]> {
+        Attestation::NotImplemented
+    }
+
+    /// The value of a Lua global in this client's own VM.
+    fn lua_variable(&self, _name: &str) -> Attestation<String> {
+        Attestation::NotImplemented
+    }
+
+    /// Is a module of this name loaded in the client's process?
+    ///
+    /// A browser has no process modules, so a web client's honest answer is always `Absent` — which
+    /// makes this check free to pass and therefore worth nothing as a check. Left implementable
+    /// rather than hard-wired, because a native build of this client could answer it meaningfully.
+    fn module_loaded(&self, _name: &str) -> Attestation<()> {
+        Attestation::NotImplemented
+    }
+
+    /// Is a driver of this name present? Same standing as [`Self::module_loaded`].
+    fn driver_loaded(&self, _name: &str) -> Attestation<()> {
+        Attestation::NotImplemented
+    }
+
+    /// Has the named API entry point been detoured? `Absent` means "not detoured".
+    fn api_detoured(&self, _name: &str) -> Attestation<()> {
+        Attestation::NotImplemented
+    }
+
+    /// The client's timing values, in the shape the profile asks for.
+    fn timing_values(&self) -> Attestation<Vec<u8>> {
+        Attestation::NotImplemented
+    }
+}
+
+/// The found/not-found byte both witnessable scans lead with: the server's checkers read `0` as
+/// found (`WindowsFileHashScan`/`WindowsLuaScan`: `auto const found = !buff.read<uint8>()`).
+const FOUND: u8 = 0;
+const NOT_FOUND: u8 = 1;
+
+/// A presence-only answer, for the scans whose reply is just the found byte.
+fn presence(attestation: Attestation<()>, gap: &'static str) -> ScanOutcome {
+    match attestation {
+        Attestation::Present(()) => ScanOutcome::Answered(vec![FOUND]),
+        Attestation::Absent => ScanOutcome::Answered(vec![NOT_FOUND]),
+        Attestation::NotImplemented => ScanOutcome::Unanswerable(gap),
+    }
+}
+
+/// Answer one check. Gaps and structural impossibilities are both named, never faked.
 pub fn answer(request: &ScanRequest, witness: &dyn ScanWitness) -> ScanOutcome {
     match request.check {
-        CheckType::ReadMemory => {
-            ScanOutcome::Unanswerable("READ_MEMORY reads a WoW.exe process image; this client has none")
-        }
-        CheckType::FindMemImageCodeByHash | CheckType::FindCodeByHash => {
-            ScanOutcome::Unanswerable("code-by-hash scans search a WoW.exe image; this client has none")
-        }
+        CheckType::ReadMemory => ScanOutcome::Unanswerable(
+            "READ_MEMORY reads a WoW.exe process image; this client has none",
+        ),
+        CheckType::FindMemImageCodeByHash | CheckType::FindCodeByHash => ScanOutcome::Unanswerable(
+            "code-by-hash scans search a WoW.exe image; this client has none",
+        ),
         CheckType::HashClientFile => match witness.hash_client_file(&request.param) {
-            // `WindowsFileHashScan`'s checker reads a found/not-found byte (0 = found) and then the
-            // digest, so the reply carries both.
-            Some(hash) => {
-                let mut out = Vec::with_capacity(21);
-                out.push(0);
+            Attestation::Present(hash) => {
+                let mut out = Vec::with_capacity(1 + hash.len());
+                out.push(FOUND);
                 out.extend_from_slice(&hash);
                 ScanOutcome::Answered(out)
             }
-            None => ScanOutcome::Answered(vec![1]),
+            Attestation::Absent => ScanOutcome::Answered(vec![NOT_FOUND]),
+            Attestation::NotImplemented => {
+                ScanOutcome::Unanswerable("ScanWitness::hash_client_file is not implemented")
+            }
         },
         CheckType::GetLuaVariable => match witness.lua_variable(&request.param) {
-            Some(value) => {
-                let mut out = Vec::with_capacity(2 + value.len());
-                out.push(0);
-                out.push(value.len().min(u8::MAX as usize) as u8);
-                out.extend_from_slice(&value.as_bytes()[..value.len().min(u8::MAX as usize)]);
+            Attestation::Present(value) => {
+                let len = value.len().min(u8::MAX as usize);
+                let mut out = Vec::with_capacity(2 + len);
+                out.push(FOUND);
+                out.push(len as u8);
+                out.extend_from_slice(&value.as_bytes()[..len]);
                 ScanOutcome::Answered(out)
             }
-            None => ScanOutcome::Answered(vec![1]),
+            Attestation::Absent => ScanOutcome::Answered(vec![NOT_FOUND]),
+            Attestation::NotImplemented => {
+                ScanOutcome::Unanswerable("ScanWitness::lua_variable is not implemented")
+            }
         },
-        // Truthfully absent in a browser: no process modules, no drivers, no detourable API.
-        CheckType::FindModuleByName | CheckType::FindDriverByName | CheckType::ApiCheck => {
-            ScanOutcome::Answered(vec![0])
-        }
-        CheckType::CheckTimingValues => ScanOutcome::Answered(vec![0]),
+        CheckType::FindModuleByName => presence(
+            witness.module_loaded(&request.param),
+            "ScanWitness::module_loaded is not implemented",
+        ),
+        CheckType::FindDriverByName => presence(
+            witness.driver_loaded(&request.param),
+            "ScanWitness::driver_loaded is not implemented",
+        ),
+        CheckType::ApiCheck => presence(
+            witness.api_detoured(&request.param),
+            "ScanWitness::api_detoured is not implemented",
+        ),
+        CheckType::CheckTimingValues => match witness.timing_values() {
+            Attestation::Present(bytes) => ScanOutcome::Answered(bytes),
+            Attestation::Absent => ScanOutcome::Answered(vec![NOT_FOUND]),
+            Attestation::NotImplemented => {
+                ScanOutcome::Unanswerable("ScanWitness::timing_values is not implemented")
+            }
+        },
     }
 }
 
@@ -476,18 +563,73 @@ pub fn build_checks_result(outcomes: &[ScanOutcome]) -> Result<Vec<u8>, &'static
 mod tests {
     use super::*;
 
-    /// A witness standing in for a real client: it holds one game file and one Lua global.
+    /// A witness standing in for a fully implemented client: it holds one game file, one Lua
+    /// global, and can speak to the browser-shaped surfaces (all absent).
     struct TestWitness;
 
     impl ScanWitness for TestWitness {
-        fn hash_client_file(&self, path: &str) -> Option<[u8; 20]> {
-            (path == r"Interface\FrameXML\FrameXML.toc").then(|| Sha1::digest(b"toc").into())
+        fn hash_client_file(&self, path: &str) -> Attestation<[u8; 20]> {
+            if path == r"Interface\FrameXML\FrameXML.toc" {
+                Attestation::Present(Sha1::digest(b"toc").into())
+            } else {
+                Attestation::Absent
+            }
         }
-        fn lua_variable(&self, name: &str) -> Option<String> {
-            (name == "UIParent").then(|| "table".to_string())
+        fn lua_variable(&self, name: &str) -> Attestation<String> {
+            if name == "UIParent" {
+                Attestation::Present("table".to_string())
+            } else {
+                Attestation::Absent
+            }
+        }
+        fn module_loaded(&self, _name: &str) -> Attestation<()> {
+            Attestation::Absent
+        }
+        fn driver_loaded(&self, _name: &str) -> Attestation<()> {
+            Attestation::Absent
+        }
+        fn api_detoured(&self, _name: &str) -> Attestation<()> {
+            Attestation::Absent
+        }
+        fn timing_values(&self) -> Attestation<Vec<u8>> {
+            Attestation::Present(vec![0])
         }
     }
 
+    /// The default trait bodies: a client that has implemented nothing must produce NAMED gaps, not
+    /// clean passes. This is the regression that matters most in this file — a silent `Answered`
+    /// here would mean every unimplemented check reports "nothing wrong".
+    struct EmptyWitness;
+    impl ScanWitness for EmptyWitness {}
+
+    #[test]
+    fn an_unimplemented_witness_names_its_gaps_instead_of_passing() {
+        for check in [
+            CheckType::HashClientFile,
+            CheckType::GetLuaVariable,
+            CheckType::FindModuleByName,
+            CheckType::FindDriverByName,
+            CheckType::ApiCheck,
+            CheckType::CheckTimingValues,
+        ] {
+            let outcome = answer(
+                &ScanRequest {
+                    check,
+                    param: "x".into(),
+                },
+                &EmptyWitness,
+            );
+            match outcome {
+                ScanOutcome::Unanswerable(reason) => assert!(
+                    reason.contains("not implemented"),
+                    "{check:?} gap must name itself: {reason}"
+                ),
+                ScanOutcome::Answered(bytes) => {
+                    panic!("{check:?} answered {bytes:?} with nothing implemented")
+                }
+            }
+        }
+    }
 
     /// A profile's fixed encoding, standing in for the module's `opcodes[]` table: here the wire
     /// byte is the scan type plus an offset, xored, so the test exercises a real indirection rather
@@ -627,7 +769,7 @@ mod tests {
             &TestWitness,
         );
         let expected: [u8; 20] = Sha1::digest(b"toc").into();
-        let mut want = vec![0u8];
+        let mut want = vec![FOUND];
         want.extend_from_slice(&expected);
         assert_eq!(held, ScanOutcome::Answered(want));
 
@@ -638,6 +780,6 @@ mod tests {
             },
             &TestWitness,
         );
-        assert_eq!(absent, ScanOutcome::Answered(vec![1]));
+        assert_eq!(absent, ScanOutcome::Answered(vec![NOT_FOUND]));
     }
 }
