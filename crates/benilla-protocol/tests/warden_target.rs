@@ -202,3 +202,76 @@ fn an_empty_witness_still_names_its_gaps() {
         ScanOutcome::Answered(bytes) => panic!("an empty witness answered {bytes:?}"),
     }
 }
+
+/// The scan set runs every round, so the five door models must be read from the archive ONCE per
+/// session, not once per round. On the web each read is a synchronous XHR on the browser's own
+/// thread, so the difference is a hitch the player feels.
+///
+/// Counting the reads is the only way to check this: the answers are identical either way, so an
+/// assertion on the reply would pass against a witness with no cache at all.
+#[test]
+fn each_file_is_read_from_the_archive_once_per_session() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let reads = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&reads);
+    let witness = ClientWitness::new(
+        Box::new(move |path| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            (path == TOC).then(|| TOC_BYTES.to_vec())
+        }),
+        Box::new(|_| None),
+        Box::new(|| (0, 0)),
+    );
+
+    let ask = || {
+        answered(
+            CheckType::HashClientFile,
+            ScanParams::FileHash { path: TOC.into() },
+            &witness,
+        )
+    };
+    let first = ask();
+    for _ in 0..4 {
+        assert_eq!(ask(), first, "the cached answer must not drift");
+    }
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        1,
+        "five rounds must cost one archive read"
+    );
+
+    // A file the client does not hold is cached too, or a missing path is re-read every round.
+    let missing = ScanParams::FileHash {
+        path: r"Interface\NotHere.blp".into(),
+    };
+    answered(CheckType::HashClientFile, missing, &witness);
+    answered(
+        CheckType::HashClientFile,
+        ScanParams::FileHash {
+            path: r"Interface\NotHere.blp".into(),
+        },
+        &witness,
+    );
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        2,
+        "a missing file costs one read, not one per round"
+    );
+}
+
+/// The paths the scan table actually names. Pinned so a careless edit cannot quietly drop one — a
+/// scan whose file the app never warmed still answers, it just pays an archive read mid-round.
+#[test]
+fn the_door_models_are_the_ones_the_scan_table_names() {
+    use benilla_protocol::world::warden::DOOR_INTEGRITY_FILES;
+    assert_eq!(DOOR_INTEGRITY_FILES.len(), 5);
+    for path in DOOR_INTEGRITY_FILES {
+        assert!(path.ends_with(".m2"), "{path} should be a model");
+        assert!(path.starts_with(r"World\"), "{path} should be an MPQ path");
+    }
+    assert!(DOOR_INTEGRITY_FILES
+        .iter()
+        .any(|p| p.contains("OnyxiasGate01")));
+}

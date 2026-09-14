@@ -783,6 +783,29 @@ pub fn build_checks_result(outcomes: &[ScanOutcome]) -> Result<Vec<u8>, &'static
     Ok(packet)
 }
 
+/// The files a 1.12 Warden scan set actually asks this client to hash.
+///
+/// Taken from the scan table itself (tortoise-wow `src/game/Anticheat/sql/world.sql`, the five
+/// `type = 4` rows): every one is an instance door model, because the cheat they catch is a doctored
+/// door you can walk through. They are ordinary MPQ files, so this client hashes them from the same
+/// chain it renders from and the answer is a fact about the client that is running.
+///
+/// Listed here so the app can warm them before a scan round rather than paying five archive reads
+/// inside one — on the web those reads are synchronous XHR on the browser's own thread.
+///
+/// Two rows in that same table are worth knowing about and are NOT here. `id = 86` asks whether
+/// `kernel32.dll` is loaded and expects YES, commented "Warden module search bypass sanity check":
+/// it exists to catch a client that answers "not found" to every module lookup, which is exactly
+/// what this client honestly does. A profile that includes `FIND_MODULE_BY_NAME` therefore fails
+/// this client on a scan it answered truthfully. `id = 85` is the same trap for the code scans.
+pub const DOOR_INTEGRITY_FILES: [&str; 5] = [
+    r"World\Lordaeron\stratholme\Activedoodads\doors\nox_door_plague.m2",
+    r"World\Kalimdor\onyxiaslair\doors\OnyxiasGate01.m2",
+    r"World\Generic\Human\Activedoodads\doors\deadminedoor02.m2",
+    r"World\Kalimdor\silithus\activedoodads\ahnqirajdoor\ahnqirajdoor02.m2",
+    r"World\Kalimdor\diremaul\activedoodads\doors\diremaulsmallinstancedoor.m2",
+];
+
 /// A complete [`ScanWitness`] for this client, built from the three things only the client can
 /// supply. Everything else — hashing, the reply shapes, what is truthfully absent — is decided here
 /// so no caller has to get it right twice.
@@ -793,6 +816,13 @@ pub struct ClientWitness {
     read_file: Box<dyn Fn(&str) -> Option<Vec<u8>> + Send>,
     lua_global: Box<dyn Fn(&str) -> Option<String> + Send>,
     clocks: Box<dyn Fn() -> (u32, u32) + Send>,
+    /// One archive read per path per session. A server re-runs its scan set every round, so without
+    /// this the same five models would be read and hashed every time — and on the web each read is a
+    /// synchronous XHR on the browser's own thread, which is a hitch a player would feel.
+    ///
+    /// Caching a FILE hash is sound in a way caching a Lua value would not be: the bytes cannot
+    /// change under a running client, so the cached digest is still a fact about it.
+    hashed: std::sync::Mutex<std::collections::HashMap<String, Option<[u8; 20]>>>,
 }
 
 impl ClientWitness {
@@ -807,7 +837,27 @@ impl ClientWitness {
             read_file,
             lua_global,
             clocks,
+            hashed: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// Read and hash a path now, so a later scan round answers from the cache. Returns whether the
+    /// file was there — a caller warming [`DOOR_INTEGRITY_FILES`] can log what is missing rather
+    /// than discovering it mid-round.
+    pub fn warm(&self, path: &str) -> bool {
+        self.digest(path).is_some()
+    }
+
+    /// The cached digest, reading through on the first ask. `None` means the client does not hold
+    /// the file — cached too, so a missing file is not re-read every round either.
+    fn digest(&self, path: &str) -> Option<[u8; 20]> {
+        let mut cache = self.hashed.lock().expect("warden hash cache");
+        if let Some(hit) = cache.get(path) {
+            return *hit;
+        }
+        let computed = (self.read_file)(path).map(|bytes| Sha1::digest(&bytes).into());
+        cache.insert(path.to_string(), computed);
+        computed
     }
 }
 
@@ -816,11 +866,8 @@ impl ScanWitness for ClientWitness {
     /// the digest describes the client that is running rather than what a host meant to serve it —
     /// which is the only reading under which this check means anything.
     fn hash_client_file(&self, path: &str) -> Attestation<FileHash> {
-        Attestation::Present(match (self.read_file)(path) {
-            Some(bytes) => FileHash {
-                found: true,
-                sha1: Sha1::digest(&bytes).into(),
-            },
+        Attestation::Present(match self.digest(path) {
+            Some(sha1) => FileHash { found: true, sha1 },
             None => FileHash {
                 found: false,
                 sha1: [0u8; 20],
