@@ -159,7 +159,7 @@ impl ZoomLimit {
 }
 /// Yards the wheel moves the target per notch — `CameraZoomIn`/`CameraZoomOut`'s default `amount`
 /// (VERIFIED 1.0 in `WoW.exe`).
-const CAM_ZOOM_STEP: f32 = 1.0;
+pub(super) const CAM_ZOOM_STEP: f32 = 1.0;
 /// Camera zoom speed in **yards/second** — `cameraDistanceMoveSpeed` (VERIFIED default 8.33). Vanilla
 /// glides the distance toward the wheel target at this *constant velocity* (linear, frame-delta-scaled
 /// — `FUN_005112d0` in `WoW.exe`), **not** an exponential ease.

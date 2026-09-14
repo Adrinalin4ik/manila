@@ -20,6 +20,12 @@
 //! `PlaySoundFile("Sound\\...\\file.wav")` is the sibling by-path form (the 1.12 client resolves
 //! it through the same file layer as kit entries — MPQ chain, loose files shadowing): no kit, so
 //! no gates and no variation; same queue, same returns.
+//!
+//! `StopMusic()` is the seam's first *stop* verb — a plain unit intent, no kit and no file, which
+//! is exactly why it is its own variant: the app's drain must act on it even headless, where
+//! every *play* arm is dropped for want of the kit catalog. TWoW's Everlook "radio" addon is the
+//! chain's only caller — its mute button pairs it with `SetCVar("EnableMusic", 0)`, and its
+//! login arm cuts a saved station's stream.
 
 use mlua::{Lua, Value};
 
@@ -34,6 +40,10 @@ pub enum SoundRequest {
     KitName(String),
     /// `PlaySoundFile("path")` — a raw file path, no kit.
     File(String),
+    /// `StopMusic()` — cut whatever is on the music slot (a zone track, an intro, or a
+    /// server-pushed one). Needs neither kit catalog nor assets, so the drain handles it
+    /// before its catalog-absent early return.
+    StopMusic,
 }
 
 impl super::UiScript {
@@ -53,7 +63,7 @@ impl super::UiScript {
     }
 }
 
-/// Register the `PlaySound` and `PlaySoundFile` globals.
+/// Register the `PlaySound`, `PlaySoundFile` and `StopMusic` globals.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "PlaySoundFile",
@@ -99,6 +109,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // willPlay (queued), soundHandle (nil — module docs).
             Ok((true, Value::Nil))
         })?,
+    );
+    // StopMusic() — arity 0, no returns: the music slot's cut. It rides the play queue (one seam
+    // for every sound intent); the app tells the stop arm from the play arms by the variant.
+    lua.globals().set(
+        "StopMusic",
+        lua.create_function(|lua, ()| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.sound_queue.push(SoundRequest::StopMusic);
+            Ok(())
+        })?,
     )
 }
 
@@ -130,6 +150,15 @@ mod tests {
             ]
         );
         // Drained: the queue is empty until the next PlaySound.
+        assert!(s.take_sounds().is_empty());
+    }
+
+    #[test]
+    fn stopmusic_queues_and_drains() {
+        let mut s = UiScript::new().unwrap();
+        s.run("StopMusic()").unwrap();
+        assert_eq!(s.take_sounds(), vec![SoundRequest::StopMusic]);
+        // Drained: the queue is empty until the next call.
         assert!(s.take_sounds().is_empty());
     }
 

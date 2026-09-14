@@ -1,7 +1,8 @@
 //! The **five camera views** — `SetView` / `SaveView` / `ResetView` / `NextView` / `PrevView`,
-//! plus `FlipCameraYaw`: the outbound half of the reference's `UIUtil\Camera.cpp` Lua surface.
+//! plus `FlipCameraYaw` and the `CameraZoomIn`/`CameraZoomOut` pair: the outbound half of the
+//! reference's `UIUtil\Camera.cpp` Lua surface.
 //!
-//! Six globals, no state — [`super::follow`]'s shape exactly. Nothing here reads the camera: every
+//! Eight globals, no state — [`super::follow`]'s shape exactly. Nothing here reads the camera: every
 //! one of these is an **engine action** over state this VM does not hold (the orbit arm, the pitch,
 //! the character's facing, the zoom ceiling), so each call queues a [`CameraViewRequest`] the app
 //! drains ([`super::UiScript::take_camera_view_requests`]) and applies to the rig
@@ -80,6 +81,12 @@ pub enum CameraViewRequest {
     /// `FlipCameraYaw(degrees)` — add this many **degrees** to the camera's yaw. The binding body
     /// 1.12 ships is `FlipCameraYaw(180)`.
     FlipYaw(f32),
+    /// `CameraZoomIn(amount)` — step the orbit target this many yards toward the head, the same
+    /// move a wheel notch makes (the app side's `CAM_ZOOM_STEP`). The rig glides the realized
+    /// distance there at `cameraDistanceMoveSpeed`.
+    ZoomIn(f32),
+    /// `CameraZoomOut(amount)` — [`Self::ZoomIn`]'s twin, away from the head.
+    ZoomOut(f32),
 }
 
 impl super::UiScript {
@@ -189,5 +196,62 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // CameraZoomIn(amount) — the wheel-notch verb as its own Lua entry point: the same move the
+    // CAMERAZOOMIN binding dispatch makes ("1.12's own `CameraZoomIn(1.0)` argument" — the
+    // notch's own step, VERIFIED 1.0 yd in `WoW.exe`, the app side's `CAM_ZOOM_STEP`). The
+    // amount keeps its fraction; an absent or non-number argument is the 1.0 notch.
+    g.set(
+        "CameraZoomIn",
+        lua.create_function(|lua, amount: Value| {
+            let amount = lua.coerce_number(amount).ok().flatten().unwrap_or(1.0) as f32;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model
+                .camera_view_requests
+                .push(CameraViewRequest::ZoomIn(amount));
+            Ok(())
+        })?,
+    )?;
+
+    // CameraZoomOut(amount) — [`CameraZoomIn`]'s twin, away from the head. TWoW's barbershop is
+    // the chain's only caller (`SetupCamera`: SetView, FlipCameraYaw, then out two steps).
+    g.set(
+        "CameraZoomOut",
+        lua.create_function(|lua, amount: Value| {
+            let amount = lua.coerce_number(amount).ok().flatten().unwrap_or(1.0) as f32;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model
+                .camera_view_requests
+                .push(CameraViewRequest::ZoomOut(amount));
+            Ok(())
+        })?,
+    )?;
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CameraViewRequest;
+    use crate::script::UiScript;
+
+    /// The zoom pair queues the amount given, and a bare call steps the notch's own 1.0 — the
+    /// number `WoW.exe`'s zoom verb is VERIFIED to default (the app side's `CAM_ZOOM_STEP`).
+    #[test]
+    fn camera_zoom_queues_the_step_and_defaults_to_one() {
+        let mut s = UiScript::new().unwrap();
+        s.run("CameraZoomOut(2)").unwrap();
+        s.run("CameraZoomIn(0.5)").unwrap();
+        s.run("CameraZoomIn()").unwrap();
+        s.run("CameraZoomOut('garbage')").unwrap();
+        assert_eq!(
+            s.take_camera_view_requests(),
+            vec![
+                CameraViewRequest::ZoomOut(2.0),
+                CameraViewRequest::ZoomIn(0.5),
+                CameraViewRequest::ZoomIn(1.0),
+                CameraViewRequest::ZoomOut(1.0),
+            ]
+        );
+        assert!(s.take_camera_view_requests().is_empty());
+    }
 }

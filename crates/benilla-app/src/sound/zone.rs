@@ -551,6 +551,23 @@ fn apply_music_suppression(zone: &mut ZoneAudio, suppressed: bool, now: f64) {
     }
 }
 
+/// `StopMusic()`'s slot action — [`apply_music_suppression`]'s cut edge without the latch: drop
+/// the music slot's handle with the no-fade stop, and reset the starvation watch (the 1109
+/// staleness rule both that cut and [`stop_world_soundscape`] carry). The scheduler is
+/// deliberately left alone: the reap arms the next zone cycle the moment the stopped handle is
+/// collected, so the zone's own music continues its rhythm after the stop. That is the client's
+/// shape too — `StopMusic` stops the *track*, not the cycle, and TWoW's Everlook mute button
+/// (the chain's only caller) pairs it with `SetCVar("EnableMusic", 0)`, whose category-amp 0
+/// makes the resumed cycle inaudible until the player unmutes. Drained from the UI-sound drain
+/// in `super::ui`.
+pub(super) fn cut_music(zone: &mut ZoneAudio) {
+    if let Some(mut h) = zone.music.take() {
+        h.stop(mixer::fade(0));
+        info!("zone music: cut (StopMusic)");
+    }
+    zone.music_watch.reset();
+}
+
 fn zone_music_row(cat: &AreaSoundCatalog, _id: u32) -> Option<&benilla_formats::ZoneMusicEntry> {
     // The catalog keys zone-music rows by id; expose via resolve()'s cached row instead of a
     // second map walk. (Small helper so the call sites read; see AreaSoundCatalog::zone_music.)

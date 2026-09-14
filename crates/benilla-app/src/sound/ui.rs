@@ -39,6 +39,7 @@ use crate::net::NetCommands;
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 
 use super::kit::{self, KitRef, SoundKits};
+use super::zone::{cut_music, ZoneAudio};
 use super::{SoundConfig, SoundOutput};
 
 /// Drain the VM's queued `PlaySound` intents into the kit player. The queue is drained even when
@@ -46,6 +47,7 @@ use super::{SoundConfig, SoundOutput};
 /// those plays are dropped with a debug line, the same graceful-absence posture as every consumer.
 fn drain_ui_sounds(
     script: Option<NonSendMut<UiScript>>,
+    mut zone: NonSendMut<ZoneAudio>,
     kits: Option<ResMut<SoundKits>>,
     assets: Option<Res<WorldAssets>>,
     mut out: NonSendMut<SoundOutput>,
@@ -55,6 +57,22 @@ fn drain_ui_sounds(
         return;
     };
     let requests = script.take_sounds();
+    if requests.is_empty() {
+        return;
+    }
+    // `StopMusic` acts on the zone's music slot and needs neither kit catalog nor assets, so it is
+    // drained BEFORE the catalog-absent early return below, which would otherwise drop it
+    // headless. One cut serves any number of queued stops — the slot is empty after the first,
+    // which is what the client's own repeated `StopMusic()` calls see too.
+    if requests
+        .iter()
+        .any(|r| matches!(r, SoundRequest::StopMusic))
+    {
+        cut_music(&mut zone);
+    }
+    // The stop is handled; everything left is a play, so the drop log below counts plays only.
+    let mut requests = requests;
+    requests.retain(|r| !matches!(r, SoundRequest::StopMusic));
     if requests.is_empty() {
         return;
     }
@@ -83,6 +101,9 @@ fn drain_ui_sounds(
                 }
                 continue;
             }
+            // Unreachable — the retain above already drained every StopMusic; the arm is here so
+            // the match stays exhaustive.
+            SoundRequest::StopMusic => continue,
         };
         // 2D: no position, so the listener is irrelevant (no gate, no rolloff). Interface
         // sounds ride the SFX slider (the client's SoundVolume bucket).

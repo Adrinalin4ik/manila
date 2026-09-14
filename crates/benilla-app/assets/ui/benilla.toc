@@ -344,6 +344,13 @@ Interface\FrameXML\PlayerFrame.xml
 # UiPanels.xml (StaticPopup.lua l.526, UIParent.lua), and the three raid constants, which
 # RaidFrame.xml already declared — that is the reference's home for them (RaidFrame.lua l.2-4).
 Interface\FrameXML\PartyFrame.xml
+# TWoW's own JSON codec — the global `json` table (`json.encode` / `json.decode`, the vendored
+# rxi-style library, version 0.1.2 — stdlib only, zero host surface). TWoW seats it inside the
+# unit-frame kit (its toc l.46, between PartyFrame.xml and TargetFrame.xml); the seat is
+# TWoW's, not a dependency — nothing in the kit reads it, and its two consumers (LFT.lua and
+# CustomMerchantFrame.lua, both far below) read it at call time. Keeping the row at TWoW's own
+# position keeps our manifest diffable against its toc.
+Interface\FrameXML\json.lua
 # `TargetFrame`, its texture frame and dropdown, the sixteen debuff and five buff buttons with
 # their three templates, and the whole `TargetofTarget*` family — out of `TargetFrame.lua`, which
 # is also where `MAX_COMBO_POINTS` (l.1) and `SetRaidTargetIconTexture` live. `TargetofTarget_Update`
@@ -1285,6 +1292,76 @@ Interface\FrameXML\CinematicFrame.xml
 # (SmallMoneyFrameTemplate), GameTooltip and UiPanels, all far above.
 Interface\FrameXML\TabardFrame.xml
 Interface\FrameXML\TutorialFrame.xml
+# ══ THE TWOW TAIL — TWoW-exclusive rows, off the player's chain ════════════════════════════
+# Everything from here to LFT is TWoW's own addition — the rows its FrameXML.toc appends after
+# its last stock row (ClassTrainerFrameTemplates.xml, its l.93), in its own internal order. Our
+# seat is after the last CHAIN row above (TutorialFrame.xml) and before GameMenuFrame.xml,
+# which stays last on purpose: in TWoW's toc these load after ALL stock rows, and the game menu
+# is ours. The host surface the whole block needs was bound above it; the two genuine gaps it
+# had are host verbs now (`StopMusic`, for Everlook's mute button; `CameraZoomOut`, for the
+# barbershop's chair-side camera). One TWoW row is deliberately absent — StatsFrame.xml (its
+# toc l.52, between ItemButtonTemplate.xml and SpellBookFrame.xml) is TODO: it lives in the
+# lettered-patch merge (patch-2.mpq) and is not in the extraction yet.
+
+# Hooks.lua (its l.95): TWoW's tooltip hooks — `GameTooltip:SetBagItem` / `:SetUnit` wrapped for
+# the gear-inspection pass TWoW runs, with a hidden HooksScanTooltip doing the set-bonus scan
+# and a SetTalent hook alongside. Pure hooking over the kit far above; no frames, no new host
+# surface.
+Interface\FrameXML\Hooks.lua
+# ChronoboonTimers.lua (its l.96): the world-buff suspend/restore tracker — CHAT_MSG_SYSTEM's
+# "Suspended"/"Restored" pair, plus the chronoboon's own bag-item tooltip line (item 83001)
+# via a PLAYER_LOGIN hook. Reads chat, hooks a tooltip; nothing else.
+Interface\FrameXML\ChronoboonTimers.lua
+# SpellChatLinks.lua (its l.97): spell and talent chat links (the |Htalent: family over TWoW's
+# TW_CHAT_MSG_* addon-message protocol). Its talent hook waits on ADDON_LOADED for
+# "Blizzard_TalentUI" (its l.116) so it cannot break at load; its spell hook rebinds
+# `SpellButton_OnClick` at file load, which SpellBookFrame.xml (far above) has defined by
+# then. `ChatFrame_OnHyperlinkShow` and `SendAddonMessage` are bound far above too.
+Interface\FrameXML\SpellChatLinks.lua
+
+# Arena (its l.99-104): Turtle_ArenaUI — the arena window, its queue frame and the registrar
+# frames. Its own lua first, then templates, then the three windows, TWoW's own order; stock
+# templates only.
+Interface\FrameXML\Turtle_ArenaUI\Turtle_ArenaUI.lua
+Interface\FrameXML\Turtle_ArenaUI\Turtle_ArenaUITemplates.xml
+Interface\FrameXML\Turtle_ArenaUI\Turtle_ArenaFrame.xml
+Interface\FrameXML\Turtle_ArenaUI\Turtle_ArenaQueueFrame.xml
+Interface\FrameXML\Turtle_ArenaUI\Turtle_ArenaRegistrarFrame.xml
+
+# Barbershop (its l.107): the chair — customization previews over SendAddonMessage, and the
+# camera setup that needed the `CameraZoomOut` verb (`SetupCamera`: SetView, FlipCameraYaw,
+# then out two steps). The xml sources its own Turtle_Barbershop.lua and -Templates.xml.
+Interface\FrameXML\Turtle_BarbershopUI\Turtle_Barbershop.xml
+
+# Transmog (its l.110-111): the appearance window — templates first, then the frame.
+Interface\FrameXML\Turtle_TransmogUI\Turtle_TransmogUITemplates.xml
+Interface\FrameXML\Turtle_TransmogUI\Turtle_TransmogUI.xml
+
+# Shop (its l.114-115): TWoW's item shop — templates first, then the frame.
+Interface\FrameXML\Turtle_ShopUI\Turtle_ShopUITemplates.xml
+Interface\FrameXML\Turtle_ShopUI\Turtle_ShopUI.xml
+
+# Guild Bank (its l.118-119): the shared-wealth window — templates first, then the frame.
+Interface\FrameXML\Turtle_GuildBankUI\Turtle_GuildBankUITemplates.xml
+Interface\FrameXML\Turtle_GuildBankUI\Turtle_GuildBankUI.xml
+
+# EverlookBroadcastingCo (its l.122): the in-game "radio" — a minimap button, a two-station
+# dropdown and a mute that pairs `SetCVar("EnableMusic", 0)` with `StopMusic()` (the host verb
+# this block needed), `.radio <station>` chat lines to the server, and a saved station cut at
+# PLAYER_LOGIN. The dropdown kit it uses is far above.
+Interface\FrameXML\EverlookBroadcastingCo\EverlookBroadcastingCo.xml
+
+# Custom_Merchant (its l.124): the custom vendor window — item rows through the
+# `SetItemButton*` family (ItemButtonTemplate.xml, far above) and `json` (far above too).
+Interface\FrameXML\Custom_Merchant\CustomMerchantFrame.xml
+
+# LFT (its l.127-130): TWoW's looking-for-group tool — data first, then logic, then templates,
+# then the frames.
+Interface\FrameXML\LFT\LFT_Data.lua
+Interface\FrameXML\LFT\LFT.lua
+Interface\FrameXML\LFT\LFTTemplates.xml
+Interface\FrameXML\LFT\LFT.xml
+
 # The game menu (decision 0674): the frame ESC opens. LAST on purpose — it is the outermost
 # layer of the shell, it depends on everything it touches being loaded (UiPanels' popup engine
 # + panel manager, MainMenuBarMicroButtons' UpdateMicroButtons, BagFrame's Disable_BagButtons), and nothing
