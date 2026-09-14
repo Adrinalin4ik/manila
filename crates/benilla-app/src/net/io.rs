@@ -256,14 +256,113 @@ pub(super) struct NetConfig {
     /// account; as a *pick* it is app-side policy (`crate::char_select` auto-answers the roster with
     /// it — the dev fast path past the select screen).
     character: Option<String>,
+    /// The patch chain, for the one thing the net lane needs to read off disk: the files a Warden
+    /// `HASH_CLIENT_FILE` scan asks about ([`benilla_protocol::world::warden::DOOR_INTEGRITY_FILES`]).
+    /// An `Arc<Chain>` rather than a handle to the asset layer because `Chain::read` takes `&self`
+    /// and is `Send + Sync`, so it crosses to the net thread as it stands.
+    ///
+    /// `None` when there is no install (capture runs, tests): Warden then has no witness and the
+    /// session refuses it, which is the same answer it gives today.
+    chain: Option<Arc<benilla_formats::Chain>>,
+    /// The scan encoding a server has agreed to use with this client, from `WOW_WARDEN_PROFILE`.
+    ///
+    /// It is configuration rather than a constant because it is the SERVER's choice: on a stock
+    /// server the type bytes come from the Warden module's own table, which a from-scratch client
+    /// cannot load, so a server willing to admit this client fixes the encoding and states it. Until
+    /// one does, this is `None` and every Warden message is refused — the safe default, since
+    /// guessing an encoding does not fail, it silently misreads every request.
+    warden_encoding: Option<([u8; 9], u8)>,
+}
+
+/// Parse `WOW_WARDEN_PROFILE`: nine comma-separated scan-type bytes then the terminator, all
+/// decimal or `0x`-prefixed — e.g. `0,1,2,3,4,5,6,7,8;255`. The order is `WindowsScanType`'s:
+/// READ_MEMORY, FIND_MODULE_BY_NAME, FIND_MEM_IMAGE_CODE_BY_HASH, FIND_CODE_BY_HASH,
+/// HASH_CLIENT_FILE, GET_LUA_VARIABLE, API_CHECK, FIND_DRIVER_BY_NAME, CHECK_TIMING_VALUES.
+///
+/// Returns `None` on anything malformed rather than a partial table: a half-read encoding would
+/// mis-decode requests instead of refusing them, and a refusal is the failure we can see.
+fn parse_warden_encoding(spec: &str) -> Option<([u8; 9], u8)> {
+    let (types, terminator) = spec.split_once(';')?;
+    let byte = |t: &str| -> Option<u8> {
+        let t = t.trim();
+        match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+            Some(hex) => u8::from_str_radix(hex, 16).ok(),
+            None => t.parse().ok(),
+        }
+    };
+    let parsed: Vec<u8> = types.split(',').filter_map(byte).collect();
+    let table: [u8; 9] = parsed.try_into().ok()?;
+    Some((table, byte(terminator)?))
 }
 
 impl NetConfig {
     pub(super) fn from_env() -> Self {
         NetConfig {
             character: crate::webenv::var("WOW_CHAR"),
+            chain: benilla_formats::wow_data()
+                .and_then(|dir| benilla_formats::Chain::open(&dir).ok())
+                .map(Arc::new),
+            warden_encoding: crate::webenv::var("WOW_WARDEN_PROFILE")
+                .as_deref()
+                .and_then(parse_warden_encoding),
         }
     }
+
+    /// A fresh Warden profile for one connection attempt, or `None` when either half is missing.
+    ///
+    /// Fresh per attempt on purpose: [`ClientWitness`] memoises the digests it has computed, and
+    /// that cache belongs to one session — a reconnect is a new client as far as the server's scan
+    /// round is concerned, and carrying stale hashes across one would be reporting what we saw
+    /// before rather than what we hold now.
+    fn warden_profile(&self) -> Option<benilla_protocol::world::warden::WardenProfile> {
+        use benilla_protocol::world::warden::{ClientWitness, WardenProfile};
+        let chain = self.chain.clone()?;
+        let (opcodes, terminator) = self.warden_encoding?;
+        let for_files = Arc::clone(&chain);
+        let witness = ClientWitness::new(
+            Box::new(move |path| for_files.read(path).ok()),
+            // No Lua reader: the VM is a `!Send` `NonSend` resource on the Bevy main thread, so it
+            // cannot be read from this lane — and the scan set this profile exists for has no
+            // GET_LUA_VARIABLE rows. A server that adds one gets a named gap, not a wrong answer.
+            Box::new(|_| None),
+            Box::new(client_clocks),
+        );
+        // Warm the files the scan table names, so a round does not pay five archive reads inside
+        // its response window — on the web each of those is a synchronous XHR on the browser thread.
+        for path in benilla_protocol::world::warden::DOOR_INTEGRITY_FILES {
+            if !witness.warm(path) {
+                bevy::log::warn!("warden: this install has no {path} to hash");
+            }
+        }
+        Some(WardenProfile {
+            opcodes,
+            terminator,
+            witness: Box::new(witness),
+        })
+    }
+}
+
+/// Two independent clocks, for `CHECK_TIMING_VALUES`.
+///
+/// The scan exists because the reference client's own timer and `GetTickCount` should agree, and a
+/// hooked one makes them diverge. The honest equivalent here is a MONOTONIC clock against a WALL
+/// clock: two different mechanisms on both targets (`Instant` vs `SystemTime` natively;
+/// `performance.now()` vs `Date.now()` in a page, which is what `web-time` maps them to). Reading
+/// the same source twice would report agreement it had not established.
+///
+/// Both are reduced to milliseconds and truncated to `u32`, which is the width the reply carries.
+fn client_clocks() -> (u32, u32) {
+    use std::sync::OnceLock;
+    use web_time::{Instant, SystemTime, UNIX_EPOCH};
+
+    // The monotonic side needs an origin to measure from; the first call fixes one for the process.
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    let monotonic = ORIGIN.get_or_init(Instant::now).elapsed().as_millis() as u32;
+    let wall = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u32)
+        .unwrap_or(monotonic);
+    (monotonic, wall)
 }
 
 /// What one wake-up at the character park asked for — the `select!`'s answer, so that every jump
@@ -659,11 +758,12 @@ async fn run(
             });
             !canceled()
         };
-        let mut session = match WorldSession::connect_queued_async(
+        let mut session = match WorldSession::connect_queued_with_warden_async(
             &world_addr,
             &req.user,
             logon.session_key,
             &mut on_queue,
+            cfg.warden_profile(),
         )
         .await
         {

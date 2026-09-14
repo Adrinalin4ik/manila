@@ -197,6 +197,19 @@ impl WorldSession {
         ))
     }
 
+    /// [`Self::connect_queued_async`] with a Warden profile in place before the handshake runs —
+    /// the async twin of [`Self::connect_with_warden`], and the one the app's net lane uses because
+    /// that lane is a task on the browser's event loop as well as a thread natively.
+    pub async fn connect_queued_with_warden_async(
+        addr: &str,
+        username: &str,
+        session_key: [u8; SESSION_KEY_LENGTH],
+        on_queue: &mut dyn FnMut(Option<u32>) -> bool,
+        profile: Option<warden::WardenProfile>,
+    ) -> Result<Self> {
+        Self::connect_inner(addr, username, session_key, on_queue, profile).await
+    }
+
     /// The body both entry points share.
     async fn connect_inner(
         addr: &str,
