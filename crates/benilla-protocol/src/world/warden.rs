@@ -306,7 +306,7 @@ pub enum ScanOutcome {
 }
 
 /// What a check asked for, decoded under a fixed-encoding profile.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ScanRequest {
     pub check: CheckType,
     /// The check's string parameter: a file path for `HashClientFile`, a global's name for
@@ -362,6 +362,116 @@ pub fn answer(request: &ScanRequest, witness: &dyn ScanWitness) -> ScanOutcome {
     }
 }
 
+// --- request framing -----------------------------------------------------------------------------
+//
+// `Warden::RequestScans` (`Warden.cpp:246-274`) assembles a Windows request as:
+//
+//     u8  CHEAT_CHECKS_REQUEST
+//     string table: repeated { u8 len, bytes[len] }, terminated by a single u8 0
+//     the scan block: each scan's own bytes, back to back
+//     u8  module->scanTerminator ^ xor
+//
+// and each scan begins with `module->opcodes[type] ^ xor`. Both bytes come from the module, which is
+// why `decode_type` and `terminator` are parameters here rather than constants: a profile that fixes
+// the encoding supplies them, and nothing in this file has to guess.
+//
+// The two witnessable scans share one payload: `u8 string_index`, 1-based because the server takes
+// `strings.size()` AFTER pushing (`WardenScan.cpp:214-219` and `:254-259`). Layouts for the other
+// types are deliberately not modelled — we have not read them, and inventing one would desync the
+// walk rather than fail it.
+
+/// Why a request could not be read. A parse that stops is worth more than one that guesses: the
+/// scan block has no per-scan length, so a wrong payload width silently turns the rest of the
+/// packet into nonsense.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RequestError {
+    Truncated(&'static str),
+    /// A type byte `decode_type` did not recognise.
+    UnknownType(u8),
+    /// A type we can recognise but whose payload layout this client has not modelled, so the walk
+    /// cannot continue past it.
+    UnmodelledPayload(CheckType),
+    /// A scan referenced a string index the table does not have.
+    BadStringIndex(u8),
+}
+
+/// Parse a decrypted `CHEAT_CHECKS_REQUEST` body (opcode byte already stripped).
+pub fn parse_checks_request(
+    body: &[u8],
+    decode_type: &dyn Fn(u8) -> Option<CheckType>,
+    terminator: u8,
+) -> Result<Vec<ScanRequest>, RequestError> {
+    let mut at = 0usize;
+    let mut strings: Vec<String> = Vec::new();
+    loop {
+        let len = *body.get(at).ok_or(RequestError::Truncated("string table"))? as usize;
+        at += 1;
+        if len == 0 {
+            break;
+        }
+        let end = at + len;
+        let raw = body.get(at..end).ok_or(RequestError::Truncated("string"))?;
+        strings.push(String::from_utf8_lossy(raw).into_owned());
+        at = end;
+    }
+
+    let mut out = Vec::new();
+    loop {
+        let byte = *body.get(at).ok_or(RequestError::Truncated("scan block"))?;
+        at += 1;
+        if byte == terminator {
+            return Ok(out);
+        }
+        let check = decode_type(byte).ok_or(RequestError::UnknownType(byte))?;
+        match check {
+            CheckType::HashClientFile | CheckType::GetLuaVariable => {
+                let index = *body.get(at).ok_or(RequestError::Truncated("string index"))?;
+                at += 1;
+                let param = strings
+                    .get((index as usize).wrapping_sub(1))
+                    .ok_or(RequestError::BadStringIndex(index))?
+                    .clone();
+                out.push(ScanRequest { check, param });
+            }
+            other => return Err(RequestError::UnmodelledPayload(other)),
+        }
+    }
+}
+
+/// The server's `BuildChecksum` (`Warden.cpp:351-362`): SHA-1 over the result payload, then the five
+/// 32-bit words of the digest XORed together, little-endian.
+pub fn checks_result_checksum(payload: &[u8]) -> u32 {
+    let hash: [u8; 20] = Sha1::digest(payload).into();
+    let mut sum = 0u32;
+    for word in hash.chunks_exact(4) {
+        sum ^= u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+    }
+    sum
+}
+
+/// Assemble `CHEAT_CHECKS_RESULT`: `u8 opcode, u16 length, u32 checksum, payload`, the order the
+/// server reads it in (`Warden.cpp:425-429`).
+///
+/// Refuses to build when any outcome is [`ScanOutcome::Unanswerable`], carrying that reason out.
+/// There is no filler byte that would be honest here — the server matches results to the scans it
+/// sent, positionally, so a placeholder is not a gap in the reply, it is a false answer to a
+/// specific question.
+pub fn build_checks_result(outcomes: &[ScanOutcome]) -> Result<Vec<u8>, &'static str> {
+    let mut payload = Vec::new();
+    for outcome in outcomes {
+        match outcome {
+            ScanOutcome::Answered(bytes) => payload.extend_from_slice(bytes),
+            ScanOutcome::Unanswerable(reason) => return Err(reason),
+        }
+    }
+    let mut packet = Vec::with_capacity(1 + 2 + 4 + payload.len());
+    packet.push(client_op::CHEAT_CHECKS_RESULT);
+    packet.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+    packet.extend_from_slice(&checks_result_checksum(&payload).to_le_bytes());
+    packet.extend_from_slice(&payload);
+    Ok(packet)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +486,84 @@ mod tests {
         fn lua_variable(&self, name: &str) -> Option<String> {
             (name == "UIParent").then(|| "table".to_string())
         }
+    }
+
+
+    /// A profile's fixed encoding, standing in for the module's `opcodes[]` table: here the wire
+    /// byte is the scan type plus an offset, xored, so the test exercises a real indirection rather
+    /// than an identity mapping that would hide an index bug.
+    const XOR: u8 = 0x5a;
+    const TERMINATOR: u8 = 0xff ^ XOR;
+
+    fn decode(byte: u8) -> Option<CheckType> {
+        CheckType::from_u8(byte ^ XOR)
+    }
+
+    /// Build a request the way `Warden::RequestScans` does, walk it back, answer it, and assemble
+    /// the reply — the whole lane, end to end, without a server.
+    #[test]
+    fn a_request_round_trips_into_a_checksummed_result() {
+        let mut body = Vec::new();
+        for s in [r"Interface\FrameXML\FrameXML.toc", "UIParent"] {
+            body.push(s.len() as u8);
+            body.extend_from_slice(s.as_bytes());
+        }
+        body.push(0); // end of string table
+        body.push(CheckType::HashClientFile as u8 ^ XOR);
+        body.push(1); // 1-based index into the table
+        body.push(CheckType::GetLuaVariable as u8 ^ XOR);
+        body.push(2);
+        body.push(TERMINATOR);
+
+        let requests = parse_checks_request(&body, &decode, TERMINATOR).expect("parse");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].check, CheckType::HashClientFile);
+        assert_eq!(requests[0].param, r"Interface\FrameXML\FrameXML.toc");
+        assert_eq!(requests[1].check, CheckType::GetLuaVariable);
+        assert_eq!(requests[1].param, "UIParent");
+
+        let outcomes: Vec<_> = requests
+            .iter()
+            .map(|r| answer(r, &TestWitness))
+            .collect();
+        let packet = build_checks_result(&outcomes).expect("both are witnessable");
+
+        assert_eq!(packet[0], client_op::CHEAT_CHECKS_RESULT);
+        let len = u16::from_le_bytes([packet[1], packet[2]]) as usize;
+        let sum = u32::from_le_bytes([packet[3], packet[4], packet[5], packet[6]]);
+        let payload = &packet[7..];
+        assert_eq!(payload.len(), len, "declared length must match the payload");
+        assert_eq!(sum, checks_result_checksum(payload), "server recomputes this and kicks on a mismatch");
+    }
+
+    /// A memory scan in the set must stop the reply being built at all, carrying its reason out —
+    /// never a filler byte, which the server would read as a positional answer to that scan.
+    #[test]
+    fn a_memory_scan_blocks_the_whole_reply() {
+        let outcomes = vec![
+            ScanOutcome::Answered(vec![0]),
+            answer(
+                &ScanRequest {
+                    check: CheckType::ReadMemory,
+                    param: String::new(),
+                },
+                &TestWitness,
+            ),
+        ];
+        let err = build_checks_result(&outcomes).expect_err("must refuse");
+        assert!(err.contains("WoW.exe"), "the reason must name why: {err}");
+    }
+
+    /// A type we recognise but whose payload we have not modelled stops the walk instead of
+    /// guessing its width — the scan block has no per-scan length, so a wrong guess turns the rest
+    /// of the packet into nonsense rather than into an error.
+    #[test]
+    fn an_unmodelled_payload_stops_the_walk() {
+        let body = vec![0u8, CheckType::ReadMemory as u8 ^ XOR, 0, 0, 0, 0];
+        assert_eq!(
+            parse_checks_request(&body, &decode, TERMINATOR),
+            Err(RequestError::UnmodelledPayload(CheckType::ReadMemory))
+        );
     }
 
     /// Every scan type, answered. The three memory types must come back `Unanswerable` and the rest
