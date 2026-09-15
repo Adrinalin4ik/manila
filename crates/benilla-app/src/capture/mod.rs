@@ -93,6 +93,7 @@ mod phase_probe;
 mod pick_probe;
 mod probe_auction;
 mod probe_bank;
+mod probe_bg_queue;
 mod probe_binder;
 mod probe_book;
 mod probe_castcancel;
@@ -122,6 +123,7 @@ pub(crate) use phase_probe::PhaseProbePlugin;
 pub(crate) use pick_probe::PickProbePlugin;
 pub(crate) use probe_auction::ProbeAuctionPlugin;
 pub(crate) use probe_bank::ProbeBankPlugin;
+pub(crate) use probe_bg_queue::ProbeBgQueuePlugin;
 pub(crate) use probe_binder::ProbeBinderPlugin;
 pub(crate) use probe_book::ProbeBookPlugin;
 pub(crate) use probe_castcancel::ProbeCastCancelPlugin;
@@ -1087,7 +1089,9 @@ fn drive_capture(
             if watch.stable >= stable_frames() || capped {
                 if let Some(px) = watch.prev.as_deref() {
                     if px
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0)
                     {
                         error!(

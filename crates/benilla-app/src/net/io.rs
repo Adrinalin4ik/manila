@@ -1359,6 +1359,9 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         } => w.destroy_item(bag_index, slot, count),
         ClientCommand::CastSpell { spell_id, target } => w.cast_spell(spell_id, target),
         ClientCommand::CastSpellAtDest { spell_id, dest } => w.cast_spell_at_dest(spell_id, dest),
+        ClientCommand::CastSpellAtSource { spell_id, src } => {
+            w.cast_spell_at_source(spell_id, src)
+        }
         ClientCommand::CancelAura { spell_id } => w.cancel_aura(spell_id),
         ClientCommand::SetActionButton { button, packed } => w.set_action_button(button, packed),
         ClientCommand::SetActionBarToggles { toggles } => w.set_actionbar_toggles(toggles),

@@ -93,6 +93,85 @@ pub(crate) struct CombatTextEvent {
 
 /// The feed's change-tracking memory: what we last told the VM, plus one server-side log-once.
 ///
+/// **`PLAYER_LEAVING_WORLD` on a cross-map worldport** (decision 2235, corrected by 2238).
+///
+/// The reference fires event `0x111` at `0x490b48`, inside `0x490a80`. wow-re's census of both
+/// signal helpers puts the id at exactly one site image-wide — 336/336 ids resolved through
+/// `0x703e50`, 149/149 through `0x703f50`, and the encoding `b9 11 01 00 00` occurs once in the
+/// binary — so that is the whole of the FIRE, and it is what this doc used to conflate with the
+/// whole of the event.
+///
+/// **One fire site, three callers, and this system is one of them** (2238; wow-re `5ad31a12`).
+/// `0x490a80` is reached from the local player object's own destructor (`0x401bc0` → `0x467700`
+/// → `0x467800` → the per-object `[vtbl+0]` → `0x5dd500` → `0x5dd600` → `0x5dd72c` → `0x5dd543`)
+/// — **this system's occasion** — and also from `0x490c20` inside the shutdown tail `0x490bd0`,
+/// which is where an in-world `/reload`, a logout, a quit and a disconnect reach it, and from
+/// `0x5e9b5a`, vtable slot 1, on a DESTROY / OUT_OF_RANGE of the local player object.
+/// 2235 read `5ce96437`'s "three gates" as three gates on the event and its subject line as a
+/// census of the callers; neither is what they were. Two of those gates (`0x5dd71c`/`0x5dd721`/
+/// `0x5dd725` and `0x5dd539`/`0x5dd53e`/`0x5dd541`) sit in the destructor chain and gate only the
+/// caller below; `0x490a80`'s own only gate is the latch at `[0xb4b424]`.
+///
+/// **The tail's occasions are already ours**, and were years before this system existed:
+/// [`crate::ui_script::shutdown_ui_state`] fires `PLAYER_LEAVING_WORLD` then `PLAYER_LOGOUT` as
+/// the head of the same `0x490bd0` tail, from `end_ui_session` (logout, disconnect, and
+/// `run_pending_reload`'s `/reload`) and from `shutdown_on_exit` (quit). So the two producers are
+/// complements, not duplicates — a fact worth writing down precisely because nothing in either
+/// file said so, and a reader of this doc alone would take the tail's fire for a bug.
+///
+/// **Cross-map only *for this occasion*, and that falls out of the gate rather than being a rule
+/// on top of it.** The first gate (`0x5dd728`) admits only the local player's destructor, and a
+/// same-map teleport never destroys the object — including the >30 yd variant that forces a
+/// blocking terrain reload, which reloads tiles rather than `CGObject`s. So
+/// [`crate::net::WorldportMessage`] is the right edge and `needs_ack` is the right discriminator:
+/// the one worldport that does NOT need an ack is the initial-login map, where nothing is being
+/// left.
+///
+/// **Nothing shipped listens to it.** Zero of the 232 extracted reference interface files
+/// register `PLAYER_LEAVING_WORLD` (controls, same sweep: `PLAYER_ENTERING_WORLD` 22 files,
+/// `VARIABLES_LOADED` 7, `PLAYER_LOGIN` 1). This is an addon-facing event, which is exactly why
+/// it went missing here for so long — no stock window breaks without it, and only the corpus
+/// notices. It is also why this stays a bare fire and promises nothing more: in the reference the
+/// handler runs *during* teardown, after the three manager unlinks and ~35 of `0x490a80`'s 37
+/// teardown calls, so a real addon's handler already sees a substantially dismantled UI.
+///
+/// **What "dismantled" costs there is the opposite of what 2235 guessed** (2238; wow-re
+/// `20210d32`). The GUID hash's link is `obj+0x1c` and the destructor splices the object out
+/// (`0x467887 call 0x468680`) *before* `call [vtbl+0]`, so on THIS occasion — and only this one —
+/// a hash lookup misses. But `UnitName("player")` never asks the hash: `0x517020` short-circuits
+/// at `0x51707d` and answers from the cached character record `[0xc27d88]`, which has one writer
+/// (`CGlueMgr::EnterWorld`) and no clearer; `UnitRace`, `UnitClass` and `0x517ee0` take the same
+/// fast path. The binding that *does* go nil is `UnitExists("player")`, whose `0x515970` resolves
+/// through `0x468460` and takes `0x5159c9 je 0x515a39` → `0:0` on the miss. We reproduce none of
+/// that ordering and are not trying to: ours fires with the descriptor still present, so every
+/// unit binding answers. That is a divergence in our favour, recorded rather than closed —
+/// closing it would mean deliberately breaking `UnitExists` to match a teardown artifact no
+/// stock file observes.
+fn fire_leaving_world_on_worldport(
+    script: Option<NonSendMut<UiScript>>,
+    mut armed: ResMut<crate::ui_script::LeavingWorldArmed>,
+    mut ports: MessageReader<crate::net::WorldportMessage>,
+) {
+    // `needs_ack` false is the initial-login map (`player::wire_in`'s own split): an entry, not a
+    // departure. Read the whole iterator either way so the cursor never carries one over.
+    let leaving = ports.read().filter(|w| w.needs_ack).count() > 0;
+    if !leaving {
+        return;
+    }
+    // **The world latch, spent here** (2239): this producer and the shutdown tail are the
+    // reference's `0x5dd543` and `0x490c20`, two callers of one fire site, and `[0xb4b424]` is
+    // what keeps them from both claiming one departure. Spent even if the VM turns out to be
+    // absent below — the reference clears it at `0x490a8d`, ahead of the fire and of every
+    // teardown call after it, so a departure nobody could be told about is still a departure.
+    if !armed.spend() {
+        return;
+    }
+    let Some(mut script) = script else {
+        return;
+    };
+    script.fire_event("PLAYER_LEAVING_WORLD", Vec::new());
+}
+
 /// The VM half lives behind a [`crate::ui_script::VmMemo`], **inside the resource** — the same
 /// law 1290 wrote for `Local` memos, reached the way a `ResMut` system has to reach it: a memory
 /// about what THIS VM was told is unreadable against the next VM, so a `/reload` (1291) — which
@@ -176,10 +255,8 @@ impl Plugin for UiUnitPlugin {
                 // …and never before the in-game UI exists (1348). The whole SET, not just
                 // `feed_units`: every feed in it either fires a login one-shot or latches a
                 // per-VM memo, and both are lost forever against the boot VM. The window and
-                // the reference's own ordering: `ui_script::ingame_ui_pending`.
-                .run_if(bevy::ecs::schedule::common_conditions::not(
-                    crate::ui_script::ingame_ui_pending,
-                )),
+                // the reference's own ordering: `ui_script::ingame_ui_up`.
+                .run_if(crate::ui_script::ingame_ui_up),
         )
         .init_resource::<UnitFeedState>()
         // [`feed_units`] shows catalog messages (the rest-state pair, the PvP toggle) through
@@ -190,9 +267,23 @@ impl Plugin for UiUnitPlugin {
         .init_resource::<crate::sound::MessageSounds>()
         .add_message::<UnitCombatFeedback>()
         .add_message::<CombatTextEvent>()
+        // …and the worldport edge [`fire_leaving_world_on_worldport`] reads, for exactly the
+        // reason above: the message belongs to `crate::net`, which a UI-only harness does not
+        // stand up, and an unregistered `MessageReader` is a system-validation panic rather than
+        // an empty read. `add_message` is idempotent, so the net plugin declaring it too costs
+        // nothing. (1348's own `the_login_one_shots_wait_for_the_in_game_ui` is the harness that
+        // found this — it builds this plugin alone.)
+        .add_message::<crate::net::WorldportMessage>()
+        // The world latch (2239): this plugin owns one of its two producers, so it declares the
+        // resource as well as the message — same reason, and `init_resource` is idempotent
+        // against `UiScriptPlugin`'s own.
+        .init_resource::<crate::ui_script::LeavingWorldArmed>()
         .add_systems(
             Update,
             (
+                // FIRST in the chain, so a worldport's leaving edge precedes the entering edge
+                // the same port raises in `feed_units` once the new descriptor lands.
+                fire_leaving_world_on_worldport,
                 feed_units,
                 feed_unit_reach,
                 feed_player_control,
@@ -295,7 +386,7 @@ fn feed_known_languages(
     spells: Option<Res<crate::ui_action::Spells>>,
     skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
     languages: Option<Res<LanguagesRes>>,
-    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    self_q: Query<Ref<ObjectStore>, With<SelfPlayer>>,
     mut pushed: Local<crate::ui_script::VmMemo<Option<Vec<String>>>>,
 ) {
     let Some(mut script) = script else {
@@ -306,6 +397,18 @@ fn feed_known_languages(
     };
     let pushed = pushed.get(&script);
     let store = self_q.iter().next();
+    // A pure function of the spell book, the three catalogs and our descriptor — with all still
+    // and a push already made on this VM, the rebuild (a skill-slot scan per language, a
+    // `Vec<String>`) can only reproduce the memo.
+    let inputs_moved = store.as_ref().is_some_and(|s| s.is_changed())
+        || actions.is_changed()
+        || spells.is_changed()
+        || languages.is_changed()
+        || skill_lines.as_ref().is_some_and(|l| l.is_changed());
+    if pushed.is_some() && !inputs_moved {
+        return;
+    }
+    let store: Option<&ObjectStore> = store.as_deref();
     let has_skill_line = |line: u32| {
         store.is_some_and(|s| {
             (0..benilla_protocol::messages::PLAYER_SKILL_SLOTS)
@@ -344,6 +447,35 @@ fn load_default_languages(
         // Not fatal: the binding's contract already has an answer for "no table".
         Err(e) => warn!("ui_unit: default languages unavailable — {e:#}"),
     }
+}
+
+/// **The player's default language goes into the VM at its birth** (decision 2241, through the
+/// seam 2240 established) — because `GetDefaultLanguage()` is read *inside* the load burst, and
+/// until now the answer during that burst was `nil` and then a race.
+///
+/// Two readers, both stock: `ChatEdit_OnLoad` takes it at OnLoad (dead in 1.12, but it is the
+/// era's idiom), and `ChatFrame_OnEvent`'s `PLAYER_ENTERING_WORLD` arm stores it as
+/// `this.defaultLanguage`, which gates the `[Common]`/`[Orcish]` prefix on every readable chat
+/// line for the session. We fire `PLAYER_ENTERING_WORLD` from [`feed_units`] — an `Update` system
+/// in the same set as [`feed_default_language`], with no ordering between them — so whether that
+/// gate was seeded when the event arrived was Bevy's intra-set order to decide, per run.
+///
+/// The race comes from the **roster row** rather than the object store, because the avatar does not
+/// exist yet at this edge; it is the same value from the same login, and it is the row
+/// [`crate::ui_script::seat_from_roster`] builds the player seat from a few lines earlier in the
+/// same call. [`feed_default_language`] still runs and still owns the live answer — this only
+/// makes sure the burst does not read a nil.
+pub(crate) fn seed_default_language(world: &mut World, script: &mut UiScript) {
+    let (Some(langs), Some(roster)) = (
+        world.get_resource::<DefaultLanguagesRes>(),
+        world.get_resource::<crate::char_select::Roster>(),
+    ) else {
+        return;
+    };
+    let Some(row) = roster.pending_row() else {
+        return;
+    };
+    script.set_default_language(langs.0.name(u32::from(row.race), 0).map(str::to_string));
 }
 
 /// Push `GetDefaultLanguage()`'s one string, on change only.
@@ -593,6 +725,42 @@ pub(crate) fn race_faction_group(race: u8) -> Option<&'static str> {
     } else {
         "Horde"
     })
+}
+
+/// A unit's **PvP team digit** — `0x5efe00`'s tri-state: `0` Horde, `1` Alliance, `-1` no side.
+///
+/// **This is NOT [`faction_group`], and the difference is the whole of report B378.** The two read
+/// different sources and only agree while nothing has moved a unit off its racial faction:
+///
+/// * `UnitFactionGroup` (`0x516630`) reads the unit's LIVE `UNIT_FIELD_FACTIONTEMPLATE`
+///   (`0x5166b8 mov eax,[eax+0x110]` / `0x5166be mov eax,[eax+0x74]`, byte-read here) — so a
+///   vmangos GM, forced to template 35, genuinely has no side and the PvP flag icon genuinely
+///   hides. That is faithful.
+/// * The rank title's team digit (`0x5efe00`) reads the unit's **RACE** and walks
+///   `[obj+0x110]+0x78` → `ChrRaces.dbc` field 2 (FactionTemplate id) → `FactionTemplate.dbc`
+///   field 3 (factionGroupMask) → `& 4` ⇒ 0, else `& 2` ⇒ 1, else −1 — never the live template.
+///   A GM's race does not change, so the reference names his rank exactly as it always did.
+///
+/// We had the second wired to the first, which is why a Grand Marshal's Honor tab read `NONE` on
+/// a GM-flagged account while the 1.12 client on the same server read "Grand Marshal"
+/// (decision 2227). Every `0x5efe00` caller is race-derived: `GetPVPRankInfo`'s team
+/// (`0x51a9af`/`0x51a9c8`), `UnitPVPName`'s rank decoration (`0x5efe60`), the battlefield
+/// scoreboard's per-row side (`0x4aa200`, which inlines the same walk off the name-cache record).
+///
+/// The table is the shipped one, frozen: `ChrRaces.dbc` has **nine** rows in 5875 and race 9
+/// (Goblin, unplayable) shares Human's faction template 1, so it answers Alliance — not `None`,
+/// which is what a "playable races only" table would say.
+/// [`tests::race_pvp_team_matches_the_shipped_tables`] walks the real DBCs and pins every row.
+pub(crate) fn race_pvp_team(race: u8) -> i8 {
+    match race {
+        // factionGroupMask 3 = Player|Alliance → `& 4` clear, `& 2` set.
+        1 | 3 | 4 | 7 | 9 => 1,
+        // factionGroupMask 5 = Player|Horde → `& 4` set, tested first.
+        2 | 5 | 6 | 8 => 0,
+        // No `ChrRaces` row (a creature's race byte, or an unstreamed descriptor): the engine's
+        // bounds/NULL failure tail, `-1`. It formats into the key and matches no GlobalString.
+        _ => -1,
+    }
 }
 
 /// Resolve a UnitPopup unit token to the **player guid** it names — `"target"` through the
@@ -994,6 +1162,13 @@ pub(crate) fn snapshot(
         // pane's `UnitPVPRank("target")` can answer at all. A creature has no PLAYER block and
         // reads 0, the reference's own answer for one.
         pvp_rank: store.0.player_pvp_rank().unwrap_or(0),
+        // `0x5efe00`'s team digit — the second `%d` of `PVP_RANK_<rank>_<team>`. It sits here
+        // beside the rank byte for the same reason that one does (nothing but the descriptor is
+        // needed) and it reads the RACE, not `faction_group`: the engine walks the race through
+        // `ChrRaces`/`FactionTemplate` and never looks at the live `UNIT_FIELD_FACTIONTEMPLATE`
+        // this unit is carrying, so a GM-flagged player keeps his rank title while losing the PvP
+        // icon. See [`race_pvp_team`] and decision 2227 (report B378).
+        pvp_team: store.0.unit_race().map_or(-1, race_pvp_team),
         // `PLAYER_BYTES_3` byte 2 — the city-protector title, the same PUBLIC dword as the rank
         // byte above. `UnitPVPName` appends a `PVP_MEDAL<n>` line for a non-zero one; 0 is "no
         // medal", which is every character on this server (vmangos never writes the byte).
@@ -1546,20 +1721,22 @@ fn feed_units(
     // being broken, which has now cost two separate sessions an investigation. So it is a BENCH
     // diagnostic, not UI: nothing appears on screen, exactly as in the reference.
     //
-    // The honor arc (1512) put a SECOND surface behind this same side: a rank's title is the
-    // GlobalString `PVP_RANK_<rank>_<team>`, and with no side there is no team digit, so
-    // `GetPVPRankInfo` answers nil and the Honor tab renders `NONE` at every rank — for a Grand
-    // Marshal. That reads exactly like an unbuilt pane, which is why it is named in the warning
-    // rather than left for the next investigation to rediscover.
+    // The honor arc (1512) was once listed here as a SECOND surface behind this same side, and
+    // it is not one: the rank title's team digit is `0x5efe00`, which reads the RACE through
+    // `ChrRaces`/`FactionTemplate` and never the live template, so a GM's Honor tab names his
+    // rank exactly as it always did (`race_pvp_team`, decision 2227 — the cause of report B378
+    // was that we had wired the two together, not the GM mode itself). What this warning still
+    // covers is every genuinely template-derived surface: `UnitFactionGroup` and the icons and
+    // comparisons built on it.
     if let Some(p) = &player {
         let sideless = p.faction_group.is_none();
         if sideless && !feed.warned_sideless {
             warn!(
                 "faction: our own template names no side (usually GM mode — vmangos forces \
-                 template 35, group mask 0). Faction-derived UI cannot resolve a side while this \
-                 holds: the PvP flag icon stays hidden however flagged you are, and the Honor tab's rank \
-                 title reads NONE at every rank (PVP_RANK_<rank>_<team> has no team digit). \
-                 `.gm off` restores both."
+                 template 35, group mask 0). Every UnitFactionGroup-derived surface loses its \
+                 side while this holds — the PvP flag icon stays hidden however flagged you are. \
+                 `.gm off` restores it. (The Honor tab's rank title is NOT one of these: its team \
+                 digit comes from your race, not your template.)"
             );
         }
         feed.warned_sideless = sideless;
@@ -2147,6 +2324,89 @@ fn combo_edge(last: Option<(u8, u64)>, now: (u8, u64)) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The DESCRIPTOR leg of the same answer: `snapshot` takes the team digit off
+    /// `UNIT_FIELD_BYTES_0` byte 0 and **never** off `UNIT_FIELD_FACTIONTEMPLATE`.
+    ///
+    /// The pane-level regression (`ui_script::honor_frame_tests::a_gm_flagged_player_…`) seats
+    /// `pvp_team` by hand, so it proves the key is built from the right field and not that the
+    /// right field is read. This is that half: a template-35 GM — the exact descriptor vmangos
+    /// gives one — still answers his race's side.
+    #[test]
+    fn the_team_digit_comes_off_the_race_byte_not_the_faction_template() {
+        use benilla_protocol::ObjectFields;
+        /// `UNIT_FIELD_FACTIONTEMPLATE` / `UNIT_FIELD_BYTES_0`, one dword apart — the reference's
+        /// own `[obj+0x110]+0x74` and `+0x78`.
+        const FACTIONTEMPLATE: u16 = 35;
+        const BYTES_0: u16 = 36;
+        /// vmangos's GM template: `FactionTemplate.dbc` group mask 0, friendly to everyone.
+        const GM_TEMPLATE: u32 = 35;
+
+        let team = |fields: &[(u16, u32)]| {
+            snapshot(
+                &ObjectStore(ObjectFields::from_pairs(fields)),
+                None,
+                0,
+                None,
+            )
+            .pvp_team
+        };
+        // Byte 0 of BYTES_0 is the race; the class in byte 1 must not disturb it.
+        let human_warrior = 1 | (1 << 8);
+        let scourge_mage = 5 | (8 << 8);
+        assert_eq!(team(&[(BYTES_0, human_warrior)]), 1, "Human → Alliance");
+        assert_eq!(team(&[(BYTES_0, scourge_mage)]), 0, "Scourge → Horde");
+        // **The report.** The sideless GM template sits right beside the race byte and is not
+        // consulted: the answer is the race's, unchanged.
+        assert_eq!(
+            team(&[(BYTES_0, human_warrior), (FACTIONTEMPLATE, GM_TEMPLATE)]),
+            1,
+            "a GM keeps his race's side (report B378)"
+        );
+        assert_eq!(
+            team(&[(BYTES_0, scourge_mage), (FACTIONTEMPLATE, GM_TEMPLATE)]),
+            0,
+            "…on both sides"
+        );
+        // A unit whose race byte has not streamed is the engine's bounds-failure −1, and a
+        // faction template alone cannot stand in for it.
+        assert_eq!(team(&[]), -1, "no race byte, no team digit");
+        assert_eq!(
+            team(&[(FACTIONTEMPLATE, 1)]),
+            -1,
+            "and a template is not one"
+        );
+    }
+
+    /// [`race_pvp_team`]'s frozen table against the **shipped tables it is a copy of** — the walk
+    /// the engine runs at `0x5efe00`, on the real `ChrRaces.dbc` and `FactionTemplate.dbc`.
+    ///
+    /// The table is hardcoded because it is nine constant rows of a 2006 file and threading a DBC
+    /// resource through every unit snapshot to read them would be pure ceremony. This is what
+    /// makes that safe: the file decides, and a row that ever disagrees — or a race the file has
+    /// and the table does not (race 9, Goblin, which shares Human's template and is **not** a
+    /// `None`) — fails here. Skips without client data.
+    #[test]
+    fn race_pvp_team_matches_the_shipped_tables() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let want = benilla_formats::load_race_pvp_teams(&mut chain).expect("ChrRaces walk");
+        // The misparse guard: 5875 ships nine rows, not eight. An empty or truncated map would
+        // otherwise let this test pass by asserting nothing.
+        assert_eq!(want.len(), 9, "ChrRaces.dbc row count");
+        for (&race, &team) in &want {
+            assert_eq!(race_pvp_team(race), team, "race {race}");
+        }
+        // Both sides are actually represented — a walk that answered one digit for everything
+        // would satisfy the loop above and name every rank off one list.
+        assert!(want.values().any(|&t| t == 0), "some race is Horde");
+        assert!(want.values().any(|&t| t == 1), "some race is Alliance");
+        // Off the end of the file is the engine's bounds-failure tail, not a guess.
+        for race in [0u8, 10, 255] {
+            assert!(!want.contains_key(&race));
+            assert_eq!(race_pvp_team(race), -1, "race {race} has no ChrRaces row");
+        }
+    }
 
     /// **The tapped bit fires `UNIT_FACTION`, and without this the verbs are decorative.**
     ///
@@ -3148,5 +3408,88 @@ mod tests {
             !exists(&mut app),
             "the window closed, yet UnitExists(\"npc\")"
         );
+    }
+
+    /// **`PLAYER_LEAVING_WORLD` fires on a cross-map worldport, and only on one** (decision 2235).
+    ///
+    /// Measured live before this existed: an addon counting all three world events across a real
+    /// mapId 0 → 1 port read `enter=2 leave=0 login=1`. Two of those already matched the
+    /// reference — `PLAYER_ENTERING_WORLD` re-fires because the port destroys and re-creates the
+    /// descriptor, and `PLAYER_LOGIN` correctly does not, being armed only by a UI load. The
+    /// leaving half was simply never wired.
+    ///
+    /// The `needs_ack` split is the reference's own: `0x111` is fired from the local player
+    /// object's destructor, which a same-map teleport never reaches, and the one worldport that
+    /// owes no ack is the initial-login map — an arrival, with nothing behind it to leave.
+    #[test]
+    fn a_cross_map_worldport_fires_leaving_world_and_the_login_map_does_not() {
+        let mut app = App::new();
+        app.add_message::<crate::net::WorldportMessage>()
+            .init_resource::<crate::ui_script::LeavingWorldArmed>()
+            .add_systems(Update, fire_leaving_world_on_worldport);
+        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.world_mut()
+            .non_send_resource::<UiScript>()
+            .run(
+                "Left = 0 \
+                 local f = CreateFrame(\"Frame\") \
+                 f:RegisterEvent(\"PLAYER_LEAVING_WORLD\") \
+                 f:SetScript(\"OnEvent\", function() Left = Left + 1 end)",
+            )
+            .expect("probe frame");
+        let left = |app: &mut App| -> i64 {
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .eval::<i64>("return Left")
+                .unwrap()
+        };
+        let port = |needs_ack: bool| crate::net::WorldportMessage {
+            map_id: 1,
+            position: [0.0; 3],
+            orientation: 0.0,
+            needs_ack,
+            transport_entry: None,
+        };
+
+        let arm = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<crate::ui_script::LeavingWorldArmed>()
+                .arm();
+        };
+
+        // A world began (2239's latch — the reference arms it from the local player's create).
+        arm(&mut app);
+        app.world_mut().write_message(port(false));
+        app.update();
+        assert_eq!(left(&mut app), 0, "the initial-login map is an arrival");
+
+        app.world_mut().write_message(port(true));
+        app.update();
+        assert_eq!(left(&mut app), 1, "a cross-map port leaves a world");
+
+        app.update();
+        assert_eq!(
+            left(&mut app),
+            1,
+            "once per port, not once per frame after it"
+        );
+
+        // **And once per WORLD, which is the latch's own law** (2239): the port above spent it,
+        // and nothing here re-armed — no new avatar was created. A second departure off the same
+        // world is the window a quit on the loading screen lands in, and the reference fires
+        // nothing there.
+        app.world_mut().write_message(port(true));
+        app.update();
+        assert_eq!(
+            left(&mut app),
+            1,
+            "a second departure with the latch spent fired again — [0xb4b424] is per world"
+        );
+
+        // Re-armed, as the new world's create does: the next departure is its own.
+        arm(&mut app);
+        app.world_mut().write_message(port(true));
+        app.update();
+        assert_eq!(left(&mut app), 2, "the next world's departure fires again");
     }
 }

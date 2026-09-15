@@ -129,7 +129,9 @@ enum GpuBucket {
     Static,
     /// bevy's transparent (and transmissive) 3D passes — water, glow cards, particles.
     Transparent,
-    /// The `ffx_glow` chain: the quarter-res downsample, the two Gauss taps, the combine.
+    /// The `ffx_glow` chain: the quarter-res downsample, the two Gauss taps — and a bake's
+    /// combine. The world's combine is the first draw of the UI camera's main pass since 2234,
+    /// nested under `main_transparent_pass_2d`, so it lands in [`Self::Ui`] with that pass.
     Glow,
     /// The full-screen tail on every camera: tonemapping, upscaling, the MSAA writeback.
     Post,
@@ -172,6 +174,17 @@ struct GpuAccum {
     /// The newest measurement time consumed, so each fold reads only what arrived since. All
     /// measurements of one sync share one `Instant`, which is what makes "a frame" countable.
     seen: Option<Instant>,
+    /// `WOW_GPU_PASSES=1` — the same sums per PASS, printed beside each row as a `GPU_PASSES`
+    /// line: the journal's buckets fold both 2D passes, the UI pass and the gamma decode into
+    /// one `gpu_ui`, and a pass-level question (an empty pass encoded every frame; one filter
+    /// pass of a chain) needs the raw split. Empty and unread unless armed.
+    passes: std::collections::BTreeMap<String, f64>,
+}
+
+/// `WOW_GPU_PASSES=1`, read once.
+fn passes_armed() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_GPU_PASSES").is_some())
 }
 
 impl GpuAccum {
@@ -180,14 +193,21 @@ impl GpuAccum {
         let mut newest = self.seen;
         let mut frame_times: Vec<Instant> = Vec::new();
         for diagnostic in store.iter() {
-            let Some(bucket) = gpu_bucket(diagnostic.path().as_str()) else {
+            let path = diagnostic.path().as_str();
+            let Some(bucket) = gpu_bucket(path) else {
                 continue;
             };
+            let pass = passes_armed()
+                .then(|| path.strip_prefix("render/")?.strip_suffix("/elapsed_gpu"))
+                .flatten();
             for m in diagnostic
                 .measurements()
                 .filter(|m| self.seen.is_none_or(|s| m.time > s))
             {
                 self.sum[bucket as usize] += m.value;
+                if let Some(pass) = pass {
+                    *self.passes.entry(pass.to_string()).or_default() += m.value;
+                }
                 if !frame_times.contains(&m.time) {
                     frame_times.push(m.time);
                 }
@@ -214,9 +234,20 @@ impl GpuAccum {
             for bucket in self.sum {
                 s.push_str(&format!(",{:.2}", bucket / n));
             }
+            if passes_armed() {
+                // Costliest first, ms per read frame — the raw split the buckets fold.
+                let mut rows: Vec<(&String, &f64)> = self.passes.iter().collect();
+                rows.sort_by(|a, b| b.1.total_cmp(a.1));
+                let line: Vec<String> = rows
+                    .iter()
+                    .map(|(k, v)| format!("{k}={:.3}", *v / n))
+                    .collect();
+                eprintln!("GPU_PASSES frames={} {}", self.frames, line.join(" "));
+            }
         }
         self.sum = [0.0; GPU_BUCKETS];
         self.frames = 0;
+        self.passes.clear();
         s
     }
 }

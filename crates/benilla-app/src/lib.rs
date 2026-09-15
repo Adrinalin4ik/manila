@@ -109,6 +109,7 @@ mod shaders;
 
 mod game_tip;
 mod name_persist;
+mod opaque2d;
 /// Where "the client is going down" may be observed, and why that is `Last` and not `Update`
 /// (decision 1528). Every system that persists state on the way out registers through it.
 mod shutdown;
@@ -118,6 +119,7 @@ mod sound;
 mod swing_refusal;
 mod target;
 mod text_filter;
+mod text_reshape;
 mod textinput;
 mod transport;
 mod tutorial;
@@ -613,9 +615,10 @@ pub fn run(build: BuildId) -> AppExit {
     // The player-UI quad pass (decision 0068 §2): its own composited-above-the-world,
     // below-the-egui-dev-overlays camera + sorted-quad renderer. `$WOW_UI_DEMO=1` seeds a proof scene.
     .add_plugins(PlayerUiPlugin)
-    // The world's frame, rendered off-screen and handed to the UI pass as its first quad — the
-    // seam that puts the UI-over-world blend back into gamma bytes (0161/0254's last piece).
-    // Registered AFTER the UI pass: it writes `UiQuads`, which that plugin owns.
+    // The world's frame, rendered off-screen and drawn first in the UI camera's main pass —
+    // the seam that puts the UI-over-world blend back into gamma bytes (0161/0254's last piece,
+    // a pass rather than a quad since 2234). Registered AFTER the UI pass: it points that
+    // plugin's camera at the world camera.
     .add_plugins(WorldBackdropPlugin)
     // The HUD minimap (decision 0203 phase 1): fills the `<Minimap>` widget's extracted hole with
     // the streamed tile window + mask + player arrow, and feeds the zone text.
@@ -681,6 +684,10 @@ pub fn run(build: BuildId) -> AppExit {
     .add_plugins(BattlefieldPositionsPlugin)
     .add_plugins(crate::game_tip::GameTipPlugin)
     .add_plugins(crate::text_filter::TextFilterPlugin)
+    // The re-shape a `bevy_ui` text root loses when its last span is despawned
+    // (decision 2212, B383): an upstream change-detection hole whose only symptom is a
+    // panic inside `bevy_text` on the next window resize.
+    .add_plugins(crate::text_reshape::TextReshapePlugin)
     .add_plugins(TutorialPlugin)
     // The melee swing refusals (`SMSG_ATTACKSWING_NOTINRANGE`/`_BADFACING`/`_DEADTARGET`/
     // `_CANT_ATTACK`): the latch the packets set, and the 4 s repeat that shows it while an

@@ -412,7 +412,25 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// item (the `#[cfg(feature = "dev")]` weather panel is its only other namer); what changed is
 /// that a game module names it now, which is exactly the crossing this gate exists to make
 /// visible.
-const CEILING: usize = 180;
+/// And 180 → 181: `final_pass::FinalPassTarget`, a PUBLISH — where a colour lane's final pass
+/// lands, as one noun (decision 2206). The client has two colour lanes that end in a full-screen
+/// decode: the world's (the FFXGlow combine, engine-side) and the UI's (`crate::ui_gamma`'s,
+/// game-side since 0254 — the interface is the game's). Both used to write bevy's main texture
+/// and let its `upscaling` blit copy the result out; 2206 has each render straight into its
+/// camera's target when the camera's output mode is `Skip`, and the rule that turns an output
+/// mode into a destination, a format and a scissor is one rule, not two copies of it that drift.
+/// It could not go the other way: moving the UI decode into the engine would put the UI lane's
+/// colour law on the wrong side of the wall. So the engine publishes the rule as one type with
+/// two associated functions, and the game names it once.
+/// And 181 → 182: `ffx_glow::FfxBackdrop`, a PUBLISH — the component that makes the world's
+/// FFX combine the first draw of the player-UI camera's main pass (decision 2234). The combine is engine-side
+/// (the world lane's byte math, 0161); the camera it now runs on is the game's (the interface,
+/// 0254); so the engine publishes the claim as one component the game puts on its camera and
+/// points at the world camera it owns, and the two nodes behind it stay private. It retires a
+/// full-window float image that one camera wrote and the next read back — the seam 1603 built
+/// and 2215 measured — and it could not go the other way for 2206's reason: the UI camera cannot
+/// move into the engine.
+const CEILING: usize = 182;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it
