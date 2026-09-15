@@ -25,6 +25,15 @@ struct WsState {
     /// deployment (`main.rs` defaults to loopback); a host per port is the containerised one,
     /// where realmd (3724) and mangosd (8085) are different services.
     upstreams: Arc<HashMap<u16, Arc<str>>>,
+    /// Dial the `?host=` the client asked for, falling back to [`Self::upstreams`] when it is
+    /// absent or unusable. **Off by default and off in every existing caller**, because turning it
+    /// on makes this an outbound TCP relay to the allowlisted ports on any address the page names.
+    ///
+    /// This is why it is a field rather than a change to [`upgrade`]: `wenilla-realm` mounts this
+    /// very router (`wenilla-realm/src/lib.rs`) and is internet-facing, so following the client
+    /// there would be a server-side request forgery reachable by any visitor. Only
+    /// `wenilla-host`'s `--follow-client-realmlist` sets it.
+    follow_client: bool,
 }
 
 /// Build the `/ws/{port}` router with one upstream host for every allowed port. `allowed` is the
@@ -37,27 +46,87 @@ pub fn router(upstream: impl Into<Arc<str>>, allowed: impl IntoIterator<Item = u
 }
 
 /// Build the `/ws/{port}` router from an explicit port → host map; the keys are the allowlist.
+///
+/// The client-supplied `?host=` is **ignored**: every session for a port dials that port's
+/// configured host. This is the door `wenilla-realm` uses and its behaviour must not change.
 pub fn router_map(upstreams: impl IntoIterator<Item = (u16, Arc<str>)>) -> Router {
+    build(upstreams, false)
+}
+
+/// [`router_map`], but each session dials the `?host=` the client asked for — the address the
+/// player typed into the login screen's realmlist box, which reaches us because
+/// `benilla-protocol::transport::web`'s `connect_url` already puts it on the query string. The
+/// map is then only the **default** for a session that names no host.
+///
+/// **This is an open outbound relay to the allowlisted ports, and only those.** The port is still
+/// checked against the map's keys before anything is dialed, so this widens *where* a session may
+/// go and never *what* it may reach there. Fit for a local development host whose operator chose
+/// it; not fit for a service with visitors, which is why `wenilla-realm` calls [`router_map`].
+pub fn router_map_following(upstreams: impl IntoIterator<Item = (u16, Arc<str>)>) -> Router {
+    build(upstreams, true)
+}
+
+fn build(upstreams: impl IntoIterator<Item = (u16, Arc<str>)>, follow_client: bool) -> Router {
     Router::new()
         .route("/ws/{port}", get(upgrade))
         .with_state(WsState {
             upstreams: Arc::new(upstreams.into_iter().collect()),
+            follow_client,
         })
 }
 
-/// `host` arrives as `?host=` — logging only (the shared scheme's own words); the proxy always
-/// dials `state.upstream`, never the client-supplied value, so a client can't redirect the socket
-/// somewhere else on the network.
+/// The `?host=` value, if it is something we are willing to hand to a resolver.
+///
+/// Not a security check — [`WsState::follow_client`] is the decision that matters, and the port is
+/// bounded before this is consulted. It rejects the shapes that would otherwise reach the resolver
+/// as a puzzling failure: an empty box, a pasted `http://…` URL, a `user@host`, or a trailing
+/// `:3724` the player copied from a setup page. The client splits the port off itself
+/// (`benilla_protocol::host_port`) and it travels as the path segment, so a host arriving with one
+/// attached is a value we could not honour anyway — better refused by name in the log than turned
+/// into a DNS lookup for `"realm.example:3724"`.
+///
+/// A bracketed IPv6 literal keeps its brackets stripped, which is the spelling
+/// `TcpStream::connect((host, port))` wants.
+fn client_host(raw: &str) -> Option<&str> {
+    let host = raw.trim();
+    if let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        return (!inner.is_empty()).then_some(inner);
+    }
+    let bad = host.is_empty()
+        || host.len() > 253
+        || host.contains(':')
+        || host.contains('/')
+        || host.contains('@')
+        || host.contains('?')
+        || host.chars().any(char::is_whitespace);
+    (!bad).then_some(host)
+}
+
+/// `host` arrives as `?host=` — the address the client wanted. By default it is **logging only**
+/// and the proxy dials this port's configured upstream, so a page cannot redirect the socket
+/// somewhere else on the network; under [`router_map_following`] it is what gets dialed, with the
+/// configured upstream as the fallback. Either way the port comes from the path and is checked
+/// against the allowlist first.
 async fn upgrade(
     State(state): State<WsState>,
     Path(port): Path<u16>,
     Query(params): Query<HashMap<String, String>>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let Some(upstream) = state.upstreams.get(&port).cloned() else {
+    let Some(configured) = state.upstreams.get(&port).cloned() else {
         return StatusCode::FORBIDDEN.into_response();
     };
     let host_label = params.get("host").cloned().unwrap_or_default();
+    // Resolved before the upgrade so the log line names the address that was actually dialed —
+    // "asked for X, dialed Y" is the whole diagnosis when a realmlist edit appears to do nothing.
+    let asked = state
+        .follow_client
+        .then(|| client_host(&host_label))
+        .flatten();
+    let upstream: Arc<str> = match asked {
+        Some(h) => Arc::from(h),
+        None => configured,
+    };
     ws.on_upgrade(move |socket| async move {
         // Opening and closing are both logged at INFO because the two failures a player hits are
         // indistinguishable from the client: the upgrade is accepted before the upstream is dialed,
@@ -65,10 +134,11 @@ async fn upgrade(
         // the same generic `LOGIN_FAILED` ("Unable to connect") a refusal produces. The byte counts
         // are what separate them: 0 down means nothing answered, a few bytes down is realmd
         // refusing, and `first_down` names the refusal outright.
-        tracing::info!(host = %host_label, port, "ws proxy session opening");
+        tracing::info!(host = %host_label, dialed = %upstream, port, "ws proxy session opening");
         match relay(socket, &upstream, port).await {
             Ok(stats) => tracing::info!(
                 host = %host_label,
+                dialed = %upstream,
                 port,
                 up = stats.up,
                 down = stats.down,
@@ -76,7 +146,13 @@ async fn upgrade(
                 "ws proxy session closed",
             ),
             Err(e) => {
-                tracing::warn!(error = %e, host = %host_label, port, "ws proxy session ended")
+                tracing::warn!(
+                    error = %e,
+                    host = %host_label,
+                    dialed = %upstream,
+                    port,
+                    "ws proxy session ended",
+                )
             }
         }
     })

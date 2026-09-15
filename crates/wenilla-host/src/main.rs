@@ -54,6 +54,20 @@ struct Cli {
     /// (`up=0 down=0` in the proxy log) rather than like a wrong address.
     #[arg(long)]
     world_upstream: Option<String>,
+    /// Dial the realmlist the *client* asked for, instead of `--upstream`.
+    ///
+    /// The login screen's realmlist box already travels to this proxy as `?host=` on the socket
+    /// URL, and the world address the realm list advertises travels the same way; without this
+    /// flag both are logged and discarded. With it, one build can reach any realm by typing its
+    /// address on the login screen — and `--world-upstream` stops being needed, because the world
+    /// address then arrives from the realm list rather than from a flag.
+    ///
+    /// **It makes this host an outbound TCP relay to ports 3724 and 8085 on any address a page
+    /// names**, so it is off by default and it is a deliberate choice on a shared bind. The port
+    /// allowlist still holds: this widens where a session may go, never what it may reach there.
+    /// `wenilla-realm` has no equivalent and is not affected.
+    #[arg(long)]
+    follow_client_realmlist: bool,
 }
 
 #[tokio::main]
@@ -111,7 +125,11 @@ async fn main() -> Result<()> {
 
     let app = wenilla_host::data::router_with_modules(chain, Some(modules))
         .merge(wenilla_host::addons::router(addons))
-        .merge(wenilla_host::ws::router_map(upstreams))
+        .merge(if cli.follow_client_realmlist {
+            wenilla_host::ws::router_map_following(upstreams)
+        } else {
+            wenilla_host::ws::router_map(upstreams)
+        })
         .merge(wenilla_host::static_site::router(&cli.www));
 
     let listener = tokio::net::TcpListener::bind(&cli.bind)
@@ -130,8 +148,18 @@ async fn main() -> Result<()> {
         www = %cli.www.display(),
         upstream = %cli.upstream,
         world_upstream = %world_upstream,
+        follow_client_realmlist = cli.follow_client_realmlist,
         "wenilla-host listening"
     );
+    if cli.follow_client_realmlist {
+        // Said once at startup, at WARN, because the per-session `dialed=` field is the only other
+        // place this mode is visible and nobody reads a proxy log until something is already wrong.
+        tracing::warn!(
+            "--follow-client-realmlist: /ws/{{port}} dials the address the page asks for. This \
+             host will relay TCP to ports 3724 and 8085 anywhere a page names. Keep it on a \
+             network you trust."
+        );
+    }
     axum::serve(listener, app).await.context("serving")
 }
 

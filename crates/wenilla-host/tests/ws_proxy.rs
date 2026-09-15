@@ -85,3 +85,72 @@ async fn relays_binary_frames_both_ways_and_closes_with_the_upstream() {
         "expected the proxy to close, got {end:?}"
     );
 }
+
+/// `--follow-client-realmlist`: the socket goes where the page asked, and without the flag it
+/// does not.
+///
+/// **Both arms run against the same pair of addresses**, which is what makes this a measurement
+/// rather than a self-consistency check: the router is configured with a host that cannot resolve
+/// (`.invalid` is reserved by RFC 2606 for exactly this) while the echo server sits on loopback
+/// and only `?host=` names it. So a byte coming back proves the configured host was *not* used,
+/// and the control arm proves the asked-for host is *not* used by default — neither arm can pass
+/// by accident, and a relay that ignored the query string would fail the first while a relay that
+/// always honoured it would fail the second.
+#[tokio::test]
+async fn following_the_client_dials_the_asked_for_host_and_the_default_does_not() {
+    let echo_port = spawn_echo_server().await;
+    let unreachable = std::sync::Arc::<str>::from("realmlist-must-not-be-used.invalid");
+
+    async fn serve(app: axum::Router) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind proxy");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    // Following: `?host=` is dialed, so the echo server answers even though the configured
+    // upstream does not exist.
+    let addr = serve(wenilla_host::ws::router_map_following([(
+        echo_port,
+        std::sync::Arc::clone(&unreachable),
+    )]))
+    .await;
+    let (ws, _) = tokio_tungstenite::connect_async(&format!(
+        "ws://{addr}/ws/{echo_port}?host=127.0.0.1"
+    ))
+    .await
+    .expect("ws connect");
+    let (mut tx, mut rx) = ws.split();
+    tx.send(Message::Binary(vec![0xABu8; 8].into()))
+        .await
+        .expect("send frame");
+    let echoed = rx.next().await.expect("frame").expect("ws frame ok");
+    assert_eq!(
+        echoed.into_data().as_ref(),
+        [0xABu8; 8].as_slice(),
+        "the proxy did not dial the host the client asked for"
+    );
+    tx.close().await.expect("close ws");
+
+    // Default: the same request dials the configured host, which cannot resolve — so the session
+    // ends without ever echoing. The upgrade itself still succeeds; the upstream is dialed after.
+    let addr = serve(wenilla_host::ws::router_map([(
+        echo_port,
+        std::sync::Arc::clone(&unreachable),
+    )]))
+    .await;
+    let (ws, _) = tokio_tungstenite::connect_async(&format!(
+        "ws://{addr}/ws/{echo_port}?host=127.0.0.1"
+    ))
+    .await
+    .expect("ws connect");
+    let (mut tx, mut rx) = ws.split();
+    let _ = tx.send(Message::Binary(vec![0xABu8; 8].into())).await;
+    let end = rx.next().await;
+    assert!(
+        !matches!(&end, Some(Ok(Message::Binary(b))) if b.as_ref() == [0xABu8; 8].as_slice()),
+        "the default router followed ?host= and reached the echo server: {end:?}"
+    );
+}
