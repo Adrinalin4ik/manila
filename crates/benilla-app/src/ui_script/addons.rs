@@ -234,8 +234,31 @@ impl Addon {
         for file in files {
             // A manifest entry is relative to the addon's own folder; `read` and the loader both
             // work in the source's path space, so resolve once here and use it for both.
+            // **`?path` — present on some installs, absent on others**, and neither is a defect.
+            // The reference's `FrameXML.toc` is not one file: a server that ships its own FrameXML
+            // adds entries to it, and those files exist only on that server's install. Turtle WoW
+            // opens its manifest with `Globals.lua` and `Overrides.lua`, which vanilla has no
+            // equivalent of, and its own `PaperDollFrame.lua` and `WorldMapFrame.lua` call
+            // straight into them (`explode`, `CONTINENTS_LENGTH`).
+            //
+            // Without a marker there is no severity that is right for both: an `error!` is a false
+            // alarm on vanilla (and gate-fatal to `smoke.sh`'s zero-ERROR count), while demoting
+            // every missing chain entry to a warning would blind the guard that catches OUR
+            // manifest naming a 1.12 file wrongly. The marker keeps that guard and says plainly
+            // which entries are expected to vary.
+            let (optional, file) = match file.strip_prefix('?') {
+                Some(rest) => (true, rest),
+                None => (false, file.as_str()),
+            };
             let path = benilla_ui::loader::join_ref(&self.prefix(), file);
             let Some(bytes) = self.read(&path) else {
+                if optional {
+                    info!(
+                        "ui_script: {}/{file} not on this install — skipped (optional entry)",
+                        self.name
+                    );
+                    continue;
+                }
                 let e = format!("{}/{file}: not found", self.name);
                 // Severity follows whose manifest lied. For the builtin that is us — a client
                 // bug, and the boot tests assert none. For a player's addon it is the package

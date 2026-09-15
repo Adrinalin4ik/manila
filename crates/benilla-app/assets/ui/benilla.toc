@@ -63,6 +63,23 @@ Interface\FrameXML\Fonts.xml
 # The app's Startup load stays where it is — the cast-fail display (0427) resolves messages before
 # the in-game UI materializes at all (1051) — so this is a second, idempotent assignment pass.
 Interface\FrameXML\GlobalStrings.lua
+# ══ A SERVER'S OWN FRAMEXML PRELUDE — optional, and `?` is what says so (see `addons.rs`) ══
+# Vanilla 1.12 has neither file. Turtle WoW's `FrameXML.toc` opens with them, at lines 4 and 5,
+# straight after `GlobalStrings.lua` — which is the slot they get here, because the files that
+# need them are loaded from that same install and expect them already run.
+#
+# What they carry is not decoration. `Globals.lua` defines `explode`, `trim`, `wipe`, `sizeof` and
+# the addon-message delimiters — 43 call sites across `PaperDollFrame.lua`, `WorldStateFrame.lua`
+# and the guild-bank UI. `Overrides.lua` defines `CONTINENTS_LENGTH`, which `WorldMapFrame.lua`
+# compares against on every continent-dropdown update. Absent, the player's own FrameXML raises a
+# red script error on opening the character sheet and again on the world map — which is exactly
+# how this was found.
+#
+# They are `?` rather than plain entries because a vanilla install has no such files, and there a
+# missing entry must stay silent: this manifest is ours, so a non-optional line the chain does not
+# hold is our bug, and that guard is worth keeping sharp.
+?Interface\FrameXML\Globals.lua
+?Interface\FrameXML\Overrides.lua
 # ══ THE LOCALE ADJUSTMENTS — the reference's own, off the player's chain (1751, window 5) ══
 # `Localize()` (which this file also CALLS at load, exactly as the reference's own two-part
 # `<Script>` does) and `LocalizeFrames()`. Nothing of ours ever shipped either, and the gap was
