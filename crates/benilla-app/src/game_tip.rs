@@ -389,8 +389,40 @@ fn drive_game_tip(
     shadow.color = Color::BLACK;
     *vis = Visibility::Inherited;
 
+    // **One span until the font is loaded** — a bevy 0.18.1 defect, not a choice.
+    //
+    // `TextPipeline::update_buffer` pushes every span into `ComputedTextBlock::entities` and only
+    // then checks whether that span's font is loaded; on a miss it returns `NoSuchFont` with the
+    // list left TRUNCATED, while the cosmic-text buffer keeps the previous layout. Nothing ties
+    // that failure to `text_system`, which calls `update_text_layout_info` regardless — and that
+    // builds `glyph_info` from the truncated list, then walks the stale buffer indexing
+    // `glyph_info[glyph.metadata]`. A leftover metadata of 1 against a one-entry list is
+    // `index out of bounds: the len is 1 but the index is 1`, and in wasm a panic is the whole
+    // client: `RuntimeError: unreachable`, blank canvas.
+    //
+    // A single span cannot reach it — its metadata is 0, and a list that exists at all has an
+    // entry 0. So while the font is still loading the tip draws in one colour; the markup is not
+    // lost for good, only for the tips shown in that window.
+    let font_ready = matches!(
+        assets.get_load_state(font.font.id()),
+        Some(bevy::asset::LoadState::Loaded)
+    );
     // The coloured runs: the first is the `Text` root's own, the rest are `TextSpan` children.
-    let runs = spans(tip, base_color());
+    let runs = if font_ready {
+        spans(tip, base_color())
+    } else {
+        // Greppable, and it names the reason: if the panic outlives this gate, this line's absence
+        // says the tip was not the site and the search moves to the other multi-span builder
+        // (`glue::widgets::outlined_spans`).
+        info!("loading screen: tip drawn as one span — its font is still loading");
+        vec![(
+            spans(tip, base_color())
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect::<String>(),
+            base_color(),
+        )]
+    };
     let painted = !runs.is_empty();
     let mut e = commands.entity(entity);
     match runs.split_first() {
