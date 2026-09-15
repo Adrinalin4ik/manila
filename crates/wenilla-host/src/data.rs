@@ -10,10 +10,11 @@
 //! ourselves and mapping `/` -> `\` afterward matches exactly what the client's `encode_name`
 //! produces on the way out.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Path as AxumPath, State};
 use axum::http::{header, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -30,6 +31,9 @@ use tower_http::set_header::SetResponseHeaderLayer;
 pub struct DataState {
     pub chain: Arc<Chain>,
     index: Arc<IndexCache>,
+    /// Directory holding the server's Warden `.cr` files, when the operator has one. `None` — the
+    /// default, and what `wenilla-realm` passes — leaves the route unmounted entirely.
+    modules: Option<Arc<PathBuf>>,
 }
 
 /// Single-flight initialization; transient list errors are retried on the next request.
@@ -61,11 +65,33 @@ impl IndexCache {
 /// Build the `/data/*` router. Kept separate from `static_site`'s and `ws`'s so `main.rs` can
 /// merge them with `Router::merge` and each test file can stand its half up alone.
 pub fn router(chain: Arc<Chain>) -> Router {
-    Router::new()
+    router_with_modules(chain, None)
+}
+
+/// [`router`] plus `GET /data/warden_modules/{id}.cr`, reading the loose `.cr` files a Warden
+/// module lane needs out of `modules`.
+///
+/// **They cannot come from the chain**, which is what the first cut of this got wrong: `.cr` files
+/// are the operator's server files sitting beside the archives, not members of them, so
+/// `/data/{*name}` answers 404 for every one of them. The web client fetched exactly that URL and
+/// the module lane refused with "no .cr for module …" — a 404 wearing the costume of a missing
+/// module.
+///
+/// Off unless asked for. `wenilla-realm` mounts [`router`] and therefore serves none of this, which
+/// is its behaviour today; turning it on there is a deliberate change, not something a signature
+/// should hand over by default.
+pub fn router_with_modules(chain: Arc<Chain>, modules: Option<PathBuf>) -> Router {
+    let mut router = Router::new()
         .route("/data/__index", get(index))
         // axum's matchit picks the more specific literal route above over this wildcard on its
         // own — registration order here doesn't matter.
-        .route("/data/{*name}", get(file).head(file))
+        .route("/data/{*name}", get(file).head(file));
+    if modules.is_some() {
+        // Registered ahead of the wildcard for the same matchit reason as `__index`; the test
+        // below is what proves the specific route actually wins, rather than trusting it.
+        router = router.route("/data/warden_modules/{id}", get(warden_module));
+    }
+    router
         // On the fly, not precompressed like `static_site`'s: that route serves the handful of
         // files `web-build.sh` writes and can pay brotli once at build time, while this one
         // serves an arbitrary slice of a 5 GB install nobody can enumerate ahead of time.
@@ -83,7 +109,58 @@ pub fn router(chain: Arc<Chain>) -> Router {
         .with_state(DataState {
             chain,
             index: Arc::default(),
+            modules: modules.map(Arc::new),
         })
+}
+
+/// The on-disk filename for a requested module id, or `None` when the id is not one.
+///
+/// This is the whole path-safety story, which is why it is a function and not three lines inside
+/// the handler: a name that passes is exactly 32 hex digits plus `.cr`, so it contains no
+/// separator, no `..` and no dot beyond the extension, and the join cannot leave the directory.
+/// Uppercased on the way out because that is how the files are named and how `module_id_hex`
+/// spells an id — on a case-sensitive filesystem the two have to agree.
+fn module_filename(id: &str) -> Option<String> {
+    let stem = id.strip_suffix(".cr")?;
+    (stem.len() == 32 && stem.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| format!("{}.cr", stem.to_ascii_uppercase()))
+}
+
+/// `GET /data/warden_modules/{id}.cr` — one module's challenge/response file.
+///
+/// `id` is checked by [`module_filename`] before it reaches the filesystem. Anything it rejects is
+/// a 404 rather than a 400: a probe should not learn from the status code whether it guessed the
+/// shape right.
+async fn warden_module(
+    AxumPath(id): AxumPath<String>,
+    State(state): State<DataState>,
+) -> Response {
+    let Some(dir) = state.modules.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(name) = module_filename(&id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let path = dir.join(name);
+    match tokio::task::spawn_blocking(move || std::fs::read(path)).await {
+        Ok(Ok(bytes)) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/octet-stream"),
+                (
+                    header::CACHE_CONTROL,
+                    "private, max-age=31536000, immutable",
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Ok(Err(_)) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "warden module read task panicked");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 /// Which bodies are worth compressing, as a value rather than inline in [`router`] so the tests
@@ -299,6 +376,70 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bytes.as_ptr(), warm.as_ptr());
+    }
+
+    /// The module route's two claims, neither of which the compiler checks.
+    ///
+    /// **What this covers and what it does not.** There is no `Chain` here — `Chain::open` needs a
+    /// real vanilla install and refuses an empty directory — so this is not an end-to-end route
+    /// test: it does not prove the handler reads a file or that `main.rs` passes the right
+    /// directory. It proves the two things that were actually in doubt: that a specific literal
+    /// route wins over the `/data/{*name}` wildcard (the whole reason the first cut 404'd), and
+    /// that nothing but a real module id reaches the filesystem.
+    #[tokio::test]
+    async fn the_module_route_outranks_the_wildcard_and_only_accepts_real_ids() {
+        // Registered in the same order and shape as `router_with_modules` does it.
+        let app = axum::Router::new()
+            .route("/data/{*name}", axum::routing::get(|| async { "wildcard" }))
+            .route(
+                "/data/warden_modules/{id}",
+                axum::routing::get(|| async { "module" }),
+            );
+        let body = app
+            .oneshot(
+                Request::builder()
+                    .uri("/data/warden_modules/BA877D8E62E30E3373505709FCE6DDCB.cr")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("router response")
+            .into_body();
+        let bytes = axum::body::to_bytes(body, 64).await.expect("body");
+        assert_eq!(
+            &bytes[..],
+            b"module",
+            "the wildcard must not swallow the module route — that is what 404'd the first time"
+        );
+
+        // A real id, as `module_id_hex` spells one, and the same id lowercased.
+        assert_eq!(
+            super::module_filename("BA877D8E62E30E3373505709FCE6DDCB.cr").as_deref(),
+            Some("BA877D8E62E30E3373505709FCE6DDCB.cr")
+        );
+        assert_eq!(
+            super::module_filename("ba877d8e62e30e3373505709fce6ddcb.cr").as_deref(),
+            Some("BA877D8E62E30E3373505709FCE6DDCB.cr"),
+            "case is normalised, because the files on disk are uppercase"
+        );
+
+        // Nothing else may reach the filesystem.
+        for bad in [
+            "../../../../etc/passwd",
+            "../BA877D8E62E30E3373505709FCE6DDCB.cr",
+            "BA877D8E62E30E3373505709FCE6DDCB",     // no extension
+            "BA877D8E62E30E3373505709FCE6DDC.cr",   // 31 digits
+            "BA877D8E62E30E3373505709FCE6DDCBA.cr", // 33
+            "BA877D8E62E30E3373505709FCE6DDCG.cr",  // not hex
+            "BA877D8E62E30E33/505709FCE6DDCB.cr",
+            ".cr",
+            "",
+        ] {
+            assert!(
+                super::module_filename(bad).is_none(),
+                "{bad:?} must not become a path"
+            );
+        }
     }
 
     #[tokio::test]

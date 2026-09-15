@@ -80,7 +80,21 @@ async fn main() -> Result<()> {
         (port, host)
     });
 
-    let app = wenilla_host::data::router(chain)
+    // The Warden `.cr` files live beside the archives, not inside them, so they get their own
+    // route. Derived from `--data` rather than given its own flag: they are part of the same
+    // install, and an operator who has none simply has an empty directory and 404s.
+    let modules = if cli.data.is_dir() {
+        cli.data.join("warden_modules")
+    } else {
+        // `--data` may name a single `.MPQ`; the install is then its parent.
+        cli.data
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("warden_modules")
+    };
+    tracing::info!(dir = %modules.display(), exists = modules.is_dir(), "warden module directory");
+
+    let app = wenilla_host::data::router_with_modules(chain, Some(modules))
         .merge(wenilla_host::ws::router_map(upstreams))
         .merge(wenilla_host::static_site::router(&cli.www));
 
