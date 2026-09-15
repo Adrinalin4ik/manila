@@ -1363,13 +1363,18 @@ fn a_clean_world_entry_raises_only_the_warnings_we_have_named() {
         .get_non_send_resource::<benilla_ui::script::UiScript>()
         .expect("VM");
 
-    // **`OnInputLanguageChanged` stays out permanently**, and this is where that is said out loud.
-    // It is a real 1.12 slot (`FloatingChatFrame.xml` wires it to the IME language indicator) with
-    // zero corpus call sites, and benilla has no IME — so nothing here could ever fire it, and
-    // `SCRIPT_KINDS`' rule is that a name we cannot fire stays out. The refusal is the honest
-    // answer; the row is the price of saying it out loud.
+    // **`OnInputLanguageChanged` left this census with decision 2192**, and `SCRIPT_KINDS`' doc is
+    // where its leaving is said out loud. It is a real 1.12 slot (`FloatingChatFrame.xml` wires
+    // it to the IME language indicator) with zero corpus call sites — but the reference's own
+    // no-IME client ACCEPTS the name and never fires it, and the 2026-09-14 TWoW run showed the
+    // stock chain reading as wanting the name to exist: the shipped `ChatFrameEditBoxTemplate`
+    // declared it (that run's only `SetScript` refusal) and TWoW's `ChatEdit_OnShow` calls
+    // `ChatEdit_OnInputLanguageChanged()` directly at every box open. Raising was the divergence
+    // from the reference, not the silence; the refusal was the old answer and this row was the
+    // price of saying it out loud. The name now sits in `SCRIPT_KINDS` as its one measured
+    // exception — accepted, stored, fired by nothing.
     //
-    // **`gxRefresh` stays out permanently too** (decision 2177). The stock VIDEO options window
+    // **`gxRefresh` stays out permanently** (decision 2177). The stock VIDEO options window
     // reads it in `OptionsFrameRefreshDropDown_OnLoad` — one of the two `<OnLoad>` paths that run
     // on the spot when that file loads — and benilla does not register it, because a refresh rate
     // is only selectable through an exclusive mode-set and this client ships none on any target
@@ -1377,7 +1382,7 @@ fn a_clean_world_entry_raises_only_the_warnings_we_have_named() {
     // reference's own "no rates available" sentinel, the dropdown greys itself, and nothing ever
     // reads the variable. Registering it would be a key with no reader — 1134 §4's silent
     // pretence — so the warn-once is the honest answer and this row is the price of saying so.
-    const KNOWN: [&str; 2] = ["OnInputLanguageChanged", "unknown CVar 'gxRefresh'"];
+    const KNOWN: [&str; 1] = ["unknown CVar 'gxRefresh'"];
 
     let unexpected: Vec<String> = script
         .diagnostics()

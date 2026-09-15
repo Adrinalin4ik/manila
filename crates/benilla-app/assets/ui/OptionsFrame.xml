@@ -1194,6 +1194,45 @@
             [6] = "RowBrightness", [9] = "RowWeatherDensity",
         }
         --
+        -- **The bounds those rows resolve to when the chain does not carry the table** (decision
+        -- 2193, the TWoW gap of 2026-09-14): a chain whose `OptionsFrame.lua` is the reference's own
+        -- defines `OptionsFrameSliders` and everything below reads it; a chain whose patch
+        -- REPLACED that file (TWoW's is a whole category/search options system that defines no
+        -- such table) left the five reads below indexing a nil — every Graphics row OnLoad,
+        -- plus the OnShow re-apply, one `ui_script` error each, on the 2026-09-14 run. The live
+        -- table stays the PREFERRED source wherever it exists, because the pfUI conduit is
+        -- load-bearing: `hdgraphic` writes `OptionsFrameSliders[3].maxValue = 15` and the OnShow
+        -- loop must honor it — and on a chain without the table an addon's write could only
+        -- index the same nil, so the vendored rows are the only bounds there are. Rows 1/2/3/9
+        -- are the reference's own numbers (transcribed at 2177); row 6's RANGE is the wow-re
+        -- carve's `[-0.5, 0.5]` (the GetGamma/SetGamma pair's `1 - gamma`, centre 0.0 — the
+        -- cvars' own note). Row 6's STEP is ours, not the reference's: 0.05, twenty stops over
+        -- the 1.0-wide travel, in the stock table's own stop-count family (its rows run 3, 4,
+        -- 10 and 36 stops); pin it against the stock file's row when one is at hand.
+        BENILLA_GRAPHICS_SLIDER_BOUNDS = {
+            [1] = { 0.64, 1.0, 0.01 },
+            [2] = { 177, 777, 60 },
+            [3] = { 0, 2, 1 },
+            [6] = { -0.5, 0.5, 0.05 },
+            [9] = { 0, 3, 1 },
+        }
+        -- Row i's bounds, one door for all five OnLoads and the OnShow re-apply alike: the
+        -- reference's table when the chain carries it, the vendored row above when it does not.
+        -- It returns THREE values, so the call-site law matters: a multiple-return call expands
+        -- only in a call's FINAL argument position — anywhere earlier, Lua truncates it to one
+        -- value and the caller's next argument lands in MAX's seat (`Setup(self,
+        -- BenillaGraphicsSliderBounds(2), "raw")` would pass "raw" as max and nil as step). So:
+        -- the helper as a call's last argument, or — the shape every row below uses — capture
+        -- into locals first. Do not inline it mid-argument-list again.
+        function BenillaGraphicsSliderBounds(i)
+            local t = OptionsFrameSliders and OptionsFrameSliders[i]
+            if ( t ) then
+                return t.minValue, t.maxValue, t.valueStep
+            end
+            local b = BENILLA_GRAPHICS_SLIDER_BOUNDS[i]
+            return b[1], b[2], b[3]
+        end
+        --
         -- **Both WorldDetail verbs are bound** (2163), which is what makes pfUI's module RUN
         -- rather than merely load: it hooks `SetWorldDetail`/`GetWorldDetail`, and hooking a nil
         -- took its extended arm down at the first call. `SetWorldDetail` is `0x488dd0`'s carve —
@@ -2916,9 +2955,7 @@
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "uiScale", "UI Scale",
                                                     "OPTION_TOOLTIP_UI_SCALE")
-                                                OptionsSliderRow_Setup(self, OptionsFrameSliders[1].minValue,
-                                                    OptionsFrameSliders[1].maxValue,
-                                                    OptionsFrameSliders[1].valueStep)
+                                                OptionsSliderRow_Setup(self, BenillaGraphicsSliderBounds(1))
                                                 -- era registers its uiscale row CommitFlag.Apply
                                                 -- (Graphics.lua l.684): the one row whose live
                                                 -- write would rescale the very slider mid-drag —
@@ -2934,9 +2971,14 @@
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "farclip", "Terrain Distance",
                                                     "OPTION_TOOLTIP_FARCLIP")
-                                                OptionsSliderRow_Setup(self, OptionsFrameSliders[2].minValue,
-                                                    OptionsFrameSliders[2].maxValue,
-                                                    OptionsFrameSliders[2].valueStep, "raw")
+                                                -- Local capture, not an inline call: a
+                                                -- multiple-return call in a NON-final argument
+                                                -- position truncates to one value, so
+                                                -- `Setup(self, BenillaGraphicsSliderBounds(2),
+                                                -- "raw")` would pass "raw" as MAX and nil as
+                                                -- STEP. Capture first, then pass the three.
+                                                local min, max, step = BenillaGraphicsSliderBounds(2)
+                                                OptionsSliderRow_Setup(self, min, max, step, "raw")
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowWorldDetail" inherits="OptionsSliderRowTemplate">
@@ -2950,9 +2992,8 @@
                                                 -- The stop names are the era preset ladder's (its
                                                 -- quality dropdowns say Low/Medium/High); 1.12's
                                                 -- slider had no stop labels to quote.
-                                                OptionsSliderRow_Setup(self, OptionsFrameSliders[3].minValue,
-                                                    OptionsFrameSliders[3].maxValue,
-                                                    OptionsFrameSliders[3].valueStep, nil,
+                                                local min, max, step = BenillaGraphicsSliderBounds(3)
+                                                OptionsSliderRow_Setup(self, min, max, step, nil,
                                                     { "Low", "Medium", "High" })
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -2987,9 +3028,8 @@
                                                 OptionsNumFuncRow_OnLoad(self, GetGamma, SetGamma,
                                                     tostring(1 - gd), "Brightness",
                                                     "BENILLA_TOOLTIP_BRIGHTNESS")
-                                                OptionsSliderRow_Setup(self, OptionsFrameSliders[6].minValue,
-                                                    OptionsFrameSliders[6].maxValue,
-                                                    OptionsFrameSliders[6].valueStep, "travel")
+                                                local min, max, step = BenillaGraphicsSliderBounds(6)
+                                                OptionsSliderRow_Setup(self, min, max, step, "travel")
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- Weather Intensity (2181) — the reference's slider 9,
@@ -3021,9 +3061,8 @@
                                                 -- the two ENDS -- but every slider row in this kit
                                                 -- carries a readout, and "2" is the one thing that
                                                 -- seat could say that means nothing to a player.
-                                                OptionsSliderRow_Setup(self, OptionsFrameSliders[9].minValue,
-                                                    OptionsFrameSliders[9].maxValue,
-                                                    OptionsFrameSliders[9].valueStep, nil,
+                                                local min, max, step = BenillaGraphicsSliderBounds(9)
+                                                OptionsSliderRow_Setup(self, min, max, step, nil,
                                                     { "Minimal", "Low", "Medium", "Full" })
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -3123,10 +3162,13 @@
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>
-                                    <!-- Re-apply the slider bounds from the REFERENCE's OptionsFrameSliders every time the page is shown.
-                                         The rows read the table at OnLoad, which is long before any addon runs; an addon that
-                                         writes a bound (pfUI's hdgraphic raises Environment Detail's maxValue to 15) would
-                                         otherwise never move the slider it just rewrote. The reference does the same loop in
+                                    <!-- Re-apply the slider bounds every time the page is shown — off the
+                                         REFERENCE's OptionsFrameSliders where the chain carries the table, off the vendored
+                                         rows where it does not (BenillaGraphicsSliderBounds, the one door both share).
+                                         The rows resolve their bounds at OnLoad, which is long before any addon runs;
+                                         an addon that writes a bound (pfUI's hdgraphic raises Environment Detail's
+                                         maxValue to 15) would otherwise never move the slider it just rewrote. The
+                                         reference does the same loop in
                                          OptionsFrame_Load; ours lives here rather than under that name because our page
                                          implements almost none of the rest of that function's contract and publishing a
                                          reference name over a partial body is how a gap hides.
@@ -3136,11 +3178,11 @@
                                     <Scripts>
                                         <OnShow>
                                             for i, name in BENILLA_GRAPHICS_SLIDER_ROWS do
-                                                local info = OptionsFrameSliders[i]
                                                 local row = getglobal(this:GetName() .. name)
-                                                if ( info and row ) then
-                                                    OptionsSliderRow_Setup(row, info.minValue, info.maxValue,
-                                                        info.valueStep, row.fmt, row.stops)
+                                                if ( row ) then
+                                                    local min, max, step = BenillaGraphicsSliderBounds(i)
+                                                    OptionsSliderRow_Setup(row, min, max, step,
+                                                        row.fmt, row.stops)
                                                 end
                                             end
                                         </OnShow>

@@ -460,6 +460,12 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// names the reference has that we do NOT fire stay OUT, with the reason recorded at
 /// [`crate::script::object::events_regions::set_script`].
 ///
+/// One measured exception (decision 2192), the one row below that nothing fires:
+/// `OnInputLanguageChanged`, the reference's own accept-and-never-fire slot on a no-IME
+/// client. The shipped TWoW ChatFrameEditBoxTemplate declares it and its handler still
+/// runs — TWoW calls the function directly from `ChatEdit_OnShow` — so raising was the
+/// divergence from the reference, not the silence; the row's own comment carries the case.
+///
 /// **This list is FLAT; the reference's set is per widget type** (RF-0028's script-name→slot
 /// resolvers: base map `0x76a0d0` + the type's own additions — a `<Frame>` has no `OnClick`). That
 /// divergence is deliberate and measured, and the 1751 migration has been shrinking the debt it
@@ -473,7 +479,7 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// corpus call sites across 91 addons); it removes working behaviour from the 23 sites that remain,
 /// so it is still a change to make deliberately rather than as a side effect of widening this list
 /// — but the FrameXML half of "with FrameXML fixed first" is most of the way there now.
-const SCRIPT_KINDS: [&str; 39] = [
+const SCRIPT_KINDS: [&str; 40] = [
     "OnLoad",
     "OnEvent",
     "OnUpdate",
@@ -504,6 +510,18 @@ const SCRIPT_KINDS: [&str; 39] = [
     "OnCursorChanged",
     "OnEditFocusGained",
     "OnEditFocusLost",
+    // The EditBox's IME slot (RF-0082 §2's family): the one row in this list nothing fires, and
+    // the const's law above is the record of why that is measured acceptance and not a gap. The
+    // reference ACCEPTS the handler on every client and fires it only on one with an
+    // input-method switch — never on a single-layout system, which is exactly this host's
+    // posture (`GetInputLanguage` answers "ROMAN" forever and `ToggleInputLanguage` moves
+    // nothing; the editbox methods' own comments). The shipped TWoW ChatFrameEditBoxTemplate
+    // declares it — the 2026-09-14 TWoW run's only `SetScript` refusal — and the handler is not
+    // the silently-dead trap this list's rule guards against, because TWoW's `ChatEdit_OnShow`
+    // calls `ChatEdit_OnInputLanguageChanged()` directly at every box open (ChatFrame.lua
+    // l.1890), a path the reference itself takes for the same language-label refresh. The
+    // engine fires nothing for it and never will: there is no input-method switch to fire.
+    "OnInputLanguageChanged",
     "OnHorizontalScroll",
     "OnVerticalScroll",
     "OnScrollRangeChanged",

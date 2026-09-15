@@ -154,7 +154,11 @@ fn load_entry(s: &UiScript, entry: &str, strict_templates: bool, no_warnings: bo
     // to bring it too, and brings the reference's own file rather than a transcription of the
     // three rows: a stand-in here would be a second copy of numbers whose whole point is that
     // they are no longer ours. Seated BEFORE the load, for the same reason MultiActionBars is:
-    // the rows index it from inside this very load walk.
+    // the rows index it from inside this very load walk. (Since decision 2193 the rows no longer
+    // DIE without it — `BenillaGraphicsSliderBounds` falls back to vendored bounds when the table
+    // is nil, which is the case on a 1.18 chain whose own optionsframe.lua declares no
+    // `OptionsFrameSliders` — but the live table stays the preferred source everywhere it exists,
+    // this seating included, because it is what a pfUI Graphics-row conduit writes into.)
     if path
         .rsplit('/')
         .next()

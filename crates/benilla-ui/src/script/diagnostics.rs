@@ -137,13 +137,17 @@ pub(crate) struct DiagnosticLog {
 }
 
 impl DiagnosticLog {
-    /// Record one failure, collapsing it onto an existing identical row if there is one.
+    /// Record one failure, collapsing it onto an existing identical row if there is one. Answers
+    /// whether **this call created the row** — `false` when an identical row was only bumped —
+    /// because the warning channel's host half ([`Model::record_warning`]) reports the first
+    /// occurrence of a message only and leaves the repeats to the row's `count`, so it needs
+    /// exactly that answer.
     ///
     /// The dedupe scan is linear over at most [`DIAGNOSTIC_LOG_CAP`] rows and runs on the failure
     /// path only. The pathological caller is an `OnUpdate` raising at frame rate, where the scan
     /// hits its row and returns — cheaper by far than the `String` allocation it saves, and
     /// arithmetic beside the `mlua` error formatting that produced the message in the first place.
-    pub(crate) fn record(&mut self, kind: DiagnosticKind, message: &str) {
+    pub(crate) fn record(&mut self, kind: DiagnosticKind, message: &str) -> bool {
         if let Some(row) = self
             .rows
             .iter_mut()
@@ -152,7 +156,7 @@ impl DiagnosticLog {
             // Saturating rather than wrapping: a count that rolls over to 0 reads as "this never
             // happened", which is the one answer that is never true here.
             row.count = row.count.saturating_add(1);
-            return;
+            return false;
         }
         self.seq += 1;
         if self.rows.len() == DIAGNOSTIC_LOG_CAP {
@@ -164,6 +168,7 @@ impl DiagnosticLog {
             message: message.to_string(),
             count: 1,
         });
+        true
     }
 
     /// Every retained row, oldest first.

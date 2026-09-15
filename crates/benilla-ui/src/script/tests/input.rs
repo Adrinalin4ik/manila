@@ -621,6 +621,12 @@ fn the_unfired_script_kinds_still_raise_rather_than_silently_accepting() {
         // (`editbox::drain_cursor_changed`), which is the rule applied in the other direction
         // again — its law lives in `script::editbox::tests`.
         //
+        // `OnInputLanguageChanged` left with decision 2192, and unlike every other departure
+        // above nothing fires it — it is the ONE measured exception `SCRIPT_KINDS`' law carries:
+        // the reference's own no-IME client accepts the slot and never raises it, and the
+        // shipped TWoW chain wants the name to exist (`ChatEdit_OnShow` calls the handler
+        // directly at every box open). The case is at the row in `SCRIPT_KINDS`.
+        //
         // 2.0's secure-frame system — no such slot exists in any 1.12 resolver.
         "OnAttributeChanged",
         // Real 1.12 slots we do not fire, and zero corpus call sites. (`OnUpdateModel` and
@@ -629,7 +635,6 @@ fn the_unfired_script_kinds_still_raise_rather_than_silently_accepting() {
         // horizontal offset pair, which fires it — `script::tests::scrollframe`.)
         "OnHyperlinkEnter",
         "OnMessageScrollChanged",
-        "OnInputLanguageChanged",
     ] {
         let err = s
             .run(&format!(r#"Raiser:SetScript("{name}", function() end)"#))

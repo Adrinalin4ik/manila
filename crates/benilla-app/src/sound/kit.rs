@@ -91,6 +91,14 @@ pub(crate) struct SoundKits {
     /// Turtle server references kit ids its client DBC does not ship, and a looping GO event
     /// re-fires every cycle: this set is what keeps that from being a per-frame warn.
     reported_missing: HashSet<u32>,
+    /// Stream-URL kit files already reported — TWoW's internet-radio rows: a SoundEntries file
+    /// whose path is an http(s) URL rather than a chain path (the Everlook `.radio` stations,
+    /// where the server answers the chat command by pushing `SMSG_PLAY_MUSIC` for the station's
+    /// kit, and re-pushes the same kit every 5 s). The real client streams the URL off the
+    /// network; this one reads the patch chain, so the play can only fail — and this set keeps
+    /// the failure one line per URL, the same law as `reported_missing` beside it. The drop
+    /// itself lives in `zone`'s `start_music_stream`.
+    reported_url: HashSet<String>,
 }
 
 impl SoundKits {
@@ -1093,6 +1101,7 @@ impl SoundKits {
             pick: HashMap::new(),
             rng: Rng(0x9e37_79b9),
             reported_missing: HashSet::new(),
+            reported_url: HashSet::new(),
         }
     }
 
@@ -1115,6 +1124,12 @@ impl SoundKits {
         let pick = self.pick_variation(kit_id, &weights);
         let path = self.catalog.get(kit_id)?.files[pick].0.clone();
         Some((path, volume))
+    }
+
+    /// Note a stream-URL kit file and answer whether this is its first report — the URL arm of
+    /// `start_music_stream` in `zone.rs`, the same first-miss-only law as `reported_missing`.
+    pub(super) fn note_stream_url(&mut self, url: &str) -> bool {
+        self.reported_url.insert(url.to_string())
     }
 
     /// `0x45bb70`: weighted-random pick over the kit's *remaining* weight pool, refilled when

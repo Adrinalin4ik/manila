@@ -653,6 +653,21 @@ fn start_music_stream(
     let Some((path, kit_vol)) = kits.pick_stream(kit_id) else {
         return false;
     };
+    // TWoW's internet-radio rows: a SoundEntries file whose path is a stream URL, not a chain
+    // path — the Everlook stations (`.radio <station>` in chat has the server answer with
+    // `SMSG_PLAY_MUSIC` for the station's kit, and re-push the same kit every 5 s). The
+    // reference client streams the URL off the network; this one reads the patch chain, so the
+    // read below can only fail — once per 5 s, for as long as the station is on. Report the
+    // first miss per URL (the `reported_missing` law, one set over in `SoundKits`) and drop the
+    // play: like a file-less kit, the slot keeps whatever the zone cycle owns, so zone music
+    // keeps playing while "tuned in" — the interim until real streaming (icecast over HTTP →
+    // incremental feed; the mixer's streams are whole-file today).
+    if path.starts_with("http://") || path.starts_with("https://") {
+        if kits.note_stream_url(&path) {
+            warn!("zone music: {path} — internet-radio stream URL, not streamed yet (dropped)");
+        }
+        return false;
+    }
 
     // **Native loads inline; wasm hands both halves to the browser.** The two targets differ here
     // and nowhere else in this file — see `super::web_load`'s header for the 206 ms doorway that

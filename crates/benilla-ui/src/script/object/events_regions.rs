@@ -355,10 +355,20 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 ///   frame/attribute system; there is no such slot in any 1.12 resolver. That addon is asking for a
 ///   later client and should hear so.
 /// * **`OnHyperlinkEnter` · `OnHyperlinkLeave` · `OnMessageScrollChanged` ·
-///   `OnMovieFinished`/`ShowSubtitle`/`HideSubtitle` · `OnInputLanguageChanged`** — **raising.**
-///   Real 1.12 slots that we do not fire, and measured at **zero** call sites across the
-///   218-addon corpus, so there is nothing to weigh against the trap: they land when their
-///   mechanism does.
+///   `OnMovieFinished`/`ShowSubtitle`/`HideSubtitle`** — **raising.** Real 1.12 slots that we
+///   do not fire, and measured at **zero** call sites across the 218-addon corpus, so there is
+///   nothing to weigh against the trap: they land when their mechanism does.
+/// * **`OnInputLanguageChanged`** — **accepted, stored, fired by nothing: the reference's own
+///   no-IME-client behaviour, taken deliberately** (the one exception `SCRIPT_KINDS`' law
+///   records, decision 2192). The EditBox's IME slot (RF-0082 §2): the real client takes the handler
+///   on every client and fires it only where an input method can actually change, and a host whose
+///   `GetInputLanguage` answers "ROMAN" forever is that client. It left this raising list when
+///   the shipped TWoW `ChatFrameEditBoxTemplate` declared it and died at load (the 2026-09-14
+///   TWoW run's only `SetScript` refusal) — and it is not the silent-death trap this rule
+///   exists for, because TWoW's `ChatEdit_OnShow` calls
+///   `ChatEdit_OnInputLanguageChanged()` directly at every box open (ChatFrame.lua l.1890), so
+///   the handler runs off a path the reference itself uses for the same label refresh. The
+///   engine fires nothing for it: there is no input-method switch to fire it with.
 /// * **`OnHorizontalScroll`** — **accepted, because `SetHorizontalScroll` fires it.** It was on
 ///   the line above while "horizontal scroll isn't modeled at all", which stopped being true when
 ///   the ScrollFrame's horizontal offset pair landed beside the vertical one

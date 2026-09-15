@@ -173,6 +173,15 @@ Interface\FrameXML\UIParent.xml
 # `$parentNormalTexture`, 37x37) — which is what makes this the safest of the foundational swaps
 # rather than the widest: everything that inherits it asks for the same four names.
 Interface\FrameXML\ItemButtonTemplate.xml
+# ══ THE DEBUG STATS FRAME — the stock one, off the player's chain (its own toc l.52) ═════════
+# StatsFrame.xml, carrying its own StatsFrame.lua through the xml's <Script file> include: the
+# hidden DIALOG-strata frame whose one line (StatsFrameText, refreshed every 0.5 s by its
+# OnUpdate) is `GetDebugStats()` — the one host verb the file needs, bound in benilla-ui's
+# client verbs beside `GetFramerate`. Stock seat: TWoW's FrameXML.toc l.52, right between
+# ItemButtonTemplate.xml above and SpellBookFrame.xml below, the same seat stock 1.12's own
+# toc gives it. Nothing else references the frame — `ToggleStats` is the file's own global, so
+# a chain that does not carry the file loses only the frame, never a dependency.
+Interface\FrameXML\StatsFrame.xml
 # ══ THE MONEY KIT — the reference's own, off the player's chain (1751; decision 1962) ══
 # MoneyFrame.lua + MoneyFrame.xml (two rows: the .xml sources no .lua): MoneyTypeInfo, the
 # MoneyFrame_* API, MoneyFrameTemplate / SmallMoneyFrameTemplate. Needs only Fonts, and must come
@@ -1299,9 +1308,10 @@ Interface\FrameXML\TutorialFrame.xml
 # which stays last on purpose: in TWoW's toc these load after ALL stock rows, and the game menu
 # is ours. The host surface the whole block needs was bound above it; the two genuine gaps it
 # had are host verbs now (`StopMusic`, for Everlook's mute button; `CameraZoomOut`, for the
-# barbershop's chair-side camera). One TWoW row is deliberately absent — StatsFrame.xml (its
-# toc l.52, between ItemButtonTemplate.xml and SpellBookFrame.xml) is TODO: it lives in the
-# lettered-patch merge (patch-2.mpq) and is not in the extraction yet.
+# barbershop's chair-side camera). StatsFrame.xml — the one row this header used to defer as
+# living in the lettered-patch merge, not yet extracted — is on the manifest since the full
+# chain extraction landed: at its own toc line's seat beside ItemButtonTemplate.xml, with
+# `GetDebugStats` bound beside `GetFramerate` to cover its one host call.
 
 # Hooks.lua (its l.95): TWoW's tooltip hooks — `GameTooltip:SetBagItem` / `:SetUnit` wrapped for
 # the gear-inspection pass TWoW runs, with a hidden HooksScanTooltip doing the set-bonus scan

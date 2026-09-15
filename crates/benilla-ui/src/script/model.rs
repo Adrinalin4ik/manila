@@ -1846,13 +1846,24 @@ impl Model {
     /// `inherits=`, an unresolved anchor, an unregistered CVar — which is precisely the class the
     /// diagnostic log was built for.
     ///
+    /// The host half carries only a message's FIRST occurrence — the retained row's `count` is
+    /// the copy that says it went on happening, the same collapse law on both channels. Without
+    /// the gate a caller in a loop puts one terminal line on the screen per raise: the TWoW run
+    /// of 2026-09-14 logged 242 identical `SetOwner` lines off Turtle_ShopUI's per-entry scan
+    /// tooltip, against one retained row already carrying ×242. The error channel keeps
+    /// per-occurrence dispatch everywhere — `geterrorhandler` seeing every raise is the
+    /// reference's own law, not a convenience.
+    ///
     /// Its sibling is [`Self::warn_host_only`], for the one message already retained under a
     /// truer kind.
     pub(crate) fn record_warning(&mut self, msg: impl Into<String>) {
         let msg = msg.into();
-        self.diagnostics
+        let new = self
+            .diagnostics
             .record(super::diagnostics::DiagnosticKind::Warning, &msg);
-        self.warnings.push(msg);
+        if new {
+            self.warnings.push(msg);
+        }
     }
 
     /// The host channel **alone** — for a message that is already retained under a kind that says
