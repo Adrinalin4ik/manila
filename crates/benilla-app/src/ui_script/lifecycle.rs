@@ -509,9 +509,14 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
 }
 
 /// The entry load's opening: the identity the addons see, the realm and player the file scopes
-/// read, and the instruction bound (the reference FrameXML is a manifest entry now). Shared by the
-/// sliced entry load and the one-shot [`load_ingame_ui_on_world_entry`]; the *why* of each line
-/// lives on the one-shot below.
+/// read, the four seeds of decision 2241, the raster seam, and the instruction bound (the
+/// reference FrameXML is a manifest entry now).
+///
+/// **It is the SLICED path's opening only.** It used to be shared with the one-shot
+/// [`load_ingame_ui_on_world_entry`], which is why the *why* of most lines still lives down
+/// there — upstream's 2226/2241 rewrite inlined its own copy, so the two now run the same steps
+/// from two places. Anything added to one belongs in the other: a step left on upstream's path
+/// alone simply does not happen in this fork, and the keybinding table is what proved it.
 fn entry_prepare(world: &mut World, script: &mut UiScript) -> (Option<(String, String)>, bool) {
     let identity = world
         .get_resource::<crate::char_select::Roster>()
@@ -535,6 +540,23 @@ fn entry_prepare(world: &mut World, script: &mut UiScript) -> (Option<(String, S
                 .get_resource::<crate::cvars::CvarPersist>()
                 .is_none_or(crate::cvars::CvarPersist::addon_version_check)
         });
+    // **The four seeds of decision 2241, which the sliced path needs exactly as the one-shot
+    // does.** Upstream moved them out of per-VM `Update` claims and into its single exclusive
+    // load call, on the premise that "the whole interface load happens inside one exclusive call
+    // that precedes the first `Update`". That premise does not hold here: this fork spreads the
+    // load across frames, because the browser has one thread and a single burst stalls it.
+    //
+    // Left only on upstream's path, every one of them silently did not happen on ours — and the
+    // old `Update` systems that used to do the work are gone with the rewrite. The keybinding
+    // table was the visible half: the Key Bindings window enumerates `GetNumBindings`, so it
+    // opened with no rows at all, and an addon's `SetBinding` on a stock command was a silent nil.
+    // The other three fail the same way and quieter — `General` filed as a custom channel, the
+    // `[Language]` prefix gate unset, and `GetMapContinents`/`GetMapZones` empty at the file
+    // scope where Astrolabe builds its whole zone table.
+    crate::ui_chat::seed_zone_channel_catalog(world, script);
+    crate::bindings::seed_bindings_for_vm(world, script);
+    crate::ui_unit::seed_default_language(world, script);
+    crate::ui_world_map::seed_world_map_catalog(world, script);
     // The VM's raster seam — screen size and font engine — before the first `<OnLoad>` runs
     // (decision 2028); the one-shot's own call carries the why. It belongs on this path for the
     // same reason and one more: the sliced load spans frames, so a file loaded in slice one would
