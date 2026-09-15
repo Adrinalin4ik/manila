@@ -374,6 +374,12 @@ pub struct UnitState {
     /// the `"target"` token; other tokens leave the default `false` (→ nil), which is right for
     /// every current caller (`TargetFrame_CheckLevel`'s difficulty-color gate).
     pub can_attack: bool,
+    /// The player may help this unit (`UnitCanAssist("player", unit)`) — app-fed from
+    /// `CanAssist 0x6066f0`, the same predicate that gates whose buffs are visible
+    /// (`ui_aura::buffs_visible_on`) and which side a friendly scan accepts. Fed for the same
+    /// tokens [`Self::can_attack`] is, and for the same reason: the predicate needs resources
+    /// `snapshot`'s other call sites do not hold.
+    pub can_assist: bool,
     /// This token resolves to a **TYPEID_CORPSE world object** — `UnitIsCorpse`'s whole
     /// predicate (`0x5161c0`, §5-VERIFIED: a pure object-type check, no health test; a dead
     /// mob/player is NOT a corpse). No feed sets it yet — corpse objects (a released player's

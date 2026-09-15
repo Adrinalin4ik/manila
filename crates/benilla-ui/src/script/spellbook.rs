@@ -207,6 +207,13 @@ impl super::UiScript {
         std::mem::take(&mut self.model_mut().spell_stop)
     }
 
+    /// Drain the `AttackTarget()` trigger: `true` if a script asked to start or stop melee since
+    /// the last call. The app spends it through the same arm the ATTACK_TARGET binding runs, so
+    /// the key and the script cannot diverge about what "attack" means.
+    pub fn take_attack_target(&mut self) -> bool {
+        std::mem::take(&mut self.model_mut().attack_target)
+    }
+
     /// Push whether the app's spell-targeting cursor mode is active (decision 0792) — what
     /// `SpellIsTargeting()` reads and `SpellStopTargeting()` gates on. Pushed each frame by the
     /// app's targeting feed (`benilla::ui_action`), before the input pass runs the ESC chain.
@@ -798,6 +805,25 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             } else {
                 Ok(Value::Nil)
             }
+        })?,
+    )?;
+
+    // AttackTarget() — 1.12's melee toggle, the Lua door onto the same `0x612df0` the
+    // ATTACK_TARGET binding (default `T`) goes through: the actor refusal first, then start the
+    // swing on the current target or acquire the nearest one. Registered here beside the other
+    // cast-lifecycle triggers because it shares their shape — a flag the app drains — and the
+    // resolution stays in the app, which is the only half that can see the target and the ladder.
+    //
+    // **Returns nothing**, and this one is not a guess: nothing in the shipped FrameXML tests its
+    // value, and the callers in the wild (`AutoAttack`'s `StopAttacking`) call it as a statement.
+    // Inventing a 1/nil would be a claim about a return we have not read.
+    g.set(
+        "AttackTarget",
+        lua.create_function(|lua, ()| {
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .attack_target = true;
+            Ok(())
         })?,
     )?;
 

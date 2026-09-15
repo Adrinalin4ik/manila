@@ -304,6 +304,35 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // UnitCanAssist (`0x516bb0`) → 1/nil — the assist twin of the binding above, delegating to
+    // `CanAssist 0x6066f0` through [`UnitState::can_assist`]. The engine predicate is byte-derived
+    // (`crate`-side `target::relations::can_assist`) and already gates buff visibility; this only
+    // opens the door Lua asks through. ShaguTweaks' `CastSpellByName` hook is a live caller, and
+    // the shipped FrameXML is not — which is why it went missing until an addon asked.
+    //
+    // **The argument gate is taken from [`UnitCanAttack`]'s shape, not read off `0x516bb0`.** Both
+    // positions raise on a non-string here because that is what the sibling does and what every
+    // observed caller passes (`UnitCanAssist("player", "target")`); if the reference turns out to
+    // gate one position only, this is stricter than it, and that is the direction a wrong guess
+    // should err in — a raise names itself, a silent nil does not.
+    g.set(
+        "UnitCanAssist",
+        lua.create_function(|lua, (a, b): (Value, Value)| {
+            let a = Some(crate::script::binding_abi::string_arg(
+                lua,
+                a,
+                r#"Usage: UnitCanAssist("unit", "otherUnit")"#,
+            )?);
+            let b = Some(crate::script::binding_abi::string_arg(
+                lua,
+                b,
+                r#"Usage: UnitCanAssist("unit", "otherUnit")"#,
+            )?);
+            let token = pick_unit_token(&a, &b);
+            unit_predicate(lua, &token, |u| u.can_assist)
+        })?,
+    )?;
+
     // GetQuestGreenRange (`0x4e17d0`, §5-VERIFIED 2026-07-17) — the green→grey boundary the
     // FrameXML `GetDifficultyColor` buckets by (ref QuestLogFrame.lua l.593):
     // `GRAYBAND[min(playerLevel/5, 19)]` off the binary's `0x8076c0` table, byte-identical to

@@ -91,12 +91,21 @@ pub(super) fn item_action_route(
 /// own shape (`AttackTarget` and `UseAction`'s SPELL_ATTACK both land in `0x612df0`).
 pub(super) fn attack_target_binding(
     binds: Res<crate::bindings::BindingsState>,
+    script: Option<NonSendMut<UiScript>>,
     targeting: cast_target::CastTargeting,
     mut acquire: MessageWriter<crate::target::AttackNearestRequest>,
     mut ui_errors: ResMut<UiErrorKeys>,
     mut ladder: CastLadder,
 ) {
-    if !binds.fired(crate::bindings::cmd::ATTACK_TARGET) {
+    // Two doors, one arm: the key through the binding table, and `AttackTarget()` through the Lua
+    // global. The script flag is drained **unconditionally**, ahead of the key test — a `take_` on
+    // a `!` short-circuit would leave a script's request sitting in the model until the next time
+    // somebody pressed the key, which is a stale attack rather than a dropped one.
+    let scripted = match script {
+        Some(mut s) => s.take_attack_target(),
+        None => false,
+    };
+    if !scripted && !binds.fired(crate::bindings::cmd::ATTACK_TARGET) {
         return;
     }
     if attack_actor_refusal(

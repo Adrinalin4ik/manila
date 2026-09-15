@@ -1040,6 +1040,23 @@ pub(crate) struct UnitStores<'w, 's> {
     removed: RemovedComponents<'w, 's, ObjectStore>,
 }
 
+/// A guid's streamed descriptor, whichever entity holds it — `CanAssist`'s owner chase, and the
+/// twin of `target::scan`'s own `store_of`.
+///
+/// It clones, where the scanner borrows, because the predicate's parameter is
+/// `FnOnce(u64) -> Option<ObjectStore>` and this feed's call sites already hold the query
+/// immutably for the unit being judged. The cost is one descriptor copy on the one clause that
+/// asks for it — a unit that is **not** player-controlled — and nothing at all otherwise, since
+/// `FnOnce` means the closure is never run when the earlier clauses decide.
+fn store_of(
+    index: &Option<Res<crate::net::GuidIndex>>,
+    stores: &Query<&'static ObjectStore>,
+    guid: u64,
+) -> Option<ObjectStore> {
+    let entity = *index.as_ref()?.0.get(&guid)?;
+    stores.get(entity).ok().cloned()
+}
+
 /// Build a unit snapshot from a streamed object's descriptor (decision 0061's `ObjectFields`) plus
 /// its cache-resolved name and its `UnitReaction` value (`1..8`, or `0` for tokens whose reaction we
 /// don't resolve — everything but `"target"`; see [`feed_units`]).
@@ -1771,6 +1788,17 @@ fn feed_units(
             &reputations,
             self_pair.map(|(s, _)| s),
         );
+        // `CanAssist 0x6066f0`'s twin, for `UnitCanAssist("player","target")`. The owner chase is
+        // the predicate's own third clause: a unit that is not player-controlled is judged on its
+        // OWNER's PvP flag, so the closure hands it whatever descriptor that guid is streamed on —
+        // the same lookup `target::scan`'s friendly side does (`store_of`).
+        s.can_assist = crate::target::can_assist(
+            Some(store),
+            factions.as_deref(),
+            &reputations,
+            self_pair.map(|(s, _)| s),
+            |owner| store_of(&index, &stores.all, owner),
+        );
         // `GetGuildInfo("target")` — see the player leg. PLAYER_GUILDID/RANK are PUBLIC, which is
         // the whole reason the binding is per-unit rather than per-player.
         s.guild = crate::ui_guild::unit_guild(&store.0, &mut guild, &commands);
@@ -1821,6 +1849,13 @@ fn feed_units(
                 factions.as_deref(),
                 &reputations,
                 self_pair.map(|(s, _)| s),
+            );
+            s.can_assist = crate::target::can_assist(
+                Some(store),
+                factions.as_deref(),
+                &reputations,
+                self_pair.map(|(s, _)| s),
+                |owner| store_of(&index, &stores.all, owner),
             );
             enrich_unit(
                 &mut s,
@@ -1909,6 +1944,13 @@ fn feed_units(
                 factions.as_deref(),
                 &reputations,
                 self_pair.map(|(s, _)| s),
+            );
+            s.can_assist = crate::target::can_assist(
+                Some(store),
+                factions.as_deref(),
+                &reputations,
+                self_pair.map(|(s, _)| s),
+                |owner| store_of(&index, &stores.all, owner),
             );
             enrich_unit(
                 &mut s,

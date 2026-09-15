@@ -1995,3 +1995,56 @@ fn unit_on_taxi_is_one_or_nil_and_raises_the_reference_usage() {
         "the gate's own message, not mlua's type error: {err}"
     );
 }
+
+/// `UnitCanAssist` reads the app-fed `CanAssist 0x6066f0` verdict off the non-player token, and
+/// `AttackTarget()` leaves one drainable request behind.
+///
+/// The two live together because they arrived together, for one reason: an addon asked for them
+/// and got `nil`. ShaguTweaks' `CastSpellByName` hook calls `UnitCanAssist("player","target")` on
+/// every `/cast`, and AutoAttack calls `AttackTarget()` out of a combat-state handler — so a macro
+/// raised a Lua error and the traceback named our engine, not the addon.
+#[test]
+fn can_assist_and_attack_target_bindings() {
+    let mut s = UiScript::new().unwrap();
+    // Absent verdict → nil, the falsy leg every caller branches on.
+    s.set_unit(
+        "target",
+        Some(UnitState {
+            exists: true,
+            ..Default::default()
+        }),
+    );
+    assert!(s
+        .eval::<bool>(r#"return UnitCanAssist("player", "target") == nil"#)
+        .unwrap());
+    s.set_unit(
+        "target",
+        Some(UnitState {
+            exists: true,
+            can_assist: true,
+            ..Default::default()
+        }),
+    );
+    // Both argument orders read the same non-player token — `pick_unit_token`'s law, and what
+    // makes this a test of the binding rather than of the fixture.
+    assert_eq!(
+        s.eval::<i64>(r#"return UnitCanAssist("player", "target")"#)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        s.eval::<i64>(r#"return UnitCanAssist("target", "player")"#)
+            .unwrap(),
+        1
+    );
+    // `can_attack` and `can_assist` are independent verdicts, not one flag read twice.
+    assert!(s
+        .eval::<bool>(r#"return UnitCanAttack("player", "target") == nil"#)
+        .unwrap());
+
+    // AttackTarget(): nothing queued until it is called, then exactly one request, drained.
+    assert!(!s.take_attack_target());
+    s.run("AttackTarget()").unwrap();
+    assert!(s.take_attack_target(), "the call must leave a request");
+    assert!(!s.take_attack_target(), "and the drain must spend it");
+}

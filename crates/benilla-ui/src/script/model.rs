@@ -902,6 +902,11 @@ pub(crate) struct Model {
     /// Set when `SpellStopCasting()` fired while [`Self::casting`] — the ESC local-cancel
     /// trigger, drained by [`super::UiScript::take_spell_stop`] ([`spellbook`]).
     pub(crate) spell_stop: bool,
+    /// Set when `AttackTarget()` fired — drained by [`super::UiScript::take_attack_target`] and
+    /// spent by the app's attack arm, the same one the ATTACK_TARGET binding (default `T`) fires.
+    /// A flag rather than a count: the reference's `0x612df0` is a toggle whose second call in a
+    /// frame undoes the first, so coalescing is the faithful answer as well as the cheap one.
+    pub(crate) attack_target: bool,
     /// Whether the app's spell-targeting cursor mode is active — the `flag_word != 0` mirror
     /// (`SpellIsTargeting 0x6e6cd0`, decision 0792). Pushed each frame by the app's targeting
     /// feed ([`super::UiScript::set_spell_targeting`]); read by `SpellIsTargeting()` and gating
@@ -2032,6 +2037,7 @@ impl Model {
             pet_spell_autocasts: Vec::new(),
             casting: false,
             spell_stop: false,
+            attack_target: false,
             spell_targeting: false,
             spell_can_target_unit: false,
             spell_stop_targeting: false,
