@@ -227,6 +227,20 @@ impl CharCreateCatalog {
         for combo in UNUSED_COMBOS {
             catalog.combos.remove(&combo);
         }
+        // **A race is known completely or not at all.** `load_races` keeps only [`PLAYABLE_RACES`],
+        // so anything outside it has no body displayId, no fileString, no customization tokens and
+        // no dial ranges — while `CharBaseInfo` is read whole, so its combos survive. A server that
+        // adds races (Turtle WoW ships two, ids 9 and 10) therefore produced a catalog that offered
+        // a race the rest of it could not describe: the create screen drew slots for them with no
+        // art and its authored layout overflowed.
+        //
+        // Dropping them here rather than teaching `load_races` to keep them is the honest half of
+        // the fix: the client cannot render those races today (`scene_token` and the geoset tables
+        // are 1..=8 as well), and offering something that cannot be created is worse than not
+        // offering it. On a vanilla install this removes nothing — there is no race outside 1..=8.
+        catalog
+            .combos
+            .retain(|&(race, _)| PLAYABLE_RACES.contains(&race));
         Ok(catalog)
     }
 
@@ -234,10 +248,10 @@ impl CharCreateCatalog {
     fn self_check(&self) -> Result<()> {
         for (race, classes) in KNOWN_COMBOS {
             let got = self.classes_for_race(race);
-            if got != classes {
+            if !covers_vanilla(&got, classes) {
                 bail!(
-                    "CharBaseInfo misparse: race {race} classes {got:?} != known {classes:?} \
-                     (check the 2-byte race/class layout)"
+                    "CharBaseInfo misparse: race {race} classes {got:?} do not cover known \
+                     {classes:?} (check the 2-byte race/class layout)"
                 );
             }
         }
@@ -541,6 +555,26 @@ fn derive_ranges(
     }
 }
 
+/// Does a parsed race's class list still contain every class vanilla gives it?
+///
+/// **Containment, not equality, and that difference is the whole point of this function.** The
+/// guard it serves exists to catch a MISPARSE — chiefly the 2-byte race/class columns read the
+/// wrong way round — not to insist that a server ship vanilla's content. Turtle WoW's
+/// `CharBaseInfo.dbc` carries 57 rows against vanilla's 40: Hunter added to Human, Undead and
+/// Gnome, Mage to Orc, Warlock to Troll, plus two races vanilla has no id for (measured on a live
+/// install). Under equality every such realm failed the guard, and the cost was wildly out of
+/// proportion to the check: `load` bails, so the `CharCreate` resource is never inserted, so
+/// `build_glue_preview` has nothing to stand up, so character-select renders the race backdrop
+/// with no character in front of it — the explanation five layers away from the symptom.
+///
+/// Containment keeps the detection it was written for. Swap the two columns and race 1 collects
+/// every race that has Warrior — 1..=8 — which cannot contain class 9 (Warlock), so the guard
+/// still fires; drop a column and the list shrinks, so it fires too. What it no longer rejects is
+/// a server that ADDED a combination, which was never evidence of a parsing bug.
+fn covers_vanilla(got: &[u8], known: &[u8]) -> bool {
+    known.iter().all(|c| got.contains(c))
+}
+
 /// A schema of `n` `UInt32` fields named `f0..fn` — for the DBCs we read purely by index (the field
 /// *names* are irrelevant; string columns are 4-byte offsets read as ints and ignored). The parser
 /// requires the count to match the file header, which is the alignment guard.
@@ -555,6 +589,47 @@ fn all_u32_schema(name: &str, n: usize) -> Schema {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The guard must catch a misparse and pass a server with its own data.**
+    ///
+    /// The numbers are measured, not invented: `CharBaseInfo.dbc` from a live Turtle WoW install
+    /// carries 57 rows against vanilla's 40, adding Hunter to Human, Undead and Gnome, Mage to
+    /// Orc, Warlock to Troll, and two races vanilla has no id for.
+    ///
+    /// **What this covers:** the comparison [`covers_vanilla`] makes, which is the line that
+    /// changed. It does NOT stand up a whole catalog, so it says nothing about the four other
+    /// guards in `self_check`. Those were checked the only way that settles it — by running
+    /// `CharCreateCatalog::load` against that real install, which failed on this guard before the
+    /// change and succeeds after it.
+    #[test]
+    fn a_server_may_add_race_class_combos_but_not_lose_the_vanilla_ones() {
+        // Vanilla itself, for every race the guard knows.
+        for (_, classes) in KNOWN_COMBOS {
+            assert!(covers_vanilla(classes, classes));
+        }
+
+        // Human as this install actually has it: vanilla's six plus Hunter.
+        assert!(
+            covers_vanilla(&[1, 2, 3, 4, 5, 8, 9], &[1, 2, 4, 5, 8, 9]),
+            "an added combination is the server's own data, not a misparse"
+        );
+        // Troll plus Warlock, Orc plus Mage — the rest of that install's additions.
+        assert!(covers_vanilla(&[1, 3, 4, 5, 7, 8, 9], &[1, 3, 4, 5, 7, 8]));
+        assert!(covers_vanilla(&[1, 3, 4, 7, 8, 9], &[1, 3, 4, 7, 9]));
+
+        // A MISSING vanilla combination is still a misparse — that is what the guard is for.
+        assert!(
+            !covers_vanilla(&[1, 2, 4, 5, 8], &[1, 2, 4, 5, 8, 9]),
+            "losing Human Warlock must still fail"
+        );
+
+        // And the layout it was written to catch. Read the two columns the wrong way round and
+        // race 1 collects every race that has Warrior — 1..=8 — which has no class 9 in it.
+        assert!(
+            !covers_vanilla(&[1, 2, 3, 4, 5, 6, 7, 8], &[1, 2, 4, 5, 8, 9]),
+            "a swapped 2-byte layout must still be caught"
+        );
+    }
 
     /// CharSections `SECTION_TYPE_FACIAL_HAIR` — used only by the predicate transcription (the runtime
     /// facial-hair count comes from CharacterFacialHairStyles, so the lib never references it).
