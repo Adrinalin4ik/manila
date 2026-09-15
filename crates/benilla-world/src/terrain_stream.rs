@@ -290,6 +290,15 @@ pub struct WorldLoadProgress {
     /// unfurnished ground again (a worldport's map swap, a far teleport), which re-arms the full
     /// accounting. [`Self::focus_tile`] and [`Self::focus_resident`] stay live every frame
     /// regardless: the loading screen's backstop and the settle release key on them.
+    /// **Who the stragglers are** — up to [`PENDING_EXAMPLES`] not-yet-up focus placements, each
+    /// named with its asset path and load state. Empty whenever nothing is pending.
+    ///
+    /// The residency counters say *how many* are missing and never *which*, and a placement that
+    /// is missing because its asset failed to load looks exactly like one still arriving: both are
+    /// `spawned == false` for ever. That cost a loading screen stuck at 3458/3464 for 400 s with
+    /// nothing in the log but the count. The bound keeps it cheap — a flood of pending placements
+    /// is ordinary streaming and not worth naming; a handful that will not finish is the question.
+    pub pending_examples: Vec<String>,
     pub complete: bool,
 }
 
@@ -621,6 +630,37 @@ impl Plugin for TerrainPlugin {
 /// (decision 0476): a tile the map doesn't author is never requested — no NotFound error spam on
 /// open-ocean crossings, and the loading screen's ready/total counts only tiles that can exist.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)] // the bundled asset_stores tuple
+/// How many stragglers [`WorldLoadProgress::pending_examples`] names. Small on purpose: this is a
+/// diagnostic for "a few will not finish", not a census of ordinary streaming.
+const PENDING_EXAMPLES: usize = 8;
+
+/// One line describing why a focus placement is not up yet: what it is, whether its own model
+/// spawned, what the asset server thinks of that model, and how many of its props are outstanding.
+///
+/// A failed asset here is the answer to a whole class of stuck loads — one that will never arrive
+/// leaves `spawned` false for ever, and the residency gate waits on it for ever.
+fn describe_pending(asset_server: &AssetServer, pl: &Placement) -> String {
+    let (path, state) = match &pl.model {
+        ModelHandle::M2(h) => (
+            h.path().map(|p| p.to_string()),
+            asset_server.get_load_state(h.id()),
+        ),
+        ModelHandle::Wmo(h) => (
+            h.path().map(|p| p.to_string()),
+            asset_server.get_load_state(h.id()),
+        ),
+    };
+    let props_pending = pl.doodads.iter().filter(|d| !d.spawned).count();
+    format!(
+        "{} [root {}, asset {:?}, props {}/{} pending]",
+        path.unwrap_or_else(|| "<no asset path>".to_string()),
+        if pl.spawned { "spawned" } else { "NOT spawned" },
+        state,
+        props_pending,
+        pl.doodads.len()
+    )
+}
+
 fn stream_terrain(
     mut commands: Commands,
     mut state: ResMut<TerrainStreamer>,
@@ -1135,6 +1175,7 @@ fn stream_terrain(
             let spawned = |c: &(i32, i32)| state.tiles.get(c).is_some_and(|t| t.furnished);
             p.total = desired.len();
             p.ready = desired.iter().filter(|c| spawned(c)).count();
+            p.pending_examples.clear();
             // The focus neighbourhood's placements join the accounting (bar + scene term). A
             // placement is *up* once its own model spawned AND its WMO props (each an M2 arriving
             // on its own schedule) have — the furniture the reveal would otherwise pop in.
@@ -1156,6 +1197,12 @@ fn stream_terrain(
                                     p.total += 1;
                                     p.ready += usize::from(up);
                                     near_pending += usize::from(!up);
+                                    // Bounded: at most PENDING_EXAMPLES path formats per frame,
+                                    // and only while something is actually outstanding.
+                                    if !up && p.pending_examples.len() < PENDING_EXAMPLES {
+                                        p.pending_examples
+                                            .push(describe_pending(&asset_server, pl));
+                                    }
                                 }
                             }
                         }

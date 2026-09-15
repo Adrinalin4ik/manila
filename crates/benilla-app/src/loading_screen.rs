@@ -807,6 +807,12 @@ fn drive_loading_screen(
                     warm.satisfied(),
                     entry_ui_pending.is_some(),
                 );
+                // The counters say how many are missing; this says WHICH. A placement whose asset
+                // failed and one still arriving are both `spawned == false`, so the count alone
+                // cannot tell a slow load from a dead one — and that difference is the diagnosis.
+                for what in &progress.pending_examples {
+                    info!("loading screen:   still pending — {what}");
+                }
             }
         }
     }

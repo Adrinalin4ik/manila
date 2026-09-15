@@ -35,6 +35,24 @@ use crate::wmo_portal::{WmoGroupVis, WmoPortalInstance, WmoRoom};
 use benilla_assets::m2_url;
 use benilla_assets::materials::WowModelMaterial;
 
+/// Has this asset's load **failed** — i.e. will it never arrive?
+///
+/// The streamer's residency gate counts a placement as outstanding until it spawns, and an asset
+/// that failed leaves it outstanding for ever: the loading screen waits on a file that is not
+/// coming. Turtle WoW's Stormwind references `world/expansion02/doodads/…/hu_brick_pile01.m2`,
+/// which is not in a 1.12 chain, and five of those plus four missing props of one transport WMO
+/// held a world entry at 3458/3464 indefinitely.
+///
+/// A failure is terminal, so the caller marks the placement spawned and releases the count — which
+/// is exactly what `Placement::spawned` already promises: "true once we've spawned **or determined
+/// there's nothing to spawn**". Only the second half was never implemented.
+fn asset_failed(asset_server: &AssetServer, id: impl Into<bevy::asset::UntypedAssetId>) -> bool {
+    matches!(
+        asset_server.get_load_state(id),
+        Some(bevy::asset::LoadState::Failed(_))
+    )
+}
+
 use super::collider::{
     build_collider_task, doodad_bodies_disabled, doodad_hulls_bare, placement_collider_data,
     PendingCollider,
@@ -146,7 +164,16 @@ pub(super) fn spawn_loaded_placements(
             let entities = match &p.model {
                 ModelHandle::M2(h) => {
                     let Some(m) = m2s.get(h) else {
-                        continue; // model still loading (or missing) — try next frame
+                        if asset_failed(&asset_server, h.id()) {
+                            // Not coming. Retire it so the residency gate can close.
+                            warn!(
+                                "placement {unique_id}: {} failed to load — skipping it, the                                  world is short one doodad rather than stuck waiting",
+                                h.path().map(|p| p.to_string()).unwrap_or_default()
+                            );
+                            p.spawned = true;
+                            *pending_spawns -= 1;
+                        }
+                        continue; // still loading — try next frame
                     };
                     // The model's app-built render forms (decision 0834): request static — plus
                     // the skinned twins iff the anim host will rig this model — and wait for the
@@ -325,6 +352,14 @@ pub(super) fn spawn_loaded_placements(
                 }
                 ModelHandle::Wmo(h) => {
                     let Some(m) = wmos.get(h) else {
+                        if asset_failed(&asset_server, h.id()) {
+                            warn!(
+                                "placement {unique_id}: {} failed to load — skipping it, the                                  world is short one building rather than stuck waiting",
+                                h.path().map(|p| p.to_string()).unwrap_or_default()
+                            );
+                            p.spawned = true;
+                            *pending_spawns -= 1;
+                        }
                         continue;
                     };
                     // The building's app-built render forms (0834): static only — WMO group
@@ -667,6 +702,16 @@ pub(super) fn spawn_loaded_placements(
                 continue;
             }
             let Some(m) = m2s.get(&d.handle) else {
+                if asset_failed(&asset_server, d.handle.id()) {
+                    // Same retirement as a root's: four missing props of one WMO are four counts
+                    // that never come back, and the gate waits on all of them.
+                    warn!(
+                        "placement {unique_id}: prop {} failed to load — skipping it",
+                        d.handle.path().map(|p| p.to_string()).unwrap_or_default()
+                    );
+                    d.spawned = true;
+                    *pending_spawns -= 1;
+                }
                 continue; // this prop's M2 still loading
             };
             // The prop's app-built render forms (0834) — same gate as its owning placement's.
