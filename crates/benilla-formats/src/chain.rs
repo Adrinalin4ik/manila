@@ -66,6 +66,23 @@ pub struct Chain {
     base: String,
     /// `None` inside = the index could not be fetched/parsed; `contains` falls back to `HEAD`.
     index: std::sync::OnceLock<Option<std::collections::HashSet<String>>>,
+    /// Names the INDEX does not list, and what the host said about them — one entry per distinct
+    /// name, filled the first time anything asks.
+    ///
+    /// **An MPQ index is not a census.** `Chain::list` enumerates `(listfile)`, and a listfile is
+    /// an ordinary file inside the archive that an author may leave incomplete: a server shipping
+    /// its own content commonly adds files without adding their names. Those files are perfectly
+    /// readable — the hash table finds them by hash — but invisible to any enumeration, and that
+    /// is not recoverable on the client, because the hash table stores hashes and never names.
+    ///
+    /// Measured on a Turtle WoW install: `Interface\WorldMap\Elwynn\` has 31 entries in the index
+    /// and `…\Northwind\` has **zero**, while every one of Northwind's twelve map tiles reads back
+    /// and decodes. The world map simply never asked for them.
+    ///
+    /// So the index is a POSITIVE cache and no longer a veto; a miss costs one round trip per
+    /// distinct name, once, which is what keeps the sprite-candidate walk (`Foo.blp`, then
+    /// `Foo.tga`) from paying per ask the way it did before the index existed.
+    verified: std::sync::Mutex<std::collections::HashMap<String, bool>>,
 }
 
 /// `patch-?.MPQ` with the reference's FindFirstFileW semantics: `?` matches **exactly one**
@@ -248,6 +265,7 @@ impl Chain {
         Ok(Self {
             base: crate::web::data_base(),
             index: std::sync::OnceLock::new(),
+            verified: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -274,12 +292,35 @@ impl Chain {
             .as_ref()
     }
 
-    /// Whether the web host has `name` — from the name index when it loaded, else a `HEAD`
-    /// request (no body).
+    /// Whether the web host has `name` — the index answers YES on its own; a name it does not
+    /// list is verified against the host once and remembered.
+    ///
+    /// See [`Self::verified`] for why a miss is not an answer: a listfile can be incomplete, and
+    /// a file it omits is still readable by hash.
     pub fn contains(&self, name: &str) -> bool {
-        match self.index() {
-            Some(set) => set.contains(&Self::index_key(name)),
-            None => crate::web::exists_sync(&self.url_for(name)),
+        let key = Self::index_key(name);
+        if self.index().is_some_and(|set| set.contains(&key)) {
+            return true;
+        }
+        if let Some(&known) = self.verified.lock().expect("chain verified cache").get(&key) {
+            return known;
+        }
+        let present = crate::web::exists_sync(&self.url_for(name));
+        self.remember(key, present);
+        present
+    }
+
+    /// Record what the host said about a name the index did not list, and count the distinct
+    /// misses so the cost of the fallback is a number rather than a hope.
+    fn remember(&self, key: String, present: bool) {
+        let mut cache = self.verified.lock().expect("chain verified cache");
+        cache.insert(key, present);
+        // Only at powers of ten: the interesting question is the ORDER of magnitude — a handful
+        // is free, tens of thousands would mean the index has stopped being useful — and a line
+        // per miss would itself be the cost it is measuring.
+        let n = cache.len();
+        if n == 1 || n == 10 || n == 100 || n == 1_000 || n == 10_000 {
+            crate::web::log_index_misses(n);
         }
     }
 
@@ -295,15 +336,27 @@ impl Chain {
     /// that text — there are some — behaves the same on both targets.
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
         crate::web::trace(name); // boot-manifest capture; no-op unless the page armed it
-                                 // A name the index says is absent is a 404 round trip saved — the same answer, and the
-                                 // sprite-candidate walk (`Foo.blp`, then `Foo.tga`) asks for absent names by design.
-        if self
-            .index()
-            .is_some_and(|set| !set.contains(&Self::index_key(name)))
+        // **The index answers YES on its own; its silence is not a NO** (see [`Self::verified`]).
+        // This used to return here on any name the index did not list, on the reasoning that it
+        // was "a 404 round trip saved — the same answer". It is not the same answer when the
+        // archive's `(listfile)` is incomplete, which is the normal state of a server's own
+        // content: the file is there and reads by hash, and the client refused to ask for it.
+        //
+        // What the short-circuit was really for survives as the cache: the sprite-candidate walk
+        // (`Foo.blp`, then `Foo.tga`) asks for absent names by design, and once the host has said
+        // "no" about one, asking again is exactly the round trip the index existed to save.
+        let key = Self::index_key(name);
+        let listed = self.index().is_some_and(|set| set.contains(&key));
+        if !listed && self.verified.lock().expect("chain verified cache").get(&key) == Some(&false)
         {
             return Err(anyhow!("file not in patch chain: {name}"));
         }
-        crate::web::fetch_sync(&self.url_for(name)).map_err(|e| {
+        let got = crate::web::fetch_sync(&self.url_for(name));
+        if !listed {
+            // The GET is the verification — no extra HEAD for a name we were fetching anyway.
+            self.remember(key, got.is_ok());
+        }
+        got.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 anyhow!("file not in patch chain: {name}")
             } else {

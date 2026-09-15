@@ -51,6 +51,22 @@ mod wasm {
     /// person copies the deduplicated array out of the console into the manifest. Without the
     /// array this is one snapshotted `Reflect::get` for the whole session and per-call nothing —
     /// tracing must cost the boot it measures as close to zero as possible.
+    /// One console line naming how many distinct names have gone past the index to the host.
+    ///
+    /// The index exists because per-name `HEAD`s were 2,145 asks and ~125 s of frozen tab in one
+    /// world entry; making a miss ask the host again pays a round trip per distinct name, and
+    /// this is how that price stays a measurement instead of a hope. Called only at powers of
+    /// ten, so the instrument cannot become the cost.
+    pub fn log_index_misses(distinct: usize) {
+        web_sys::console::log_1(
+            &format!(
+                "chain: {distinct} distinct name(s) not in the index have been verified against \
+                 the host (an incomplete (listfile) is normal on a server's own content)"
+            )
+            .into(),
+        );
+    }
+
     pub fn trace(name: &str) {
         use wasm_bindgen::JsCast;
         thread_local! {
@@ -127,4 +143,4 @@ mod wasm {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use wasm::{data_base, exists_sync, fetch_sync, trace};
+pub use wasm::{data_base, exists_sync, fetch_sync, log_index_misses, trace};
