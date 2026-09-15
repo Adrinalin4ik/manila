@@ -429,10 +429,41 @@ fn read_under(root: &Path, rel: &str) -> Option<Vec<u8>> {
 /// prefix is stripped; everything else can only reach the read-only archive chain, whose names
 /// cannot leave `Interface\`'s own tree. An addon reaches a sibling and the client's own interface
 /// files, and never the machine.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn read_addon_file(root: &Path, req: &str) -> Option<Vec<u8>> {
     under_addons(req)
         .and_then(|rel| read_under(root, rel))
         .or_else(|| super::reference_ui::read(&req.replace('/', "\\")))
+}
+
+/// The web twin of [`read_addon_file`]: the same two legs, with the host's `/addons` route where
+/// the filesystem is.
+///
+/// `root` is unused and kept only so the two targets share one call site — a browser tab has no
+/// path to resolve against, and the host's route does the escape check that [`read_under`] does
+/// here (`addons::safe_relative`, tested there).
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn read_addon_file(_root: &Path, req: &str) -> Option<Vec<u8>> {
+    under_addons(req)
+        .and_then(fetch_addon_file)
+        .or_else(|| super::reference_ui::read(&req.replace('/', "\\")))
+}
+
+/// `{origin}/addons/<rel>` — the sibling of the `/data` route the chain already fetches against.
+///
+/// Derived from [`benilla_formats::web::data_base`] rather than read from `location` again, so
+/// both routes are anchored to one place: whatever origin the chain is talking to, addons come
+/// from the same host.
+#[cfg(target_arch = "wasm32")]
+fn addons_base() -> String {
+    let data = benilla_formats::web::data_base();
+    format!("{}/addons", data.strip_suffix("/data").unwrap_or(&data))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn fetch_addon_file(rel: &str) -> Option<Vec<u8>> {
+    let url = format!("{}/{}", addons_base(), rel.replace('\\', "/"));
+    benilla_formats::web::fetch_sync(&url).ok()
 }
 
 /// `req` with the `Interface/AddOns/` prefix stripped, or `None` if it does not carry one.
@@ -637,6 +668,66 @@ fn upcase_unit(c: char) -> char {
 
 /// The player's own addons — every folder under the AddOns root with a `<Name>.toc`, in
 /// [`sort_by_directory_order`].
+/// The web twin of [`discover_folder`]: the host's `/addons/__index` where `read_dir` is.
+///
+/// **One flat list answers both halves of discovery.** The native walk asks the filesystem for
+/// the folder names and then, per folder, for a `<Name>.toc` matched case-insensitively; the
+/// index carries every relative path, so the folders are its first segments and the manifest is a
+/// name match inside one. That is why the route ships no second listing endpoint.
+///
+/// A first segment with no `/` after it is a loose FILE sitting in the addons root, not a folder,
+/// and is skipped — the real install that motivated this route has several.
+#[cfg(target_arch = "wasm32")]
+fn discover_folder() -> Vec<Addon> {
+    use std::collections::BTreeMap;
+    let Some(root) = root() else {
+        return Vec::new();
+    };
+    let Ok(bytes) = benilla_formats::web::fetch_sync(&format!("{}/__index", addons_base())) else {
+        return Vec::new(); // no addon route (or no folder) is the normal case, not an error
+    };
+    // One path per line — see the host route's module note for why this is not JSON.
+    let text = String::from_utf8_lossy(&bytes);
+    let paths: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    // folder -> its files, so the `.toc` probe below is a lookup rather than a second fetch.
+    let mut by_folder: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for p in &paths {
+        let norm = p.replace('\\', "/");
+        let Some((folder, rest)) = norm.split_once('/') else {
+            continue; // a loose file in the addons root is not an addon
+        };
+        if folder.is_empty() || rest.is_empty() {
+            continue;
+        }
+        by_folder
+            .entry(folder.to_string())
+            .or_default()
+            .push(rest.to_string());
+    }
+    let mut names: Vec<String> = by_folder.keys().cloned().collect();
+    sort_by_directory_order(&mut names);
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let want = format!("{name}.toc");
+            // Case-insensitively, for the same reason the native probe is: the reference is a
+            // Windows client, so `MyAddon/myaddon.toc` is an addon there and has to be one here.
+            let file = by_folder
+                .get(&name)?
+                .iter()
+                .find(|f| f.eq_ignore_ascii_case(&want))?;
+            let bytes = fetch_addon_file(&format!("{name}/{file}"))?;
+            let text = benilla_ui::source::decode(&bytes).into_owned();
+            Some(Addon {
+                name,
+                toc: Toc::parse(&text),
+                source: Source::Dir(root.clone()),
+            })
+        })
+        .collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn discover_folder() -> Vec<Addon> {
     let Some(root) = root() else {
         return Vec::new();

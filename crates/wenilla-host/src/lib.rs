@@ -3,6 +3,7 @@
 //! package has no seam a `tests/` file can `use`), so `main.rs` stays a thin CLI wrapper over
 //! these modules.
 
+pub mod addons;
 pub mod data;
 pub mod static_site;
 pub mod ws;

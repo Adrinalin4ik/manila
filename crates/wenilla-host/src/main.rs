@@ -94,7 +94,23 @@ async fn main() -> Result<()> {
     };
     tracing::info!(dir = %modules.display(), exists = modules.is_dir(), "warden module directory");
 
+    // The player's own `Interface\AddOns`, beside the `Data` directory rather than inside it —
+    // so it is derived from `--data`'s parent, the install root. A browser tab has no filesystem,
+    // so without this route `discover_folder` finds nothing and only the twelve `Blizzard_*`
+    // addons inside the archive ever load.
+    let install_root = if cli.data.is_dir() {
+        cli.data.parent().map(std::path::Path::to_path_buf)
+    } else {
+        cli.data.parent().and_then(|d| d.parent().map(std::path::Path::to_path_buf))
+    };
+    let addons = install_root
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("Interface")
+        .join("AddOns");
+    tracing::info!(dir = %addons.display(), exists = addons.is_dir(), "addon directory");
+
     let app = wenilla_host::data::router_with_modules(chain, Some(modules))
+        .merge(wenilla_host::addons::router(addons))
         .merge(wenilla_host::ws::router_map(upstreams))
         .merge(wenilla_host::static_site::router(&cli.www));
 
