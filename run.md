@@ -25,7 +25,8 @@ scripts/web-build.sh                      # → web/dist (WebGPU). WEB_DEBUG=1 k
 cargo run --release -p wenilla-host -- \
   --www web/dist \
   --data /path/to/WoW/Data \
-  --upstream logon.your-realm.example
+  --upstream logon.your-realm.example \
+  --bind 0.0.0.0:8090                     # loopback-only if you drop this — see "Reaching the host"
 ```
 
 Then open **<http://127.0.0.1:8090/>**.
@@ -35,6 +36,33 @@ overrides it per session. See "Changing realm from the login screen".
 
 The build takes a few minutes and produces a ~75 MB wasm (~20 MB gzipped). Fine over LAN, painful
 over mobile data.
+
+### Run `web-build.sh` with a bare environment
+
+**`CARGO_TARGET_DIR` breaks this script, and it breaks it silently.** The artifact path is hardcoded
+relative to the repo (`WASM="target/wasm32-unknown-unknown/${PROFILE}/wenilla.wasm"`), so cargo
+builds into *your* directory while `wasm-bindgen` reads `target/` — and `target/` usually holds a
+**previous** build. The result is a `web/dist` with a fresh timestamp and last week's code in it, no
+error anywhere. It costs a full cold rebuild on top, since a `cargo check` target dir has no release
+artifacts to reuse.
+
+So: no `CARGO_TARGET_DIR` for this script. Export it for `cargo check`/`cargo test` if you like —
+those name their own outputs and are unaffected.
+
+### Checking that the bundle is actually new
+
+Timestamps lie in one direction here: `web/dist` can be newer than your edit while its bytes are
+old, which is exactly what the trap above produces. Two numbers settle it, not one — the
+intermediate artifact must be newer than the source, and the bundle newer than the artifact:
+
+```bash
+ls -l --time-style=+%H:%M:%S \
+  target/wasm32-unknown-unknown/release/wenilla.wasm \
+  web/dist/wenilla_bg.wasm
+```
+
+A changed **size** on both is the independent check, and the one worth trusting: a republished stale
+file keeps its byte count exactly.
 
 ### Changing realm from the login screen
 
@@ -194,6 +222,7 @@ Loopback needs none of this: WSL2 forwards `127.0.0.1` to Windows on its own.
 
 | symptom | look at |
 |---|---|
+| a fix you just built is not in the browser, and a hard reload does not help | you built with `CARGO_TARGET_DIR` set — see "Run `web-build.sh` with a bare environment". Compare the two timestamps **and** the two sizes before blaming the cache |
 | page loads, canvas stays black, console shows `RuntimeError: unreachable` | rebuild with `WEB_DEBUG=1`; check for a WebGPU adapter first; `?bridge=0` rules the bridge out |
 | world never loads, glue screens fine | no WebGPU adapter |
 | login hangs with no error, proxy log shows `up=0 down=0` | the world upstream is wrong — see "Why `--world-upstream`" |
