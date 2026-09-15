@@ -190,6 +190,7 @@ pub(in crate::entities) fn build_glue_preview(
     if state.last_look != preview.look {
         state.last_look = preview.look;
         state.built = false;
+        state.complained = false;
     }
     if state.built {
         return;
@@ -210,13 +211,34 @@ pub(in crate::entities) fn build_glue_preview(
     // displayId → the shared display cache. The want-list in `update_display_models` has already
     // asked for this display; the assembly waits (retry, `built` stays false) until its model +
     // parts are built.
+    // **Both of the next two bail-outs used to be silent**, and a silent one is indistinguishable
+    // from a bug: the stage keeps its backdrop, no character appears, and nothing says why. The
+    // scene is loaded by a different system with its own logging, so the screen looks healthy —
+    // a race's `UI_*` backdrop with an empty stage in front of it.
     let (Some(creatures), Some(char_create)) = (creatures.as_deref(), char_create.as_deref())
     else {
+        if !state.complained {
+            state.complained = true;
+            warn!(
+                "glue preview: no character body — the {} catalog is missing, so this screen                  will keep retrying and stay empty (see the startup warning that names why)",
+                if creatures.is_none() {
+                    "creature-display"
+                } else {
+                    "char-create"
+                }
+            );
+        }
         return;
     };
     let (race, sex) = look.body();
     let Some(display_id) = char_create.0.body_display(race, sex) else {
         state.built = true; // a non-playable race can't resolve — nothing to show, don't spin
+        if !state.complained {
+            state.complained = true;
+            warn!(
+                "glue preview: no character body — ChrRaces has no display for race {race} sex                  {sex}, so there is nothing to stand up. This is permanent for this look."
+            );
+        }
         return;
     };
 
@@ -1191,6 +1213,10 @@ pub(in crate::entities) struct PetState {
 pub(in crate::entities) struct PreviewState {
     last_look: Option<GlueLook>,
     built: bool,
+    /// Whether this look has already explained why it produced no body. One line per look, not
+    /// per frame: the two bail-outs below sit in a system that runs every frame, and the point is
+    /// to name the gap once, not to fill the console.
+    complained: bool,
 }
 
 /// [`build_dressup_preview`]'s per-run memory — the same latch over the dressing room's look.

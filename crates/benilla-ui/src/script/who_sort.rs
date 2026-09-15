@@ -207,10 +207,27 @@ fn ascii_ci_cmp(a: &str, b: &str) -> Ordering {
 /// exist. Anything that starts showing UNKNOWN here has to carry the miss to this comparator by
 /// some route other than the string (wow-re `who-list-sort-law.md` §11.1–§11.2).
 fn dbc_name_cmp(a: &str, b: &str) -> Ordering {
-    if a.is_empty() || b.is_empty() {
-        return Ordering::Equal;
+    // **Unresolved rows sort together at the END, they do not tie with everything.**
+    //
+    // Tying an empty string with every name is not an ordering at all: `"" == "Orc"` and
+    // `"" == "Human"` while `"Orc" > "Human"`, so equality is not transitive. The reference gets
+    // away with it because C's `qsort` never checks; Rust's sort does, and it does not degrade —
+    // it aborts the process. On a realm whose races or zones our DBCs cannot name (Turtle WoW's
+    // ids 9 and 10, its own zones) one unresolved row was enough to kill the client outright on
+    // the /who refresh: "user-provided comparison function does not correctly implement a total
+    // order".
+    //
+    // Bucketing the misses last keeps what the tie was FOR — an unresolved id must not sort as
+    // `""` and park every unknown above Ahn'Qiraj (see this function's original note) — while
+    // being a real order. The divergence from the reference is confined to where unresolved rows
+    // land among themselves, which is the one thing its own intransitive comparator left
+    // arbitrary anyway.
+    match (a.is_empty(), b.is_empty()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => ascii_ci_cmp(a, b),
     }
-    ascii_ci_cmp(a, b)
 }
 
 #[cfg(test)]
@@ -389,6 +406,52 @@ mod tests {
 
         // A *guild* is not a DBC lookup: an empty guild is a real value and sorts first.
         assert_eq!(ascii_ci_cmp("", "Legacy"), Ordering::Less);
+    }
+
+    /// **The comparator must be a total order**, because Rust's sort aborts the process when it
+    /// is not — this is a crash, not a mis-sort.
+    ///
+    /// The case is real: a `/who` row whose class, race or zone id our DBCs cannot name arrives
+    /// with an empty string, and on a realm with its own races and zones that is an ordinary row.
+    /// The old `dbc_name_cmp` answered `Equal` whenever either side was empty, which makes
+    /// equality intransitive the moment two different names meet the same empty one.
+    #[test]
+    fn the_dbc_comparator_is_a_total_order_with_unresolved_rows() {
+        const NAMES: [&str; 5] = ["", "Orc", "Human", "", "Troll"];
+        for &a in &NAMES {
+            for &b in &NAMES {
+                // Antisymmetry.
+                assert_eq!(
+                    dbc_name_cmp(a, b).reverse(),
+                    dbc_name_cmp(b, a),
+                    "{a:?} vs {b:?} must be antisymmetric"
+                );
+                for &c in &NAMES {
+                    // Transitivity of equality — the law the old version broke.
+                    if dbc_name_cmp(a, b) == Ordering::Equal
+                        && dbc_name_cmp(b, c) == Ordering::Equal
+                    {
+                        assert_eq!(
+                            dbc_name_cmp(a, c),
+                            Ordering::Equal,
+                            "{a:?} == {b:?} and {b:?} == {c:?}, so {a:?} == {c:?}"
+                        );
+                    }
+                    // Transitivity of less-than.
+                    if dbc_name_cmp(a, b) == Ordering::Less && dbc_name_cmp(b, c) == Ordering::Less
+                    {
+                        assert_eq!(
+                            dbc_name_cmp(a, c),
+                            Ordering::Less,
+                            "{a:?} < {b:?} < {c:?}"
+                        );
+                    }
+                }
+            }
+        }
+        // And the behaviour the tie existed to protect: unresolved rows do not head the list.
+        assert_eq!(dbc_name_cmp("", "Ahn'Qiraj"), Ordering::Greater);
+        assert_eq!(dbc_name_cmp("Ahn'Qiraj", ""), Ordering::Less);
     }
 
     /// `"group"` is a live chain key with a dead arm: it displaces whatever was at the front, and

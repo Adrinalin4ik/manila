@@ -12,3 +12,7 @@ pub mod ws;
 /// allowlist is a security boundary, not a convenience default. Public so a wrapper binary that
 /// mounts these routers behind its own auth (wenilla-realm) uses the same set.
 pub const ALLOWED_PORTS: [u16; 2] = [3724, 8085];
+
+/// The world (worldd) port out of [`ALLOWED_PORTS`] — named because it is the one a deploy may have
+/// to point at a different host than the login server (`main.rs`'s `--world-upstream`).
+pub const WORLD_PORT: u16 = 8085;

@@ -25,6 +25,7 @@ use crate::transport::ReadExactAsync;
 mod movement;
 mod reader;
 mod session;
+pub mod warden;
 mod writer;
 
 pub use reader::WorldReader;

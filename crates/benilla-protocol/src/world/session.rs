@@ -8,6 +8,7 @@ use crate::transport::Conn;
 use super::movement::{client_uptime_ms, movement_info, MOVEMENT_FLAG_FORWARD};
 use super::reader::WorldReader;
 use super::writer::WorldWriter;
+use super::warden;
 use super::{recv_packet, send_packet};
 
 /// Socket read timeout for the handshake phase only (connect → `player_login`), where each step
@@ -25,7 +26,7 @@ const HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// long wait, so the wait is generous rather than infinite.
 const QUEUE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// The server requires Warden, which benilla does not implement — raised by
+/// The server requires Warden and asked something this session cannot answer — raised by
 /// [`WorldSession::connect`] and recoverable through the `anyhow` chain with
 /// `err.downcast_ref::<WardenRequired>()`, so the login screen can say so plainly.
 ///
@@ -34,6 +35,14 @@ const QUEUE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3
 /// `World.cpp`), and `Warden::Update` kicks unconditionally when it expires — not subject to the
 /// penalty config, and regardless of module/maiev mode. So a client that cannot answer cannot stay
 /// in the world: refusing at the handshake is the honest outcome, not a policy choice.
+///
+/// **That is vmangos, and tortoise-wow differs on the kick.** Its live implementation is a
+/// different tree — `src/game/Anticheat/Warden/` (namreeb's; the `WardenAnticheat/` directory
+/// beside it is not in `src/game/CMakeLists.txt` and does not build) — and there `Warden::Update`
+/// has the timeout's `_session->KickPlayer()` commented out, so silence is logged rather than
+/// punished. Refusing early stays right regardless: the paths that kick unconditionally in BOTH
+/// trees are the ones a half-answering client trips — a failed checksum, an unknown opcode, and a
+/// failed or unexpected challenge response, all in `HandlePacket`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WardenRequired;
 
@@ -68,9 +77,13 @@ impl std::error::Error for WorldAuthReject {}
 
 impl std::fmt::Display for WardenRequired {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Was "which benilla does not implement", which stopped being true once the module lane
+        // landed and is now actively misleading: a live realm gets through the offer, the challenge
+        // and the re-key, and refuses on ONE scan it cannot witness. The player-facing sentence has
+        // to say which of those it was, or the login screen blames the wrong thing.
         write!(
             f,
-            "this server requires the Warden anticheat, which benilla does not implement"
+            "this server's Warden asked for something this client cannot answer about itself"
         )
     }
 }
@@ -100,6 +113,141 @@ pub struct WorldSession {
     /// answers our addon block, which is the state that keeps the Lua index space empty
     /// (decision 2175). Read by [`Self::take_addon_info`].
     addon_info: Option<Vec<u8>>,
+    /// Kept because Warden's ciphers are derived from it (`warden::WardenCrypto::from_session_key`)
+    /// and the first `SMSG_WARDEN_DATA` can arrive before the handshake even finishes — there is no
+    /// later point at which the caller could hand it back.
+    session_key: [u8; SESSION_KEY_LENGTH],
+    /// Built on the first Warden packet rather than at connect, so a server that never runs Warden
+    /// pays nothing for it.
+    warden: Option<warden::WardenCrypto>,
+    /// The scan encoding this server uses and what we can witness, set by
+    /// [`Self::set_warden_profile`]. `None` — the default — means Warden is refused: the encoding
+    /// is either read from the offered module's `.cr` or stated by the server, and guessing one
+    /// does not fail, it silently misreads every request.
+    warden_profile: Option<warden::WardenProfile>,
+}
+
+/// What one Warden message obliges the client to do.
+struct WardenReply {
+    /// The `CMSG_WARDEN_DATA` body to send, its client opcode already in front.
+    body: Vec<u8>,
+    /// The module key pair to re-key with once `body` is on the wire — set only by the challenge
+    /// answer. See [`WorldSession::handle_warden`] for why it cannot be applied any earlier.
+    rekey: Option<([u8; 16], [u8; 16])>,
+}
+
+/// Decide the answer to one decrypted Warden message; `Ok(None)` means the message takes no reply.
+///
+/// Split out of [`WorldSession::handle_warden`] because it needs `&mut` on the profile (a module
+/// offer makes it adopt an encoding) while the send needs `&mut self`. It touches nothing else —
+/// no socket, no cipher — so the send-then-re-key ordering lives in one place at the call site
+/// instead of being re-derived in each branch here.
+fn warden_reply(
+    message: &Option<warden::ServerMessage>,
+    xor: u8,
+    profile: Option<&mut warden::WardenProfile>,
+) -> Result<Option<WardenReply>> {
+    let refuse = |what: String| -> anyhow::Error {
+        anyhow::Error::new(WardenRequired).context(format!("warden sent {what}"))
+    };
+    let (message, profile) = match (message, profile) {
+        (Some(m), Some(p)) => (m, p),
+        (other, _) => {
+            let what = match other {
+                Some(msg) => format!("{msg:?}"),
+                None => "an empty body".to_string(),
+            };
+            return Err(refuse(what));
+        }
+    };
+
+    match message {
+        // Answering MODULE_OK skips the transfer entirely: `Warden::HandlePacket`'s
+        // WARDEN_CMSG_MODULE_OK branch reads nothing past the opcode and goes straight to
+        // `RequestChallenge`. MODULE_MISSING would instead stream us the module in 500-byte chunks
+        // we have no use for, and a second MODULE_MISSING after that is a kick.
+        //
+        // The offer is only acceptable because the `.cr` gives us the module's challenge table and
+        // opcode map without running it. Adopting it here, before the reply goes out, means the
+        // scan encoding is already right when the first request lands.
+        warden::ServerMessage::ModuleUse { id, .. } => {
+            profile.adopt_offered_module(id).map_err(|e| {
+                anyhow::Error::new(WardenRequired)
+                    .context(format!("warden offered a module we cannot adopt: {e}"))
+            })?;
+            Ok(Some(WardenReply {
+                body: vec![warden::client_op::MODULE_OK],
+                rekey: None,
+            }))
+        }
+
+        // The challenge is a table lookup, not a computation. The server checks the body is
+        // *exactly* `1 + sizeof(reply)` = 21 bytes and memcmps from offset 1
+        // (`HandleChallengeResponse`), so neither a short nor a padded body passes.
+        warden::ServerMessage::HashRequest { seed } => {
+            let module = profile.module().ok_or_else(|| {
+                anyhow::Error::new(WardenRequired)
+                    .context("warden sent a challenge before offering a module we adopted")
+            })?;
+            let entry = module.answer_challenge(seed).ok_or_else(|| {
+                anyhow::Error::new(WardenRequired).context(format!(
+                    "warden's challenge seed is not in module {}'s table — \
+                     the adopted module is not the one it offered",
+                    warden::module_id_hex(&module.id)
+                ))
+            })?;
+            let mut body = Vec::with_capacity(1 + entry.reply.len());
+            body.push(warden::client_op::HASH_RESULT);
+            body.extend_from_slice(&entry.reply);
+            Ok(Some(WardenReply {
+                body,
+                rekey: Some((entry.client_key, entry.server_key)),
+            }))
+        }
+
+        // Silence is the protocol here, not a gap. `WardenWin::InitializeClient` concatenates three
+        // MODULE_INITIALIZE blocks into one packet, sets `_initialized` and reads nothing back —
+        // there is no `WARDEN_CMSG_*` opcode that could answer it, and `HandlePacket` has no case
+        // that would accept one. They tell the module where the client's Lua, file and timing
+        // functions are; we answer those scans from our own state instead, so there is nothing in
+        // the blocks for us to act on and nothing for us to send.
+        warden::ServerMessage::ModuleInitialize => Ok(None),
+
+        warden::ServerMessage::CheatChecksRequest { body } => {
+            // Reborrowed shared once, so the closure below and `terminator_on_wire` are plainly two
+            // reads of the same `&` rather than two captures of a `&mut`.
+            let profile: &warden::WardenProfile = profile;
+            // No encoding yet means the server asked for scans before offering the module that
+            // would have named them. Refusing is the only honest answer: there is no table to read
+            // the request under, and a placeholder one would misread rather than fail.
+            let terminator = profile.terminator_on_wire(xor).ok_or_else(|| {
+                anyhow::Error::new(WardenRequired)
+                    .context("warden asked for scans before any encoding was known")
+            })?;
+            let requests =
+                warden::parse_checks_request(body, &|b| profile.decode(b, xor), terminator)
+                    .map_err(|e| anyhow!("unreadable Warden scan request: {e:?}"))?;
+            let outcomes: Vec<_> = requests
+                .iter()
+                .map(|r| warden::answer(r, profile.witness.as_ref()))
+                .collect();
+            // An unanswerable scan stops the whole reply rather than being padded: results are
+            // matched to scans positionally, so filler is not a gap, it is a false answer to one
+            // specific question. The profile asked something this client cannot witness, and
+            // saying so is the honest end.
+            let body = warden::build_checks_result(&outcomes).map_err(|reason| {
+                anyhow::Error::new(WardenRequired)
+                    .context(format!("warden asked something we cannot witness: {reason}"))
+            })?;
+            Ok(Some(WardenReply { body, rekey: None }))
+        }
+
+        // What is left is MODULE_CACHE, which can only follow a MODULE_MISSING we never send, and
+        // `Unknown` — which is where MEM_CHECKS_REQUEST lands, and also where a mis-keyed cipher
+        // lands, since noise decodes to an opcode outside `server_op`. Refused by name so the
+        // difference is readable in the log rather than guessed at.
+        other => Err(refuse(format!("{other:?}"))),
+    }
 }
 
 impl WorldSession {
@@ -157,6 +305,53 @@ impl WorldSession {
         username: &str,
         session_key: [u8; SESSION_KEY_LENGTH],
         on_queue: &mut dyn FnMut(Option<u32>) -> bool,
+    ) -> Result<Self> {
+        Self::connect_inner(addr, username, session_key, on_queue, None).await
+    }
+
+    /// [`Self::connect`] with a Warden profile in place BEFORE the handshake runs.
+    ///
+    /// It has to be a connect-time argument rather than a setter: the server arms Warden as soon as
+    /// the session authenticates, so its first `SMSG_WARDEN_DATA` routinely arrives while
+    /// `SMSG_AUTH_RESPONSE` is still being waited for. A profile installed after `connect` returns
+    /// would be installed after the message it was needed for — which is exactly the hole that
+    /// writing the wiring test exposed.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn connect_with_warden(
+        addr: &str,
+        username: &str,
+        session_key: [u8; SESSION_KEY_LENGTH],
+        profile: warden::WardenProfile,
+    ) -> Result<Self> {
+        futures_lite::future::block_on(Self::connect_inner(
+            addr,
+            username,
+            session_key,
+            &mut |_| true,
+            Some(profile),
+        ))
+    }
+
+    /// [`Self::connect_queued_async`] with a Warden profile in place before the handshake runs —
+    /// the async twin of [`Self::connect_with_warden`], and the one the app's net lane uses because
+    /// that lane is a task on the browser's event loop as well as a thread natively.
+    pub async fn connect_queued_with_warden_async(
+        addr: &str,
+        username: &str,
+        session_key: [u8; SESSION_KEY_LENGTH],
+        on_queue: &mut dyn FnMut(Option<u32>) -> bool,
+        profile: Option<warden::WardenProfile>,
+    ) -> Result<Self> {
+        Self::connect_inner(addr, username, session_key, on_queue, profile).await
+    }
+
+    /// The body both entry points share.
+    async fn connect_inner(
+        addr: &str,
+        username: &str,
+        session_key: [u8; SESSION_KEY_LENGTH],
+        on_queue: &mut dyn FnMut(Option<u32>) -> bool,
+        warden_profile: Option<warden::WardenProfile>,
     ) -> Result<Self> {
         let (host, port) = crate::host_port(addr, super::WORLD_PORT);
         let mut queued = false;
@@ -219,6 +414,9 @@ impl WorldSession {
             billing_time_rested: 0,
             tutorial_flags: None,
             addon_info: None,
+            session_key,
+            warden: None,
+            warden_profile,
         };
 
         // 4. Wait for SMSG_AUTH_RESPONSE. Usually the first encrypted packet, but not always first
@@ -226,10 +424,10 @@ impl WorldSession {
         // AUTH_RESPONSE lead. Each read is still bounded by the handshake timeout, so a server that
         // never answers still fails per decision 0065.
         //
-        // SMSG_WARDEN_DATA among them ends the connection here: it means the server runs Warden,
-        // whose response clock kicks us ~30 s later no matter what else we do ([`WardenRequired`]).
-        // Refusing at the handshake trades an unplayable 30-second kick/reconnect cycle for one
-        // honest message at the login screen.
+        // SMSG_WARDEN_DATA never reaches this match: `recv_async` answers it and reads on. A
+        // session with no profile still ends here, as the `Err` that call returns — a server
+        // running Warden we cannot answer kicks us later anyway ([`WardenRequired`]), so one honest
+        // message at the login screen beats an unplayable kick/reconnect cycle.
         loop {
             match session.recv_async().await? {
                 ServerPacket::AuthResponse {
@@ -265,9 +463,6 @@ impl WorldSession {
                 ServerPacket::AuthResponse { result, .. } => {
                     return Err(WorldAuthReject { code: result }.into())
                 }
-                ServerPacket::Other {
-                    opcode: opcode::SMSG_WARDEN_DATA,
-                } => return Err(WardenRequired.into()),
                 _ => continue,
             }
         }
@@ -321,24 +516,103 @@ impl WorldSession {
         self.addon_info.take()
     }
 
-    /// Read + decrypt + parse one server packet.
+    /// Read + decrypt + parse one server packet, answering Warden on the way through.
+    ///
+    /// **Warden is handled HERE, not in a loop arm**, for the same reason `SMSG_ADDON_INFO` is
+    /// captured here: which read loop happens to see a packet is the server's timing, not our
+    /// contract, and `recv_async` is the one place all of them go through — the native `recv`
+    /// included (decision 2175).
+    ///
+    /// It was a loop arm, in the handshake and the roster step only, and that was a real hole: the
+    /// world phase reads through `recv_async` and nothing else, so once a session could get PAST
+    /// Warden it stopped answering it. A live probe against a real realm caught it — the scan round
+    /// arrived ~40 s after login, two `SMSG_WARDEN_DATA` came back to the caller unhandled, and the
+    /// server was answered by nobody. Unreachable before the module lane existed, because no
+    /// session ever reached the world with Warden armed.
+    ///
+    /// A handled Warden packet is not returned: it is the transport talking to itself, and no
+    /// caller has business seeing it. Refusals still surface, as the `Err` from this call.
     pub async fn recv_async(&mut self) -> Result<ServerPacket> {
-        let packet = recv_packet(&mut self.conn, Some(self.crypto.decrypter())).await?;
-        // **Captured here rather than in a loop arm**, because it is not one loop's business:
-        // `SMSG_ADDON_INFO` lands somewhere between `CMSG_AUTH_SESSION` and the roster, and which
-        // of the handshake's three read loops sees it is the server's timing, not our contract.
-        // `recv_async` is the one place all of them go through — the native `recv` included
-        // (decision 2175).
-        if let ServerPacket::AddonInfo { statuses } = &packet {
-            self.addon_info = Some(statuses.clone());
+        loop {
+            let packet = recv_packet(&mut self.conn, Some(self.crypto.decrypter())).await?;
+            if let ServerPacket::AddonInfo { statuses } = &packet {
+                self.addon_info = Some(statuses.clone());
+            }
+            if let ServerPacket::WardenData { body } = packet {
+                self.handle_warden(body)?;
+                continue;
+            }
+            return Ok(packet);
         }
-        Ok(packet)
     }
 
     /// Send a client packet (encrypted header + plaintext body). Synchronous on every target — a
     /// write is a buffered hand-off on both bodies of the transport seam.
     fn send(&mut self, opcode: u16, body: &[u8]) -> Result<()> {
         send_packet(&mut self.conn, Some(self.crypto.encrypter()), opcode, body)
+    }
+
+    /// Declare which Warden encoding this server uses, and what this client can witness.
+    ///
+    /// Without it every Warden message is refused. With it, a `CHEAT_CHECKS_REQUEST` whose types the
+    /// profile defines is answered; and when the profile carries a module source, a module offer is
+    /// accepted and its challenge completed.
+    pub fn set_warden_profile(&mut self, profile: warden::WardenProfile) {
+        self.warden_profile = Some(profile);
+    }
+
+    /// Handle one `SMSG_WARDEN_DATA`.
+    ///
+    /// The body is decrypted first in every case, so even a refusal can NAME what arrived rather
+    /// than reporting a bare "Warden" — and an opcode outside `server_op`'s range in that name is
+    /// the tell for a mis-keyed cipher rather than for an exotic server.
+    ///
+    /// **The re-key happens after the reply is on the wire, and that ordering is load-bearing.**
+    /// `Warden::HandlePacket` decrypts the whole incoming packet with its OLD `_inputCrypto` before
+    /// `HandleChallengeResponse` compares the reply and re-inits both ciphers
+    /// (`Warden.cpp:364-367`, `:141-142`). So our `HASH_RESULT` must go out under the old key and
+    /// only then may we re-key. Doing it the other way round does not error — the server reads
+    /// noise where the opcode should be, finds it is not `HASH_RESULT` while a challenge is
+    /// pending, and kicks.
+    fn handle_warden(&mut self, mut body: Vec<u8>) -> Result<()> {
+        let crypto = self
+            .warden
+            .get_or_insert_with(|| warden::WardenCrypto::from_session_key(&self.session_key));
+        crypto.decrypt(&mut body);
+        // The scan encoding is masked with a byte derived from the session key, not sent by the
+        // server, so it is read off our own cipher rather than carried in the profile.
+        let xor = crypto.scan_xor();
+        let message = warden::parse_server_message(&body);
+
+        // The profile is taken out for the duration because answering a module offer MUTATES it
+        // (it adopts the module's encoding) while `send_warden` needs `&mut self` too. Put back on
+        // every path, including the error one, so a refused message does not also lose the profile.
+        let mut profile = self.warden_profile.take();
+        let decided = warden_reply(&message, xor, profile.as_mut());
+        self.warden_profile = profile;
+
+        let Some(reply) = decided? else {
+            return Ok(());
+        };
+        self.send_warden(&reply.body)?;
+        if let Some((client_key, server_key)) = reply.rekey {
+            self.warden
+                .as_mut()
+                .expect("the cipher was inserted at the top of this function")
+                .rekey(&client_key, &server_key);
+        }
+        Ok(())
+    }
+
+    /// Send one `CMSG_WARDEN_DATA`: the body is RC4'd under our outgoing key, then travels as an
+    /// ordinary packet (the world header crypto is a separate layer and still applies).
+    fn send_warden(&mut self, body: &[u8]) -> Result<()> {
+        let mut encrypted = body.to_vec();
+        self.warden
+            .as_mut()
+            .ok_or_else(|| anyhow!("no Warden cipher to send under"))?
+            .encrypt(&mut encrypted);
+        self.send(opcode::CMSG_WARDEN_DATA, &encrypted)
     }
 
     /// Request the character list (blocking) — the native twin of [`Self::char_enum_async`].
@@ -357,11 +631,6 @@ impl WorldSession {
                     self.roster_races = characters.iter().map(|c| (c.guid, c.race)).collect();
                     return Ok(characters);
                 }
-                // Warden can land either side of SMSG_AUTH_RESPONSE depending on when the server
-                // arms it, so the roster step refuses it too — same reason as `connect`.
-                ServerPacket::Other {
-                    opcode: opcode::SMSG_WARDEN_DATA,
-                } => return Err(WardenRequired.into()),
                 // The tutorial bank, if the server sends it this early (1976): kept for the world
                 // entry — skipped here it would be lost to the roster loop.
                 ServerPacket::TutorialFlags(flags) => {

@@ -1602,6 +1602,12 @@ pub enum ServerPacket {
         /// One `status` per record, in the order the records arrived.
         statuses: Vec<u8>,
     },
+    /// `SMSG_WARDEN_DATA` — carried whole because the body IS the message: it is RC4 ciphertext
+    /// under a key the parser has no access to, so there is nothing to decode here and dropping it
+    /// (as `Other` does) would discard the only thing the packet contains.
+    WardenData {
+        body: Vec<u8>,
+    },
     Other {
         opcode: u16,
     },
@@ -1948,6 +1954,7 @@ impl ServerPacket {
             ServerPacket::InitWorldStates(_) => "SMSG_INIT_WORLD_STATES".into(),
             ServerPacket::UpdateWorldState { .. } => "SMSG_UPDATE_WORLD_STATE".into(),
             ServerPacket::AddonInfo { .. } => "SMSG_ADDON_INFO".into(),
+            ServerPacket::WardenData { .. } => "SMSG_WARDEN_DATA".into(),
             ServerPacket::Other { opcode } => format!("opcode {opcode:#06x}"),
         }
     }
