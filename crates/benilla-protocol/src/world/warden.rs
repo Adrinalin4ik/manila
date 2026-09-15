@@ -22,6 +22,13 @@
 //!
 //! There is a second keying step: once a module is loaded the server re-inits both ciphers from the
 //! module's own `clientKey`/`serverKey` (`Warden.cpp:141-142`). [`WardenCrypto::rekey`] is that step.
+//!
+//! **The module's own data is readable without executing the module.** A server's `.cr` file
+//! ([`WardenModuleData`]) carries the scan-opcode table and a thousand pregenerated
+//! challenge/response/key triples, so a client holding it can decode a stock request and answer the
+//! challenge. That is the whole of what executing the module would have bought us HERE — it buys
+//! nothing towards the scans that read a `WoW.exe` image, which stay unanswerable for the reason in
+//! the scope note above.
 
 use sha1::{Digest, Sha1};
 
@@ -247,15 +254,17 @@ pub fn parse_server_message(body: &[u8]) -> Option<ServerMessage> {
 // --- the scan lane -------------------------------------------------------------------------------
 //
 // Everything above is the transport. What follows is what a scan request MEANS, and it is written
-// against a contract this client cannot read off the wire on its own: the byte that names a check's
-// type is `module->opcodes[type] ^ xor` (`WardenScan.cpp`'s builders), and that table lives inside
-// the module. A client that does not execute the module therefore cannot dispatch a request built
-// the stock way — so this lane is written for a server profile that fixes the encoding instead, and
-// [`CheckType`] is the mapping it proposes.
+// against a contract that is never on the wire: the byte naming a check's type is
+// `module->opcodes[type] ^ xor` (`WardenScan.cpp`'s builders), and that table lives in the module.
+//
+// There are two ways to hold it. [`WardenModuleData`] reads it out of the server's own `.cr` file,
+// which is the stock encoding exactly; a server that instead fixes an encoding for this client
+// states it in the profile directly. Either way the table reaches [`WardenProfile`] and nothing
+// below has to guess — which matters because guessing does not fail, it misreads.
 
 /// The scan types, numbered as `WindowsScanType` numbers them (`WardenScan.hpp:42-53`). The wire
-/// byte is NOT this value on a stock server — see the note above — but the enum is the server's, so
-/// a fixed-encoding profile has an obvious mapping to adopt.
+/// byte is NOT this value: it is `opcodes[type] ^ xor`, so the enum is only the INDEX into the
+/// module's table — see [`WardenProfile::decode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckType {
     ReadMemory = 0,
@@ -934,51 +943,275 @@ impl ScanWitness for ClientWitness {
     }
 }
 
+// --- the module's own data -----------------------------------------------------------------------
+
+/// One pregenerated challenge/response/key triple — `ChallengeResponseEntry`
+/// (`WardenModule.hpp:17-23`, under `#pragma pack(push, 1)`, so 68 bytes with no padding).
+///
+/// The server picks one at random per session (`Warden::RequestChallenge`), sends its `seed`, and
+/// expects `reply` back; both sides then re-key from `client_key`/`server_key`. Nothing derives
+/// these from the seed — the table IS the answer, which is why holding the `.cr` is enough and
+/// executing the module is not required.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChallengeResponse {
+    pub seed: [u8; 16],
+    pub reply: [u8; 20],
+    /// The key the server will DECRYPT our traffic with, so the one we encrypt under.
+    pub client_key: [u8; 16],
+    /// The key the server encrypts with, so the one we decrypt under.
+    pub server_key: [u8; 16],
+}
+
+/// Bytes before the challenge table: `u32 memoryRead`, `u32 pageScanCheck`, `u8 opcodes[9]`, in the
+/// order `WardenModule`'s constructor reads them (`WardenModule.cpp:84-87`).
+const CR_HEADER_LEN: usize = 4 + 4 + 9;
+/// One packed `ChallengeResponseEntry`.
+const CR_ENTRY_LEN: usize = 16 + 20 + 16 + 16;
+
+/// A Warden module's server-side data, parsed from its `.cr` file.
+///
+/// **The layout is measured against real modules, not inferred from the struct** — and the two
+/// measurements cover different amounts, so they are stated separately.
+///
+/// FOUR `.cr` files from tortoise-wow's `warden_modules/` were fetched whole: each is 68017 bytes,
+/// and `(68017 - 17) % 68` is 0 with a quotient of exactly 1000. A wrong header width or entry
+/// stride would have left a remainder rather than dividing evenly four times over.
+///
+/// All 73 module HEADERS were fetched — the first 17 bytes only, so this says nothing about the
+/// other 69 files' sizes. What it does pin is the terminator, `0x00` for 71 of them and `0x01` for
+/// two, which is why [`Self::scan_terminator`] derives it instead of returning a constant; and that
+/// exactly one module has an all-zero opcode table, the Mac one [`Self::parse`] refuses.
+#[derive(Debug)]
+pub struct WardenModuleData {
+    /// MD5 of the module binary — what `MODULE_USE` carries, and how a store finds this file.
+    pub id: [u8; 16],
+    /// Offset of the module's own memory-reading function. Not used to answer anything: it is the
+    /// `offset` field of a `FIND_CODE_BY_HASH` the server builds against the module itself
+    /// (`WardenWin.cpp:1534-1559`), which is an image scan and stays unanswerable.
+    pub memory_read: u32,
+    /// The page-scan check's offset, same story.
+    pub page_scan_check: u32,
+    /// Wire opcode per [`CheckType`], indexed by its discriminant.
+    pub opcodes: [u8; 9],
+    pub crk: Vec<ChallengeResponse>,
+    /// `seed` → index into [`Self::crk`], built once in [`Self::parse`]. A stock table holds 1000
+    /// entries and the server picks one at random, so a linear scan would walk ~500 of them on
+    /// every challenge; this makes it one hash.
+    by_seed: std::collections::HashMap<[u8; 16], usize>,
+}
+
+impl WardenModuleData {
+    /// Parse a `.cr` file. `id` is the module id `MODULE_USE` named, carried through so a caller
+    /// can tell which module it adopted.
+    ///
+    /// Refuses rather than guessing, in each case `WardenModule`'s constructor refuses: a size that
+    /// is not header-plus-whole-entries (`WardenModule.cpp:77-78`), a Mac module (all-zero opcodes,
+    /// `WardenModule::Windows`), and a zero `memoryRead` or `pageScanCheck` (`:110-114`). The Mac
+    /// case is the one that would otherwise pass quietly — nine zero opcodes parse fine and then
+    /// decode every scan type to `ReadMemory`.
+    ///
+    /// Plus one the constructor leaves to a caller: an empty challenge table, which
+    /// `Warden::RequestChallenge` asserts against before picking a row.
+    pub fn parse(id: [u8; 16], cr: &[u8]) -> Result<Self, &'static str> {
+        let body = cr
+            .get(CR_HEADER_LEN..)
+            .ok_or("cr file is shorter than its 17-byte header")?;
+        if body.len() % CR_ENTRY_LEN != 0 {
+            return Err("cr size is not a 17-byte header plus whole 68-byte challenge entries");
+        }
+        let memory_read = u32::from_le_bytes([cr[0], cr[1], cr[2], cr[3]]);
+        let page_scan_check = u32::from_le_bytes([cr[4], cr[5], cr[6], cr[7]]);
+        let opcodes: [u8; 9] = cr[8..CR_HEADER_LEN].try_into().expect("9 bytes");
+
+        if opcodes.iter().all(|&b| b == 0) {
+            return Err("mac module: its opcode table is all zeroes and decodes nothing");
+        }
+        if memory_read == 0 {
+            return Err("module data does not include memory read information");
+        }
+        if page_scan_check == 0 {
+            return Err("module data does not include page scan check information");
+        }
+
+        let mut crk = Vec::with_capacity(body.len() / CR_ENTRY_LEN);
+        let mut by_seed = std::collections::HashMap::with_capacity(crk.capacity());
+        for chunk in body.chunks_exact(CR_ENTRY_LEN) {
+            let entry = ChallengeResponse {
+                seed: chunk[0..16].try_into().expect("16 bytes"),
+                reply: chunk[16..36].try_into().expect("20 bytes"),
+                client_key: chunk[36..52].try_into().expect("16 bytes"),
+                server_key: chunk[52..68].try_into().expect("16 bytes"),
+            };
+            by_seed.insert(entry.seed, crk.len());
+            crk.push(entry);
+        }
+        // `Warden::RequestChallenge` asserts `!_module->crk.empty()` before picking one, so a module
+        // with no entries is one the server could not use either.
+        if crk.is_empty() {
+            return Err("cr file carries no challenge entries");
+        }
+
+        Ok(WardenModuleData {
+            id,
+            memory_read,
+            page_scan_check,
+            opcodes,
+            crk,
+            by_seed,
+        })
+    }
+
+    /// The byte that ends a scan block: the first value absent from [`Self::opcodes`], exactly as
+    /// `WardenModule.cpp:93-108` derives it. Nine opcodes cannot cover 256 values, so this always
+    /// finds one.
+    pub fn scan_terminator(&self) -> u8 {
+        (0u8..=u8::MAX)
+            .find(|i| !self.opcodes.contains(i))
+            .expect("nine opcodes cannot exhaust 256 values")
+    }
+
+    /// The entry whose `seed` the server sent, or `None` when it named one this module does not
+    /// hold — which means we adopted the wrong module, not that the challenge is unanswerable.
+    pub fn answer_challenge(&self, seed: &[u8]) -> Option<&ChallengeResponse> {
+        let key: [u8; 16] = seed.try_into().ok()?;
+        self.by_seed.get(&key).map(|&i| &self.crk[i])
+    }
+}
+
+/// A module id as it names its files: 32 uppercase hex digits, the basename tortoise-wow's
+/// `WardenModuleMgr` pairs `.bin`/`.key`/`.cr` under.
+pub fn module_id_hex(id: &[u8; 16]) -> String {
+    id.iter().map(|b| format!("{b:02X}")).collect()
+}
+
+/// Fetch a module's `.cr` bytes by id. The protocol crate does no IO of its own — the app hands in
+/// the same reader the rest of the client uses, as it already does for [`ClientWitness`].
+pub type ModuleSource = Box<dyn Fn(&[u8; 16]) -> Option<Vec<u8>> + Send>;
+
 /// A server profile's fixed check encoding, plus the client's witness — everything
 /// [`crate::WorldSession`] needs to take part in a scan round.
 ///
-/// This exists because the stock encoding is unavailable to us: the byte naming a check's type is
-/// `module->opcodes[type] ^ xor`, and that table lives inside the Warden module, which a
-/// from-scratch client cannot load. A server willing to admit such a client fixes the encoding
-/// instead, and states it here. `opcodes` is indexed by [`CheckType`], exactly mirroring the
-/// module's own table so a profile author has an obvious thing to copy.
+/// The encoding can arrive two ways and the profile holds whichever it got. [`Self::from_module`]
+/// takes it from a `.cr`, which is the stock table verbatim; [`Self::new`] takes one a server fixed
+/// for this client. `opcodes` is indexed by [`CheckType`] in both cases, mirroring the module's own
+/// table. When a [`ModuleSource`] is attached, a `MODULE_USE` offer is answered by loading that
+/// module and adopting its encoding mid-session ([`Self::adopt_offered_module`]).
 ///
 /// A session without a profile refuses Warden outright — which is the right default, because
 /// guessing an encoding does not fail, it silently misreads every request.
 pub struct WardenProfile {
-    /// Wire byte for each [`CheckType`], indexed by its discriminant.
-    pub opcodes: [u8; 9],
-    /// The byte that ends the scan block (`module->scanTerminator ^ xor` on a stock server).
-    pub terminator: u8,
+    /// Wire byte for each [`CheckType`] (indexed by its discriminant) and the byte that ends a scan
+    /// block — or `None` while the profile is waiting for a module to supply both.
+    ///
+    /// One `Option` over the pair rather than two public fields, because a HALF-known encoding is
+    /// the dangerous state: nine placeholder zeroes decode every scan type to `ReadMemory` and a
+    /// zero terminator ends the block at the first one. [`Self::decode`] answers `None` for
+    /// everything until this is set, so an unexpected request is refused instead of misread.
+    encoding: Option<([u8; 9], u8)>,
     /// What the client can say about itself.
     pub witness: Box<dyn ScanWitness + Send>,
+    /// Where a `.cr` comes from when the server offers a module. `None` means module offers are
+    /// refused — correct for a fixed-encoding server, which never sends one.
+    modules: Option<ModuleSource>,
+    /// The module this session adopted, kept for its challenge table. Private because adopting one
+    /// must move `opcodes` and `terminator` with it; [`Self::adopt_offered_module`] is the only way
+    /// in, so the three cannot drift apart.
+    module: Option<WardenModuleData>,
 }
 
 impl WardenProfile {
+    /// A profile over an encoding stated out of band — a server that fixed one for this client.
+    pub fn new(opcodes: [u8; 9], terminator: u8, witness: Box<dyn ScanWitness + Send>) -> Self {
+        WardenProfile {
+            encoding: Some((opcodes, terminator)),
+            witness,
+            modules: None,
+            module: None,
+        }
+    }
+
+    /// A profile over a module's own encoding, for a caller that already holds the `.cr`.
+    pub fn from_module(module: WardenModuleData, witness: Box<dyn ScanWitness + Send>) -> Self {
+        WardenProfile {
+            encoding: Some((module.opcodes, module.scan_terminator())),
+            witness,
+            modules: None,
+            module: Some(module),
+        }
+    }
+
+    /// A profile with no encoding yet, for a stock server that will offer a module.
+    ///
+    /// Until the offer lands this decodes nothing, so a scan request that somehow arrives first is
+    /// refused by name rather than read under a placeholder table.
+    pub fn awaiting_module(witness: Box<dyn ScanWitness + Send>, modules: ModuleSource) -> Self {
+        WardenProfile {
+            encoding: None,
+            witness,
+            modules: Some(modules),
+            module: None,
+        }
+    }
+
+    /// Attach a source of `.cr` files, so a `MODULE_USE` offer can be answered.
+    pub fn with_modules(mut self, modules: ModuleSource) -> Self {
+        self.modules = Some(modules);
+        self
+    }
+
+    /// Load the module the server just offered and take on its encoding.
+    ///
+    /// This REPLACES `opcodes` and `terminator`, because from here the server builds every request
+    /// from that module's table — a profile that kept a previously stated encoding would misread
+    /// the very next packet.
+    pub fn adopt_offered_module(&mut self, id: &[u8; 16]) -> Result<(), String> {
+        let source = self
+            .modules
+            .as_ref()
+            .ok_or_else(|| "no module source is configured".to_string())?;
+        let cr = source(id).ok_or_else(|| {
+            format!("no .cr for module {} in the module source", module_id_hex(id))
+        })?;
+        let module = WardenModuleData::parse(*id, &cr)
+            .map_err(|e| format!("module {}: {e}", module_id_hex(id)))?;
+        self.encoding = Some((module.opcodes, module.scan_terminator()));
+        self.module = Some(module);
+        Ok(())
+    }
+
+    /// The adopted module, when there is one — the only thing that can answer a `HASH_REQUEST`.
+    pub fn module(&self) -> Option<&WardenModuleData> {
+        self.module.as_ref()
+    }
+
     /// Wire byte -> check type, under the session's mask. `None` for a byte the profile does not
     /// define, which stops the walk rather than letting a misread request be answered.
     ///
     /// `xor` comes from [`WardenCrypto::scan_xor`], not from the profile: the mask is per-session
-    /// and derived from the session key, while the table is the server's fixed choice.
+    /// and moves with the keys, while the table belongs to the module or the agreement.
     pub fn decode(&self, byte: u8, xor: u8) -> Option<CheckType> {
+        let (opcodes, _) = self.encoding?;
         let value = byte ^ xor;
-        self.opcodes
+        opcodes
             .iter()
             .position(|&b| b == value)
             .and_then(|i| CheckType::from_u8(i as u8))
     }
 
     /// The scan block's terminator as it appears on the wire for this session.
-    pub fn terminator_on_wire(&self, xor: u8) -> u8 {
-        self.terminator ^ xor
+    ///
+    /// `None` when no encoding is known yet — and a caller must not substitute a byte of its own,
+    /// because a wrong terminator either ends the walk early or never ends it.
+    pub fn terminator_on_wire(&self, xor: u8) -> Option<u8> {
+        self.encoding.map(|(_, terminator)| terminator ^ xor)
     }
 }
 
 impl std::fmt::Debug for WardenProfile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WardenProfile")
-            .field("opcodes", &self.opcodes)
-            .field("terminator", &self.terminator)
+            .field("encoding", &self.encoding)
+            .field("module", &self.module.as_ref().map(|m| module_id_hex(&m.id)))
             .finish_non_exhaustive()
     }
 }
@@ -1484,6 +1717,123 @@ mod tests {
             requests[1].params,
             ScanParams::Timing,
             "the scan after a memory read must still decode"
+        );
+    }
+
+    // --- the module's own data ---------------------------------------------------------------
+
+    /// Real 17-byte headers, copied out of tortoise-wow's `warden_modules/`. The challenge tables
+    /// below them are synthetic, and the test says so rather than implying it hashed a real one.
+    ///
+    /// What a synthetic tail cannot prove, a measurement did — see [`WardenModuleData`]'s own note
+    /// for exactly how much each pass covered. In short: four whole files pin the 17/68/1000
+    /// arithmetic, and all 73 headers pin the terminator and the single Mac module. So the sizes
+    /// asserted below are not a fixture agreeing with itself.
+    const HDR_TERM_00: [u8; 17] = [
+        0xB8, 0x47, 0x00, 0x00, 0x79, 0x6C, 0x00, 0x00, 0x74, 0x0E, 0xA8, 0xA7, 0x41, 0xDC, 0xDB,
+        0x76, 0x10,
+    ];
+    /// `2B1837AFD92A1BC289C7BD6F75D33209` — one of the two whose table contains `0x00`, so its
+    /// terminator is `0x01`. A hardcoded zero would be wrong here and right everywhere else, which
+    /// is exactly the bug that never shows up in one sample.
+    const HDR_TERM_01: [u8; 17] = [
+        0x99, 0x54, 0x00, 0x00, 0xC0, 0x6D, 0x00, 0x00, 0x52, 0xA8, 0xFE, 0xDB, 0x31, 0xAA, 0x87,
+        0x00, 0x56,
+    ];
+    /// `0DBBF209A27B1E279A9FEC5C168A15F7` — the Mac module, header verbatim.
+    const HDR_MAC: [u8; 17] = [0u8; 17];
+
+    /// A `.cr` at the shipped shape: one of the real headers plus 1000 entries.
+    fn cr_file(header: [u8; 17], entries: usize) -> Vec<u8> {
+        let mut cr = header.to_vec();
+        for i in 0..entries {
+            cr.extend_from_slice(&(i as u16).to_le_bytes()); // first 2 bytes of the seed
+            cr.extend_from_slice(&[0xAA; 14]); // rest of seed
+            cr.extend_from_slice(&[0xBB; 20]); // reply
+            cr.extend_from_slice(&[0xCC; 16]); // clientKey
+            cr.extend_from_slice(&[0xDD; 16]); // serverKey
+        }
+        cr
+    }
+
+    /// The `.cr` layout, its two refusals, and the derived terminator — the three things a wrong
+    /// answer here would corrupt silently rather than fail on.
+    #[test]
+    fn a_cr_file_parses_at_the_shipped_shape() {
+        let cr = cr_file(HDR_TERM_00, 1000);
+        assert_eq!(cr.len(), 68017, "every shipped module is exactly this size");
+
+        let m = WardenModuleData::parse([1u8; 16], &cr).expect("a real header must parse");
+        assert_eq!(m.crk.len(), 1000, "17-byte header, 68-byte entries");
+        assert_eq!(m.memory_read, 0x47B8);
+        assert_eq!(m.page_scan_check, 0x6C79);
+        assert_eq!(m.opcodes, [116, 14, 168, 167, 65, 220, 219, 118, 16]);
+        assert_eq!(m.scan_terminator(), 0x00, "0 is absent from this table");
+
+        // The challenge is a lookup, not a computation: the seed picks the row and the row carries
+        // everything the rekey needs.
+        let mut seed = [0xAAu8; 16];
+        seed[0] = 7;
+        seed[1] = 0;
+        let hit = m.answer_challenge(&seed).expect("seed 7 is in the table");
+        assert_eq!(hit.reply, [0xBB; 20]);
+        assert_eq!(hit.client_key, [0xCC; 16]);
+        assert_eq!(hit.server_key, [0xDD; 16]);
+        assert!(
+            m.answer_challenge(&[0xFF; 16]).is_none(),
+            "a seed this module does not hold means the wrong module was adopted"
+        );
+        assert!(
+            m.answer_challenge(&[0u8; 15]).is_none(),
+            "a seed that is not 16 bytes is not a seed"
+        );
+
+        // The two modules a single sample would have got wrong.
+        let odd = WardenModuleData::parse([2u8; 16], &cr_file(HDR_TERM_01, 4)).expect("parses");
+        assert!(odd.opcodes.contains(&0), "this table really does contain 0");
+        assert_eq!(odd.scan_terminator(), 0x01, "so 0 cannot be the terminator");
+
+        // A Mac module's nine zeroes would otherwise decode every scan type to ReadMemory.
+        assert!(WardenModuleData::parse([3u8; 16], &cr_file(HDR_MAC, 4))
+            .unwrap_err()
+            .contains("mac module"));
+
+        // A size that is not header-plus-whole-entries is a file we misunderstand, not one to
+        // round down: the residual is the only signal that the layout moved.
+        let mut short = cr_file(HDR_TERM_00, 4);
+        short.pop();
+        assert!(WardenModuleData::parse([4u8; 16], &short)
+            .unwrap_err()
+            .contains("whole 68-byte"));
+
+        // A profile with no encoding yet must decode NOTHING. Nine placeholder zeroes would decode
+        // every wire byte equal to the mask as `ReadMemory` and end the block at the first one —
+        // a misread, which is worse than a refusal because it produces answers.
+        let mut waiting = WardenProfile::awaiting_module(
+            Box::new(EmptyWitness),
+            Box::new(|_| Some(cr_file(HDR_TERM_00, 2))),
+        );
+        assert!(waiting.terminator_on_wire(0x5A).is_none());
+        assert!(
+            (0..=u8::MAX).all(|b| waiting.decode(b, 0x5A).is_none()),
+            "no byte may decode before an encoding is known"
+        );
+
+        // Adopting the offer supplies both, and they are the module's, not a default.
+        waiting.adopt_offered_module(&[9u8; 16]).expect("adopts");
+        assert_eq!(
+            waiting.decode(65 ^ 0x5A, 0x5A),
+            Some(CheckType::HashClientFile),
+            "65 is this module's opcode for HASH_CLIENT_FILE"
+        );
+        assert_eq!(waiting.terminator_on_wire(0x5A), Some(0x00 ^ 0x5A));
+        assert_eq!(waiting.module().map(|m| m.id), Some([9u8; 16]));
+
+        // 16 bytes become the 32-character uppercase basename the module files are paired under.
+        assert_eq!(
+            module_id_hex(&[0x0D, 0xBB, 0xF2, 0x09, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            "0DBBF209000000000000000000000000",
+            "the id names the file"
         );
     }
 

@@ -269,9 +269,40 @@ pub(super) struct NetConfig {
     /// It is configuration rather than a constant because it is the SERVER's choice: on a stock
     /// server the type bytes come from the Warden module's own table, which a from-scratch client
     /// cannot load, so a server willing to admit this client fixes the encoding and states it. Until
-    /// one does, this is `None` and every Warden message is refused — the safe default, since
-    /// guessing an encoding does not fail, it silently misreads every request.
+    /// one does, this is `None` — and then Warden is refused unless `warden_modules` is on, which
+    /// is the other way to obtain the table. Never guessed: guessing an encoding does not fail, it
+    /// silently misreads every request.
     warden_encoding: Option<([u8; 9], u8)>,
+    /// Whether to answer a stock server's module offer by loading its `.cr` from
+    /// `<data>/warden_modules/<ID>.cr`, set by `WOW_WARDEN_MODULES=1`.
+    ///
+    /// Opt-in rather than "try and see", because the try is a round trip: on web each `.cr` read is
+    /// a synchronous XHR on the browser's own thread, and a 404 for every module a server offers
+    /// would be a stall for nothing on installs that do not carry them.
+    warden_modules: bool,
+}
+
+/// Read one Warden module's `.cr` by id, from the same place the rest of the client reads data:
+/// the install's `Data` directory natively, the web host's `/data` route on wasm.
+///
+/// The basename is the id as 32 uppercase hex digits, which is how tortoise-wow's
+/// `WardenModuleMgr` pairs a module's `.bin`, `.key` and `.cr`. Loose files rather than
+/// `Chain::read`, because these are not MPQ members — they are the server's own files, copied in
+/// beside the archives.
+fn read_warden_cr(id: &[u8; 16]) -> Option<Vec<u8>> {
+    let name = format!(
+        "warden_modules/{}.cr",
+        benilla_protocol::world::warden::module_id_hex(id)
+    );
+    #[cfg(target_arch = "wasm32")]
+    {
+        let url = format!("{}/{name}", benilla_formats::web::data_base());
+        benilla_formats::web::fetch_sync(&url).ok()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::fs::read(benilla_formats::wow_data()?.join(name)).ok()
+    }
 }
 
 /// Parse `WOW_WARDEN_PROFILE`: nine comma-separated scan-type bytes then the terminator, all
@@ -305,6 +336,7 @@ impl NetConfig {
             warden_encoding: crate::webenv::var("WOW_WARDEN_PROFILE")
                 .as_deref()
                 .and_then(parse_warden_encoding),
+            warden_modules: crate::webenv::var("WOW_WARDEN_MODULES").as_deref() == Some("1"),
         }
     }
 
@@ -317,7 +349,11 @@ impl NetConfig {
     fn warden_profile(&self) -> Option<benilla_protocol::world::warden::WardenProfile> {
         use benilla_protocol::world::warden::{ClientWitness, WardenProfile};
         let chain = self.chain.clone()?;
-        let (opcodes, terminator) = self.warden_encoding?;
+        // Either half is enough to take part: a stated encoding for a server that fixed one, or a
+        // module source for a stock server that will name its own. Neither means Warden is refused.
+        if self.warden_encoding.is_none() && !self.warden_modules {
+            return None;
+        }
         let for_files = Arc::clone(&chain);
         let witness = ClientWitness::new(
             Box::new(move |path| for_files.read(path).ok()),
@@ -334,10 +370,20 @@ impl NetConfig {
                 bevy::log::warn!("warden: this install has no {path} to hash");
             }
         }
-        Some(WardenProfile {
-            opcodes,
-            terminator,
-            witness: Box::new(witness),
+        let witness = Box::new(witness);
+        let Some((opcodes, terminator)) = self.warden_encoding else {
+            // Guarded above, so we only reach this with modules enabled: the offered module will
+            // supply the encoding, and until it does the profile decodes nothing rather than guess.
+            return Some(WardenProfile::awaiting_module(
+                witness,
+                Box::new(read_warden_cr),
+            ));
+        };
+        let profile = WardenProfile::new(opcodes, terminator, witness);
+        Some(if self.warden_modules {
+            profile.with_modules(Box::new(read_warden_cr))
+        } else {
+            profile
         })
     }
 }
