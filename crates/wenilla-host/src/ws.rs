@@ -26,13 +26,14 @@ struct WsState {
     /// where realmd (3724) and mangosd (8085) are different services.
     upstreams: Arc<HashMap<u16, Arc<str>>>,
     /// Dial the `?host=` the client asked for, falling back to [`Self::upstreams`] when it is
-    /// absent or unusable. **Off by default and off in every existing caller**, because turning it
-    /// on makes this an outbound TCP relay to the allowlisted ports on any address the page names.
+    /// absent or unusable. Setting it makes this an outbound TCP relay to the allowlisted ports on
+    /// any address the page names.
     ///
     /// This is why it is a field rather than a change to [`upgrade`]: `wenilla-realm` mounts this
     /// very router (`wenilla-realm/src/lib.rs`) and is internet-facing, so following the client
-    /// there would be a server-side request forgery reachable by any visitor. Only
-    /// `wenilla-host`'s `--follow-client-realmlist` sets it.
+    /// there would be a server-side request forgery reachable by any visitor. It is therefore
+    /// **false in [`router_map`] and never reachable from there**, whatever `wenilla-host` chooses
+    /// for its own default.
     follow_client: bool,
 }
 
@@ -60,8 +61,10 @@ pub fn router_map(upstreams: impl IntoIterator<Item = (u16, Arc<str>)>) -> Route
 ///
 /// **This is an open outbound relay to the allowlisted ports, and only those.** The port is still
 /// checked against the map's keys before anything is dialed, so this widens *where* a session may
-/// go and never *what* it may reach there. Fit for a local development host whose operator chose
-/// it; not fit for a service with visitors, which is why `wenilla-realm` calls [`router_map`].
+/// go and never *what* it may reach there. It is what `wenilla-host` mounts by default — a local
+/// development tool, where a realmlist control that changed nothing would be the worse default —
+/// and it is not fit for a service with visitors, which is why `wenilla-realm` calls
+/// [`router_map`] and `--pin-upstream` exists to get back to it.
 pub fn router_map_following(upstreams: impl IntoIterator<Item = (u16, Arc<str>)>) -> Router {
     build(upstreams, true)
 }

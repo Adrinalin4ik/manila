@@ -25,55 +25,62 @@ scripts/web-build.sh                      # → web/dist (WebGPU). WEB_DEBUG=1 k
 cargo run --release -p wenilla-host -- \
   --www web/dist \
   --data /path/to/WoW/Data \
-  --upstream logon.your-realm.example \
-  --world-upstream 10.0.0.5              # see "Why --world-upstream" below
+  --upstream logon.your-realm.example
 ```
 
 Then open **<http://127.0.0.1:8090/>**.
+
+`--upstream` is the realm a session gets when it asks for none; the login screen's realmlist box
+overrides it per session. See "Changing realm from the login screen".
 
 The build takes a few minutes and produces a ~75 MB wasm (~20 MB gzipped). Fine over LAN, painful
 over mobile data.
 
 ### Changing realm from the login screen
 
-By default the proxy dials `--upstream` and nothing the page says can move it, so the realmlist
-box on the login screen sets the client's own idea of the address and changes nothing else. Add
-`--follow-client-realmlist` and the box becomes what it looks like: the proxy dials the address
-you typed, and `--upstream` is only the default for a session that names none.
+**The realmlist box works.** Type an address into **realmlist** on the login screen — or pass
+`?host=` in the URL, which sets the same box — and the proxy dials it. `--upstream` is only the
+default for a session that names no host, so a run where nobody touches the box behaves exactly as
+it did before.
+
+The proxy log's `dialed=` field names the address a session actually went to, beside the `host=`
+the client asked for. That is the one thing worth reading when a realm change appears to do
+nothing.
+
+**`--world-upstream` is not needed.** The world address comes from the realm list the login server
+sends, and the client puts it on the socket URL the same way; following the client means following
+that too.
+
+**This makes the host a TCP relay to ports 3724 and 8085 on any address a page names.** That is a
+fair default for a local tool: on the default loopback bind it reaches nothing you could not reach
+from a terminal, and on `--bind 0.0.0.0` this host is already handing out the whole game install
+with no login — the startup warning says both, on that bind only. The port allowlist holds either
+way: this widens *where* a session may go, never *what* it may reach there.
+
+To turn it off and pin every session to the flags:
 
 ```bash
 cargo run --release -p wenilla-host -- \
   --www web/dist --data /path/to/WoW/Data \
   --upstream logon.your-realm.example \
-  --follow-client-realmlist
+  --world-upstream 10.0.0.5 \
+  --pin-upstream
 ```
 
-Then type an address into **realmlist** on the login screen — or pass `?host=` in the URL, which
-sets the same box — and log in. The proxy log's `dialed=` field names the address a session
-actually went to, which is the one thing worth reading when a realm change appears to do nothing.
-
-**`--world-upstream` is not needed with this flag.** The world address comes from the realm list
-the login server sends, and the client puts it on the socket URL the same way; following the
-client means following that too.
-
-**It makes the host a TCP relay to ports 3724 and 8085 on any address a page names**, so it is off
-by default and it says so at startup. On a loopback bind that reaches nothing you could not reach
-anyway; on `--bind 0.0.0.0` it is a choice about the network you are on. The port allowlist still
-holds either way: this widens *where* a session may go, never *what* it may reach there.
-`wenilla-realm` has no such flag.
+`wenilla-realm` is always pinned and has no such flag.
 
 ### Why `--world-upstream`
 
-Only for a host running **without** `--follow-client-realmlist`. It is optional, and omitting it
+Only for a host running with `--pin-upstream`. It is optional, and omitting it
 means *"the world is on the same host as the login server"* — not
 *"work it out"*. That is wrong for any realm whose realmd advertises a different address for the
 world than the one it answers logins on.
 
 The world address **is** discovered automatically, by the client, from the realm list. The client
 then hands it to the proxy as `/ws/8085?host=<that address>`. The proxy **discards it** and dials
-its configured upstream, deliberately: a page must not be able to aim the socket somewhere else on
-the network (`ws.rs`, `upgrade`). `--world-upstream` is the supported way to say where the world
-actually is — or turn that default off with `--follow-client-realmlist`.
+its configured upstream **when pinned**, so that a page cannot aim the socket somewhere else on the
+network (`ws.rs`, `upgrade`). `--world-upstream` is then the supported way to say where the world
+actually is.
 
 Get it wrong and the failure is silent rather than loud: a DDoS front accepts a connection on every
 port, so the world socket opens against the login host and then says nothing. The proxy log is what
@@ -109,9 +116,8 @@ mapping is mechanical: `WOW_<NAME>` is the query key `<name>`, lowercased, prefi
 | `WOW_WARDEN_MODULES` | `?warden_modules=` | `1` enables the Warden module lane — see below |
 | `WOW_WARDEN_PROFILE` | `?warden_profile=` | a fixed scan encoding, for a server that agreed one instead of offering a module. Rarely needed now. |
 
-**`?host=` changes what the client dials; whether the proxy follows is the host's choice.**
-Without `--follow-client-realmlist` the socket still goes to `--upstream` and the realm is the
-host's — see "Changing realm from the login screen".
+**`?host=` sets the realmlist, and the proxy follows it** unless the host was started with
+`--pin-upstream` — see "Changing realm from the login screen".
 
 ## Warden
 
@@ -199,8 +205,8 @@ Loopback needs none of this: WSL2 forwards `127.0.0.1` to Windows on its own.
 
 ## Not supported yet
 
-- **Choosing a realm on the realm service.** `--follow-client-realmlist` exists only on
-  `wenilla-host`; players on `wenilla-realm` reach the realm it is configured for.
+- **Choosing a realm on the realm service.** Following the client's realmlist is a `wenilla-host`
+  behaviour only; players on `wenilla-realm` reach the realm it is configured for.
 - **A realmlist on a non-standard port.** The proxy's port allowlist is `{3724, 8085}`
   (`crates/wenilla-host/src/lib.rs`, `ALLOWED_PORTS`), so `realm.example:3725` gets a 403 whatever
   the upstream flags say.

@@ -86,18 +86,19 @@ async fn relays_binary_frames_both_ways_and_closes_with_the_upstream() {
     );
 }
 
-/// `--follow-client-realmlist`: the socket goes where the page asked, and without the flag it
-/// does not.
+/// The two doors: [`router_map_following`] sends the socket where the page asked, [`router_map`]
+/// does not. `wenilla-host` mounts the first by default and the second under `--pin-upstream`;
+/// `wenilla-realm` only ever mounts the second.
 ///
 /// **Both arms run against the same pair of addresses**, which is what makes this a measurement
 /// rather than a self-consistency check: the router is configured with a host that cannot resolve
 /// (`.invalid` is reserved by RFC 2606 for exactly this) while the echo server sits on loopback
 /// and only `?host=` names it. So a byte coming back proves the configured host was *not* used,
-/// and the control arm proves the asked-for host is *not* used by default — neither arm can pass
+/// and the control arm proves the pinned door ignores the asked-for host — neither arm can pass
 /// by accident, and a relay that ignored the query string would fail the first while a relay that
 /// always honoured it would fail the second.
 #[tokio::test]
-async fn following_the_client_dials_the_asked_for_host_and_the_default_does_not() {
+async fn following_dials_the_asked_for_host_and_the_pinned_router_does_not() {
     let echo_port = spawn_echo_server().await;
     let unreachable = std::sync::Arc::<str>::from("realmlist-must-not-be-used.invalid");
 
@@ -134,7 +135,7 @@ async fn following_the_client_dials_the_asked_for_host_and_the_default_does_not(
     );
     tx.close().await.expect("close ws");
 
-    // Default: the same request dials the configured host, which cannot resolve — so the session
+    // Pinned: the same request dials the configured host, which cannot resolve — so the session
     // ends without ever echoing. The upgrade itself still succeeds; the upstream is dialed after.
     let addr = serve(wenilla_host::ws::router_map([(
         echo_port,
@@ -151,6 +152,6 @@ async fn following_the_client_dials_the_asked_for_host_and_the_default_does_not(
     let end = rx.next().await;
     assert!(
         !matches!(&end, Some(Ok(Message::Binary(b))) if b.as_ref() == [0xABu8; 8].as_slice()),
-        "the default router followed ?host= and reached the echo server: {end:?}"
+        "the pinned router followed ?host= and reached the echo server: {end:?}"
     );
 }
