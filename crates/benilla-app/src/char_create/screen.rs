@@ -244,6 +244,9 @@ struct TowerRows {
     /// The tower's own top. Raised only as far as the overflow demands — never below the authored
     /// 74, and never above 0.
     tower_top: f32,
+    /// How tall the banner texture is drawn. Another install-authored number rather than a
+    /// derivation — 259 in this screen's vanilla reading, 500 in a ten-race client's own XML.
+    banner_h: f32,
 }
 
 impl TowerRows {
@@ -256,6 +259,7 @@ impl TowerRows {
     const VANILLA_ROWS: f32 = 4.0;
     const RANDOMIZE_TOP: f32 = 645.0;
     const RANDOMIZE_H: f32 = 30.0;
+    const VANILLA_BANNER_H: f32 = 259.0;
 
     fn of(catalog: Option<&CharCreate>) -> Self {
         // The taller of the two columns, counting only races the catalog can actually describe —
@@ -295,6 +299,11 @@ impl TowerRows {
             icon,
             shift,
             tower_top,
+            banner_h: if rows > Self::VANILLA_ROWS {
+                500.0
+            } else {
+                Self::VANILLA_BANNER_H
+            },
         }
     }
 
@@ -351,10 +360,16 @@ fn left_tower(
                 }
             }
             // The banners (`CharacterCreateBanners`, 256×259 at TOP (−2,−60)) behind the race grid.
+            //
+            // The HEIGHT is an install's own number, not a derivation: vanilla's texture is drawn
+            // 259 tall and a ten-race client draws the same file 500 tall (`CharacterCreateBanners`
+            // in its `CharacterCreate.xml`), stretching the painted banner down past the longer
+            // grid and behind the class icons. Ours stayed at 259, which is why the blue and the
+            // red stopped two rows short of the races standing on them.
             if let Some(banners) = &art.banners {
                 tower.spawn((
                     ImageNode::new(banners.clone()),
-                    abs(s, -27.0, 60.0, 256.0, 259.0),
+                    abs(s, -27.0, 60.0, 256.0, rows.banner_h),
                 ));
             }
             // Alliance | Horde over the banner tops (bottom-anchored ±50 of the banner center).
@@ -461,7 +476,15 @@ fn left_tower(
                     position_type: PositionType::Absolute,
                     left: px(27.0),
                     top: px(rows.below_grid(369.0)),
-                    width: px(3.0 * 48.0 + 2.0 * 4.0),
+                    // **Two units of slack, and they are load-bearing.** Three 48s and two 4s come
+                    // to exactly 152, so the authored width was an EXACT fit — and an exact fit is
+                    // the one case flexbox cannot be trusted with, because the row's total and the
+                    // container's width are computed from `48.0 * s` and `152.0 * s` by different
+                    // multiplications. One ulp the wrong way wraps the third icon onto its own row,
+                    // which is what a class grid two-wide instead of three-wide was: not a layout
+                    // opinion, a float comparison. The slack is far short of a fourth column (52
+                    // more), so the grid cannot silently become four-wide either.
+                    width: px(3.0 * 48.0 + 2.0 * 4.0 + 2.0),
                     flex_direction: FlexDirection::Row,
                     flex_wrap: FlexWrap::Wrap,
                     column_gap: px(4.0),
@@ -778,6 +801,7 @@ mod tower_rows_tests {
     fn vanilla_is_untouched_and_five_rows_land_where_the_client_puts_them() {
         let v = TowerRows::for_rows(4.0);
         assert_eq!((v.shift, v.icon, v.tower_top), (0.0, 48.0, 74.0));
+        assert_eq!(v.banner_h, 259.0, "vanilla banner art must not stretch");
         for authored in [303.0, 369.0, 480.0, 645.0] {
             assert_eq!(v.below_grid(authored), authored, "vanilla offset moved");
         }
@@ -791,6 +815,7 @@ mod tower_rows_tests {
         assert_eq!(t.icon, 45.0);
         assert_eq!(t.shift, 38.0, "5×45+4×5 against 4×48+3×5");
         assert_eq!(t.tower_top, 55.0, "the install's own XML says −55");
+        assert_eq!(t.banner_h, 500.0, "and 500 for the banner");
         // And the thing the whole change exists to prevent: Randomize inside the canvas.
         assert!(t.tower_top + t.below_grid(645.0) + 30.0 <= TowerRows::CANVAS_H);
     }
