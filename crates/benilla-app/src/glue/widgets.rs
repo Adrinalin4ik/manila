@@ -365,6 +365,9 @@ pub(crate) fn icon_button<A: Component, I: Bundle, L: Bundle>(
     label_dyn: Option<L>,
     label: &str,
     art: &GlueArt,
+    // Edge length in authored units: 48 everywhere the reference authors it, and smaller from the
+    // create screen's race grid on an install with more races than the grid has rows (`TowerRows`).
+    size: f32,
     s: f32,
 ) {
     let px = |v: f32| Val::Px(v * s);
@@ -372,8 +375,8 @@ pub(crate) fn icon_button<A: Component, I: Bundle, L: Bundle>(
         action,
         Button,
         Node {
-            width: px(48.0),
-            height: px(48.0),
+            width: px(size),
+            height: px(size),
             ..default()
         },
     ));

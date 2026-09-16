@@ -216,9 +216,97 @@ fn spawn_screen(
     });
 }
 
-/// The configuration tower (`CharacterCreateConfigurationFrame`, 206×600 at TOPLEFT (28,−74)):
-/// frame art, banners, faction headers, the race/gender/class grids, the dial rows, Randomize —
-/// every child at its authored offset.
+/// How tall the race grid actually is, and what the rest of the tower has to do about it.
+///
+/// **The reference authors nothing below the race grid as a constant.** Every frame under it hangs
+/// off the one above by a relative anchor, and the chain starts at the LAST race slot:
+/// `CharacterCreateGenderButtonMale` is `RaceButton5.BOTTOMLEFT + (27,−25)`, `ClassButton1` is
+/// `GenderMale.BOTTOMLEFT + (−44,−15)`, `CustomizationButtonFrame1` is `ClassButton6.BOTTOM +
+/// (20,−15)`, and `CharCreateRandomizeButton` is re-anchored to `CustomizationButtonFrame5.BOTTOM
+/// + (0,−5)` on every race change (`CharacterCreate.lua:386`). Read out of this install's own
+/// `Interface\GlueXML\CharacterCreate.xml` through the host's `/data` route.
+///
+/// This screen flattened that chain into four authored tops — 303 / 369 / 480 / 645 — every one of
+/// them measured from a **four**-row column. The grid itself grows with the race count, so a fifth
+/// race walked straight into the gender row and shoved the rest off the bottom. That is the defect;
+/// this type is the chain put back.
+///
+/// **Vanilla is unchanged by construction, not by care.** At four rows `shift` is exactly zero and
+/// `tower_top` clamps to the authored 74, so every number this produces is the number that was
+/// there before. There is no second layout to keep in step.
+struct TowerRows {
+    /// Race-icon edge. 48 is this screen's authored vanilla value; 45 is what a ten-race install
+    /// uses (`CharacterCreateIconButtonTemplate`, same file) — the reference shrinks the icon
+    /// rather than let five rows push the tower up past its own banner art.
+    icon: f32,
+    /// How far everything below the grid moves. Zero on vanilla.
+    shift: f32,
+    /// The tower's own top. Raised only as far as the overflow demands — never below the authored
+    /// 74, and never above 0.
+    tower_top: f32,
+}
+
+impl TowerRows {
+    /// The glue engine's virtual canvas height; the tower is laid out in these units.
+    const CANVAS_H: f32 = 768.0;
+    /// The authored numbers this screen has always used, and the shape of the stack under the
+    /// grid: `RANDOMIZE_TOP` is the last thing in the tower and `30` is its height.
+    const VANILLA_ICON: f32 = 48.0;
+    const GAP: f32 = 5.0;
+    const VANILLA_ROWS: f32 = 4.0;
+    const RANDOMIZE_TOP: f32 = 645.0;
+    const RANDOMIZE_H: f32 = 30.0;
+
+    fn of(catalog: Option<&CharCreate>) -> Self {
+        // The taller of the two columns, counting only races the catalog can actually describe —
+        // the same filter the grid itself applies, so the budget and the art cannot disagree.
+        let offered = |faction: &[u8]| {
+            faction
+                .iter()
+                .filter(|r| catalog.and_then(|c| c.0.race_file(**r)).is_some())
+                .count() as f32
+        };
+        Self::for_rows(offered(&ALLIANCE).max(offered(&HORDE)).max(1.0))
+    }
+
+    /// The arithmetic alone, so it can be checked without a loaded DBC.
+    fn for_rows(rows: f32) -> Self {
+        let icon = if rows > Self::VANILLA_ROWS {
+            45.0
+        } else {
+            Self::VANILLA_ICON
+        };
+        let span = |rows: f32, icon: f32| rows * icon + (rows - 1.0) * Self::GAP;
+        // **Never negative.** A grid SHORTER than four rows must not pull the stack up: the
+        // reference's hidden race slots keep their anchored positions, so its gender row sits below
+        // slot 5 whether or not slot 5 is drawn, and compacting would be our invention rather than
+        // its behaviour. No real install reaches this leg — `rows` is the taller column — but a
+        // derivation that only happens to be right on real data is not a derivation.
+        let shift = (span(rows, icon) - span(Self::VANILLA_ROWS, Self::VANILLA_ICON)).max(0.0);
+        // Raise the tower by exactly what hangs off the bottom, and not one unit more. **This is
+        // the whole reason there is no second magic number here**: on a ten-race install it works
+        // out to 55, which is precisely where that install's own XML puts the frame
+        // (`CharacterCreateConfigurationFrame` at TOPLEFT (28,−55) against vanilla's −74). The rule
+        // reproduces the reference's answer instead of copying it, which is the only evidence
+        // available that the rule is the right one.
+        let bottom = Self::RANDOMIZE_TOP + shift + Self::RANDOMIZE_H;
+        let tower_top = 74.0_f32.min(Self::CANVAS_H - bottom).max(0.0);
+        Self {
+            icon,
+            shift,
+            tower_top,
+        }
+    }
+
+    /// An authored top from the four-row era, moved by whatever the grid actually costs.
+    fn below_grid(&self, authored: f32) -> f32 {
+        authored + self.shift
+    }
+}
+
+/// The configuration tower (`CharacterCreateConfigurationFrame`, 206×600 at TOPLEFT (28,−74) on
+/// vanilla; [`TowerRows`] moves it up when a longer race grid demands it): frame art, banners,
+/// faction headers, the race/gender/class grids, the dial rows, Randomize.
 fn left_tower(
     ui: &mut ChildSpawnerCommands,
     art: &GlueArt,
@@ -228,10 +316,13 @@ fn left_tower(
     catalog: Option<&CharCreate>,
 ) {
     let px = |v: f32| Val::Px(v * s);
+
+    // ── The tower's vertical budget, derived rather than authored (see `TowerRows`) ──────────
+    let rows = TowerRows::of(catalog);
     ui.spawn((Node {
         position_type: PositionType::Absolute,
         left: px(28.0),
-        top: px(74.0),
+        top: px(rows.tower_top),
         width: px(206.0),
         height: px(600.0),
         ..default()
@@ -320,6 +411,7 @@ fn left_tower(
                                 None::<DynText>,
                                 race_name(race),
                                 art,
+                                rows.icon,
                                 s,
                             );
                         }
@@ -331,7 +423,7 @@ fn left_tower(
                 .spawn((Node {
                     position_type: PositionType::Absolute,
                     left: px(53.0),
-                    top: px(303.0),
+                    top: px(rows.below_grid(303.0)),
                     flex_direction: FlexDirection::Row,
                     column_gap: px(5.0),
                     ..default()
@@ -355,6 +447,7 @@ fn left_tower(
                             None::<DynText>,
                             strings.text(key, fallback),
                             art,
+                            48.0,
                             s,
                         );
                     }
@@ -367,7 +460,7 @@ fn left_tower(
                 .spawn((Node {
                     position_type: PositionType::Absolute,
                     left: px(27.0),
-                    top: px(369.0),
+                    top: px(rows.below_grid(369.0)),
                     width: px(3.0 * 48.0 + 2.0 * 4.0),
                     flex_direction: FlexDirection::Row,
                     flex_wrap: FlexWrap::Wrap,
@@ -385,6 +478,7 @@ fn left_tower(
                             Some(DynText::ClassSlotLabel(slot)),
                             "",
                             art,
+                            48.0,
                             s,
                         );
                     }
@@ -396,7 +490,7 @@ fn left_tower(
                 .spawn((Node {
                     position_type: PositionType::Absolute,
                     left: px(4.0),
-                    top: px(480.0),
+                    top: px(rows.below_grid(480.0)),
                     width: px(198.0),
                     flex_direction: FlexDirection::Column,
                     ..default()
@@ -415,7 +509,7 @@ fn left_tower(
                 .spawn((Node {
                     position_type: PositionType::Absolute,
                     left: px(30.0),
-                    top: px(645.0),
+                    top: px(rows.below_grid(645.0)),
                     ..default()
                 },))
                 .with_children(|r| {
@@ -663,4 +757,41 @@ pub(super) fn exit_create(
     // (its `OnEnter` runs after this `OnExit`).
     preview.look = None;
     preview.scene = None;
+}
+
+#[cfg(test)]
+mod tower_rows_tests {
+    use super::TowerRows;
+
+    /// **Backward compatibility is the assertion, not a side note.** A four-row install — every
+    /// vanilla one — must come out of this arithmetic with the numbers the screen was authored
+    /// with: no shift at all, the authored icon, the authored tower top. If this ever fails, the
+    /// derivation has started rewriting a layout that was already right.
+    ///
+    /// The five-row leg is checked against the reference rather than against itself: a ten-race
+    /// install's own `CharacterCreate.xml` puts `CharacterCreateConfigurationFrame` at TOPLEFT
+    /// (28,−55), and the clamp is asked to produce 55 without having been told it. That is the
+    /// only independent evidence available here that the rule is right, so it is what the test
+    /// pins — a self-consistent check (does the shift equal the span difference?) would pass for a
+    /// wrong rule too.
+    #[test]
+    fn vanilla_is_untouched_and_five_rows_land_where_the_client_puts_them() {
+        let v = TowerRows::for_rows(4.0);
+        assert_eq!((v.shift, v.icon, v.tower_top), (0.0, 48.0, 74.0));
+        for authored in [303.0, 369.0, 480.0, 645.0] {
+            assert_eq!(v.below_grid(authored), authored, "vanilla offset moved");
+        }
+
+        // A grid shorter than the authored four must not pull the stack up either — the reference
+        // keeps its hidden slots' positions, so there is nothing to compact.
+        let short = TowerRows::for_rows(1.0);
+        assert_eq!((short.shift, short.tower_top), (0.0, 74.0));
+
+        let t = TowerRows::for_rows(5.0);
+        assert_eq!(t.icon, 45.0);
+        assert_eq!(t.shift, 38.0, "5×45+4×5 against 4×48+3×5");
+        assert_eq!(t.tower_top, 55.0, "the install's own XML says −55");
+        // And the thing the whole change exists to prevent: Randomize inside the canvas.
+        assert!(t.tower_top + t.below_grid(645.0) + 30.0 <= TowerRows::CANVAS_H);
+    }
 }
