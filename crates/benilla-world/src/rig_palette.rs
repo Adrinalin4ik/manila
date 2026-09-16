@@ -45,7 +45,15 @@
 //! themselves collapse.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// **`bevy::platform::time::Instant`, never `std::time::Instant`.** The latter compiles for
+// wasm32 and then panics the moment it is CALLED (`time not implemented on this platform`),
+// so no build gate catches it — and the only caller here is the exhaustion path, which fires
+// under load in a dense zone rather than at boot. It reached a browser as a bare
+// `RuntimeError: unreachable` mid-session, which is the whole reason this line carries a
+// comment instead of just an import.
+use bevy::platform::time::Instant;
 
 use bevy::ecs::lifecycle::HookContext;
 use bevy::ecs::world::DeferredWorld;
