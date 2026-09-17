@@ -196,7 +196,10 @@ fn the_directors_two_verified_addons_come_out_on_opposite_sides() {
     // `addon_harness` example's job, not a unit test's.
     let fx = Fixtures::new("oracle");
     for name in ["!OmniCC", "Bagnon", "Bagnon_Core", "Bagnon_Forever"] {
+        #[cfg(unix)]
         std::os::unix::fs::symlink(corpus.join(name), fx.root().join(name)).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(corpus.join(name), fx.root().join(name)).unwrap();
     }
     let reports = survey(fx.root());
     let row = |name: &str| {

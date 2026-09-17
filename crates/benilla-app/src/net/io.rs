@@ -781,11 +781,11 @@ async fn run(
             //
             // The [`Parked`] answer stays exactly as it is natively, and for the same reason: the
             // arms decide, and every `break`/`continue` is made below, in plain sight.
-            let fired = futures_lite::future::or(
-                async { Fired::Realm(realm_rx.recv().await) },
-                async { Fired::Pick(pick_rx.recv().await) },
-            )
-            .await;
+            let fired =
+                futures_lite::future::or(async { Fired::Realm(realm_rx.recv().await) }, async {
+                    Fired::Pick(pick_rx.recv().await)
+                })
+                .await;
             let answer = match fired {
                 Fired::Realm(req) => match req {
                     Err(_) => Parked::Exit,
@@ -794,7 +794,9 @@ async fn run(
                     Ok(RealmRequest::Refresh) => {
                         logon.refresh_realms(REALM_REFRESH_TIMEOUT).await;
                         if events_tx
-                            .send(SessionEvent::RealmList { realms: logon.realms.clone() })
+                            .send(SessionEvent::RealmList {
+                                realms: logon.realms.clone(),
+                            })
                             .is_err()
                         {
                             Parked::Exit
@@ -1359,6 +1361,7 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         } => w.destroy_item(bag_index, slot, count),
         ClientCommand::CastSpell { spell_id, target } => w.cast_spell(spell_id, target),
         ClientCommand::CastSpellAtDest { spell_id, dest } => w.cast_spell_at_dest(spell_id, dest),
+        ClientCommand::CastSpellAtSource { spell_id, src } => w.cast_spell_at_source(spell_id, src),
         ClientCommand::CancelAura { spell_id } => w.cancel_aura(spell_id),
         ClientCommand::SetActionButton { button, packed } => w.set_action_button(button, packed),
         ClientCommand::SetActionBarToggles { toggles } => w.set_actionbar_toggles(toggles),

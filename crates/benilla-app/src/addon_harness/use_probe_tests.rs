@@ -284,7 +284,10 @@ fn the_directors_two_verified_addons_are_reachable_and_omnicc_is_not_broken() {
     };
     let fx = Fixtures::new("oracle");
     for name in ["!OmniCC", "Bagnon", "Bagnon_Core", "Bagnon_Forever"] {
+        #[cfg(unix)]
         std::os::unix::fs::symlink(corpus.join(name), fx.root().join(name)).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(corpus.join(name), fx.root().join(name)).unwrap();
     }
     let reports = survey(fx.root());
     let row = |name: &str| {

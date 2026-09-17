@@ -200,8 +200,8 @@ mod spells;
 pub use spells::{
     cc_exemption, grants_immunity, load_shapeshift_forms, load_spell_cast_times,
     load_spell_catalog, load_spell_dispel_types, load_spell_durations, load_spell_radii,
-    load_spell_ranges, min_max_range, substitute, CcExemption, FormRefusal, OpenLock,
-    ShapeshiftForm, SpellCastTime, SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes,
+    load_spell_ranges, min_max_range, substitute, CcExemption, FormRefusal, LearnAnnouncement,
+    OpenLock, ShapeshiftForm, SpellCastTime, SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes,
     SpellDisplay, SpellDuration, SpellDurationCatalog, SpellRadius, SpellRadiusCatalog, SpellRange,
     SpellRangeCatalog, TokenContext, ATTR_CASTABLE_WHILE_DEAD, ATTR_NOT_IN_COMBAT,
     ATTR_ONLY_STEALTHED, COMBAT_REACH_ADD, MELEE_RANGE_FLOOR, ON_NEXT_SWING_RANGE,
@@ -311,6 +311,9 @@ mod text_filter_lists;
 pub use text_filter_lists::{load_chat_profanity, load_spam_messages, FilterPattern};
 mod race_sound;
 pub use race_sound::{load_exploration_sound_catalog, ExplorationSoundCatalog};
+
+mod race_pvp_team;
+pub use race_pvp_team::load_race_pvp_teams;
 mod zone_map;
 pub use zone_map::{load_zone_map, ZONE_MAP_EDGE};
 
@@ -415,7 +418,7 @@ pub fn blp_mip_stats(blp_bytes: &[u8]) -> Result<Vec<BlpMipStats>> {
             let mut outside = (0usize, u8::MAX, 0u64, u8::MIN);
             let mut inside = (0usize, u8::MAX, 0u64, u8::MIN);
             let mut below_128 = 0usize;
-            for px in m.rgba.chunks_exact(4) {
+            for px in m.rgba.as_chunks::<4>().0 {
                 let luma = ((px[0] as u32 + px[1] as u32 + px[2] as u32) / 3) as u8;
                 if luma < 128 {
                     below_128 += 1;
