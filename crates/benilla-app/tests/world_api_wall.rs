@@ -103,7 +103,14 @@ const INSTRUMENT_ROOTS: &[&str] = &["art_scope", "debug_panel", "perf", "pipe_wa
 /// So they are excluded from the gated number and **counted separately**, because a rule that
 /// hides a number is worse than no rule. `art_scope` is not here: it is registered by
 /// `WorldPlugins` and lives inside the engine, so it never crosses.
-const INSTRUMENT_CONSUMERS: &[&str] = &["debug_panel", "perf", "pipe_warm"];
+///
+/// `crash` (decision 2266 §B2) is the fourth: the panic hook that writes the crash report. It is
+/// `perf::stall`'s sibling — a diagnostic that writes into `Diagnostics/` and nothing gameplay
+/// reads — and the one engine item it names, `log_ring::recent`, is a diagnostic feed kept beside
+/// the engine's `LogPlugin` because that is where the layer has to be installed. An API shaped
+/// by what a crash report wanted to attach is 1163's failure exactly, so it is counted here, not
+/// in the doorway.
+const INSTRUMENT_CONSUMERS: &[&str] = &["crash", "debug_panel", "perf", "pipe_warm"];
 
 /// Is this file one of the app-side instruments?
 fn is_instrument_consumer(rel: &str) -> bool {
@@ -430,7 +437,66 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// full-window float image that one camera wrote and the next read back — the seam 1603 built
 /// and 2215 measured — and it could not go the other way for 2206's reason: the UI camera cannot
 /// move into the engine.
-const CEILING: usize = 182;
+/// And 182 → 183: `doodad_anim::register_fx_uv`, a PUBLISH — put one spell-effect material clone
+/// on the per-instance UV-scroll lane (decision 2282). The clone is the GAME's: `entities::spell_fx`
+/// makes it because one cast is one phase (the same reason 0271's animated tint clones it), and
+/// nothing engine-side knows an effect instance exists. Everything after that is the engine's —
+/// which registry, which delta-table row, which of 1408's two baked loop spellings, and the
+/// instance-clock law that separates this lane from the shared one. Published as ONE verb rather
+/// than as its three pieces (`UvLoop`'s effect variant, `register_uv`, the row) precisely because
+/// this lane's recurring bug is a caller that takes some of the pieces and not the rest: 2038's
+/// marked-but-unregistered parts froze every waterfall in the game for three days, and a
+/// registration without a row, or a row without a registration, is that same shape. One verb
+/// cannot be half-taken. It is also why the three pieces went back to `pub(crate)` in the same
+/// commit, which is the rare crossing that *lowers* the surface it replaces.
+/// And 183 → 184: `doodad_anim::UvLoops`, the argument of the verb above. A texture transform is
+/// ONE authored record with four baked channels — 1408's two translation spellings plus 2019's
+/// per-slot rotation and scaling — and which of them a batch fills is not a thing the caller gets
+/// to reason about: a scale-only transform (`Spells\GroundingTotem_Impact.mdx`) and a
+/// dead-slot-0 translation both answer `None` to the channel you would check first. So the struct
+/// carries the record whole, and `any()`/`open_offset()` on it are the two questions the game
+/// asks — which keeps the "does this batch animate" predicate and the "what does it open on" seed
+/// in the engine, where the bake's rules live, instead of copied into the effect attach where they
+/// would drift. Four positional `Option`s would have been the alternative, and swapping two of
+/// them is a silent wrong-channel bug the compiler cannot see.
+/// And 184 → 186, both for the ENTITY lane (decision 2295), which is the same crossing 2282 made
+/// for the effect lane and made for the same reason.
+/// `doodad_anim::register_entity_uv` is the second PUBLISH verb on this lane: put a unit /
+/// GameObject / held-item batch material on the UV lane, picking the shared clock or the
+/// instance's play head from the authored record rather than making the caller reason about it.
+/// It is a separate verb from `register_fx_uv` and not a flag on it because the two lanes differ
+/// in the one thing a caller cannot get right by accident — an effect's clocks are measured from
+/// its own attach (0856/0858) and a resident entity's are the scene's — and a boolean spelling of
+/// that would read as a preference.
+/// `model_render::EntityUvLane` is the argument `entity_variants` grew, and the crossing it buys
+/// is the point of the decision: building an entity batch's material and putting it on the lane
+/// are ONE act, so the engine takes the registry and the delta table *in the same call* instead of
+/// handing back six handles and trusting the game to register them. That is 2038's law spelled in
+/// the signature — a `play_uv` flip without a registration freezes every entity batch at its first
+/// key instead of its identity, which is a different wrong frame and not a fix — and it is why the
+/// lane is a bundle rather than three arguments a caller can pass two of.
+/// And 186 → 189, the second half of 2295 — the ONE entity population that needs a material of
+/// its own rather than the batch's, which the dressing path clones and registers because the
+/// clone has to exist before the part's interior and fade records are built from it.
+/// `doodad_anim::AnimMatPart` is the draw-scan marker, and it crosses for the reason 1375 put it
+/// at the spawn site in the first place: the marker and the registration are one predicate, and
+/// the game is where an entity part is spawned. The engine cannot insert it — it does not know
+/// an entity part exists — and a lane that let the two drift is 2038's three frozen days.
+/// `doodad_anim::register_tint` and `doodad_anim::TintLoop` are the tint channel's twins of the
+/// UV verbs above, for the same five batches on three GameObject models: `G_FreezingTrap`'s glow
+/// card, `OrgrimmarPentagram`, `ScholomanceCrystalBall01` — four of whose five batches bake
+/// **nothing** in file slot 0, so a shared material can only ever seed white however faithfully it
+/// is ticked. They were already `pub` for the world streamer; what crosses here is the game naming
+/// them, and it is the same crossing the UV half makes one line up.
+/// And 189 → 190: `terrain_stream::CurrentArea`, taken by `capture/probe_bg.rs` (decision 2290).
+/// It is the engine's own area authority — the `AreaTable.dbc` leaf under the player's feet, which
+/// the engine already publishes for its own audio and zone-text consumers — and the probe reports
+/// it for one reason: a battleground census has to be able to say *where the body actually is*,
+/// and a map id alone cannot. "Map 489" is true of the pen, the field and the graveyard alike; the
+/// area id is what told this instrument that the port lands at Silverwing Hold and that the
+/// release lands at the graveyard. The alternative was to re-derive the leaf in the probe from
+/// tiles the engine already resolved, which is the copy-the-rule drift this wall exists to stop.
+const CEILING: usize = 190;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

@@ -70,7 +70,6 @@ pub(super) fn world_right_click_payload(
 /// fires on the up edge and the replay below turns it into the interact leg — which is the
 /// reference's own shape, `0x7cb910` → `0x4949f0(mask 4)` → `0x492820`, the same terminal the world
 /// right-click's object leg `0x492ce0` reaches.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn select_on_plate_click(
     mut plate: ResMut<crate::vplates::PlateClicks>,
     press: Res<PressPick>,
@@ -132,7 +131,6 @@ pub(super) fn select_on_plate_click(
 /// for the whole look session, as the reference suppresses its own hover during freelook. Reading
 /// the live hover here would take the `_ =>` arm below and *clear* the player's target on every
 /// drag. The reference picks once, on the down edge, and this consumes that same latch.
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(super) fn select_on_click(
     mut clicks: MessageReader<WorldClick>,
     inspect: Res<InspectMode>,
@@ -238,6 +236,11 @@ pub(crate) struct ServiceArms<'w> {
     /// The spirit healer's XP-loss question (bit 5): `0x5df730` does the same, firing
     /// `CONFIRM_XP_LOSS`.
     pub(crate) death: ResMut<'w, crate::death::DeathNet>,
+    /// The spirit GUIDE's arm (bit 6) — the battleground graveyard's resurrect wave. Unlike its
+    /// two no-packet neighbours this one does send, and it sends through the cache the per-frame
+    /// proximity poll also writes, so the click and the poll cannot disagree about which healer
+    /// is current.
+    pub(crate) spirit: ResMut<'w, crate::ui_dialog_verbs::AreaSpiritHealer>,
     /// `[0xb4e2d0]/[0xb4e2d4]`'s mirror — the NPC whose window is open, which the dispatcher
     /// compares the clicked guid against *before* the ladder ([`interaction_already_open_on`]).
     pub(crate) interact: Res<'w, crate::ui_session::InteractNpc>,
@@ -293,7 +296,7 @@ fn interaction_already_open_on(target: u64, interact: &crate::ui_session::Intera
 /// (`unable` only grays): the server holds the swing until we're in reach, as the real client does.
 /// A right-click on empty ground was just a turn — it never deselects.
 // The `ui_feedback` tuple is the 16-SystemParam ceiling's overflow bundle, commented at its site.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 pub(super) fn act_on_right_click(
     mut clicks: MessageReader<WorldRightClick>,
     // **The press pick, not the live hover** (decision 2230) — the same latch the left button has
@@ -341,10 +344,21 @@ pub(super) fn act_on_right_click(
         // `CastLadder` (it would reach `Items`/`CastErrors` twice), so the lock chain's verdict
         // travels to `ui_action::drain::drain_go_openers` instead of becoming a packet here.
         ResMut<crate::ui_action::GoOpenerCasts>,
+        // The meeting stone's use slot (decision 2283), here for the same reason: its four
+        // refusals read the roster and the template cache, so the click hands the object to
+        // `ui_dialog_verbs::drain_meeting_stone_joins` rather than validating and sending here.
+        MessageWriter<crate::ui_dialog_verbs::MeetingStoneUse>,
     ),
 ) {
-    let (mut ui_error_keys, mut cast_errors, mut loot_latch, mut mail, mut item_text, mut openers) =
-        ui_feedback;
+    let (
+        mut ui_error_keys,
+        mut cast_errors,
+        mut loot_latch,
+        mut mail,
+        mut item_text,
+        mut openers,
+        mut stone_uses,
+    ) = ui_feedback;
     if clicks.read().last().is_none() {
         return;
     }
@@ -487,6 +501,36 @@ pub(super) fn act_on_right_click(
                             debug!("right-click text gameobject: read {guid:#x}");
                             item_text.open_pages(guid);
                         }
+                    }
+                    return;
+                }
+                // MEETINGSTONE (GO type 23): **not** the shared use-sender. `[0x80bf40+0x1c]`
+                // is `0x5f69d0`, this type's own validator — four client-side refusals and then
+                // `CMSG 0x292 {u64 goGuid}` from `0x4c9ff0` (decision 2283; wow-re's §5 round on
+                // that function). The shared sender `0x5f33e0` is **unreachable** from here: it
+                // has zero direct callers and 29 `.rdata` refs, every one at some vtable's
+                // `+0x1c`, and `0x80bf5c` is not among them — so a meeting stone cannot emit
+                // `CMSG_GAMEOBJ_USE` in the reference at all. Sending `0xB1` anyway is what left
+                // every meeting stone dead here: vmangos' `GameObject::Use` has an explicit
+                // type-23 arm that does nothing ("Should never be called for this type of
+                // object", `GameObject.cpp:1836`), so the packet was answered with silence.
+                //
+                // Four types override `+0x1c`, not one — 9 TEXT, 19 MAILBOX, 23 and 28 — which
+                // corrects the wow-re sentence this file used to rest on (`+0x1c` is `0x5f33e0`
+                // "for every type but MAILBOX"); the round landed that correction too.
+                //
+                // Unlike those two it is NOT a local open — it is a real send, and it therefore
+                // sits *below* the mounted gate above (a stone is lock-less, and only MAILBOX is
+                // exempted there) and behind the same `unable` range suppression every sending
+                // arm takes. The refusals themselves need the roster, the ask-once template and
+                // the wire, which this system cannot also hold, so the verdict travels as a
+                // message to `ui_dialog_verbs::drain_meeting_stone_joins` — the 2199 shape.
+                if go.is_some_and(|(s, _)| {
+                    s.0.gameobject_type_id() == cursor_mode::GO_TYPE_MEETINGSTONE
+                }) {
+                    if !cursor.unable {
+                        debug!("right-click meeting stone: {guid:#x}");
+                        stone_uses.write(crate::ui_dialog_verbs::MeetingStoneUse { go_guid: guid });
                     }
                     return;
                 }
@@ -904,6 +948,24 @@ pub(super) fn act_on_right_click(
                 ServiceAction::AskSpiritHealer => {
                     debug!("right-click interact: {guid:#x} (spirit healer — CONFIRM_XP_LOSS, no packet)");
                     service.death.ask_spirit_healer(guid);
+                }
+                ServiceAction::AcquireSpiritGuide => {
+                    debug!("right-click interact: {guid:#x} (spirit guide — adopting, 0x2E2)");
+                    let outcome = service.spirit.click_guide(guid);
+                    if outcome.cancel_aura {
+                        if let Some(script) = service.script.as_deref_mut() {
+                            script.fire_event("AREA_SPIRIT_HEALER_OUT_OF_RANGE", vec![]);
+                        }
+                        let _ = seam.net.0.send(ClientCommand::CancelAura {
+                            spell_id: crate::ui_dialog_verbs::AREA_SPIRIT_HEALER_AURA,
+                        });
+                    }
+                    if let Some(healer) = outcome.query {
+                        let _ = seam
+                            .net
+                            .0
+                            .send(ClientCommand::AreaSpiritHealerQuery { healer });
+                    }
                 }
                 ServiceAction::Silent(why) => {
                     debug!("right-click interact: {guid:#x} ({arm:?}) — silent: {why}");
@@ -1341,6 +1403,9 @@ pub(crate) enum ServiceAction {
     AskBinder,
     /// Raise `CONFIRM_XP_LOSS` locally and send nothing (`0x5df730`).
     AskSpiritHealer,
+    /// Adopt this spirit guide as the current-area spirit healer (`0x5df950` → two calls into
+    /// `0x4921c0`, the second of which always transmits) — `CMSG_AREA_SPIRIT_HEALER_QUERY`.
+    AcquireSpiritGuide,
     /// Nothing goes out. The payload is why, for the debug line.
     Silent(&'static str),
 }
@@ -1391,13 +1456,13 @@ pub(crate) fn service_action(
         ServiceArm::Trainer => ServiceAction::Send(ClientCommand::TrainerList { trainer: guid }),
         ServiceArm::SpiritHealer if ghost => ServiceAction::AskSpiritHealer,
         ServiceArm::SpiritHealer => ServiceAction::Silent("spirit healer, and we are alive"),
-        // Ghost-gated like its neighbour, and then a stated gap: the ghost's arm sends opcode
-        // `0x2E2` (the area spirit-healer time query) from one call deeper, and benilla has no
-        // battleground resurrect timer for the reply to fill. For a living player this IS the
-        // reference's answer; for a ghost it is the gap.
-        ServiceArm::SpiritGuide if ghost => {
-            ServiceAction::Silent("spirit guide — the 0x2E2 timer query is unbuilt")
-        }
+        // Ghost-gated like its neighbour. The arm sends `CMSG_AREA_SPIRIT_HEALER_QUERY 0x2E2`
+        // from one call deeper (`0x5df950` → `0x4921c0`), and it does it through the *same*
+        // "set current area spirit healer" routine the per-frame proximity poll uses — with a
+        // deliberate `(0,0)` cache-bust first, so a click on the guide you are already standing
+        // next to re-asks for the wave clock instead of being swallowed by the routine's
+        // unchanged-guid early return.
+        ServiceArm::SpiritGuide if ghost => ServiceAction::AcquireSpiritGuide,
         ServiceArm::SpiritGuide => ServiceAction::Silent("spirit guide, and we are alive"),
         ServiceArm::Innkeeper => ServiceAction::AskBinder,
         ServiceArm::Banker => ServiceAction::Send(ClientCommand::BankerActivate { guid }),
@@ -1883,6 +1948,7 @@ mod tests {
             ServiceAction::SellFromCursor(cmd) => format!("sell {cmd:?}"),
             ServiceAction::AskBinder => "ask-binder".to_string(),
             ServiceAction::AskSpiritHealer => "ask-spirit-healer".to_string(),
+            ServiceAction::AcquireSpiritGuide => "acquire-spirit-guide".to_string(),
             ServiceAction::Silent(_) => "silent".to_string(),
         };
         assert!(matches!(
@@ -1987,6 +2053,7 @@ mod tests {
                     ServiceAction::SellFromCursor(cmd) => format!("SELL {cmd:?}"),
                     ServiceAction::AskBinder => "ask-binder".into(),
                     ServiceAction::AskSpiritHealer => "ask-xp-loss".into(),
+                    ServiceAction::AcquireSpiritGuide => "acquire-spirit-guide".into(),
                     ServiceAction::Silent(w) => format!("silent {w}"),
                 };
                 let empty = describe(service_action(arm, VENDOR, ghost, None));
@@ -2268,6 +2335,8 @@ mod tests {
 
     const F_HEALTH: u16 = 22;
     const F_MAXHEALTH: u16 = 28;
+    /// `GAMEOBJECT_TYPE_ID`, absolute field 21 — the store the GO arms fork on.
+    const GO_TYPE_FIELD: u16 = 21;
     const BOAR: u64 = 0xB0A2;
     const ME: u64 = 0x5E1F;
 
@@ -2295,6 +2364,7 @@ mod tests {
         world.init_resource::<crate::ui_quest::QuestGiver>();
         world.init_resource::<crate::ui_binder::BinderState>();
         world.init_resource::<crate::death::DeathNet>();
+        world.init_resource::<crate::ui_dialog_verbs::AreaSpiritHealer>();
         world.init_resource::<crate::ui_session::InteractNpc>();
         world.init_resource::<crate::ui_action::UiErrorKeys>();
         world.init_resource::<crate::ui_action::CastErrors>();
@@ -2302,6 +2372,7 @@ mod tests {
         world.init_resource::<crate::ui_mail::MailOpen>();
         world.init_resource::<crate::ui_item_text::ItemTextOpen>();
         world.init_resource::<crate::ui_action::GoOpenerCasts>();
+        world.init_resource::<Messages<crate::ui_dialog_verbs::MeetingStoneUse>>();
         world.spawn((SelfPlayer, Guid(ME)));
         let boar = world
             .spawn((Guid(BOAR), store(&[(F_HEALTH, 100), (F_MAXHEALTH, 100)])))
@@ -2348,5 +2419,89 @@ mod tests {
             Some(BOAR),
             "the release must act on the unit whose plate the press was over"
         );
+    }
+    /// **A meeting stone is JOINED, not USEd** (decision 2283). The GO type's own use slot
+    /// (`0x5f69d0`) replaces the shared `CMSG_GAMEOBJ_USE` sender, so the click must hand the
+    /// object to the join validator and put **no** `0xB1` on the wire — which is what left every
+    /// stone dead, since vmangos' `GameObject::Use` has an explicit do-nothing arm for type 23.
+    ///
+    /// The falsification is the assertion that matters: with the arm removed this test sees a
+    /// `GameObjUse` command and no `MeetingStoneUse` message.
+    #[test]
+    fn a_right_click_on_a_meeting_stone_joins_it_and_sends_no_gameobj_use() {
+        const STONE: u64 = 0x5701;
+        let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
+        let (mut world, _boar) = right_click_world();
+        world.insert_resource(NetCommands(tx));
+        let stone = world
+            .spawn((Guid(STONE), store(&[(GO_TYPE_FIELD, 23)])))
+            .id();
+        *world.resource_mut::<PressPick>() = PressPick {
+            object: HoveredObject {
+                target: Some(stone),
+                guid: Some(STONE),
+                distance: 5.0,
+            },
+            cursor: WorldCursor {
+                kind: cursor_mode::CursorKind::Interact,
+                unable: false,
+            },
+            ..PressPick::default()
+        };
+        world
+            .resource_mut::<Messages<WorldRightClick>>()
+            .write(WorldRightClick);
+        world.run_system_once(act_on_right_click).unwrap();
+
+        let uses: Vec<_> = world
+            .resource::<Messages<crate::ui_dialog_verbs::MeetingStoneUse>>()
+            .iter_current_update_messages()
+            .copied()
+            .collect();
+        assert_eq!(
+            uses,
+            vec![crate::ui_dialog_verbs::MeetingStoneUse { go_guid: STONE }],
+            "the stone must reach the join validator"
+        );
+        assert!(
+            !rx.try_iter()
+                .any(|c| matches!(c, ClientCommand::GameObjUse { .. })),
+            "a meeting stone must never send CMSG_GAMEOBJ_USE — the server drops it on the floor"
+        );
+    }
+
+    /// Out of interact range the click is suppressed with no toast and no packet, exactly as the
+    /// shared arms are (the reference auto-walks instead; `0x610300`, no packet).
+    #[test]
+    fn an_out_of_range_meeting_stone_click_sends_nothing() {
+        const STONE: u64 = 0x5702;
+        let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
+        let (mut world, _boar) = right_click_world();
+        world.insert_resource(NetCommands(tx));
+        let stone = world
+            .spawn((Guid(STONE), store(&[(GO_TYPE_FIELD, 23)])))
+            .id();
+        *world.resource_mut::<PressPick>() = PressPick {
+            object: HoveredObject {
+                target: Some(stone),
+                guid: Some(STONE),
+                distance: 50.0,
+            },
+            cursor: WorldCursor {
+                kind: cursor_mode::CursorKind::Interact,
+                unable: true,
+            },
+            ..PressPick::default()
+        };
+        world
+            .resource_mut::<Messages<WorldRightClick>>()
+            .write(WorldRightClick);
+        world.run_system_once(act_on_right_click).unwrap();
+        assert!(world
+            .resource::<Messages<crate::ui_dialog_verbs::MeetingStoneUse>>()
+            .iter_current_update_messages()
+            .next()
+            .is_none());
+        assert!(rx.try_iter().next().is_none());
     }
 }

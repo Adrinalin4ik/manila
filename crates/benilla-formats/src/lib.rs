@@ -207,7 +207,8 @@ pub use spells::{
     ATTR_ONLY_STEALTHED, COMBAT_REACH_ADD, MELEE_RANGE_FLOOR, ON_NEXT_SWING_RANGE,
     SPELL_ATTR_IS_TRADESKILL, SPELL_EFFECT_CREATE_ITEM, SPELL_EFFECT_ENCHANT_ITEM,
     SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, SPELL_EFFECT_LEARN_PET_SPELL, SPELL_EFFECT_LEARN_SPELL,
-    SPELL_EFFECT_SKILL_STEP, SPELL_EFFECT_SKINNING, SPELL_EFFECT_TRADE_SKILL,
+    SPELL_EFFECT_PROSPECTING, SPELL_EFFECT_SKILL_STEP, SPELL_EFFECT_SKINNING,
+    SPELL_EFFECT_TRADE_SKILL,
 };
 mod skill_lines;
 pub use skill_lines::{
@@ -849,7 +850,6 @@ mod tests {
 
     /// A minimal, complete BLP2 header (magic..=mip_sizes[16], 148 bytes) — mirrors the private
     /// builder in `benilla_blp`'s own tests (that crate's helper isn't exported).
-    #[allow(clippy::too_many_arguments)]
     fn blp2_header(
         compression: u8,
         alpha_bits: u8,

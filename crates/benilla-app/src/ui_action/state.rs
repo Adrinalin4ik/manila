@@ -385,7 +385,7 @@ fn resolve_through_macro(
 }
 
 /// Compute + diff-push every occupied slot's dynamic state, and fire the reference event edges.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // a Bevy system's full input set
+#[allow(clippy::type_complexity)] // a Bevy system's full input set
 pub(super) fn feed_action_state(
     script: Option<NonSendMut<UiScript>>,
     actions: Res<PlayerActions>,
@@ -396,13 +396,15 @@ pub(super) fn feed_action_state(
     // One tuple param (Bevy's 16-SystemParam ceiling): our own cast tracking — the in-flight
     // guard, the queued on-next-swing strike, the running channel, and the awaiting-click
     // ground targeting — plus the macro→spell binding the MACRO arm resolves through
-    // (decision 0983), which rides here for the same ceiling reason.
+    // (decision 0983) and the talent spell-modifier tables that leg 12's cost reads through,
+    // both of which ride here for the same ceiling reason.
     cast_state: (
         Res<crate::ui_cast::PendingCast>,
         Res<crate::ui_cast::QueuedMeleeSpell>,
         Res<crate::ui_cast::ActiveChannel>,
         Res<super::SpellTargeting>,
         Res<crate::ui_macro::MacroBoundSpells>,
+        Res<crate::spell_mods::SpellModifiers>,
     ),
     self_q: Query<(&ObjectStore, &Transform, Has<Engaged>, Option<&Casting>), With<SelfPlayer>>,
     selection: Res<Selection>,
@@ -410,7 +412,7 @@ pub(super) fn feed_action_state(
     units: Query<(&ObjectStore, &Transform), Without<SelfPlayer>>,
     factions: Option<Res<crate::target::Factions>>,
     reputations: Res<crate::net::Reputations>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     commands: Res<NetCommands>,
     mut memory: Local<crate::ui_script::VmMemo<StateMemory>>,
 ) {
@@ -435,7 +437,7 @@ pub(super) fn feed_action_state(
         memory.last_cd_trace = Some(now);
     }
 
-    let (pending, queued_melee, channel, targeting, bound) = &cast_state;
+    let (pending, queued_melee, channel, targeting, bound, spell_mods) = &cast_state;
     let me = self_q.iter().next();
     // The bags, walked ONCE for the frame: every reagent, totem and item-count question below
     // reads this table. It used to be one whole walk per question — per reagent per spell slot,
@@ -532,9 +534,10 @@ pub(super) fn feed_action_state(
                         reputations: &reputations,
                         cooldowns: &cooldowns,
                         carried: &carried,
+                        spell_mods,
                     };
                     let (u, oom) =
-                        usable::spell_usable(button.action, d, sp, &ctx, &mut items, &commands);
+                        usable::spell_usable(button.action, d, sp, &ctx, &items, &commands);
                     st.usable = u;
                     st.not_enough_mana = oom;
                 } else {
@@ -597,6 +600,7 @@ pub(super) fn feed_action_state(
                         reputations: &reputations,
                         cooldowns: &cooldowns,
                         carried: &carried,
+                        spell_mods,
                     };
                     let (u, oom) = usable::item_usable(
                         button.action,
@@ -604,7 +608,7 @@ pub(super) fn feed_action_state(
                         count > 0 || st.equipped,
                         &ctx,
                         spells.as_deref(),
-                        &mut items,
+                        &items,
                         &commands,
                     );
                     st.usable = u;
@@ -843,6 +847,7 @@ mod tests {
         app.insert_resource(actions)
             .insert_resource(bound)
             .init_resource::<Cooldowns>()
+            .init_resource::<crate::spell_mods::SpellModifiers>()
             .init_resource::<crate::ui_script::UiClock>()
             .init_resource::<AutoRepeatActive>()
             .init_resource::<crate::ui_cast::PendingCast>()
@@ -947,6 +952,7 @@ mod tests {
                     radii: Default::default(),
                 })
                 .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell_mods::SpellModifiers>()
                 .init_resource::<crate::ui_script::UiClock>()
                 .init_resource::<AutoRepeatActive>()
                 .init_resource::<crate::ui_cast::PendingCast>()

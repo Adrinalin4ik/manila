@@ -38,7 +38,7 @@ use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_action::{PlayerActions, Spells};
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 use crate::ui_spellbook::SkillLines;
 
@@ -143,7 +143,7 @@ impl Plugin for UiTrainerPlugin {
                     // push before the input pass so an open/close is on screen the same frame; drain
                     // after it (mirrors ui_merchant/ui_gossip).
                     close_npc_session_out_of_range::<TrainerOpen>.before(feed_trainer),
-                    feed_trainer.before(UiInput),
+                    feed_trainer.in_set(UiFeed),
                     drain_trainer.after(UiInput),
                 ),
             );
@@ -186,7 +186,6 @@ fn train_error_log_line(code: u32) -> &'static str {
 /// the ability-req names + rank from the same spell catalog, the state/cost/gates straight off the
 /// wire. `known` is the player's known-spell set ([`PlayerActions::spells`]) — each prerequisite
 /// ability is coloured by whether the player already knows that specific spell (see below).
-#[allow(clippy::too_many_arguments)] // the resolver's full catalog set
 fn resolve_service(
     wire: &TrainerSpell,
     trainer_type: u32,
@@ -194,7 +193,7 @@ fn resolve_service(
     skill_lines: Option<&SkillLineCatalog>,
     known: &BTreeSet<u32>,
     icons: Option<&ItemDisplays>,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
     // The VM's own `GlobalStrings.lua`, for [`service_group`]'s three header labels.
     get: &dyn Fn(&str) -> Option<String>,
@@ -305,14 +304,13 @@ fn resolve_service(
 
 /// Build the Lua-facing snapshot from [`TrainerOpen`] + the spell/skill catalogs — `None` when no
 /// trainer is open.
-#[allow(clippy::too_many_arguments)] // the catalogs, the player's state, and the string table
 fn snapshot(
     open: &TrainerOpen,
     spells: &SpellCatalog,
     skill_lines: Option<&SkillLineCatalog>,
     known: &BTreeSet<u32>,
     icons: Option<&ItemDisplays>,
-    items: &mut Items,
+    items: &Items,
     commands: &NetCommands,
     get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<TrainerState> {
@@ -347,7 +345,6 @@ fn snapshot(
 /// content change). Diffed against a `Local` memory, exactly like the gossip/merchant feeds. A
 /// different trainer while the window is already open is a real close+open (the client's `ShowUIPanel`
 /// early-returns when visible, so the open sound only re-plays after a hide — decision 0096).
-#[allow(clippy::too_many_arguments)]
 fn feed_trainer(
     script: Option<NonSendMut<UiScript>>,
     // ResMut only to consume the fresh-packet latch below — the feed never authors trainer content.
@@ -358,10 +355,10 @@ fn feed_trainer(
     // A tradeskill trainer's rows front the CREATED ITEM's icon, so the feed needs the ask-once
     // template cache + `ItemDisplayInfo.dbc` — the tradeskill window's own pair ([`service_icon`]).
     icons: Option<Res<ItemDisplays>>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     mut errors: ResMut<TrainerErrors>,
     commands: Res<NetCommands>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     mut last: Local<crate::ui_script::VmMemo<Option<TrainerState>>>,
     mut last_trainer: Local<crate::ui_script::VmMemo<Option<u64>>>,
     mut last_name: Local<crate::ui_script::VmMemo<Option<String>>>,
@@ -403,7 +400,7 @@ fn feed_trainer(
         Some(&skill_lines.catalog),
         &actions.spells,
         icons.as_deref(),
-        &mut items,
+        &items,
         &commands,
         &|key: &str| {
             script

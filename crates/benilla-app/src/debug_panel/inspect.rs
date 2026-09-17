@@ -157,6 +157,10 @@ pub(super) struct InspectStores<'w, 's> {
     /// The ask-once GO template cache — the readable head a TEXT object's line reports
     /// (decision 1105), and the highlight column + name the tooltip ladder reports (2246).
     go_templates: Res<'w, crate::go_templates::GameObjectTemplates>,
+    /// `[0xb72038]` — the meeting-stone queue, the other half of MEETINGSTONE(23)'s own
+    /// highlightable term (decision 2283), so the card's `interact` verdict reads the same
+    /// predicate the cursor and the click do.
+    stone: Option<Res<'w, crate::ui_dialog_verbs::MeetingStone>>,
     /// **The published GameObject mouseover** — the one the tooltip actually reads
     /// ([`crate::target::HoveredObject`]). The card's own pick is a dev pick and does not go
     /// through the publish, so without this the card can show an object the game is not hovering
@@ -192,7 +196,6 @@ pub(super) struct InspectStores<'w, 's> {
 /// The inspector overlay, drawn only while armed: a weak top-centre "armed" pill (so it's obvious the
 /// mode is on and how to leave it) and, whenever the cursor is over an identified object, a compact
 /// identity card pinned to the cursor. No chrome, no panel — its own lightweight surface.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn inspect_ui(
     mut contexts: EguiContexts,
     inspect: Res<InspectMode>,
@@ -206,7 +209,7 @@ pub(super) fn inspect_ui(
     drivers: Query<&crate::creature_anim::AnimDriver>,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
     spells: Option<Res<crate::ui_action::Spells>>,
-    mut names: ResMut<crate::names::NameCache>,
+    names: Res<crate::names::NameCache>,
     net_commands: Res<crate::net::NetCommands>,
     // Bundled into one param (Bevy's system-function arity ceiling): the copy-click button, and
     // the flag it must yield to — a left press this frame the UI already consumed as a
@@ -262,6 +265,7 @@ pub(super) fn inspect_ui(
     let (reputations, plates, plate_mode) =
         (&*stores.reputations, &stores.plates.0, &*stores.plate_mode);
     let go_templates = &*stores.go_templates;
+    let queued_area = stores.stone.as_deref().map_or(0, |s| s.area);
     let hovered_go = &*stores.hovered_go;
     // The picked submesh's shading payload — off the hit entity itself (see the field's doc).
     let tag_line = mouseover
@@ -417,7 +421,8 @@ pub(super) fn inspect_ui(
                     self_store, go_guid,
                 ),
                 meeting_stone_queued: crate::target::cursor_mode::meeting_stone_queued(
-                    go_guid.and_then(|g| go_templates.get(g)?.meeting_stone_area),
+                    go_guid.and_then(|g| Some(go_templates.get(g)?.meeting_stone?.area)),
+                    queued_area,
                 ),
             };
             let interact = if crate::target::cursor_mode::go_highlightable(s, reaction, overrides) {
