@@ -1377,6 +1377,12 @@ pub(crate) mod schedule_tests {
     /// the reason names them. Adding a consumer the ordinary way (gated) passes; adding one
     /// ungated fails here, at the line, until it is either gated or argued.
     const EXEMPT: &[(&str, &str, Because, &str)] = &[
+        ("webbridge/mod.rs", "run_vm_ops", Because::Deliberate,
+         "Launcher-installed bridge: explicit page Lua/chat requests may target glue too; a missing VM gets an error response, and event-tap state is keyed per VM"),
+        ("webbridge/mod.rs", "apply_synth_input", Because::PlayerRoundTrip,
+         "Launcher-installed bridge: explicit page input, run only InWorld; queued inputs are cleared at both world edges, not server login one-shots"),
+        ("webbridge/mod.rs", "publish_frame", Because::Deliberate,
+         "Launcher-installed bridge: exports transient events to the page in glue and world alike; consumes no one-shot intended for future FrameXML"),
         ("bindings.rs", "sync_dispatch", Because::MemoLatched,
          "`seen_generation` is a `VmMemo`: a new VM reads `None`, rebuilds and re-fires UPDATE_BINDINGS"),
         ("capture/probe_bg.rs", "bg_probe", Because::SelfHealing,

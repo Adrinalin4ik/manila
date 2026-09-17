@@ -1666,15 +1666,10 @@ impl Plugin for CvarPlugin {
             // the registry — and its observers — before the frame's drains read it. The video
             // window's Okay is the case: `SetCVar` per changed row, then `RestartGx()`, in one
             // handler; `video::drain_restart_gx` orders after this so the commit finds the stage.
-            .add_systems(
-                Update,
-                (sync_cvars, save_config)
-                    .chain()
-                    .after(crate::ui_script::UiInput),
-            );
-        // Save during the session too: a browser tab has no AppExit frame.
-        // The exit registration additionally catches native close-button changes.
-        crate::shutdown::on_app_exit(app, save_config.into_configs());
+            .add_systems(Update, sync_cvars.after(crate::ui_script::UiInput));
+        // Every frame, after Update's writers and the native exit tail have folded the VM.
+        // A browser has no exit frame, so the quiet-second save cannot be exit-gated.
+        app.add_systems(Last, save_config.after(crate::shutdown::OnAppExit));
     }
 }
 
