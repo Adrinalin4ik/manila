@@ -61,6 +61,26 @@ pub struct SpellDisplay {
     /// search's **hand restriction** (main-hand-only / off-hand-only), which is where
     /// `0x5f0c50`'s slot mask comes from (decision 1903).
     pub attributes_ex3: u32,
+    /// **`SpellFamilyName`** (column 160, `SpellRec+0x280`) — which class's talent tree may modify
+    /// this spell. `0` on 18243 of the 22357 shipped rows (creature and world spells); the rest
+    /// carry a `SpellFamilyNames` value, which for a player spell is its own class's.
+    ///
+    /// The first two of `GetSpellModifiers 0x6e6b30`'s three conjunct gates read it and nothing
+    /// else: `!= 0` (`6e6b38`), then `== [0xcecaac]`, the local player's own class family
+    /// (`6e6b46` — [`crate::ChrClasses::spell_family`]). A spell that fails either takes no
+    /// modifier at all, which is how a mage's talent stays off a warrior's ability and off every
+    /// item/creature spell in the file. wow-re `system/spell/scratch/spellmod-table-law.md` §5.1.
+    pub spell_family: u32,
+    /// **`SpellFamilyFlags`** (columns 161/162, `SpellRec+0x284`/`+0x288`) — the 64-bit bit-set
+    /// naming which of its family's modifier rows this spell subscribes to, low dword first.
+    ///
+    /// `GetSpellModifiers` walks **all 64 bits** with no early break and SUMS one cell per set bit
+    /// out of each table (`6e6b72`–`6e6ba6`), so a multi-bit spell accumulates several — and the
+    /// high dword is genuinely live rather than unused width: measured on the shipped 5875 file,
+    /// 1794 rows set exactly one bit, **322 set more than one**, and the highest bit index in the
+    /// whole table is **35**. Frostbolt 116 sets 5/19/20/30, Cleanse 4987 sets 12 **and 33** (it
+    /// needs both dwords), Cure Poison 526 sets 35 alone.
+    pub spell_family_flags: u64,
     /// **`PreventionType`** (column 165, `SpellRec+0x294`) — which crowd-control flag refuses this
     /// spell **locally**, before any packet: `1` = silence, `2` = pacify, `0` = neither. The
     /// client's CC validator `0x6094f0` (called from `TryCast 0x6e4b60`, bailing at `0x6e4f42`)
@@ -337,6 +357,8 @@ impl Default for SpellDisplay {
             attributes_ex2: 0,
             modal_next_spell: 0,
             attributes_ex3: 0,
+            spell_family: 0,
+            spell_family_flags: 0,
             prevention_type: 0,
             passive: false,
             cast_ui: 0,
@@ -565,6 +587,37 @@ impl SpellDisplay {
     /// containers, whose own name spells out what the attribute is for (decision 1312, B247).
     pub fn no_casting_bar_text(&self) -> bool {
         self.attributes_ex3 & ATTR_EX3_NO_CASTING_BAR_TEXT != 0
+    }
+
+    /// `AttributesEx3 & 0x2000` — **this spell shows no channel bar at all**
+    /// ([`ATTR_EX3_NO_CHANNEL_BAR`]). The channel handler `0x6e7550` tests it before it composes
+    /// anything (`0x6e7595 test ch,0x20` → `jne` the return), so `SPELLCAST_CHANNEL_START` never
+    /// fires and the frame is never shown.
+    ///
+    /// A **different** suppression from [`Self::no_casting_bar_text`]'s and a total one: that bit
+    /// blanks the cast bar's *label* and still draws the bar; this one removes the event. The two
+    /// live one nibble apart in the same column and are easy to conflate — the channel path never
+    /// reads bit 2 at all (`0x6e7a2d` is the only bit-2 test on `SpellRec+0x24` image-wide, wow-re
+    /// `wave-cast.md`'s twice-run census).
+    ///
+    /// Both shipped rows are 24322/24323 "Blood Siphon", the Hakkar encounter's drain.
+    pub fn no_channel_bar(&self) -> bool {
+        self.attributes_ex3 & ATTR_EX3_NO_CHANNEL_BAR != 0
+    }
+
+    /// `AttributesEx & 0x2000_0000` — **the channel bar prints this spell's own name**
+    /// ([`ATTR_EX_CHANNEL_BAR_OWN_NAME`]); cleared, it prints the GlobalStrings word `CHANNELING`.
+    /// `0x6e759a test DWORD PTR [SpellRec+0x1c],0x20000000` — set takes `Name[locale]`
+    /// (`0x6e75a9`), clear takes `FrameScript_GetText(0x870dd0 = "CHANNELING")` (`0x6e75bc`).
+    ///
+    /// This is the whole of the channel bar's naming law, and it is the reverse default of the
+    /// cast bar's: a cast bar names its spell unless told not to, a channel bar says "Channeling"
+    /// unless told to name it. Nine of the 323 channeled rows in the shipped 5875 file opt in —
+    /// the four Fishing ranks, Cannibalize, Dream Vision, Using Control Console and the two
+    /// (suppressed) Blood Siphons. Blizzard, Arcane Missiles, Mind Flay, Drain Life/Soul/Mana,
+    /// Rain of Fire, Hurricane, Tranquility, Evocation and First Aid all read the generic word.
+    pub fn channel_bar_own_name(&self) -> bool {
+        self.attributes_ex & ATTR_EX_CHANNEL_BAR_OWN_NAME != 0
     }
 
     /// The ranged-shot cooldown pad's gate (`0x6e2b60` at `0x6e2c2c`–`0x6e2c47`, byte-verified —

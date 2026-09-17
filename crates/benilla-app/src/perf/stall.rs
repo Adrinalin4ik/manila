@@ -143,6 +143,11 @@ fn arm_injectors(app: &mut App) {
             app.insert_resource(TeardownWedge(ms));
         }
     }
+    // The third injector lives with the instrument it exercises — `crash::arm_injector`, a
+    // deliberate main-thread panic — and is armed from here so all three standing injectors
+    // are named in one place.
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::crash::arm_injector(app);
 }
 
 fn watchdog(dir: Option<std::path::PathBuf>) {

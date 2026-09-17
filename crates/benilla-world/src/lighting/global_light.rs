@@ -241,11 +241,15 @@ pub(super) fn register(app: &mut App) {
         )
         // After the spawners (PostUpdate): publish the probe table for extraction on change.
         .add_systems(PostUpdate, super::prop_probes::publish_prop_probes);
-    app.sub_app_mut(RenderApp).add_systems(
-        Render,
-        (upload_light, super::prop_probes::upload_prop_probes)
-            .in_set(RenderSystems::PrepareResources),
-    );
+    // Guarded like every other render-side registration in the tree: a headless build (no GPU,
+    // `backends: None`) has no render app, and the schedule tests build the engine that way.
+    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+        render_app.add_systems(
+            Render,
+            (upload_light, super::prop_probes::upload_prop_probes)
+                .in_set(RenderSystems::PrepareResources),
+        );
+    }
 }
 
 /// Create the single persistent storage buffer. `RenderDevice` is a main-world resource (inserted in
@@ -287,7 +291,7 @@ pub(super) fn per_frame_blob_bytes() -> u64 {
 /// std430 blob. The `.w` lanes carry the faithful invariants the shaders expect (Mod2x 1.0, clamp on,
 /// terrain shininess 20, fog-enable, farclip wall); the model SH coeffs and both water swatches are
 /// derived here once per frame (they used to be recomputed + pushed per-material in `apply_wow_lighting`).
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 fn build_light_data(
     light: Res<WowLighting>,
     debug: Res<DebugState>,

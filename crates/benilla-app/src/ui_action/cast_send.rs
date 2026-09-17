@@ -97,12 +97,15 @@ pub(crate) struct CastLadder<'w, 's> {
     pub(crate) spells: Option<Res<'w, Spells>>,
     /// The item cache — the pre-send totem/reagent check reads it (decision 0552), and the item
     /// arms resolve templates through it.
-    pub(crate) items: ResMut<'w, Items>,
+    pub(crate) items: Res<'w, Items>,
     pub(crate) sheath: MessageWriter<'w, crate::creature_anim::SheathRequest>,
     pub(crate) ecs: Commands<'w, 's>,
     pub(crate) pending: ResMut<'w, crate::ui_cast::PendingCast>,
     pub(crate) queued_melee: ResMut<'w, crate::ui_cast::QueuedMeleeSpell>,
     pub(crate) cooldowns: ResMut<'w, crate::cooldowns::Cooldowns>,
+    /// The talent spell-modifier tables — rung 2's cost goes through them
+    /// ([`super::usable::power_cost`]).
+    pub(crate) spell_mods: Res<'w, crate::spell_mods::SpellModifiers>,
     pub(crate) cast_errors: ResMut<'w, CastErrors>,
     pub(crate) auto_repeat: ResMut<'w, AutoRepeatActive>,
     pub(crate) trade_skill_opens: ResMut<'w, crate::ui_tradeskill::TradeSkillOpens>,
@@ -243,6 +246,7 @@ impl CastLadder<'_, '_> {
             &mut self.pending,
             &mut self.queued_melee,
             &mut self.cooldowns,
+            &self.spell_mods,
             &mut self.cast_errors,
             &mut self.auto_repeat,
             &mut self.trade_skill_opens,
@@ -266,7 +270,6 @@ impl CastLadder<'_, '_> {
 /// source while one is already in flight, so mashing a key can no longer fire a duplicate
 /// `CMSG_CAST_SPELL` the server bounces back as a spurious cast-bar cancel. Ranged/auto-repeat
 /// shots keep their own lifecycle — they never arm the guard and are never blocked by it.
-#[allow(clippy::too_many_arguments)] // every input the follow-through + the send itself need
 fn send_spell_cast(
     spell_id: u32,
     ctx: &cast_target::CastContext,
@@ -284,6 +287,7 @@ fn send_spell_cast(
     pending: &mut crate::ui_cast::PendingCast,
     queued_melee: &mut crate::ui_cast::QueuedMeleeSpell,
     cooldowns: &mut crate::cooldowns::Cooldowns,
+    spell_mods: &crate::spell_mods::SpellModifiers,
     cast_errors: &mut CastErrors,
     auto_repeat: &mut AutoRepeatActive,
     trade_skill_opens: &mut crate::ui_tradeskill::TradeSkillOpens,
@@ -522,7 +526,7 @@ fn send_spell_cast(
     // rage-starved spam press (the 0946 campaign's live capture of the loop).
     if !commit.is_item() {
         if let (Some(d), Some(store)) = (def, ctx.rel.self_store) {
-            if !super::usable::can_afford(d, store) {
+            if !super::usable::can_afford(d, store, spell_mods) {
                 debug!("ui_action: cast {spell_id} refused locally — not enough power (0x4d)");
                 cast_errors.push_local(spell_id, 0x4d);
                 return;
@@ -862,6 +866,7 @@ mod tests {
         world.init_resource::<crate::ui_cast::PendingCast>();
         world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
         world.init_resource::<crate::cooldowns::Cooldowns>();
+        world.init_resource::<crate::spell_mods::SpellModifiers>();
         world.init_resource::<CastErrors>();
         world.init_resource::<AutoRepeatActive>();
         world.init_resource::<crate::ui_tradeskill::TradeSkillOpens>();

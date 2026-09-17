@@ -92,7 +92,7 @@ use crate::creature_anim::{
 use benilla_assets::m2_url;
 
 use super::equipment::ItemDisplays;
-use super::spell_fx::{attach_effect_visuals, ensure_model, EffectHost, SpellFx};
+use super::spell_fx::{attach_effect_visuals, ensure_model, EffectHost, FxMaterials, SpellFx};
 use super::{BoneAttach, DisplayModel, ModelHandle};
 
 /// The anim-event idents that release queued missiles — the dispatcher's drain arms (`0x5ffbd0`:
@@ -293,8 +293,58 @@ struct QueuedGo {
 
 /// Every caster's pending queue (the client's per-unit `+0xac` list heads). A caster that
 /// streams out drops its queue with it.
+///
+/// **It is also a GATE, not only a queue** (decision 2288, wow-re
+/// `missile-queue-gates-the-release-event.md`). `[CGUnit+0xac]` holds `CMissile` nodes — the
+/// binary names them itself (`Missile_C.cpp`) — inserted by the missile spawner `0x60a3d0` and
+/// drained by the release event, and the `$BWR` handler reads it *before* draining it
+/// (`0x600182 mov eax,[esi+0xac]; test eax,eax; je 0x600299`). Everything between those two points
+/// — the ranged prop's own re-anim and the cast-sound reposition — happens **only when a
+/// projectile is actually waiting to be released**. So a shot's flex and its launch are two
+/// effects of one act, and a consumer that arms the prop without asking this has half a mechanism.
 #[derive(Resource, Default)]
-pub(super) struct PendingMissiles(EntityHashMap<Vec<QueuedGo>>);
+pub(crate) struct PendingMissiles(EntityHashMap<Vec<QueuedGo>>);
+
+impl PendingMissiles {
+    /// Is a projectile queued on `caster`, waiting for its release keyframe? The reference's
+    /// `test eax,eax` on the list head — asked by [`crate::ranged_flex`] before the drain, which is
+    /// the order `0x600182` and `0x600294` sit in.
+    pub(crate) fn releasing(&self, caster: Entity) -> bool {
+        self.0.get(&caster).is_some_and(|q| !q.is_empty())
+    }
+
+    /// Queue one projectile on `caster` — **test-only**, for the consumers of the gate above
+    /// ([`crate::ranged_flex`]), which need the queue non-empty without standing up the whole GO
+    /// path to put something in it. The node's contents are irrelevant to every reader of
+    /// [`Self::releasing`]; only its presence is.
+    #[cfg(test)]
+    pub(crate) fn queue_a_shot(app: &mut bevy::app::App, caster: Entity) {
+        let spawn = MissileSpawn {
+            caster,
+            spell_id: 75,
+            path: None,
+            ammo_display_id: None,
+            dest_tag: None,
+            speed: 40.0,
+            targets: Vec::new(),
+            ground_aim: None,
+            weapon_visual: None,
+            missile_sound: None,
+            awaits_release: true,
+        };
+        app.world_mut()
+            .resource_mut::<Self>()
+            .0
+            .entry(caster)
+            .or_default()
+            .push(QueuedGo {
+                spawn,
+                key: None,
+                queued: 0.0,
+                saw_oneshot: false,
+            });
+    }
+}
 
 /// The ammo display's flight model as a [`SpellFx`] cache entry: the **shape rule** (module
 /// docs — right slot = `Ammo\`, left slot = `Weapon\`, thrown), with the row's own object skin.
@@ -462,7 +512,6 @@ fn arrival_handoff(
 /// arrival deadline was fixed at GO). A release already past its deadline arrives on the spot:
 /// the arrival hand-off plays now, no flight entity, no flight loop — the melee-range cast
 /// shows only the hit, the reference's close-range look.
-#[allow(clippy::too_many_arguments)]
 fn launch_go(
     go: &QueuedGo,
     launch: Vec3,
@@ -535,7 +584,6 @@ fn launch_go(
 /// is created at queue time (shared with the attach-point effects — the same `.mdx` is one load
 /// however many things use it); a chain-less spawn resolves the wire ammo display instead
 /// ([`ensure_ammo_model`]).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_missiles(
     mut commands: Commands,
     time: Res<Time>,
@@ -673,7 +721,6 @@ pub(super) fn spawn_missiles(
 /// Spawn a missile's model parts + particle emitters once its M2 finishes building (the shared
 /// cache's `parts` fill in `super::update_display_models`) — children of the missile entity, so
 /// they ride the mover below. An unloadable model just flies invisible and still impacts on time.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn attach_missile_models(
     mut commands: Commands,
     mut missiles: Query<(Entity, &mut Missile)>,
@@ -682,6 +729,8 @@ pub(super) fn attach_missile_models(
     time: Res<Time>,
     mut wow_materials: ResMut<Assets<benilla_assets::materials::WowModelMaterial>>,
     mut tint_reg: ResMut<super::spell_fx::FxTintAnims>,
+    mut uv_reg: ResMut<benilla_world::doodad_anim::UvAnimMaterials>,
+    mut anim_table: ResMut<benilla_world::mat_anim_table::MatAnimTable>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
 ) {
@@ -722,8 +771,12 @@ pub(super) fn attach_missile_models(
             // A projectile is the separate `CMissile` TU, not a `CEffect`: it has no kit stage and
             // no Birth/Hold/Decay lifecycle — it flies its one sequence and dies on arrival.
             None,
-            &mut wow_materials,
-            &mut tint_reg,
+            &mut FxMaterials {
+                store: &mut wow_materials,
+                tint: &mut tint_reg,
+                uv: &mut uv_reg,
+                table: &mut anim_table,
+            },
             &ibps,
             &mut palettes,
             Some(INFLIGHT_ANIM),
@@ -740,7 +793,6 @@ pub(super) fn attach_missile_models(
 /// the path. On schedule-end it snaps to the point, runs the [`arrival_handoff`] (a landed
 /// target's impact, a missed one's dodge/block), and despawns (children with it; emitters
 /// self-release via the owner contract).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn move_missiles(
     mut commands: Commands,
     time: Res<Time>,
@@ -891,6 +943,7 @@ mod tests {
             entity: caster,
             ident: *b"$CSL",
             data: 0,
+            anim_id: 0,
             pos: None,
         });
         step(&mut app, 0.05);
@@ -924,6 +977,7 @@ mod tests {
             entity: caster,
             ident: *b"$CSL",
             data: 0,
+            anim_id: 0,
             pos: None,
         });
         step(&mut app, 0.016);
@@ -1010,6 +1064,7 @@ mod tests {
             entity: caster,
             ident: *b"$CSL",
             data: 0,
+            anim_id: 0,
             pos: None,
         });
         step(&mut app, 0.016);
@@ -1090,6 +1145,7 @@ mod tests {
                 entity: caster,
                 ident: *b"$CSL",
                 data: 0,
+                anim_id: 0,
                 pos: None,
             });
             step(&mut app, 0.016);

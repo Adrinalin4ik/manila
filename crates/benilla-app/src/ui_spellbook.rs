@@ -103,8 +103,7 @@ impl Plugin for UiSpellbookPlugin {
                     // book buttons re-read them (that set's own doc).
                     feed_spellbook
                         .in_set(UnitFeed)
-                        .before(crate::ui_action::CooldownEvents)
-                        .before(UiInput),
+                        .before(crate::ui_action::CooldownEvents),
                     drain_spell_casts.after(UiInput),
                 ),
             );
@@ -145,7 +144,6 @@ struct FeedMemory {
     self_present: gate::Watch,
 }
 
-#[allow(clippy::too_many_arguments)] // a Bevy system's full input set
 fn feed_spellbook(
     script: Option<NonSendMut<UiScript>>,
     actions: Res<PlayerActions>,
@@ -153,7 +151,7 @@ fn feed_spellbook(
     skill_lines: Option<Res<SkillLines>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     changed_self: Query<(), (With<SelfPlayer>, Changed<ObjectStore>)>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
     cooldowns: Res<crate::cooldowns::Cooldowns>,
@@ -238,13 +236,13 @@ fn feed_spellbook(
     // not spell 6603's `Temp` placeholder (decision 0230) — resolved here where the self player +
     // item stores are in hand, once for the whole page (it's the same for any auto-attack spell).
     let attack_icon = store
-        .map(|s| melee_auto_attack_icon(s, &spells.forms, &mut items, icons.as_deref(), &commands));
+        .map(|s| melee_auto_attack_icon(s, &spells.forms, &items, icons.as_deref(), &commands));
     // The ranged auto-repeat shots (Auto Shot, wand Shoot) borrow the equipped ranged weapon's
     // icon the same way (decision 0231's ranged case; `None` — unarmed/thrown — keeps the
     // spell's own icon, never Spell-Reset). Character-level like the melee icon: one resolve
     // serves the page.
     let ranged_icon =
-        store.and_then(|s| ranged_weapon_icon(s, &mut items, icons.as_deref(), &commands));
+        store.and_then(|s| ranged_weapon_icon(s, &items, icons.as_deref(), &commands));
     let (mut fresh, tab_lines) = build_book(
         &actions.spells,
         &spells.catalog,

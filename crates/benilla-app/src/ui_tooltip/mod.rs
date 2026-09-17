@@ -25,7 +25,6 @@ use crate::target::{
     go_is_nearest, ring_reaction, Hovered, HoveredObject, GO_FLAG_LOCKED, GO_TYPE_GENERIC,
 };
 use crate::ui_action::{PlayerActions, Spells};
-use crate::ui_script::UiInput;
 use crate::ui_unit::{enrich_unit, snapshot, UnitFeed};
 
 pub struct UiTooltipPlugin;
@@ -35,8 +34,8 @@ impl Plugin for UiTooltipPlugin {
         app.add_systems(
             Update,
             (
-                drive_mouseover_tooltip.in_set(UnitFeed).before(UiInput),
-                feed_spell_tooltips.in_set(UnitFeed).before(UiInput),
+                drive_mouseover_tooltip.in_set(UnitFeed),
+                feed_spell_tooltips.in_set(UnitFeed),
             ),
         );
     }
@@ -60,6 +59,9 @@ struct ViewCtx<'a> {
     items: &'a mut Items,
     commands: &'a NetCommands,
     sub_classes: Option<&'a benilla_formats::ItemSubClassCatalog>,
+    /// The talent spell-modifier tables — the cost cell shows the RESOLVED cost, which since
+    /// `SPELLMOD_COST` landed means the modified one (`crate::ui_action::usable::power_cost`).
+    spell_mods: &'a crate::spell_mods::SpellModifiers,
     /// The VM's own `GlobalStrings.lua` (decision 2045) — every cell this builder composes is a
     /// key, and this is where they resolve. `text` is the `%d`-filling twin the `$`-engine's
     /// keyed tokens take (`benilla_formats::TokenContext::text`).
@@ -118,9 +120,9 @@ fn spell_tooltip_view(
     // replaces was unfaithful (B152). No store (a DBC-only view) degrades to the flat cost.
     // HAPPINESS_COST has no GlobalStrings entry and no 5875 player spell reaches powerType 4;
     // the unit word is a dead arm kept for the array's shape.
-    let resolved_cost = vctx
-        .store
-        .map_or(d.mana_cost, |s| crate::ui_action::usable::power_cost(d, s));
+    let resolved_cost = vctx.store.map_or(d.mana_cost, |s| {
+        crate::ui_action::usable::power_cost(d, s, vctx.spell_mods)
+    });
     let cost = {
         // The one `0x6e7130` table, not a local `if power_type == 1` — decision 2117 found three
         // hand-rolled copies of it and one of them had been applied at a single site out of four.
@@ -422,7 +424,6 @@ struct SpellFeedMemory {
 /// display + next-rank reads), and the live aura spells (`SetPlayerBuff`) — so a first hover
 /// never misses, exactly like the reference's all-local reads. The renderers' recorded asks
 /// (the odd id outside those sets) answer through the same build as the fallback.
-#[allow(clippy::too_many_arguments)]
 fn feed_spell_tooltips(
     script: Option<NonSendMut<UiScript>>,
     actions: Option<Res<PlayerActions>>,
@@ -438,10 +439,17 @@ fn feed_spell_tooltips(
     home_bind: Option<Res<crate::net::HomeBind>>,
     area_names: Option<Res<crate::ui_quest_log::QuestHeaderNamesRes>>,
     mut items: ResMut<Items>,
-    sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
+    // One tuple param (Bevy's 16-SystemParam ceiling): the two lookups the view builder reads
+    // straight through — the item sub-class names for the required-item line, and the talent
+    // spell-modifier tables the cost cell resolves through.
+    lookups: (
+        Option<Res<crate::ui_items::ItemSubClasses>>,
+        Res<crate::spell_mods::SpellModifiers>,
+    ),
     commands: Res<NetCommands>,
     mut memory: Local<crate::ui_script::VmMemo<SpellFeedMemory>>,
 ) {
+    let (sub_classes, spell_mods) = &lookups;
     let Some(mut script) = script else {
         return;
     };
@@ -567,6 +575,14 @@ fn feed_spell_tooltips(
         memory.combat_reach = Some(reaches);
         wanted.extend(memory.pushed.drain());
     }
+    // …and so does the cost cell, whose resolved number now goes through the talent
+    // spell-modifier tables: a respec changes what every affected spell costs, and this feed is
+    // the one consumer of `power_cost` that memoizes its build (the action bar recomputes every
+    // frame). The reference has no cache here at all — it reads the tables live at every call
+    // site — so this is what keeps the cell honest about the same change (`crate::spell_mods`).
+    if spell_mods.is_changed() {
+        wanted.extend(memory.pushed.drain());
+    }
     let watched: Vec<u32> = memory.reagents.keys().copied().collect();
     let reagent_state: std::collections::BTreeMap<u32, (u32, bool)> = watched
         .into_iter()
@@ -598,6 +614,7 @@ fn feed_spell_tooltips(
             items: &mut items,
             commands: &commands,
             sub_classes: sub_classes.as_deref().map(|c| &c.0),
+            spell_mods,
             get: &get,
             text: &text,
         };
@@ -697,7 +714,6 @@ fn locked_line_tint(outcome: Option<crate::target::lock::LockOutcome>) -> Toolti
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn drive_mouseover_tooltip(
     script: Option<NonSendMut<UiScript>>,
     hovered: Res<Hovered>,
@@ -708,7 +724,7 @@ fn drive_mouseover_tooltip(
     // The stored GAMEOBJECT_STATE the lock lines' Action gate reads (decision 0752).
     anims: Query<&crate::go_anim::GoAnim>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     commands: Res<NetCommands>,
     // The standing pair as one param — see [`crate::target::ReactionInputs`]. Bundled here and
     // not elsewhere because this system sits on Bevy's tuple limit.
@@ -717,7 +733,7 @@ fn drive_mouseover_tooltip(
     // hover and the click can never disagree about whether a lock is satisfiable — the same reason
     // `usable` and the click share one resolver (0752). Carries the go-template, Lock.dbc and
     // item caches this system used to take as three separate params.
-    mut go_inputs: crate::target::lock::GoLockInputs,
+    go_inputs: crate::target::lock::GoLockInputs,
     // The known-spell set the resolver's SKILL arm scans.
     player_actions: Res<crate::ui_action::PlayerActions>,
     // The cursor seat crosses the VM seam (0582/0584): the anchor below is UI units, not px.
@@ -845,22 +861,30 @@ fn drive_mouseover_tooltip(
         // distinction the director's two reference observations agree on — a **GENERIC(5)**
         // signpost follows the cursor, an interactable GameObject sits in the corner.
         //
-        // Not merely a guess-shaped proxy: after 0762 the only objects that are eligible for a
-        // tooltip *and* never highlightable are GENERIC ones, so "GENERIC" and "not interactable"
-        // pick out the same set here. They diverge only for the three always-eligible types
-        // (SPELL_FOCUS 8 / DUEL_ARBITER 16 / FISHINGHOLE 25), which is exactly where a pin would
-        // settle it. Flagged INTERIM in 0766 rather than presented as verified.
+        // 0766 keyed this on "is it GENERIC(5)" and said plainly that it was a proxy: the real
+        // client asks the object's own `[vtbl+0x5c]`, and what selects it was not then pinned.
+        // **It is pinned now, and it is narrower** (decision 2259): `[vtbl+0x5c]` is `0x5f8630`,
+        // whose body is `template.data[0x621b00(type, semantic 0x13)] != 0`, and key `0x13`
+        // resolves for exactly ONE of the 31 GO types — GENERIC(5), at `data[0]`. Every other type
+        // gets `-1` back and `0x5f8150`'s unsigned bound turns that into FALSE.
         //
-        // **THE PIN HAS ARRIVED, AND IT IS NARROWER THAN THIS LINE** (2255): `[vtbl+0x5c]` is
-        // `0x5f8630` = `template.data[0x621b00(type, 0x13)] != 0`, and semantic key `0x13` exists
-        // on exactly ONE of the 31 types — GENERIC(5), at `data[0]`. So the cursor arm is "GENERIC
-        // **with `data[0]` set**", and a GENERIC with it clear is corner-seated; the three
-        // always-eligible types above are corner-seated too, so 0766's "GENERIC" reading wins over
-        // its "not interactable" one. Applying it moves 190 of the 1387 hoverable type-5 templates
-        // from the cursor to the corner — a visible change, so it is its own slice and not a
-        // passenger on a bug fix (2255 carries the counts and the reasoning).
-        let cursor_seated =
-            stores.get(entity).map(|s| s.0.gameobject_type_id()) == Ok(GO_TYPE_GENERIC);
+        // So the cursor arm is **GENERIC with `data[0]` set**, and a GENERIC with it clear is
+        // corner-seated like everything else. That also settles 0766's named divergence: the three
+        // always-eligible types (SPELL_FOCUS 8 / DUEL_ARBITER 16 / FISHINGHOLE 25) carry no key
+        // `0x13`, so all three are corner-seated — 0766's "GENERIC" reading wins over its "not
+        // interactable" one.
+        //
+        // **`data[0]` is not `data[1]`.** The neighbouring slot is the mouseover-ELIGIBILITY column
+        // (0762, semantic `0x12`, `0x5f4830`), and the two answer different questions: `data[1]`
+        // says whether the object is hoverable at all, `data[0]` only says *where its plate sits*.
+        // 342 of the 447 type-5 entries in the reference's own `gameobjectcache.wdb` carry both;
+        // the objects that differ are hoverable and corner-seated, not silent.
+        let cursor_seated = stores.get(entity).map(|s| s.0.gameobject_type_id())
+            == Ok(GO_TYPE_GENERIC)
+            && go_inputs
+                .templates
+                .get(guid)
+                .is_some_and(|t| t.floating_tooltip);
         // Window px → the VM's y-up 768-virtual units (÷s, the input seam's own conversion) —
         // the anchor this point seats is resolved in UI units, so a raw-px point lands the
         // plate (s−1)× the cursor's distance from the bottom-left corner away from it.

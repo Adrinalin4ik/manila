@@ -49,7 +49,7 @@ use bevy::prelude::*;
 use benilla_ui::script::keybind::{AddonBindingBody, KeybindCommand, KeybindRequest};
 use benilla_ui::script::UiScript;
 
-use crate::char_select::ClientState;
+use crate::char_select::InWorldGated;
 use crate::ui_script::{PlayerUiHover, PointerOverUiPanel, UiKeyboardCapture};
 
 pub(crate) mod chord;
@@ -274,9 +274,10 @@ impl Plugin for BindingsPlugin {
                         .chain()
                         .in_set(crate::ui_script::UiInput)
                         .in_set(BindingSet)
-                        .before(benilla_world::schedule::WorldStage::Input)
-                        .run_if(in_state(ClientState::InWorld)),
-                    drain_binding_requests,
+                        .in_set(InWorldGated),
+                    // After the tick: the requests are Lua's own (`SaveBindings`, `RunBinding`),
+                    // queued by handlers the tick dispatched, and a save must not wait a frame.
+                    drain_binding_requests.after(crate::ui_script::UiInput),
                 ),
             );
     }
@@ -498,7 +499,6 @@ fn sync_dispatch(script: Option<NonSendMut<UiScript>>, mut dispatch: ResMut<Bind
 
 /// The dispatch pass — see the module doc. Runs right after the UI key feed (same frame's
 /// capture gate), before `WorldStage::Input` (a bound key must act this frame, once).
-#[allow(clippy::too_many_arguments)]
 fn latch_and_dispatch(
     script: Option<NonSendMut<UiScript>>,
     mut keyboard: MessageReader<KeyboardInput>,

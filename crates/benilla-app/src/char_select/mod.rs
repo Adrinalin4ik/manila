@@ -65,6 +65,20 @@ pub(crate) enum ClientState {
     InWorld,
 }
 
+/// **The one "only while in the world" gate** (decision 2265 §C3). A system that has no business
+/// at a glue screen — an input reader, a world-packet feed, a per-character file watcher — joins
+/// this set instead of carrying its own `run_if(in_state(ClientState::InWorld))`: twenty-odd
+/// copies of that condition said one thing in twenty-odd places, and the condition a set carries
+/// ANDs with a member's own, so a member keeps whatever else it needs (the controller's
+/// capture-mode gate, say) and the conversion is exact.
+///
+/// Configured once, in [`CharSelectPlugin`] — the state's home — for `Update`, the only schedule
+/// a member lives in. A member in another schedule means configuring the set *there* as well
+/// (a set's conditions are per schedule; an unconfigured set gates nothing), never a fresh
+/// `run_if` at the site.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct InWorldGated;
+
 /// The character-select subsystem: the state machine + the select screen.
 pub(crate) struct CharSelectPlugin {
     /// The screen this session opens on.
@@ -94,6 +108,8 @@ fn publish_world_live(
 impl Plugin for CharSelectPlugin {
     fn build(&self, app: &mut App) {
         app.insert_state(self.start)
+            // The in-world gate, configured beside the state it reads (see [`InWorldGated`]).
+            .configure_sets(Update, InWorldGated.run_if(in_state(ClientState::InWorld)))
             .init_resource::<Roster>()
             // **The engine's world-existence bit** (1160's wire (b)): the session owner is this
             // module, so this module tells the world whether there is one. Ordered ahead of every
@@ -105,8 +121,14 @@ impl Plugin for CharSelectPlugin {
             )
             .init_resource::<dialog::DeleteDialog>()
             .init_resource::<addons::AddonsPanel>()
-            .add_systems(OnEnter(ClientState::CharSelect), screen::enter_select)
-            .add_systems(OnExit(ClientState::CharSelect), screen::exit_select)
+            .add_systems(
+                OnEnter(ClientState::CharSelect),
+                (screen::enter_select, stamp_select_entry),
+            )
+            .add_systems(
+                OnExit(ClientState::CharSelect),
+                (screen::exit_select, clear_select_entry),
+            )
             .add_systems(Update, (debug_glue_roundtrip, debug_logout_smoke))
             .add_systems(
                 Update,
@@ -151,6 +173,11 @@ impl Plugin for CharSelectPlugin {
                     )
                         .chain()
                         .before(crate::glue::GlueVisuals)
+                        // After the UI tick: one member holds the VM (the addons panel reads
+                        // the manifest through it), and every VM holder in `Update` declares
+                        // its side of the tick (decision 2304). A glue screen has no push the
+                        // tick must see, so the whole chain takes the drain side.
+                        .after(crate::ui_script::UiInput)
                         .run_if(in_state(ClientState::CharSelect)),
                 )
                     .chain()
@@ -385,9 +412,9 @@ fn last_character_row(value: &str) -> Option<usize> {
 /// Out of range falls back to the **first** row, never to the nearest one: a character deleted
 /// since you last played, or a realm with fewer characters, puts you at the top of the list rather
 /// than beside where the old row used to be.
-fn remembered_row(persist: &crate::cvars::CvarPersist, len: usize) -> usize {
-    persist
-        .stored(CVAR_LAST_CHARACTER)
+fn remembered_row(cvars: &crate::cvars::Cvars, len: usize) -> usize {
+    cvars
+        .get(CVAR_LAST_CHARACTER)
         .and_then(last_character_row)
         .filter(|&row| row < len)
         .unwrap_or(0)
@@ -401,42 +428,28 @@ fn remembered_row(persist: &crate::cvars::CvarPersist, len: usize) -> usize {
 /// and clicks and arrow keys reach `0x472740` without ever going near it. [`Roster::pending_pick`]
 /// is exactly that moment for us, so [`Roster::pending_index`] is what this reads.
 ///
-/// The write goes through [`UiScript::set_cvar_engine`] so it rides the change queue like a Lua
-/// `SetCVar` and the host's sync persists it — the minimap-zoom pattern (1131), already used from
-/// this screen by the AddOns panel's force-load box (1293). **One divergence, stated:** the
+/// The write is a host write into the registry ([`crate::cvars::Cvars::set`]), which is what
+/// persists it and what the VM's mirror learns (2303) — the shape the AddOns panel's force-load
+/// box uses from this same screen (1293). **One divergence, stated:** the
 /// reference flushes `Config.wtf` synchronously in the same call (`0x46b6f6`), while ours reaches
 /// disk on the exit edge with every other CVar (1528) — so a crash between entering the world and
 /// quitting loses the memory, where the reference would not. That is the CVar store's shape, not
 /// this key's, and changing it is an autosave design (1528's own "what this does NOT fix").
 fn persist_last_character(
     roster: Res<Roster>,
-    mut script: Option<NonSendMut<benilla_ui::script::UiScript>>,
-    // Memory about the VM's CVar table, so it dies with the VM (decision 1290). A bare `Local`
-    // here would be betting that `cvars::sync_cvars`'s per-VM seed carries this key into the next
-    // table — true today, and exactly the "correct against one VM, silently wrong against the
-    // next" shape 1290 built its structural gate to refuse. `get_for` because this system also
-    // runs while there is no VM at all.
-    mut mirrored: Local<crate::ui_script::VmMemo<Option<usize>>>,
+    mut cvars: ResMut<crate::cvars::Cvars>,
+    // A plain `Local` is honest here since 2303: the registry outlives every VM, so the row
+    // written once stays written — the per-VM memo this used to need was betting on the seed.
+    mut mirrored: Local<Option<usize>>,
 ) {
     let Some(row) = roster.pending_index() else {
         return; // nobody is entering the world — nothing to remember
     };
-    let mirrored = mirrored.get_for(script.as_deref());
     if *mirrored == Some(row) {
         return;
     }
-    let Some(script) = script.as_deref_mut() else {
-        return;
-    };
-    script.set_cvar_engine(CVAR_LAST_CHARACTER, &last_character_value(row));
-    // Latch only once the table actually took it. An engine write to a name the host has not
-    // registered yet is a deliberate silent no-op (`script::cvars::set_from_engine`), and the
-    // per-VM seed that registers it runs in `cvars::sync_cvars` — a sibling `Update` system with
-    // no ordering against this one. Latching on the frame the write was dropped would swallow
-    // exactly one entry, and it would be the session's first.
-    if script.cvar(CVAR_LAST_CHARACTER).is_some() {
-        *mirrored = Some(row);
-    }
+    cvars.set(CVAR_LAST_CHARACTER, &last_character_value(row));
+    *mirrored = Some(row);
 }
 
 /// Ask the parked IO thread to log in as `guid` (the pick channel) and remember it as pending.
@@ -456,11 +469,11 @@ fn apply_roster_policy(
     mut msgs: MessageReader<CharListMessage>,
     mut roster: ResMut<Roster>,
     pick: Res<CharPick>,
-    // The remembered row (decision 1622) — read off the persist state rather than the VM's table
-    // because it is a value the *file* owns and the session only mirrors, and because reading it
+    // The remembered row (decision 1622) — read off the registry rather than the VM's table
+    // because the registry is the store that outlives every VM (2303), and because reading it
     // here keeps this system send-able. It is consulted exactly once per process: `selected` is
     // `None` only before the first roster lands.
-    persist: Res<crate::cvars::CvarPersist>,
+    cvars: Res<crate::cvars::Cvars>,
     // Is the character pick already spoken for? Present only when a rig is driving this run
     // (decision 1174's always-present run fact) — absent in every ordinary run, which is the
     // player answer and the one this screen was written for.
@@ -521,7 +534,7 @@ fn apply_roster_policy(
             // reference reads the CVar in the char-list rebuild itself (`0x4724d0` → `0x472740`),
             // not once at startup, so the screen always opens on whoever you last entered the
             // world as. Out of range falls back to the first row; see `remembered_row`.
-            let row = remembered_row(&persist, roster.chars.len());
+            let row = remembered_row(&cvars, roster.chars.len());
             // Greppable, and it names the character rather than only the index: "the first row
             // happened to be right" and "the memory worked" are the same picture on screen, and
             // this line is the only thing that tells them apart in a log.
@@ -783,7 +796,6 @@ fn debug_glue_roundtrip(
 /// hand-written `AppExit` from `Update` skipped that question for this smoke's whole life, and the
 /// bug it would have caught — every saved variable, every addon file and the camera pose lost on
 /// every window close — shipped underneath it.
-#[allow(clippy::too_many_arguments)] // a smoke test that drives the whole round trip
 fn debug_logout_smoke(
     state: Res<State<ClientState>>,
     player: Res<crate::player::Player>,
@@ -822,7 +834,7 @@ fn debug_logout_smoke(
         // world-live falling edge, not the state edge), so the probe was reading the count before
         // the thing it is checking had happened, and reporting the world it had just left.
         //
-        // It cost more than a wrong line: 1291 wrote the reading up as a live contradiction of
+        // It cost more than a wrong line: 2277 wrote the reading up as a live contradiction of
         // 0777's release-world claim, on the strength of it reproducing identically on an older
         // commit — which it did, because an instrument that measures too early does that reliably.
         // A number that is always wrong teaches everyone to skip the line (0777's own lesson about
@@ -844,7 +856,7 @@ fn debug_logout_smoke(
         },
         4 if *state.get() == ClientState::InWorld && player.active && now - *mark > 3.0 => {
             // **The suppressor reading is the point of the second entry, not a decoration on it**
-            // (B306, decision 1542). This leg has crossed the boundary on every run since 1291 and
+            // (B306, decision 1542). This leg has crossed the boundary on every run since 2277 and
             // could only ever report that it *happened* — tiles, UI rebuilds, error counts — none
             // of which a character who re-entered unable to move would disturb. `scripts/smoke.sh`
             // fails on anything but `none`, and separately reports whether the run's logout was
@@ -954,6 +966,31 @@ fn debug_select_walk(
     }
 }
 
+/// When the select screen came up: `Time::elapsed_secs()` at `OnEnter(CharSelect)`, gone again
+/// at `OnExit`. The one clock the screen's "a few seconds after the screen is up" instruments
+/// ([`debug_select_dialog`], [`debug_select_addons`], [`debug_select_shot`]) measure from, in
+/// place of a `Local` each stamped on its own first run (decision 2265 §C3). Those three run
+/// under `in_state(CharSelect)` in `Update`, so the resource is always there when they read it.
+#[derive(Resource, Clone, Copy)]
+struct CharSelectEnteredAt(f32);
+
+impl CharSelectEnteredAt {
+    /// Seconds the screen has been up.
+    fn elapsed(&self, time: &Time) -> f32 {
+        time.elapsed_secs() - self.0
+    }
+}
+
+/// `OnEnter(CharSelect)`: stamp the screen's entry.
+fn stamp_select_entry(mut commands: Commands, time: Res<Time>) {
+    commands.insert_resource(CharSelectEnteredAt(time.elapsed_secs()));
+}
+
+/// `OnExit(CharSelect)`: the screen is down, so is its clock.
+fn clear_select_entry(mut commands: Commands) {
+    commands.remove_resource::<CharSelectEnteredAt>();
+}
+
 /// The shot instrument's delete-dialog dial (`WOW_CHARSELECT_DIALOG=<typed>`): open the
 /// typed-confirm dialog for the selected character a few seconds after the screen is up, with
 /// `<typed>` pre-typed (may be empty) — so the dialog's geometry (the ChatInputBorder edit box,
@@ -963,7 +1000,7 @@ fn debug_select_dialog(
     roster: Res<Roster>,
     mut dialog: ResMut<dialog::DeleteDialog>,
     time: Res<Time>,
-    mut entered_at: Local<Option<f32>>,
+    entered_at: Res<CharSelectEnteredAt>,
     mut done: Local<bool>,
 ) {
     if *done {
@@ -973,8 +1010,7 @@ fn debug_select_dialog(
         *done = true;
         return;
     };
-    let start = *entered_at.get_or_insert(time.elapsed_secs());
-    if time.elapsed_secs() - start < 4.0 {
+    if entered_at.elapsed(&time) < 4.0 {
         return;
     }
     let Some(c) = roster.selected_char() else {
@@ -995,7 +1031,7 @@ fn debug_select_addons(
     roster: Res<Roster>,
     mut panel: ResMut<addons::AddonsPanel>,
     time: Res<Time>,
-    mut entered_at: Local<Option<f32>>,
+    entered_at: Res<CharSelectEnteredAt>,
     mut done: Local<bool>,
 ) {
     if *done {
@@ -1005,8 +1041,7 @@ fn debug_select_addons(
         *done = true;
         return;
     }
-    let start = *entered_at.get_or_insert(time.elapsed_secs());
-    if time.elapsed_secs() - start < 4.0 {
+    if entered_at.elapsed(&time) < 4.0 {
         return;
     }
     if roster.chars.is_empty() {
@@ -1041,7 +1076,7 @@ const SELECT_SHOT_AT: f32 = 8.0;
 fn debug_select_shot(
     mut commands: Commands,
     time: Res<Time>,
-    mut entered_at: Local<Option<f32>>,
+    entered_at: Res<CharSelectEnteredAt>,
     mut done: Local<bool>,
 ) {
     if *done {
@@ -1055,8 +1090,7 @@ fn debug_select_shot(
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(SELECT_SHOT_AT);
-    let start = *entered_at.get_or_insert(time.elapsed_secs());
-    if time.elapsed_secs() - start < at {
+    if entered_at.elapsed(&time) < at {
         return;
     }
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
@@ -1405,8 +1439,8 @@ mod tests {
             .init_resource::<Roster>()
             .insert_resource(CharPick(tx))
             .insert_resource(match stored {
-                Some(v) => crate::cvars::CvarPersist::with_stored(CVAR_LAST_CHARACTER, v),
-                None => crate::cvars::CvarPersist::default(),
+                Some(v) => crate::cvars::Cvars::with_value(CVAR_LAST_CHARACTER, v),
+                None => crate::cvars::Cvars::default(),
             })
             .add_message::<CharListMessage>()
             .add_message::<AppExit>()
@@ -1528,10 +1562,7 @@ mod tests {
         app.add_plugins(MinimalPlugins)
             .init_resource::<Roster>()
             .insert_resource(CharPick(tx))
-            .insert_resource(crate::cvars::CvarPersist::with_stored(
-                CVAR_LAST_CHARACTER,
-                "0",
-            ))
+            .insert_resource(crate::cvars::Cvars::with_value(CVAR_LAST_CHARACTER, "0"))
             .add_message::<CharListMessage>()
             .add_message::<AppExit>()
             .add_systems(Update, apply_roster_policy);
@@ -1581,14 +1612,11 @@ mod tests {
     #[test]
     fn only_entering_the_world_writes_the_cvar() {
         let (tx, _rx) = async_channel::unbounded();
-        let script = benilla_ui::script::UiScript::new().unwrap();
-        script.register_cvars([(CVAR_LAST_CHARACTER, "0")]);
-
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<Roster>()
+            .init_resource::<crate::cvars::Cvars>()
             .insert_resource(CharPick(tx))
-            .insert_non_send_resource(script)
             .add_systems(Update, persist_last_character);
         {
             let mut roster = app.world_mut().resource_mut::<Roster>();
@@ -1602,96 +1630,35 @@ mod tests {
         }
         app.update();
         assert!(
-            app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
-                .take_cvar_changes()
-                .is_empty(),
+            !app.world().resource::<crate::cvars::Cvars>().has_events(),
             "a selection alone must NOT be remembered — the reference writes nothing here",
         );
 
         // …and now Enter World, on the row that was selected.
         app.world_mut().resource_mut::<Roster>().pending_pick = Some(2);
         app.update();
+        let moved: Vec<(String, String)> = app
+            .world_mut()
+            .resource_mut::<crate::cvars::Cvars>()
+            .take_events()
+            .into_iter()
+            .map(|e| (e.name, e.new))
+            .collect();
         assert_eq!(
-            app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
-                .take_cvar_changes(),
+            moved,
             vec![(CVAR_LAST_CHARACTER.to_string(), "1".to_string())],
-            "guid 2 sits at row 1, and the row is what rides the queue",
+            "guid 2 sits at row 1, and the row is what the registry took",
         );
-    }
-
-    /// **The 1290 property, at this call site.** A login replaces the VM, and the memo of "the
-    /// table already says 1" must die with it — otherwise the mirror stays quiet against a table
-    /// that has never been told, and the memory survives only for as long as some *other* module
-    /// happens to carry the key across (`cvars::sync_cvars`'s saved-base seed does, today).
-    #[test]
-    fn a_replaced_vm_is_told_the_remembered_row_again() {
-        let (tx, _rx) = async_channel::unbounded();
-        let fresh = || {
-            let s = benilla_ui::script::UiScript::new().unwrap();
-            s.register_cvars([(CVAR_LAST_CHARACTER, "0")]);
-            s
-        };
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .init_resource::<Roster>()
-            .insert_resource(CharPick(tx))
-            .insert_non_send_resource(fresh())
-            .add_systems(Update, persist_last_character);
-        {
-            let mut roster = app.world_mut().resource_mut::<Roster>();
-            roster.chars = vec![character(1, "Kerwind"), character(2, "Xero")];
-            roster.pending_pick = Some(2);
-        }
+        // Steady frames stay quiet, and the next VM is seeded from the registry — which is what
+        // replaced the per-VM memo this system used to carry (1290's property, now held by the
+        // store outliving the VM, 2303).
         app.update();
-        app.update(); // steady frames stay quiet — the memo does its job within one VM
-
-        // The login edge: `ui_script::lifecycle` drops the VM and installs a boot VM in its place.
-        app.world_mut()
-            .insert_non_send_resource::<benilla_ui::script::UiScript>(fresh());
-        app.update();
-
-        assert_eq!(
-            app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
-                .take_cvar_changes(),
-            vec![(CVAR_LAST_CHARACTER.to_string(), "1".to_string())],
-            "the new VM's table must be told the row too — a memo that outlived the old one \
-             would leave this table on its default and lose the memory at quit",
-        );
-    }
-
-    /// The write must survive the frame in which the host has not registered its table yet: an
-    /// engine write to an unregistered name is a deliberate silent no-op, so latching on it would
-    /// swallow the session's FIRST entry — the one launch-to-launch memory exists for.
-    #[test]
-    fn an_entry_made_before_the_cvar_table_exists_is_not_lost() {
-        let (tx, _rx) = async_channel::unbounded();
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .init_resource::<Roster>()
-            .insert_resource(CharPick(tx))
-            .insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap())
-            .add_systems(Update, persist_last_character);
-        {
-            let mut roster = app.world_mut().resource_mut::<Roster>();
-            roster.chars = vec![character(1, "Kerwind"), character(2, "Xero")];
-            roster.pending_pick = Some(2);
-        }
-
-        app.update(); // the table has no such name yet — the write is dropped
-        app.world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>()
-            .register_cvars([(CVAR_LAST_CHARACTER, "0")]);
-        app.update(); // ...and the next frame must still catch it up
-
-        assert_eq!(
-            app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
-                .take_cvar_changes(),
-            vec![(CVAR_LAST_CHARACTER.to_string(), "1".to_string())],
-        );
+        let cvars = app.world().resource::<crate::cvars::Cvars>();
+        assert!(!cvars.has_events());
+        assert!(cvars
+            .vm_seed()
+            .iter()
+            .any(|r| r.name == CVAR_LAST_CHARACTER && r.value == "1"));
     }
 
     /// The reverse arrival order (result first, roster after) stays armed and is answered by the
