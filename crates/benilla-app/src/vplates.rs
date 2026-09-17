@@ -433,6 +433,8 @@ struct PlateWorld<'w, 's> {
     camera: Query<'w, 's, (&'static Camera, &'static Transform), With<WorldCamera>>,
     // The cursor, for the plate-rect hover (OnEnter — the yellow name, this frame's rects).
     window: Query<'w, 's, &'static Window, With<bevy::window::PrimaryWindow>>,
+    // The pending ground-target cast — the plate's `+0x3c` hit-test veto (`0x7cba30`).
+    targeting: Res<'w, crate::ui_action::SpellTargeting>,
 }
 
 /// Gate + draw, every frame: decide which units carry a plate (into [`VPlates`], the
@@ -522,6 +524,18 @@ fn drive_vplates(
         *mouse_told.get(&script) = Some(looking);
         script.set_nameplate_mouse(!looking);
     }
+    // **The plate's OWN veto** (`0x7cba30`, the `+0x3c` override), which is a different mechanism
+    // from the freelook toggle above and has to stay one: while a ground-targeted spell is armed a
+    // plate refuses the hit test *before* the rect, so the reticle can be placed through it — and
+    // it does that without touching the mouse-enabled bit, so `IsMouseEnabled()` still answers
+    // truthfully to an addon. `TargetingWants::Location` is `0x6e6320`'s `flag & 0x60` verbatim.
+    // Written every frame rather than on an edge: it is a plain flag read at hit-test time, not a
+    // walk over the plate list, so there is no edge worth memoising.
+    script.set_nameplate_hit_test_veto(
+        world
+            .targeting
+            .wants(crate::ui_action::targeting::TargetingWants::Location),
+    );
     let hovered_key = script.hovered_nameplate();
     let clicked = script.take_nameplate_clicks();
     let my_level = self_store.and_then(|s| s.0.unit_level()).unwrap_or(1);
@@ -684,7 +698,8 @@ fn drive_vplates(
         // Geometry trace for the vplates capture (`WOW_VPLATE_TRACE=1`): the exact plate rects
         // this frame, in logical px — the machine-side check the capture PNG can't give
         // (fill/border/text hues overlap under zoom).
-        let trace = std::env::var("WOW_VPLATE_TRACE").as_deref() == Ok("1");
+        static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let trace = *TRACE.get_or_init(|| std::env::var("WOW_VPLATE_TRACE").as_deref() == Ok("1"));
         // The full seat (`0x509ec0`): the desired rect TOP-anchored on the raw projected point
         // (the plate hangs below head + 2/3 yd), then the bucket-0 seat law — normalize, SOLVE
         // off the plates already claimed this frame, clamp the resolved center-X/top half a

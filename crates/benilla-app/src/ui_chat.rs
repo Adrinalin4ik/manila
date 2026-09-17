@@ -51,6 +51,10 @@ mod tests;
 
 pub(crate) use away::AfkMirror;
 pub(crate) use broadcast::Broadcast;
+/// The zone-channel catalog's seed. Called from the world-entry UI load, like the restore below
+/// and for the neighbouring reason: the verbs that read it are read at addon file scope, and an
+/// `Update` push lands after the whole burst — decision 2241.
+pub(crate) use channels::seed_zone_channel_catalog;
 /// The joined-channel roster + the `ChatChannels.dbc` catalog. Read outside this module by the
 /// world-state readout ([`crate::world_state_ui`]), whose `Type == 1` gate is "has the player
 /// joined a zone-dependent defense channel".
@@ -143,7 +147,48 @@ impl Plugin for UiChatPlugin {
             // so an alarm or a shutdown countdown lands on the frame it decodes like every other
             // chat source.
             .add_systems(Update, broadcast::feed_broadcasts.before(feed::feed_chat))
-            .add_systems(Update, feed::feed_chat.before(UiInput))
+            // **Never against the boot VM** (B376's second half). `feed_chat` takes the whole
+            // queue with `mem::take` and fires each line as a real `CHAT_MSG_*` — so a drain
+            // against a VM with no ChatFrame does not defer the lines, it DESTROYS them, with no
+            // memo and no error. The window is the one frame `not(ingame_ui_pending)` cannot see
+            // (`ui_script::ingame_ui_up`): `apply_net_updates` drains `Connected` and the login
+            // burst behind it in one `try_iter` while the state — and with it 1978's park — is
+            // still a frame away. Measured: one login in six drained the burst there and ate a
+            // line of the realm's own welcome. The early return above `mem::take` is what holds
+            // the queue for the frames after it, and this is what holds it for that one.
+            //
+            // **…and after the world-enter cascade, because that is the reference's own order**
+            // (decision 2221, carved in wow-5875-re for this — their `ca5f7d38`). The real client does not print
+            // login chat when it arrives either: `[0x8435fc]` is a latch that ships statically
+            // `1`, so every `SMSG_MESSAGECHAT` in the login burst is queued into
+            // `__AUPENDINGCHAT__` (`0x49db5c`/`0x49db62` → `0x49cae0`) instead of displayed. It is
+            // cleared in exactly one place — `0x490974`, INSIDE the world-enter cascade, after
+            // `PLAYER_LOGIN` (`0x490959`) and `PLAYER_ENTERING_WORLD` (`0x49096a`) — and the same
+            // call drains the queue. `SMSG_GUILD_EVENT` 0x02 has no such latch: it fires
+            // `GUILD_MOTD` synchronously in its own handler (`0x5e7288`). So the reference paints
+            // the guild line FIRST and the realm's welcome lines after it, inverting the wire
+            // order — and that is what the report asked for ("before server messages").
+            //
+            // Our held `ChatLog` queue IS that latch: the early return above `mem::take` is what
+            // keeps the login burst waiting. This says when it drains. Without these two edges
+            // the order was whatever the scheduler picked between two systems that declared
+            // nothing about each other — right today, by luck, exactly as the drain above was
+            // safe by luck until it wasn't.
+            //
+            // The edges are on the two feeds that fire the cascade's events, because that is
+            // where `0x490974` sits — DOWNSTREAM of both `0x703e50` calls, not merely inside the
+            // cascade. `UnitFeed` carries `PLAYER_ENTERING_WORLD`, `GuildFeed` carries
+            // `GUILD_MOTD`. (The reference's drain is one contiguous walk — `0x49d230`, every
+            // entry through the live path's own composer `0x49a870` — so the welcome lines land
+            // as a block, after those events and before the rest of the cascade.)
+            .add_systems(
+                Update,
+                feed::feed_chat
+                    .before(UiInput)
+                    .after(crate::ui_unit::UnitFeed)
+                    .after(crate::ui_guild::GuildFeed)
+                    .run_if(crate::ui_script::ingame_ui_up),
+            )
             // The last-input stamp `[0xcf0bc8]`. Deliberately NOT in-world-gated and
             // deliberately ahead of the UI pass: the reference stores it on the raw input bus,
             // before dispatch, so a keystroke the chat box swallows still counts as input.

@@ -6,10 +6,6 @@
 //! of. [`system_cpu_ticks`] says how loaded the machine was while we measured, so two legs can be
 //! told apart from two moods of the same leg (1157).
 
-#[cfg(windows)]
-#[path = "clock_windows.rs"]
-mod windows;
-
 /// Whole-process CPU seconds consumed so far — **user + system, summed across every thread**
 /// (`getrusage(RUSAGE_SELF)`).
 ///
@@ -20,7 +16,8 @@ mod windows;
 /// report is written in ("250 % CPU at 59 fps" against 1.12.1's "100 % at 160"), so a probe that
 /// prints it can be compared against a reporter's number directly.
 ///
-/// Windows uses `GetProcessTimes`; unsupported platforms return `None`.
+/// Unix answers through `getrusage`, Windows through `GetProcessTimes` (decision 2219);
+/// elsewhere `None`: the probes print the field only where the platform answers.
 pub(crate) fn process_cpu_secs() -> Option<f64> {
     #[cfg(unix)]
     {
@@ -37,12 +34,45 @@ pub(crate) fn process_cpu_secs() -> Option<f64> {
     }
     #[cfg(windows)]
     {
-        windows::process_cpu_secs()
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+        // SAFETY: `GetProcessTimes` writes four fully-initialised `FILETIME`s into its out-params
+        // and reads nothing from them; zeroed is a valid starting value for two plain integers,
+        // and the pseudo-handle `GetCurrentProcess` returns is never closed.
+        unsafe {
+            let mut creation = std::mem::zeroed();
+            let mut exit = std::mem::zeroed();
+            let mut kernel = std::mem::zeroed();
+            let mut user = std::mem::zeroed();
+            if GetProcessTimes(
+                GetCurrentProcess(),
+                &mut creation,
+                &mut exit,
+                &mut kernel,
+                &mut user,
+            ) == 0
+            {
+                return None;
+            }
+            Some(filetime_secs(kernel) + filetime_secs(user))
+        }
     }
     #[cfg(not(any(unix, windows)))]
     {
         None
     }
+}
+
+/// A `FILETIME` — 100-nanosecond ticks — as an integer, for the differences and sums the
+/// Windows arms take before converting.
+#[cfg(windows)]
+fn filetime_ticks(t: windows_sys::Win32::Foundation::FILETIME) -> u64 {
+    (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime)
+}
+
+/// A `FILETIME` as seconds.
+#[cfg(windows)]
+fn filetime_secs(t: windows_sys::Win32::Foundation::FILETIME) -> f64 {
+    filetime_ticks(t) as f64 * 1e-7
 }
 
 /// The process's page-fault counters so far — `(minor, major)` from `getrusage`. A minor fault
@@ -81,7 +111,9 @@ pub(crate) fn process_faults() -> Option<(u64, u64)> {
 /// becomes "whichever worker happened to run this system", which is noise shaped like a
 /// measurement.
 ///
-/// Windows uses `GetThreadTimes`; unsupported platforms return `None`, like its twin.
+/// Unix answers through `clock_gettime`, Windows through `GetThreadTimes` on the calling
+/// thread's pseudo-handle — the same "whichever thread calls" contract (decision 2219);
+/// elsewhere `None`, like its twin.
 pub(crate) fn main_thread_cpu_secs() -> Option<f64> {
     #[cfg(unix)]
     {
@@ -97,7 +129,26 @@ pub(crate) fn main_thread_cpu_secs() -> Option<f64> {
     }
     #[cfg(windows)]
     {
-        windows::main_thread_cpu_secs()
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+        // SAFETY: as in `process_cpu_secs` — four out-params fully written, nothing read, and
+        // `GetCurrentThread` is a pseudo-handle valid on the thread that asked for it.
+        unsafe {
+            let mut creation = std::mem::zeroed();
+            let mut exit = std::mem::zeroed();
+            let mut kernel = std::mem::zeroed();
+            let mut user = std::mem::zeroed();
+            if GetThreadTimes(
+                GetCurrentThread(),
+                &mut creation,
+                &mut exit,
+                &mut kernel,
+                &mut user,
+            ) == 0
+            {
+                return None;
+            }
+            Some(filetime_secs(kernel) + filetime_secs(user))
+        }
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -128,7 +179,9 @@ pub(crate) fn main_thread_cpu_secs() -> Option<f64> {
 /// had not caught up with. Cross-checked against an independent out-of-process sampler over the
 /// same window — 44 % vs 44.5 % — so where the two disagree, this is the one that is right.
 ///
-/// Non-macOS returns `None`: the probes print the field only where the platform answers.
+/// macOS answers through `host_statistics64`, Windows through `GetSystemTimes` (decision 2219
+/// — its kernel time INCLUDES idle, so busy is kernel − idle + user); elsewhere `None`: the
+/// probes print the field only where the platform answers.
 ///
 /// The `deprecated` allow is `libc::mach_host_self`, whose deprecation note says "use the `mach2`
 /// crate instead". Checked, and it does not apply here: `mach2` 0.5.0 carries `mach_host_self` and
@@ -160,7 +213,23 @@ pub(crate) fn system_cpu_ticks() -> Option<(u64, u64)> {
             Some((total - idle, total))
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::GetSystemTimes;
+        // SAFETY: `GetSystemTimes` writes three fully-initialised `FILETIME`s and reads nothing.
+        unsafe {
+            let mut idle = std::mem::zeroed();
+            let mut kernel = std::mem::zeroed();
+            let mut user = std::mem::zeroed();
+            if GetSystemTimes(&mut idle, &mut kernel, &mut user) == 0 {
+                return None;
+            }
+            // All three are summed across every processor, and kernel time includes idle.
+            let total = filetime_ticks(kernel) + filetime_ticks(user);
+            Some((total.saturating_sub(filetime_ticks(idle)), total))
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         None
     }

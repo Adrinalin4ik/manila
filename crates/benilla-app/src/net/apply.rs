@@ -356,6 +356,10 @@ pub(crate) fn apply_net_updates(
             // and this is where the room is. One bundle rather than three `Res`, so the use sites
             // read `cvars.ranges` instead of `ui_actions.1 .7`.
             crate::ui_chat::combat::CombatFeedbackCvars<'_>,
+            // Spells learned mid-session, awaiting `LEARNED_SPELL_IN_TAB` (2252). A queue for the
+            // same reason the reference sorts before it fires: the tab index is only correct
+            // against the rebuilt tab list, which is the spellbook feed's, not this apply's.
+            ResMut<crate::ui_spellbook::LearnedInTab>,
         ),
         ResMut<crate::ui_items::EquipErrors>,
         ResMut<crate::ui_merchant::MerchantErrors>,
@@ -1141,12 +1145,30 @@ pub(crate) fn apply_net_updates(
                 cooldowns,
             } => spell_book(spell_ids, cooldowns, &mut ui_actions.0, &mut ui_actions.9),
             SessionEvent::ActionButtons { buttons } => action_buttons(buttons, &mut ui_actions.0),
-            SessionEvent::SpellLearned { spell_id } => learned_spell(spell_id, &mut ui_actions.0),
-            SessionEvent::SpellRemoved { spell_id } => removed_spell(spell_id, &mut ui_actions.0),
+            SessionEvent::SpellLearned { spell_id } => learned_spell(
+                spell_id,
+                &mut ui_actions.0,
+                ui_actions.10.as_deref(),
+                &mut ui_error_keys,
+                &mut ui_actions.1 .6,
+            ),
+            SessionEvent::SpellRemoved { spell_id } => removed_spell(
+                spell_id,
+                &mut ui_actions.0,
+                ui_actions.10.as_deref(),
+                &mut ui_error_keys,
+            ),
             SessionEvent::SpellSuperceded {
                 old_spell_id,
                 new_spell_id,
-            } => superceded_spell(old_spell_id, new_spell_id, &mut ui_actions.0),
+            } => superceded_spell(
+                old_spell_id,
+                new_spell_id,
+                &mut ui_actions.0,
+                ui_actions.10.as_deref(),
+                &mut ui_error_keys,
+                &mut ui_actions.1 .6,
+            ),
             SessionEvent::CastResult {
                 spell_id,
                 success,
@@ -1775,6 +1797,7 @@ pub(crate) fn apply_net_updates(
                 &mut ui_actions.8,
                 &mut ui_actions.14,
                 &mut audio.7,
+                *ui_actions.1 .5.damage_text,
                 &mut audio.10,
                 &mut loot_latch,
                 (
