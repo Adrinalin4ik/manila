@@ -209,7 +209,13 @@ fn take_fx_counts() -> (u32, u32) {
 }
 
 pub(crate) fn note_ui_micros(micros: u64) {
-    UI_US.fetch_add(micros, std::sync::atomic::Ordering::Relaxed);
+    use std::sync::atomic::Ordering::Relaxed;
+    UI_US.fetch_add(micros, Relaxed);
+    // **The divisor, and forgetting it is why the column shipped empty.** `take_ui_micros_per_frame`
+    // returns `None` on zero frames — the deliberate "unmeasured, not free" cell — so a counter that
+    // never counted read exactly like a target with no timings, which is the failure this column was
+    // added to end. One journal run was spent on that.
+    UI_FRAMES.fetch_add(1, Relaxed);
 }
 
 /// Called every frame with the message-sweep counter's delta (`UiScript::msg_lines_hashed`).
