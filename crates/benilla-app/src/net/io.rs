@@ -535,17 +535,13 @@ async fn run(
         });
         Ok(Cycle::Repark)
     };
-    // A failure resubmitting cannot fix — the app shows it and stops (no paced retry).
-    let fail_terminal = |reason: String| {
-        let _ = events_tx.send(SessionEvent::LoginFailed {
-            refusal: None,
-            reason,
-            terminal: true,
-            dial: None,
-        });
-        Ok(Cycle::Repark)
-    };
-
+    // **There is no terminal login failure any more, and that is a consequence rather than a
+    // choice.** The `terminal: true` closure that used to live here — "the app shows it and stops,
+    // no paced retry" — had exactly two callers, both of them the Warden refusal arms below, so
+    // removing the refusal left it with none. Every login failure this cycle can report is now one
+    // the app may retry, which is right for all of them: a dial that found nothing, a wrong
+    // password, a full realm. If a future failure genuinely cannot be retried, this is where its
+    // sender goes back.
     // Logon (the dial + SRP6 exchange — one blocking sequence against realmd).
     let mut logon = {
         stage(LoginStage::Connecting);
