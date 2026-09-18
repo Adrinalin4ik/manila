@@ -186,10 +186,21 @@ fn slot_view(
         view.port_expiration_ms = ms(deadline.saturating_duration_since(now));
     }
     // Status 1: the raw estimate, and `[slot+0x1c] = now − Δ` read back as `now − stamp`.
+    //
+    // **Computed without ever building that stamp**, and the difference is not stylistic:
+    // `now − (at − waited)` is `(now − at) + waited` exactly, but only the first form asks for an
+    // instant that may not exist. `waited` is the server's own count of time already spent in the
+    // queue — minutes, routinely — and on wasm an `Instant`'s zero is the page's time origin, not
+    // the machine's boot. So `at − waited` underflows for any queue older than the tab, and
+    // `web_time`'s `Sub` panics rather than saturating: accepting a Warsong invite after a long
+    // wait took the whole client down. Native never sees it, which is why it reached us.
+    //
+    // The second form has no unrepresentable intermediate, so there is nothing to clamp and no
+    // accuracy given up to avoid the panic.
     if let Some((estimate, waited)) = status.queued {
         view.estimated_wait_ms = estimate;
-        let stamp = *at - std::time::Duration::from_millis(u64::from(waited));
-        view.time_waited_ms = ms(now.saturating_duration_since(stamp));
+        let since_status = now.saturating_duration_since(*at);
+        view.time_waited_ms = ms(since_status + std::time::Duration::from_millis(u64::from(waited)));
     }
     view
 }
@@ -409,6 +420,20 @@ mod tests {
         assert_eq!((v.map_id, v.status, v.instance_id), (489, 1, 7));
         assert_eq!(v.estimated_wait_ms, 30_000, "raw, no clock");
         assert_eq!(v.time_waited_ms, 7_000, "the wire's 5 s plus the 2 s since");
+        // **A wait longer than the clock's own origin**, which is the shape that took the client
+        // down in a browser: `Instant`'s zero there is the page load, so the natural reading —
+        // build the stamp `at − waited`, then measure from it — asks for an instant that does not
+        // exist and `web_time` panics rather than saturating. Native cannot reproduce that (its
+        // epoch is the machine's), so this pins the ARITHMETIC instead: the answer must still be
+        // the sum, which is only true of the form that never builds the stamp.
+        let mut long_queue = status(0, 489, 1);
+        long_queue.queued = Some((30_000, 3 * 60 * 60 * 1_000));
+        let v_long = slot_view(Some(&(long_queue, at)), None, later);
+        assert_eq!(
+            v_long.time_waited_ms,
+            3 * 60 * 60 * 1_000 + 2_000,
+            "three hours queued plus the 2 s since the status — and no stamp in between"
+        );
         assert_eq!(v.port_expiration_ms, 0);
         assert_eq!((v.min_level, v.max_level), (0, 0), "no catalog: no bracket");
         assert!(v.map_name.is_none());
