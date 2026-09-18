@@ -77,7 +77,8 @@ pub(crate) struct FpsJournalSetting(pub(crate) bool);
 const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,mats,meshes,images,\
                               m2,uv,tint,pmat,emat,skin,cmat,tex,cgeo,evicted,fx,fy,fz,main_ms,\
                               gpu_ms,gpu_opaque,gpu_static,gpu_transp,gpu_glow,gpu_post,gpu_ui,\
-                              gpu_other,lua_errs,lua_err_us,msg_hashed,ui_us,col_us,emitters,fx_kits,fx_impacts,net_pkts,net_us,pipes\n";
+                              gpu_other,lua_errs,lua_err_us,msg_hashed,ui_us,col_us,emitters,fx_kits,fx_impacts,net_pkts,net_us,pipes,\
+                              rscale,farclip\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -482,6 +483,9 @@ struct JournalGpu<'w> {
     store: Option<Res<'w, DiagnosticsStore>>,
     adapter: Option<Res<'w, RenderAdapterInfo>>,
     device: Option<Res<'w, RenderDevice>>,
+    /// The two settings an A/B run turns - see the row tail for why they are written at all.
+    rscale: Option<Res<'w, crate::world_backdrop::RenderScale>>,
+    view: Option<Res<'w, benilla_world::view::ViewDistance>>,
 }
 
 /// `NonSendMarker` pins this to the main thread, which the `main_ms` column requires:
@@ -647,6 +651,18 @@ fn journal_fps(
         ",{kits},{impacts},{pkts},{net_us},{}",
         crate::pipe_warm::pipeline_total()
     ));
+    // **The two settings an A/B run turns, in the row that run produced.** Neither leaves any
+    // other trace in this file: `renderScale` moves no count here at all, and `farclip` culls
+    // what is drawn without unstreaming a tile or despawning anything, so `streamed` and
+    // `entities` sit still while it changes. A four-arm run was recorded with both of them
+    // turning and the arms could not be told apart afterwards - not from each other, and not from
+    // a crowd wandering out of view. A knob that steers the frame belongs in the row beside it.
+    match (gpu.rscale.as_deref(), gpu.view.as_deref()) {
+        (Some(r), Some(v)) => line.push_str(&format!(",{:.2},{:.0}", r.0, v.farclip)),
+        (Some(r), None) => line.push_str(&format!(",{:.2},", r.0)),
+        (None, Some(v)) => line.push_str(&format!(",,{:.0}", v.farclip)),
+        (None, None) => line.push_str(",,"),
+    }
     line.push('\n');
     #[cfg(target_arch = "wasm32")]
     web::append(&line);
