@@ -157,6 +157,16 @@ fn publish_cover(
     watch.0.covered.store(covered, Ordering::Relaxed);
 }
 
+/// Render pipelines the cache holds, as of the last render frame — see [`watch_pipelines`].
+static PIPELINE_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The pipeline count for the FPS journal. A snapshot, not a rate: the journal's own row-to-row
+/// delta is the compile count for that second, and an absolute total also says whether a session
+/// is still discovering variants at all.
+pub(crate) fn pipeline_total() -> u64 {
+    PIPELINE_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Render world, after `PipelineCache::process_pipeline_queue_system` has merged this frame's new
 /// pipelines and started (= on macOS: finished) their builds. `seen` is how many cache entries the
 /// previous frame had — everything past it is new this frame.
@@ -173,6 +183,17 @@ fn watch_pipelines(
     // the lower bound is exact. The settled conjunct is load-bearing: Queued/Creating pipelines
     // settle on later frames without `total` moving.
     let total = cache.pipelines().size_hint().0;
+    // Published for the FPS journal's `pipes` column, BEFORE the early-out below — the steady state
+    // is exactly when the number must keep being readable, and a value that only updates on the
+    // frames it changes would make a flat second look like a missing reading.
+    //
+    // **Why the journal wants it.** This cache never evicts and a variant's first live draw
+    // compiles it, which on a synchronous-compiling target is a frame-long stall — the 1.0-2.3 s
+    // ones this module was built for. The owner asked whether some objects are simply slow to
+    // create; a per-second delta of this count is that question as a number, and it is the only
+    // candidate left for the browser's 700-1500 ms hitches, which carried no collider work, no
+    // network and no effects.
+    PIPELINE_TOTAL.store(total as u64, Ordering::Relaxed);
     if total == *seen && *settled_seen == total {
         return;
     }

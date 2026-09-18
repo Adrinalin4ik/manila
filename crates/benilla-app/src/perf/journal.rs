@@ -68,14 +68,30 @@ pub(crate) struct FpsJournalSetting(pub(crate) bool);
 const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,mats,meshes,images,\
                               m2,uv,tint,pmat,emat,skin,cmat,tex,cgeo,evicted,fx,fy,fz,main_ms,\
                               gpu_ms,gpu_opaque,gpu_static,gpu_transp,gpu_glow,gpu_post,gpu_ui,\
-                              gpu_other,lua_errs,lua_err_us,msg_hashed,ui_us,col_us,emitters,fx_kits,fx_impacts,net_pkts,net_us\n";
+                              gpu_other,lua_errs,lua_err_us,msg_hashed,ui_us,col_us,emitters,fx_kits,fx_impacts,net_pkts,net_us,pipes\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
 /// and closes the second it is turned off.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut journal: ResMut<FpsJournalSetting>) {
+pub(crate) fn on_cvar(
+    ev: On<crate::cvars::CvarChanged>,
+    mut journal: ResMut<FpsJournalSetting>,
+    mut ui_cost: ResMut<crate::ui_script::UiCostWanted>,
+) {
     if ev.is("fpsJournal") {
         journal.0 = ev.flag();
+        // **Arm the UI cost meter with the journal, and never disarm it.** `ui_us` read a flat
+        // zero for two runs because the UI pass's `lap()` returns 0 unless something asked for the
+        // meter — its own comment says so six lines above the values I was summing. Turning it on
+        // here is what makes the column a measurement rather than a shape.
+        //
+        // One-way on purpose: the hover recorder and the book probe ask for the same flag, and a
+        // journal switched off has no business cancelling their request. The meter's cost is a
+        // handful of clock reads per frame, which is the wrong thing to be frugal about while
+        // somebody is recording a journal to find a stall.
+        if journal.0 {
+            ui_cost.0 = true;
+        }
     }
 }
 
@@ -600,7 +616,13 @@ fn journal_fps(
     ));
     let (kits, impacts) = take_fx_counts();
     let (pkts, net_us) = take_net_costs();
-    line.push_str(&format!(",{kits},{impacts},{pkts},{net_us}"));
+    // `pipes` is a SNAPSHOT of the render-pipeline cache, so the row-to-row delta is how many
+    // variants were compiled in that second — the owner's "are some objects slow to create?" as a
+    // number, and the last candidate standing for the hitches.
+    line.push_str(&format!(
+        ",{kits},{impacts},{pkts},{net_us},{}",
+        crate::pipe_warm::pipeline_total()
+    ));
     line.push('\n');
     #[cfg(target_arch = "wasm32")]
     web::append(&line);
