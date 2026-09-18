@@ -19,16 +19,19 @@
 //!
 //! **The GPU columns read bevy's render diagnostics** (`RenderDiagnosticsPlugin`, registered here
 //! so it is present in every build): one timestamp pair per render pass, resolved a few frames
-//! later into `render/<pass>/elapsed_gpu` measurements. Those need `TIMESTAMP_QUERY` and nothing
-//! more: bevy builds the query set on that feature alone
-//! (`bevy_render-0.18.1/src/diagnostic/internal.rs:205`), and a span taken at a pass BOUNDARY is
-//! not a span taken inside one. `TIMESTAMP_QUERY_INSIDE_PASSES` buys only the second kind, which
-//! no column here uses - this file claimed the opposite for a whole round of measurement, and its
-//! header printed `gpu_spans no` on a browser whose adapter does offer `timestamp-query`. An
-//! Apple GPU samples counters only at stage boundaries (the `perf` module header), so the in-pass
-//! feature is absent there too, and that alone no longer reads as "the columns cannot fill".
-//! Where nothing was read the columns stay EMPTY rather than zero, so "no reading" cannot be
-//! mistaken for "free".
+//! later into `render/<pass>/elapsed_gpu` measurements. THREE features decide whether any of that
+//! happens, and they are not interchangeable. `TIMESTAMP_QUERY` builds the query set
+//! (`bevy_render-0.18.1/src/diagnostic/internal.rs:205`). `TIMESTAMP_QUERY_INSIDE_ENCODERS` is
+//! what every span actually rides: bevy takes all of them through `encoder.write_timestamp`, and
+//! its `write_timestamp` returns `None` at the first line without that feature (ibid. 285, its
+//! comment: "unsupported on WebGPU"). `TIMESTAMP_QUERY_INSIDE_PASSES` gates only spans opened
+//! *within* a pass, which no column here uses. This file once tested the first AND the third and
+//! printed one `gpu_spans` from it - so it read `no` on a browser that has `timestamp-query`, and
+//! the one feature that was really missing was never named at all. The preamble now prints all
+//! three. An Apple GPU samples counters only at stage boundaries (the `perf` module header); a
+//! browser has no encoder timestamps whatever, so bevy's spans cannot exist there and our own
+//! whole-frame meter (`perf::gpu`) is blocked on the same feature. Where nothing was read the
+//! columns stay EMPTY rather than zero, so "no reading" cannot be mistaken for "free".
 //! Our own passes (`static_gx`, the `ffx_glow` chain, `ui_gamma_decode`) open spans of their own,
 //! because a city's biggest draw must not land in `gpu_other`. The buckets are [`gpu_bucket`]; a
 //! pass this file does not name is still counted, under `gpu_other`, and `gpu_ms` is the sum of
@@ -424,16 +427,25 @@ fn preamble(adapter: Option<&RenderAdapterInfo>, device: Option<&RenderDevice>) 
     // and the `gpu_*` columns are pass-boundary spans. So a browser run that has `timestamp-query`
     // and not the in-pass extension - which is exactly what Chrome's WebGPU adapter offers - can
     // fill every GPU column while the old single `gpu_spans no` claimed the platform could not.
-    let (ts, inside) = device.map_or(("?", "?"), |d| {
+    // Three, not two, because the feature that actually gates these columns is the THIRD one.
+    // bevy writes every timestamp through `encoder.write_timestamp`, and its own `write_timestamp`
+    // returns `None` outright unless TIMESTAMP_QUERY_INSIDE_ENCODERS is present
+    // (`bevy_render-0.18.1/src/diagnostic/internal.rs:285`, whose comment reads "unsupported on
+    // WebGPU"). So a browser can hold `timestamp-query`, build the query set, and still record not
+    // one span - which is exactly what this journal did. Printing all three is what separates
+    // "the device cannot" from "the device can and we record nothing".
+    let (ts, enc, inside) = device.map_or(("?", "?", "?"), |d| {
         let f = d.features();
         let yn = |b| if b { "yes" } else { "no" };
         (
             yn(f.contains(wgpu::Features::TIMESTAMP_QUERY)),
+            yn(f.contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS)),
             yn(f.contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES)),
         )
     });
     let head = "# benilla fps journal";
-    format!("{head} | gpu {gpu} | backend {backend} | driver {driver} | gpu_ts {ts} | gpu_inside_passes {inside}\n")
+    let gate = format!("gpu_ts {ts} | gpu_inside_encoders {enc} | gpu_inside_passes {inside}");
+    format!("{head} | gpu {gpu} | backend {backend} | driver {driver} | {gate}\n")
 }
 
 /// The journal's residency columns, grouped because `journal_fps` is near Bevy's system-param
@@ -779,7 +791,7 @@ mod tests {
     fn the_preamble_names_the_adapter_or_says_it_cannot() {
         assert_eq!(
             preamble(None, None),
-            "# benilla fps journal | gpu ? | backend ? | driver ? | gpu_ts ? | gpu_inside_passes ?\n"
+            "# benilla fps journal | gpu ? | backend ? | driver ? | gpu_ts ? | gpu_inside_encoders ? | gpu_inside_passes ?\n"
         );
     }
 }
