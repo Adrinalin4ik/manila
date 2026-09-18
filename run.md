@@ -49,20 +49,47 @@ artifacts to reuse.
 So: no `CARGO_TARGET_DIR` for this script. Export it for `cargo check`/`cargo test` if you like —
 those name their own outputs and are unaffected.
 
-### Checking that the bundle is actually new
-
-Timestamps lie in one direction here: `web/dist` can be newer than your edit while its bytes are
-old, which is exactly what the trap above produces. Two numbers settle it, not one — the
-intermediate artifact must be newer than the source, and the bundle newer than the artifact:
+### After a code change: the loop, and the one check worth trusting
 
 ```bash
-ls -l --time-style=+%H:%M:%S \
-  target/wasm32-unknown-unknown/release/wenilla.wasm \
-  web/dist/wenilla_bg.wasm
+git commit ...               # commit FIRST - the check below reads the commit hash
+scripts/web-build.sh         # bare environment, see the trap above
+grep -c "$(git rev-parse --short=8 HEAD)" web/dist/wenilla_bg.wasm     # must print 1
 ```
 
-A changed **size** on both is the independent check, and the one worth trusting: a republished stale
-file keeps its byte count exactly.
+`build_id.rs` bakes the short commit hash into the binary, so **finding it inside
+`web/dist/wenilla_bg.wasm` proves that bundle was compiled from that commit.** Nothing else here
+does. When the change was data rather than code, grep for a string you added as well (a new CVar
+name, a new label): `assets/ui` is compiled in through `include_dir!`, so it rides the same proof
+and needs no separate copy.
+
+**Commit first, and this is why rather than tidiness:** the stamp carries HEAD's hash with no
+dirty marker, so a build over uncommitted edits bakes the hash of a commit whose code it is not.
+The check would then pass while proving nothing. Committing first makes the hash mean what the
+grep reads it to mean.
+
+The player-side twin is the console line `benilla build <hash>` at boot. If it does not match the
+hash you just built, that tab is on an old bundle and wants a hard reload - the wasm is ~75 MB and
+caches hard.
+
+**Four weaker checks, each of which has been wrong here at least once.** They are written down so
+nobody re-derives them as good ideas:
+
+| check | how it lied |
+|---|---|
+| the file's timestamp | `wasm-bindgen` republished a STALE `target/.../wenilla.wasm` after `CARGO_TARGET_DIR` sent the build elsewhere: `web/dist` got a fresh mtime and old bytes |
+| the file's **size** | a one-line change compiled to the same byte count after `wasm-opt`. "Size changed" is evidence; "size unchanged" is not |
+| the build task's exit code | a chained `commit && push; build` reported success having never reached the build at all, and the bundle stayed a commit behind |
+| `cargo check` passing | `check` is not `build`. `std::time::Instant` on wasm compiles and panics only when CALLED; and a commit that passed `check --target wasm32` failed to LINK (E0282, inference through a removed call site). Before believing anything that ships to a browser, run `cargo build --profile release --target wasm32-unknown-unknown -p wenilla --no-default-features --features webgpu` |
+
+### What needs a rebuild and what does not
+
+| changed | needs |
+|---|---|
+| any Rust in `benilla-*` / `wenilla` | `scripts/web-build.sh`, then a hard reload |
+| `crates/benilla-app/assets/**` (the authored XML/Lua/TOC) | the same - `include_dir!` compiles them in, there is no file to copy |
+| `web/*.js`, `web/index.html` | the `cp` line in `web-build.sh` carries them, so a full build works; copying the one file and reloading also does |
+| `wenilla-host` | restart the host, the bundle is untouched |
 
 ### Changing realm from the login screen
 
