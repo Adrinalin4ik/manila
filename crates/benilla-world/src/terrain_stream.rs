@@ -281,6 +281,20 @@ pub struct WorldLoadProgress {
     /// bare ground for a quarter second. Same conservative semantics as the collider and merge
     /// backlogs beside it.
     pub gx_pending: usize,
+    /// **At least one outstanding focus placement is still DOWNLOADING** — its root asset reads
+    /// `LoadState::Loading`, so the stream is alive even though every counter beside this one is
+    /// standing still.
+    ///
+    /// That combination is not hypothetical and it is not rare on the web: a single large WMO
+    /// (Stormwind) is one asset, so while it is in flight `ready`, `total`, `placements_pending`
+    /// and the three backlogs are all frozen at the values they had when it was requested. The
+    /// settle release reads those six counters as "the stream is advancing", so without this flag
+    /// a healthy multi-minute download is indistinguishable from a dead one — and the stall
+    /// backstop fires, releasing gravity into a world that has not arrived.
+    ///
+    /// A bool and not a count: the only question asked of it is *is anything still coming*, and
+    /// the walk can stop at the first yes, which is what keeps it free on the frames that matter.
+    pub assets_in_flight: bool,
     /// **Which tile these facts are about** — the focus tile the streamer computed this frame.
     /// `None` until the streamer first runs (and again after `release_world`). The settle release
     /// compares it against the tile under the avatar's own feet and refuses the resident release on
@@ -636,6 +650,19 @@ impl Plugin for TerrainPlugin {
 /// How many stragglers [`WorldLoadProgress::pending_examples`] names. Small on purpose: this is a
 /// diagnostic for "a few will not finish", not a census of ordinary streaming.
 const PENDING_EXAMPLES: usize = 8;
+
+/// Is this placement's own root asset still on the wire?
+///
+/// `Loading` only — `Loaded` means it arrived (whatever is left is our spawn work, which the
+/// counters do see), and `Failed`/absent mean it never will, which is precisely the dead-stream
+/// case the stall backstop exists for and must keep firing on.
+fn root_in_flight(asset_server: &AssetServer, pl: &Placement) -> bool {
+    let state = match &pl.model {
+        ModelHandle::M2(h) => asset_server.get_load_state(h.id()),
+        ModelHandle::Wmo(h) => asset_server.get_load_state(h.id()),
+    };
+    matches!(state, Some(bevy::asset::LoadState::Loading))
+}
 
 /// One line describing why a focus placement is not up yet: what it is, whether its own model
 /// spawned, what the asset server thinks of that model, and how many of its props are outstanding.
@@ -1220,6 +1247,10 @@ fn stream_terrain(
             p.total = desired.len();
             p.ready = desired.iter().filter(|c| spawned(c)).count();
             p.pending_examples.clear();
+            // Recomputed from scratch every publish, beside the examples it rides with: a
+            // stale `true` from the frame the asset landed on would push the stall deadline
+            // for ever, which is the backstop's own failure mode inverted.
+            p.assets_in_flight = false;
             // The focus neighbourhood's placements join the accounting (bar + scene term). A
             // placement is *up* once its own model spawned AND its WMO props (each an M2 arriving
             // on its own schedule) have — the furniture the reveal would otherwise pop in.
@@ -1246,6 +1277,13 @@ fn stream_terrain(
                                     if !up && p.pending_examples.len() < PENDING_EXAMPLES {
                                         p.pending_examples
                                             .push(describe_pending(&asset_server, pl));
+                                    }
+                                    // Short-circuited on purpose: one yes settles the question,
+                                    // and the frames where this costs anything are the frames
+                                    // where something is already outstanding.
+                                    if !up && !p.assets_in_flight && root_in_flight(&asset_server, pl)
+                                    {
+                                        p.assets_in_flight = true;
                                     }
                                 }
                             }

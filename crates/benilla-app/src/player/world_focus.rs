@@ -197,19 +197,40 @@ pub(super) fn release_post_snap_hold(
     // the build queue, and the body fell to the canyon under the Valley of Heroes with the cover
     // still up. Only a stream that has made NO progress for the whole budget — missing data, dead
     // IO — can time out now, which is the case the backstop was always for.
+    // **A download in flight is progress, and the six counters above cannot see one.** A single
+    // large WMO is one asset: while it is on the wire every counter stands still, so a healthy
+    // multi-minute browser load read exactly like a dead stream and the backstop fired into it —
+    // gravity on, the city's collider not yet built, the body through the floor. That is the
+    // reported "I left the battleground and cannot move", and its twin, "I fall through the world
+    // after loading": one mechanism, two faces. `assets_in_flight` is the streamer's own answer to
+    // *is anything still coming*, and it is `Loading` only — a failed or absent asset is the dead
+    // stream this backstop is for and still times out.
     let now = time.elapsed_secs();
+    let alive = player.world_stale || progressed || p.assets_in_flight;
     if p.presentable() && !player.world_stale && focus_matches {
         player.end_settle(true, now);
-    } else if player.world_stale || progressed {
+    } else if alive {
         player.settle_deadline = now + SETTLE_TIMEOUT;
     } else if now >= player.settle_deadline {
         player.end_settle(false, now);
     }
-    // **Pay the worldport ack the moment the hold ends** (decision 1340) — on either end, the
-    // resident release or the stall timeout (a dead stream must still complete the transfer, or
-    // the server holds us out-of-world until logout). This is the real client's post-load `0xDC`,
-    // re-expressed: its blocking load's "done" is our release.
-    if !player.settling && player.owes_worldport_ack {
+    // **Pay the worldport ack when the hold ends, or when its budget is spent — whichever is
+    // first** (decision 1340, amended here). This is the real client's post-load `0xDC`
+    // re-expressed: its blocking load's "done" is our release. A dead stream must still complete
+    // the transfer, or the server holds us out-of-world until logout.
+    //
+    // **The ack and the hold are two jobs, and only one of them may wait for the download.** The
+    // release used to do both at once, so gating the hold on `assets_in_flight` would have taken
+    // the ack hostage to it too — and a stream that never finishes would then leave us
+    // out-of-world server-side until logout, which is the failure this payment exists to prevent.
+    //
+    // So the ack keeps the ORIGINAL budget, measured from the snap and not pushed by anything: at
+    // worst `SETTLE_TIMEOUT` after arriving, the transfer completes whatever the loader is doing.
+    // On a load that finishes inside the budget nothing changes — the release pays it first, as it
+    // always did. On a slow one it is paid earlier than before, which is the direction that cannot
+    // hurt: the old code already paid it early, at the timeout it should not have been taking.
+    let ack_due = now - player.settle_since >= SETTLE_TIMEOUT;
+    if (!player.settling || ack_due) && player.owes_worldport_ack {
         if let Some(net) = net_cmds.as_deref() {
             player.owes_worldport_ack = false;
             let _ = net.0.send(crate::net::ClientCommand::WorldportAck);
@@ -390,6 +411,42 @@ mod tests {
         assert!(
             !settling(&mut app),
             "a dead stream must not hold the body (and the screen) forever"
+        );
+    }
+
+    /// **A download in flight is not a stalled stream** — the reported "I left the battleground
+    /// and cannot move", diagnosed from the owner's log.
+    ///
+    /// Every counter is frozen here, which is exactly what a single large WMO in flight looks
+    /// like: the placement is already counted, the asset is on the wire, and nothing else can
+    /// move until it lands. Stormwind took 496 s over the browser in that log and the old test
+    /// read it as dead at 13 s — gravity on, the city's collider still unbuilt, the body through
+    /// the floor. The counters alone cannot tell that apart from missing data; `assets_in_flight`
+    /// is the difference.
+    ///
+    /// The ack is asserted beside it because the two were one act before this and are not now:
+    /// the transfer must still complete on its own budget, or the server holds us out-of-world
+    /// until logout however patient the loader is being.
+    #[test]
+    fn a_download_in_flight_holds_the_body_but_not_the_ack() {
+        let mut app = app();
+        app.world_mut().resource_mut::<Player>().world_stale = false;
+        for _ in 0..=(SETTLE_TIMEOUT + 2.0) as usize {
+            step(&mut app, 1.0, |p| {
+                p.total = 2000;
+                p.ready = 500;
+                p.colliders_pending = 300;
+                p.scene_ready = false;
+                p.assets_in_flight = true;
+            });
+        }
+        assert!(
+            settling(&mut app),
+            "an asset still on the wire is a live stream — releasing here is the fall-through bug"
+        );
+        assert!(
+            !app.world().resource::<Player>().owes_worldport_ack,
+            "…but the worldport ack is not held hostage to the download: unpaid, the server keeps              us out-of-world until logout"
         );
     }
 
