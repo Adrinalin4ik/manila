@@ -550,6 +550,10 @@ pub(super) fn tick_script(
     // The `scale_factor` this pass last answered measures under — the other half of the same
     // staleness edge (decision 1342). `0.0` until the first frame, which is also a real edge.
     mut last_dpi: Local<f32>,
+    // The message-sweep counter as this pass last read it — the FPS journal's print-cost column is
+    // its per-frame delta. A `Local` and not a `VmMemo`: the counter is cumulative in the VM, so a
+    // fresh VM restarts it at zero and `saturating_sub` reads that as "no work", which is right.
+    mut msg_hashed_seen: Local<u64>,
     // The uiScale dial folded into the seam scale (decision 0584).
     ui_scale: Res<super::UiScaleCvar>,
     // This frame's phase split, published for whoever asked (the `[ui-cost]` line, `hover_log`).
@@ -749,12 +753,38 @@ pub(super) fn tick_script(
     // since BasicControls installs it, an addon's own handler if it chose one — and then the
     // same errors drain to the log as always. Dispatch first so a handler that itself fails
     // lands in this frame's drain, not the next one's.
-    script.dispatch_script_errors_to_handler();
-    for err in script.take_errors() {
-        warn!("ui_script: {err}");
+    //
+    // **Metered, because a flood of these is the standing suspect for the browser's frame drops**
+    // and a suspect is not a cause until it has a number. The clock is taken only when there is
+    // something to drain — `has_script_errors` is a pair of `is_empty` reads — so a clean frame
+    // pays nothing at all, which is every frame in a healthy session. What it measures is the
+    // whole act: the Lua handler dispatch, the chat print that handler performs, and the console
+    // write across the wasm boundary, because from the frame's point of view they are one thing.
+    if script.has_script_errors() {
+        let t0 = bevy::platform::time::Instant::now();
+        let mut drained = 0u32;
+        script.dispatch_script_errors_to_handler();
+        for err in script.take_errors() {
+            warn!("ui_script: {err}");
+            drained += 1;
+        }
+        for w in script.take_warnings() {
+            warn!("ui_script: {w}");
+            drained += 1;
+        }
+        crate::perf::journal::note_script_errors(drained, t0.elapsed().as_micros() as u64);
     }
-    for w in script.take_warnings() {
-        warn!("ui_script: {w}");
+    // The print cost's own meter, every frame: one new chat line reopens its whole window to the
+    // measure sweep, so this rises by the frame's line count whenever anything printed.
+    {
+        let hashed = script.msg_lines_hashed();
+        let delta = hashed.saturating_sub(*msg_hashed_seen);
+        // Nothing printed, nothing swept, nothing to add — and an atomic write of zero is still a
+        // write. A settled frame leaves this meter entirely alone.
+        if delta > 0 {
+            crate::perf::journal::note_msg_lines_hashed(delta);
+            *msg_hashed_seen = hashed;
+        }
     }
 
     // ── The handover ────────────────────────────────────────────────────────────────────────

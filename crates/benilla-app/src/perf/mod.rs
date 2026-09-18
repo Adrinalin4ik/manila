@@ -59,7 +59,9 @@ mod clock;
 mod gpu;
 #[cfg(feature = "dev")]
 mod hud;
-mod journal;
+// `pub(crate)` for its two `note_*` sinks alone: the UI pass writes the script-cost columns
+// from outside this module, and a meter whose producer cannot reach it is no meter.
+pub(crate) mod journal;
 #[cfg(feature = "dev")]
 mod main_split;
 #[cfg(feature = "dev")]

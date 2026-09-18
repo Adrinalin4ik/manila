@@ -1461,6 +1461,18 @@ impl UiScript {
         self.model_ref().layout_solves
     }
 
+    /// Message-frame lines the measure sweep actually hashed, cumulative
+    /// ([`Model::msg_lines_hashed`] — "the skip's honest meter").
+    ///
+    /// Exposed for the FPS journal rather than for logic. It is the cost of PRINTING: a settled
+    /// frame's sweep hashes nothing, and one new line bumps the frame's generation, which reopens
+    /// the whole window — so this rises by the chat's line count on every frame something was
+    /// printed. A flood of script errors reaches the chat like any other print, which is exactly
+    /// the suspicion the journal column exists to confirm or kill.
+    pub fn msg_lines_hashed(&self) -> u64 {
+        self.model_ref().msg_lines_hashed
+    }
+
     /// How many resolves got past **tier 1** and paid the whole-roster preamble
     /// ([`Model::layout_gate_walks`], decision 1385) — the gate's true cost counter, ≥
     /// [`Self::layout_solves`] because a walk that concludes "nothing moved" pays the same
@@ -1592,6 +1604,17 @@ impl UiScript {
     /// Drain the collected script errors.
     pub fn take_errors(&mut self) -> Vec<String> {
         std::mem::take(&mut self.model_mut().errors)
+    }
+
+    /// Is there anything for the frame's error tail to do at all?
+    ///
+    /// Three `is_empty` reads, and its whole purpose is to let the caller skip a clock read on the
+    /// frames where nothing happened — which is every frame of a healthy session. The dispatch
+    /// queue is included because it is the first of the three acts (handler, then chat, then log)
+    /// and a frame with only that pending still costs all of them.
+    pub fn has_script_errors(&self) -> bool {
+        let m = self.model_ref();
+        !m.errors.is_empty() || !m.warnings.is_empty() || !m.pending_error_dispatch.is_empty()
     }
 
     /// A snapshot of non-fatal host warnings (e.g. ignored `CreateFrame` templates).

@@ -68,7 +68,7 @@ pub(crate) struct FpsJournalSetting(pub(crate) bool);
 const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,mats,meshes,images,\
                               m2,uv,tint,pmat,emat,skin,cmat,tex,cgeo,evicted,fx,fy,fz,main_ms,\
                               gpu_ms,gpu_opaque,gpu_static,gpu_transp,gpu_glow,gpu_post,gpu_ui,\
-                              gpu_other\n";
+                              gpu_other,lua_errs,lua_err_us,msg_hashed\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -128,6 +128,44 @@ struct FpsJournal {
     main_at_flush: Option<f64>,
     /// This second's GPU spans, folded per frame from the diagnostics store.
     gpu: GpuAccum,
+}
+
+/// **What a script error and a chat line cost, per second** — the three columns after `gpu_other`.
+///
+/// The frame writes; the journal's one-second flush reads and clears. Atomics rather than a
+/// resource because the producer is the UI pass (which already holds the `!Send` VM) and the
+/// consumer is this system, and a shared resource between them would be plumbing for a meter.
+///
+/// **Counts, and one duration that is not a guess.** 0735's rule is counts-never-milliseconds, and
+/// `lua_err_us` is the exception it earns: the drain's own wall time, taken only on frames that
+/// had something to drain, because the question is not how many errors there are but what one
+/// costs on a single-threaded browser — a Lua handler call, a chat print, and a console write
+/// across the wasm boundary.
+static LUA_ERRS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static LUA_ERR_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MSG_HASHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Called by the UI pass after draining this frame's script errors and warnings. `micros` covers
+/// the handler dispatch as well as the log writes: they are one act from the frame's point of view.
+pub(crate) fn note_script_errors(count: u32, micros: u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    LUA_ERRS.fetch_add(count, Relaxed);
+    LUA_ERR_US.fetch_add(micros, Relaxed);
+}
+
+/// Called every frame with the message-sweep counter's delta (`UiScript::msg_lines_hashed`).
+pub(crate) fn note_msg_lines_hashed(delta: u64) {
+    MSG_HASHED.fetch_add(delta, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Read and clear — one call per journal row, so each row is that second alone.
+fn take_script_costs() -> (u32, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        LUA_ERRS.swap(0, Relaxed),
+        LUA_ERR_US.swap(0, Relaxed),
+        MSG_HASHED.swap(0, Relaxed),
+    )
 }
 
 /// The GPU columns after `gpu_ms`, in header order.
@@ -465,6 +503,10 @@ fn journal_fps(
     // The GPU cells (2008), last of all.
     let gpu_cells = journal.gpu.columns();
     line.push_str(&gpu_cells);
+    // The script-cost trio, after the GPU cells and last of all — per this file's own rule
+    // that columns only ever grow at the end, so a journal started before this keeps parsing.
+    let (errs, err_us, hashed) = take_script_costs();
+    line.push_str(&format!(",{errs},{err_us},{hashed}"));
     line.push('\n');
     #[cfg(target_arch = "wasm32")]
     web::append(&line);
