@@ -149,7 +149,6 @@ fn standing_label(rank: u32, get: &dyn Fn(&str) -> Option<String>) -> Option<Str
 /// `0x506f70`; its bare name otherwise), the skill requirement's name off `SkillLine.dbc`, the
 /// reputation requirement off `Faction.dbc` names (the red check is the engine's, against the
 /// player's rank map).
-#[allow(clippy::too_many_arguments)] // one app-resolved catalog per argument, by design
 fn template_view(
     t: &ItemInfo,
     spells: Option<&crate::ui_action::Spells>,
@@ -273,7 +272,7 @@ fn template_view(
 pub(super) fn feed_item_sets(
     script: Option<NonSendMut<UiScript>>,
     sets: Option<Res<super::ItemSets>>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     commands: Res<NetCommands>,
     spells: Option<Res<crate::ui_action::Spells>>,
     skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
@@ -388,7 +387,6 @@ pub(super) fn feed_random_properties(
     *pushed.get(&script) = true;
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn feed_item_stats(
     script: Option<NonSendMut<UiScript>>,
     mut items: ResMut<Items>,
@@ -493,7 +491,6 @@ pub(super) fn feed_item_stats(
 /// bits) + the full skill-rank map, read off the self player's descriptor, plus the equip
 /// proficiencies (`SMSG_SET_PROFICIENCY`) and the faction → reputation-rank map (DBC base for our
 /// race/class + the `SMSG_INITIALIZE_FACTIONS` standing, ranked) — pushed on change.
-#[allow(clippy::too_many_arguments)] // a Bevy system's full input set
 pub(super) fn feed_player_req(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
@@ -607,16 +604,15 @@ pub(super) fn feed_player_req(
 /// read the action feed's ITEM arm does). `None` = the slot is empty (guid 0/unsent) — an
 /// *unresolved* occupied slot is `Some` with empty fields instead, so the bag shows the item
 /// exists before its query answers.
-#[allow(clippy::too_many_arguments)] // the slot resolve's full read set (stores + both clocks)
 fn resolve_slot(
     guid: u64,
-    items: &mut Items,
+    items: &Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
     commands: &NetCommands,
     cooldowns: &crate::cooldowns::Cooldowns,
     spells: Option<&benilla_formats::SpellCatalog>,
-    names: &mut crate::names::NameCache,
+    names: &crate::names::NameCache,
     // The petition record cache, for a charter slot's tooltip lines — a LAZY fill, so it is taken
     // mutably for the same reason `names` is: the read is what issues the query.
     petitions: &mut crate::ui_petition::PetitionState,
@@ -789,7 +785,7 @@ fn resolve_slot(
 fn bag_family_name(
     player: Option<&ObjectStore>,
     bag_slot: u8,
-    items: &mut Items,
+    items: &Items,
     families: Option<&benilla_formats::ItemBagFamilyCatalog>,
     commands: &NetCommands,
 ) -> Option<String> {
@@ -843,12 +839,12 @@ pub(crate) fn resolve_item_locks(
         .extend(pending.resolve(|bag, slot1| slot_guid_count(player, bag, slot1, &items)));
 }
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // the param list IS the input set
+#[allow(clippy::type_complexity)] // the param list IS the input set
 pub(crate) fn feed_containers(
     script: Option<NonSendMut<UiScript>>,
     // `ChrClasses.dbc` field 16, for the fit rule's relic half — see `find_equip_slot` (1803).
     classes: Option<Res<crate::chr_classes::ChrClassTable>>,
-    mut items: ResMut<Items>,
+    items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     // The two item-DBC catalogs, as one param (the 16-SystemParam ceiling): `SpellItemEnchantment`'s
     // name column — the tooltip's enchant lines (decision 0915) — and `ItemRandomProperties`, the
@@ -873,7 +869,7 @@ pub(crate) fn feed_containers(
     bag_families: Option<Res<crate::ui_items::ItemBagFamilies>>,
     pending: Res<PendingItemOps>,
     mut lock_cleared: ResMut<LockTransitions>,
-    mut names: ResMut<crate::names::NameCache>,
+    names: Res<crate::names::NameCache>,
     // Paired into one param (the 16-SystemParam ceiling this signature already sits at): the UI
     // clock, and the petition record cache a charter slot's tooltip lines read — `ResMut` because
     // that cache is LAZY and the hover is what issues its query.
@@ -1007,7 +1003,7 @@ pub(crate) fn feed_containers(
                 bag_family_name(
                     player,
                     e.bag_slot,
-                    &mut items,
+                    &items,
                     bag_families.as_deref().map(|c| &c.0),
                     &commands,
                 )
@@ -1071,13 +1067,13 @@ pub(crate) fn feed_containers(
             let guid = store.0.player_pack_slot(i).unwrap_or(0);
             if let Some(mut slot) = resolve_slot(
                 guid,
-                &mut items,
+                &items,
                 icons.as_deref(),
                 rolls,
                 &commands,
                 &cooldowns,
                 spell_catalog,
-                &mut names,
+                &names,
                 &mut petitions,
                 now,
                 ui_now,
@@ -1126,13 +1122,13 @@ pub(crate) fn feed_containers(
             for (j, &guid) in slot_guids.iter().enumerate() {
                 if let Some(mut slot) = resolve_slot(
                     guid,
-                    &mut items,
+                    &items,
                     icons.as_deref(),
                     rolls,
                     &commands,
                     &cooldowns,
                     spell_catalog,
-                    &mut names,
+                    &names,
                     &mut petitions,
                     now,
                     ui_now,
@@ -1161,13 +1157,13 @@ pub(crate) fn feed_containers(
             let guid = store.0.player_bank_slot(i).unwrap_or(0);
             if let Some(mut slot) = resolve_slot(
                 guid,
-                &mut items,
+                &items,
                 icons.as_deref(),
                 rolls,
                 &commands,
                 &cooldowns,
                 spell_catalog,
-                &mut names,
+                &names,
                 &mut petitions,
                 now,
                 ui_now,
@@ -1212,13 +1208,13 @@ pub(crate) fn feed_containers(
             for (j, &guid) in slot_guids.iter().enumerate() {
                 if let Some(mut slot) = resolve_slot(
                     guid,
-                    &mut items,
+                    &items,
                     icons.as_deref(),
                     rolls,
                     &commands,
                     &cooldowns,
                     spell_catalog,
-                    &mut names,
+                    &names,
                     &mut petitions,
                     now,
                     ui_now,
@@ -1251,13 +1247,13 @@ pub(crate) fn feed_containers(
             let guid = store.0.player_keyring_slot(i).unwrap_or(0);
             if let Some(mut slot) = resolve_slot(
                 guid,
-                &mut items,
+                &items,
                 icons.as_deref(),
                 rolls,
                 &commands,
                 &cooldowns,
                 spell_catalog,
-                &mut names,
+                &names,
                 &mut petitions,
                 now,
                 ui_now,
@@ -1279,7 +1275,7 @@ pub(crate) fn feed_containers(
         // `HasKey()` — the gate that decides whether the keyring exists in the UI at all. Pushed
         // beside the containers because it is the same knowledge (item templates) read over the
         // same slot arrays, and it must be fresh on exactly the frames a BAG_UPDATE fires.
-        let key = has_key(&store.0, &mut items, &commands);
+        let key = has_key(&store.0, &items, &commands);
         if key != memory.had_key {
             gate.audit("feed_containers", "the HasKey() flip");
             debug!(

@@ -152,7 +152,9 @@ impl ZoomLimit {
         self.max = CAM_DIST_BASE_MAX * f;
     }
 
-    /// The live factor — what the CVar table and the config file carry.
+    /// The live factor — the inverse of [`Self::set_factor`], kept for the weld test (the
+    /// registry holds the string itself since 2303).
+    #[cfg(test)]
     pub(crate) fn factor(&self) -> f32 {
         self.max / CAM_DIST_BASE_MAX
     }
@@ -172,6 +174,54 @@ const LOOK_SENSITIVITY: f32 = 0.003;
 /// 0.5 … 1.5, step 0.05). A multiplier over [`LOOK_SENSITIVITY`], so the registered default 1.0
 /// reproduces the shipped feel exactly.
 pub(crate) const MOUSE_SPEED_RANGE: std::ops::RangeInclusive<f32> = 0.5..=1.5;
+
+/// The camera rows' change callback (decision 2303) — the look, zoom and follow knobs.
+pub(crate) fn on_cvar(
+    ev: On<crate::cvars::CvarChanged>,
+    mut look: ResMut<LookConfig>,
+    mut zoom: ResMut<ZoomLimit>,
+    mut follow: ResMut<FollowConfig>,
+) {
+    let v = ev.num();
+    match ev.key().as_str() {
+        "mouseinvertpitch" => look.invert_pitch = v != 0.0,
+        // The 1.12 slider's own range; an off-grid hand-edit rides between stops, like the others.
+        "mousespeed" => {
+            look.sensitivity = v.clamp(*MOUSE_SPEED_RANGE.start(), *MOUSE_SPEED_RANGE.end());
+        }
+        // The reference's `0x50b330` validator REJECTS an out-of-range value rather than clamping
+        // it: it prints `Value out of range (%f - %f)` and `CVar::Set` never stores, so the old
+        // value stands. That is a different posture from every clamping row, and it is the
+        // faithful one — a script writing 1e9 gets a refusal, not a silently pinned camera.
+        "camerayawmovespeed" | "camerapitchmovespeed" => {
+            if !CAMERA_SPEED_RANGE.contains(&v) {
+                warn!(
+                    "cvar {}: value out of range ({} - {}) — ignored",
+                    ev.name,
+                    CAMERA_SPEED_RANGE.start(),
+                    CAMERA_SPEED_RANGE.end()
+                );
+                return;
+            }
+            if ev.is("cameraYawMoveSpeed") {
+                look.yaw_speed = v;
+            } else {
+                look.pitch_speed = v;
+            }
+        }
+        "cameradistancemaxfactor" => zoom.set_factor(v),
+        // The three stops are 1 Smart / 2 Always / 3 Never; anything else reads as the registrar
+        // default rather than as a dead camera (`FollowStyle::from_cvar`).
+        "camerasmoothstyle" => follow.style = FollowStyle::from_cvar(v),
+        // Its sibling selector — the one the reference swaps in for the externally-driven states.
+        "camerasmoothtrackingstyle" => follow.tracking_style = FollowStyle::from_cvar(v),
+        // The auto-follow rate, clamped to 1.12's own AUTO_FOLLOW_SPEED slider range.
+        "camerayawsmoothspeed" => {
+            follow.yaw_speed = v.clamp(*FOLLOW_SPEED_RANGE.start(), *FOLLOW_SPEED_RANGE.end());
+        }
+        _ => {}
+    }
+}
 
 /// **The mouse-look rate law, and the one place benilla's units are not the reference's.**
 ///
@@ -330,7 +380,9 @@ impl FollowStyle {
         }
     }
 
-    /// The CVar string this style is — the value the table and `config.toml` carry.
+    /// The CVar string this style is — the inverse of [`Self::from_cvar`], kept for the
+    /// round-trip test (the registry holds the string itself since 2303).
+    #[cfg(test)]
     pub(crate) fn cvar(self) -> &'static str {
         match self {
             Self::Never => "0",
@@ -1033,7 +1085,6 @@ pub(crate) struct CameraPivot {
 /// [`PressGesture::is_click`] alone. There is no "promotion" and nothing cancels the click for
 /// having moved — the pending click used to be destroyed the moment the cursor crossed a 4 px
 /// threshold, which is why a drag could never select (ledger B226).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn run_look_session(
     buttons: &ButtonInput<MouseButton>,
     mouse_motion: &AccumulatedMouseMotion,
@@ -1240,7 +1291,6 @@ pub(super) fn apply_zoom_scroll(scroll: f32, dt: f32, rig: &mut CameraControl, m
 /// `feet`/`head` are the caller's, because the head offset is the avatar capsule's and those
 /// constants are a movement concern; `body_pivot` is the target height read off the driven body
 /// this frame, used only when nothing else is being watched.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn seat_on_subject(
     dt: f32,
     turn_delta: f32,
@@ -1397,7 +1447,6 @@ pub(super) fn seat_on_subject(
 /// `head`/`player_pos` are precomputed by [`super::control`] (which owns the avatar capsule
 /// constants); `cam_pivot_height` is the world pivot height it derived from [`CameraPivot`] this
 /// frame.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn seat_camera(
     dt: f32,
     turn_delta: f32,
@@ -1640,7 +1689,7 @@ pub(super) fn seat_camera(
 /// compose (`wow_model.wgsl`: `out_rgb *= faded_alpha`) takes the card to black, which for an ADD blend
 /// is gone. That deliberately avoids `Visibility`, which the card's own hidden-owner mirror authors every
 /// frame in a different system.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)] // one Bevy system's full input set
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(crate) fn apply_self_model_fade(
     rig: Res<CameraControl>,
     self_player: Query<(Entity, Option<&crate::aura_visual::AuraNodes>), With<Embodied>>,

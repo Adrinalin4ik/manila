@@ -52,7 +52,7 @@ use kira::DefaultBackend;
 /// native target — CoreAudio on macOS, cpal elsewhere (1920) — so the mixer runs on it there, and
 /// wenilla's Linux build gets the ring, the render thread and the meters like any other. The
 /// browser is the one target it cannot reach: no threads for that render loop, and no clock for
-/// its meters (`std::time::Instant` panics on wasm32). wasm32 therefore stays on kira's own cpal
+/// its meters (`bevy::platform::time::Instant` panics on wasm32). wasm32 therefore stays on kira's own cpal
 /// backend, which is Web Audio under the hood. This alias is that seam, and the only one.
 #[cfg(not(target_arch = "wasm32"))]
 type MixBackend = OutputBackend;
@@ -1011,7 +1011,12 @@ impl StreamWatch {
     pub(crate) fn feed(&mut self, handle: &StreamingSoundHandle<FromFileError>, dt: f64) {
         use kira::sound::PlaybackState as S;
         let audible = matches!(handle.state(), S::Playing | S::Stopping);
-        match self.observe(audible, handle.position(), dt, bevy::platform::time::Instant::now()) {
+        match self.observe(
+            audible,
+            handle.position(),
+            dt,
+            bevy::platform::time::Instant::now(),
+        ) {
             Some(Verdict::Starved {
                 lost,
                 counted,

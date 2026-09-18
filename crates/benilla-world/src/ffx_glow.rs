@@ -838,11 +838,22 @@ fn prepare_textures(
         let Some(vp) = camera.physical_viewport_size else {
             continue;
         };
-        // A claimed view (some [`FfxBackdrop`] names it) has no combine of its own — the UI
-        // camera's ground pass is it, keyed on THAT camera's target — so it carries none rather
-        // than a pair keyed on a target nothing writes.
-        let combine_format = (!claims.0.contains(&entity))
-            .then(|| FinalPassTarget::format(&camera.output_mode, target));
+        // The view's OWN combine pair, specialised **whether or not this view is claimed**
+        // (decision 2262). A claimed view (some [`FfxBackdrop`] names it) has no combine of its
+        // own — the UI camera's ground pass is it, keyed on THAT camera's target — so it carries
+        // none rather than a pair keyed on a target nothing writes. But the claim is not a
+        // property of the world, it is a property of *this frame*: it drops the moment the UI
+        // camera loses its `ViewTarget`, which is what `prepare_view_targets` does as soon as the
+        // window's surface goes away. At app exit that is harmless (bevy runs one to three more
+        // updates after the last presented frame — see `benilla_app::shutdown`) and it is exactly
+        // what the director's 2026-09-15 log caught: two `pipeline compiled LIVE` lines in the
+        // same millisecond as "No windows are open, exiting". A minimize to zero size or a surface
+        // reconfigure reaches the same branch **while the player is looking at the frame**, and
+        // there the pair would be two synchronous Metal compiles on the render thread. Specialising
+        // is a cached lookup on a four-field key, so holding the pair warm from the first covered
+        // frame costs that lookup and nothing else.
+        let own = specializer.pair(FinalPassTarget::format(&camera.output_mode, target));
+        let combine = (!claims.0.contains(&entity)).then_some(own);
         // The reference's RT-dim chain: ½ and ¼, floored (clamp ≥8 — `ffx_compute_rt_dims`).
         let mut tex = |label: &'static str, w: u32, h: u32| {
             texture_cache.get(
@@ -871,11 +882,10 @@ fn prepare_textures(
         if existing.is_some_and(|t| {
             t.quarter_a.texture.id() == quarter_a.texture.id()
                 && t.quarter_b.texture.id() == quarter_b.texture.id()
-                && t.combine.as_ref().map(|c| c.format) == combine_format
+                && t.combine.as_ref().map(|c| c.format) == combine.as_ref().map(|c| c.format)
         }) {
             continue;
         }
-        let combine = combine_format.map(|format| specializer.pair(format));
         let pipelines = &specializer.pipelines;
         let layout_filter = specializer
             .pipeline_cache
@@ -1366,14 +1376,16 @@ impl ViewNode for FfxTransparent2dNode {
                     render_pass.set_camera_viewport(viewport);
                 }
                 if let Some((combine, bind)) = ground.as_ref() {
-                    // Its own span inside the pass, so the per-pass split (`WOW_GPU_PASSES`)
-                    // still reads one `ffx_glow_combine` a frame on a device that times inside
-                    // a pass; on one that does not, the transparent pass carries it.
-                    let ground_span = diagnostics.pass_span(&mut render_pass, "ffx_glow_combine");
+                    // No span of its own. A `pass_span` is a pipeline-statistics query as well
+                    // as a timestamp pair, and wgpu allows ONE such query active at a time: a
+                    // second one opened inside the pass's own was the validation error that
+                    // aborted every Vulkan build of the 09-15 sync on its first world frame
+                    // (B390, 2258) — and only Vulkan exposes the feature, so Metal and DX12
+                    // never nested anything and no gate saw it. The transparent pass's number
+                    // carries the combine; the journal never read a nested span.
                     render_pass.set_render_pipeline(combine);
                     render_pass.set_bind_group(0, bind, &[]);
                     render_pass.draw(0..3, 0..1);
-                    ground_span.end(&mut render_pass);
                 }
                 if !transparent_phase.items.is_empty() {
                     if let Err(err) = transparent_phase.render(&mut render_pass, world, view_entity)

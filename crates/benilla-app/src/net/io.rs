@@ -40,6 +40,7 @@ use std::time::Duration;
 use bevy::platform::time::Instant;
 
 use anyhow::{anyhow, bail, Result};
+use benilla_assets::LockRecover;
 use benilla_protocol::{
     host_port, messages, AuthReject, CharAction, LoginStage, Poll, SessionEnd, SessionEvent,
     WardenRequired, WorldSession, WorldWriter, WORLD_PORT,
@@ -256,159 +257,14 @@ pub(super) struct NetConfig {
     /// account; as a *pick* it is app-side policy (`crate::char_select` auto-answers the roster with
     /// it — the dev fast path past the select screen).
     character: Option<String>,
-    /// The patch chain, for the one thing the net lane needs to read off disk: the files a Warden
-    /// `HASH_CLIENT_FILE` scan asks about ([`benilla_protocol::world::warden::DOOR_INTEGRITY_FILES`]).
-    /// An `Arc<Chain>` rather than a handle to the asset layer because `Chain::read` takes `&self`
-    /// and is `Send + Sync`, so it crosses to the net thread as it stands.
-    ///
-    /// `None` when there is no install (capture runs, tests): Warden then has no witness and the
-    /// session refuses it, which is the same answer it gives today.
-    chain: Option<Arc<benilla_formats::Chain>>,
-    /// The scan encoding a server has agreed to use with this client, from `WOW_WARDEN_PROFILE`.
-    ///
-    /// It is configuration rather than a constant because it is the SERVER's choice: on a stock
-    /// server the type bytes come from the Warden module's own table, which a from-scratch client
-    /// cannot load, so a server willing to admit this client fixes the encoding and states it. Until
-    /// one does, this is `None` — and then Warden is refused unless `warden_modules` is on, which
-    /// is the other way to obtain the table. Never guessed: guessing an encoding does not fail, it
-    /// silently misreads every request.
-    warden_encoding: Option<([u8; 9], u8)>,
-    /// Whether to answer a stock server's module offer by loading its `.cr` from
-    /// `<data>/warden_modules/<ID>.cr`, set by `WOW_WARDEN_MODULES=1`.
-    ///
-    /// Opt-in rather than "try and see", because the try is a round trip: on web each `.cr` read is
-    /// a synchronous XHR on the browser's own thread, and a 404 for every module a server offers
-    /// would be a stall for nothing on installs that do not carry them.
-    warden_modules: bool,
-}
-
-/// Read one Warden module's `.cr` by id, from the same place the rest of the client reads data:
-/// the install's `Data` directory natively, the web host's `/data` route on wasm.
-///
-/// The basename is the id as 32 uppercase hex digits, which is how tortoise-wow's
-/// `WardenModuleMgr` pairs a module's `.bin`, `.key` and `.cr`. Loose files rather than
-/// `Chain::read`, because these are not MPQ members — they are the server's own files, copied in
-/// beside the archives.
-fn read_warden_cr(id: &[u8; 16]) -> Option<Vec<u8>> {
-    let name = format!(
-        "warden_modules/{}.cr",
-        benilla_protocol::world::warden::module_id_hex(id)
-    );
-    #[cfg(target_arch = "wasm32")]
-    {
-        let url = format!("{}/{name}", benilla_formats::web::data_base());
-        benilla_formats::web::fetch_sync(&url).ok()
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        std::fs::read(benilla_formats::wow_data()?.join(name)).ok()
-    }
-}
-
-/// Parse `WOW_WARDEN_PROFILE`: nine comma-separated scan-type bytes then the terminator, all
-/// decimal or `0x`-prefixed — e.g. `0,1,2,3,4,5,6,7,8;255`. The order is `WindowsScanType`'s:
-/// READ_MEMORY, FIND_MODULE_BY_NAME, FIND_MEM_IMAGE_CODE_BY_HASH, FIND_CODE_BY_HASH,
-/// HASH_CLIENT_FILE, GET_LUA_VARIABLE, API_CHECK, FIND_DRIVER_BY_NAME, CHECK_TIMING_VALUES.
-///
-/// Returns `None` on anything malformed rather than a partial table: a half-read encoding would
-/// mis-decode requests instead of refusing them, and a refusal is the failure we can see.
-fn parse_warden_encoding(spec: &str) -> Option<([u8; 9], u8)> {
-    let (types, terminator) = spec.split_once(';')?;
-    let byte = |t: &str| -> Option<u8> {
-        let t = t.trim();
-        match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-            Some(hex) => u8::from_str_radix(hex, 16).ok(),
-            None => t.parse().ok(),
-        }
-    };
-    let parsed: Vec<u8> = types.split(',').filter_map(byte).collect();
-    let table: [u8; 9] = parsed.try_into().ok()?;
-    Some((table, byte(terminator)?))
 }
 
 impl NetConfig {
     pub(super) fn from_env() -> Self {
         NetConfig {
             character: crate::webenv::var("WOW_CHAR"),
-            chain: benilla_formats::wow_data()
-                .and_then(|dir| benilla_formats::Chain::open(&dir).ok())
-                .map(Arc::new),
-            warden_encoding: crate::webenv::var("WOW_WARDEN_PROFILE")
-                .as_deref()
-                .and_then(parse_warden_encoding),
-            warden_modules: crate::webenv::var("WOW_WARDEN_MODULES").as_deref() == Some("1"),
         }
     }
-
-    /// A fresh Warden profile for one connection attempt, or `None` when either half is missing.
-    ///
-    /// Fresh per attempt on purpose: [`ClientWitness`] memoises the digests it has computed, and
-    /// that cache belongs to one session — a reconnect is a new client as far as the server's scan
-    /// round is concerned, and carrying stale hashes across one would be reporting what we saw
-    /// before rather than what we hold now.
-    fn warden_profile(&self) -> Option<benilla_protocol::world::warden::WardenProfile> {
-        use benilla_protocol::world::warden::{ClientWitness, WardenProfile};
-        let chain = self.chain.clone()?;
-        // Either half is enough to take part: a stated encoding for a server that fixed one, or a
-        // module source for a stock server that will name its own. Neither means Warden is refused.
-        if self.warden_encoding.is_none() && !self.warden_modules {
-            return None;
-        }
-        let for_files = Arc::clone(&chain);
-        let witness = ClientWitness::new(
-            Box::new(move |path| for_files.read(path).ok()),
-            // No Lua reader: the VM is a `!Send` `NonSend` resource on the Bevy main thread, so it
-            // cannot be read from this lane — and the scan set this profile exists for has no
-            // GET_LUA_VARIABLE rows. A server that adds one gets a named gap, not a wrong answer.
-            Box::new(|_| None),
-            Box::new(client_clocks),
-        );
-        // Warm the files the scan table names, so a round does not pay five archive reads inside
-        // its response window — on the web each of those is a synchronous XHR on the browser thread.
-        for path in benilla_protocol::world::warden::DOOR_INTEGRITY_FILES {
-            if !witness.warm(path) {
-                bevy::log::warn!("warden: this install has no {path} to hash");
-            }
-        }
-        let witness = Box::new(witness);
-        let Some((opcodes, terminator)) = self.warden_encoding else {
-            // Guarded above, so we only reach this with modules enabled: the offered module will
-            // supply the encoding, and until it does the profile decodes nothing rather than guess.
-            return Some(WardenProfile::awaiting_module(
-                witness,
-                Box::new(read_warden_cr),
-            ));
-        };
-        let profile = WardenProfile::new(opcodes, terminator, witness);
-        Some(if self.warden_modules {
-            profile.with_modules(Box::new(read_warden_cr))
-        } else {
-            profile
-        })
-    }
-}
-
-/// Two independent clocks, for `CHECK_TIMING_VALUES`.
-///
-/// The scan exists because the reference client's own timer and `GetTickCount` should agree, and a
-/// hooked one makes them diverge. The honest equivalent here is a MONOTONIC clock against a WALL
-/// clock: two different mechanisms on both targets (`Instant` vs `SystemTime` natively;
-/// `performance.now()` vs `Date.now()` in a page, which is what `web-time` maps them to). Reading
-/// the same source twice would report agreement it had not established.
-///
-/// Both are reduced to milliseconds and truncated to `u32`, which is the width the reply carries.
-fn client_clocks() -> (u32, u32) {
-    use std::sync::OnceLock;
-    use web_time::{Instant, SystemTime, UNIX_EPOCH};
-
-    // The monotonic side needs an origin to measure from; the first call fixes one for the process.
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let monotonic = ORIGIN.get_or_init(Instant::now).elapsed().as_millis() as u32;
-    let wall = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u32)
-        .unwrap_or(monotonic);
-    (monotonic, wall)
 }
 
 /// What one wake-up at the character park asked for — the `select!`'s answer, so that every jump
@@ -564,6 +420,7 @@ async fn sequencer(
     abandon: Arc<AtomicU64>,
     ping_clock: Arc<Mutex<PingClock>>,
 ) {
+    let mut tails_announced = std::collections::HashSet::new();
     loop {
         // **A cycle starts with no measurements.** Every way the last one ended — a stream
         // failure, a logout, a re-park — lands here, so one clear covers them all, and it runs on
@@ -571,8 +428,18 @@ async fn sequencer(
         // later. (`writer_loop` clears again when the fresh writer arrives, and still has to:
         // between the old socket dying and that handover the keepalive tick can still fire on the
         // stale writer.)
-        ping_clock.lock().expect("ping clock").clear();
-        match run(&cfg, &events_tx, &writer_tx, &parks, &abandon, &ping_clock).await {
+        ping_clock.lock_recover().clear();
+        match run(
+            &cfg,
+            &events_tx,
+            &writer_tx,
+            &parks,
+            &abandon,
+            &ping_clock,
+            &mut tails_announced,
+        )
+        .await
+        {
             Ok(Cycle::Exit) => return,
             Ok(Cycle::Repark) => {}
             Ok(end @ (Cycle::LoggedOut | Cycle::LoginRefused)) => {
@@ -627,6 +494,7 @@ async fn run(
     parks: &Parks,
     abandon: &AtomicU64,
     ping_clock: &Mutex<PingClock>,
+    tails_announced: &mut std::collections::HashSet<u16>,
 ) -> Result<Cycle> {
     let Parks {
         login_rx,
@@ -804,12 +672,11 @@ async fn run(
             });
             !canceled()
         };
-        let mut session = match WorldSession::connect_queued_with_warden_async(
+        let mut session = match WorldSession::connect_queued_async(
             &world_addr,
             &req.user,
             logon.session_key,
             &mut on_queue,
-            cfg.warden_profile(),
         )
         .await
         {
@@ -927,11 +794,11 @@ async fn run(
             //
             // The [`Parked`] answer stays exactly as it is natively, and for the same reason: the
             // arms decide, and every `break`/`continue` is made below, in plain sight.
-            let fired = futures_lite::future::or(
-                async { Fired::Realm(realm_rx.recv().await) },
-                async { Fired::Pick(pick_rx.recv().await) },
-            )
-            .await;
+            let fired =
+                futures_lite::future::or(async { Fired::Realm(realm_rx.recv().await) }, async {
+                    Fired::Pick(pick_rx.recv().await)
+                })
+                .await;
             let answer = match fired {
                 Fired::Realm(req) => match req {
                     Err(_) => Parked::Exit,
@@ -940,7 +807,9 @@ async fn run(
                     Ok(RealmRequest::Refresh) => {
                         logon.refresh_realms(REALM_REFRESH_TIMEOUT).await;
                         if events_tx
-                            .send(SessionEvent::RealmList { realms: logon.realms.clone() })
+                            .send(SessionEvent::RealmList {
+                                realms: logon.realms.clone(),
+                            })
                             .is_err()
                         {
                             Parked::Exit
@@ -1070,8 +939,25 @@ async fn run(
             let polled = reader.poll_async().await?;
             note_inbound(); // one packet off the wire, parsed or not — the census counts liveness
             match polled {
-                Poll::Events { opcode, events } => {
+                Poll::Events {
+                    opcode,
+                    events,
+                    tail,
+                } => {
                     skip_run = 0;
+                    // **The decode-length instrument** (decision 2265 §B1). A body is
+                    // length-framed, so a decoder shorter than the server's layout succeeds
+                    // silently and the field it never read is invisible from outside. This is
+                    // the one line that shows it — once per opcode, at info, and NEVER a skip:
+                    // the packet decoded and its events are real; a trailing field we have no
+                    // use for is drift to look at, not a packet to drop.
+                    if tail > 0 && tails_announced.insert(opcode) {
+                        bevy::log::info!(
+                            "net: opcode {} ({opcode:#06x}) left {tail} trailing byte(s) after \
+                             decode (first occurrence; announced once per opcode)",
+                            benilla_protocol::messages::opcode_name(opcode).unwrap_or("?"),
+                        );
+                    }
                     // The full inbound opcode stream (tag `in`, decision 0624) — the last place a
                     // packet could hide. `skip` covers what failed to parse and `rly` covers what
                     // reached the mover replay; between them sits the packet that parsed into *no*
@@ -1097,9 +983,7 @@ async fn run(
                         // a whole client frame to every reading, which is a frame's worth of the
                         // client's own slowness reported as the server's distance.
                         if let SessionEvent::Pong { sequence } = ev {
-                            if let Some(rtt) =
-                                ping_clock.lock().expect("ping clock").record_pong(sequence)
-                            {
+                            if let Some(rtt) = ping_clock.lock_recover().record_pong(sequence) {
                                 bevy::log::debug!("net: pong seq={sequence} rtt={rtt}ms");
                             }
                             continue;
@@ -1244,7 +1128,7 @@ fn writer_loop(
                     // A fresh connection restarts the keepalive from scratch, like the real
                     // client: sequence 1 is the new socket's first ping, and a stale in-flight
                     // pong from the old socket can no longer match.
-                    ping_clock.lock().expect("ping clock").clear();
+                    ping_clock.lock_recover().clear();
                     // The connect stamp: the first keepalive of a connection is a full interval
                     // out, not on the next drain (`0x537bcf` — verified; the alternative reading,
                     // that a zeroed stamp fires one immediately, is what the bytes ruled out).
@@ -1268,7 +1152,7 @@ fn writer_loop(
                     // spacing is our attempts on the socket, not the server's answers.
                     ping_tick = crossbeam_channel::after(PING_INTERVAL);
                     let (sequence, last_rtt) = {
-                        let mut c = ping_clock.lock().expect("ping clock");
+                        let mut c = ping_clock.lock_recover();
                         c.sequence += 1;
                         c.sent_at = Some(Instant::now());
                         // `lastRtt`: the most recent single sample, never the mean (VERIFIED —
@@ -1505,9 +1389,7 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         } => w.destroy_item(bag_index, slot, count),
         ClientCommand::CastSpell { spell_id, target } => w.cast_spell(spell_id, target),
         ClientCommand::CastSpellAtDest { spell_id, dest } => w.cast_spell_at_dest(spell_id, dest),
-        ClientCommand::CastSpellAtSource { spell_id, src } => {
-            w.cast_spell_at_source(spell_id, src)
-        }
+        ClientCommand::CastSpellAtSource { spell_id, src } => w.cast_spell_at_source(spell_id, src),
         ClientCommand::CancelAura { spell_id } => w.cancel_aura(spell_id),
         ClientCommand::SetActionButton { button, packed } => w.set_action_button(button, packed),
         ClientCommand::SetActionBarToggles { toggles } => w.set_actionbar_toggles(toggles),
@@ -1578,6 +1460,8 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::BattlefieldPort { map_id, accept } => w.battlefield_port(map_id, accept),
         ClientCommand::RequestBattlefieldScoreData => w.request_battlefield_score_data(),
         ClientCommand::LeaveBattlefield { map_id } => w.leave_battlefield(map_id),
+        ClientCommand::MeetingStoneJoin { go_guid } => w.meeting_stone_join(go_guid),
+        ClientCommand::AreaSpiritHealerQuery { healer } => w.area_spirit_healer_query(healer),
         ClientCommand::MeetingStoneLeave => w.meeting_stone_leave(),
         ClientCommand::MeetingStoneStatusQuery => w.meeting_stone_status_query(),
         ClientCommand::TutorialFlag { id } => w.tutorial_flag(id),

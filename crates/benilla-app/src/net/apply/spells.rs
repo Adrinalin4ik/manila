@@ -184,7 +184,6 @@ pub(super) fn superceded_spell(
 }
 
 /// The server's verdict on our cast (`SMSG_CAST_RESULT`).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn cast_result(
     spell_id: u32,
     success: bool,
@@ -279,6 +278,7 @@ pub(super) fn cast_result(
                     arg,
                     // `SMSG_CAST_FAILED` is addressed to the caster, and this handler is ours.
                     caster: crate::ui_action::Caster::Player,
+                    redisplay: false,
                 });
             }
         }
@@ -338,7 +338,6 @@ pub(super) fn cast_result(
 
 /// A unit began a non-triggered cast (`SMSG_SPELL_START`), instants included (`cast_time_ms == 0`)
 /// — the precast trigger the phase-2 casting animation loop builds on (decision 0099 phase 1).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spell_start(
     caster: u64,
     spell_id: u32,
@@ -456,7 +455,6 @@ const GO_TYPE_CHEST: i32 = 3;
 /// nothing about missile travel rides this packet; the client (and we) rebuild the flight
 /// visually from the same Speed column (decision 0099 phase 4: the target lists go out as
 /// [`SpellGoTargets`] for the router's instant-impact/missile branch).
-#[allow(clippy::too_many_arguments)] // one dispatch arm's full input set
 pub(super) fn spell_go(
     caster: u64,
     spell_id: u32,
@@ -532,7 +530,7 @@ pub(super) fn spell_go(
     }
     // A cast that names a GameObject (an open-lock cast on a chest / locked door) hands off to the GO
     // animation driver, which gates on the open-lock effect and opens the lid on the cast going off
-    // (decision 0250). Independent of the caster being streamed to us — an observed open still animates.
+    // (decision 2271). Independent of the caster being streamed to us — an observed open still animates.
     if let Some(go_guid) = go_target {
         go_lid.write(crate::go_anim::GoLidOpen { go_guid, spell_id });
     }
@@ -811,7 +809,6 @@ pub(super) fn spell_go(
 
 /// An observed cast was interrupted/cancelled (`SMSG_SPELL_FAILED_OTHER`) — ends the caster's
 /// `Casting` state seam the same as [`spell_go`].
-#[allow(clippy::too_many_arguments)] // one dispatch arm's full input set
 pub(super) fn spell_failed_other(
     caster: u64,
     spell_id: u32,
@@ -1057,6 +1054,23 @@ pub(super) fn aura_duration(
     now_secs: f64,
 ) {
     durations.set(slot, remaining_ms, now_secs);
+}
+
+/// One cell of one talent spell-modifier table (`SMSG_SET_FLAT_SPELL_MODIFIER` /
+/// `SMSG_SET_PCT_SPELL_MODIFIER`) — `HandleSetSpellModifier 0x6e9950`'s whole body, which is a
+/// single store: the server sends the absolute value of that `(family bit, op)` pair, never a
+/// delta, so there is nothing to accumulate and nothing to invalidate.
+///
+/// The out-of-range refusal lives on the store ([`crate::spell_mods::SpellModifiers::set`], which
+/// documents why it is ours and not the reference's).
+pub(super) fn set_spell_modifier(
+    flat: bool,
+    mask_bit: u8,
+    op: u8,
+    value: i32,
+    mods: &mut crate::spell_mods::SpellModifiers,
+) {
+    mods.set(flat, mask_bit, op, value);
 }
 
 /// The caster's chain-target hop array, filled from a wire target list — the reference's
@@ -1378,6 +1392,7 @@ mod tests {
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
+            .init_resource::<crate::spell_mods::SpellModifiers>()
             .init_resource::<crate::ui_pet::PetBar>()
             .init_resource::<crate::items::Items>();
 
@@ -1485,6 +1500,126 @@ mod tests {
         assert!(matches!(feed[0], CastBarEdge::Stop), "…with a STOP");
     }
 
+    /// **A broken channel flashes green and fades — it never goes red "Interrupted"**, and the
+    /// whole of `Spell::cancel()`'s wire is driven here because the correctness rests on a gate
+    /// that does not mention channels.
+    ///
+    /// vmangos cancels a running channel (moved, turned, target died, `CMSG_CANCEL_CHANNELLING`)
+    /// with **two** packets, in this order (`Spell.cpp` `Spell::cancel`, `SPELL_STATE_CASTING`):
+    ///
+    /// ```text
+    /// SendChannelUpdate(0, true)   -> MSG_CHANNEL_UPDATE(0)      -> SPELLCAST_CHANNEL_STOP
+    /// SendInterrupted(0)           -> SMSG_SPELL_FAILED_OTHER    -> ??? (SendObjectMessageToSet
+    ///                                                                 (…, /*self*/ true))
+    /// ```
+    ///
+    /// The second one **reaches the caster too**, so the obvious reading is that the bar turns red
+    /// a frame after it flashed green. It must not, and three independent things say so:
+    ///
+    /// - vmangos deliberately withholds the *other* interrupt signal —
+    ///   `sendInterrupt = !(m_channeled && m_spellState != SPELL_STATE_PREPARING)` gates
+    ///   `SendCastResult(SPELL_FAILED_INTERRUPTED)` off, with the comment "channeled spells don't
+    ///   display interrupted message even if they are interrupted";
+    /// - the reference's own `SMSG_SPELL_FAILED_OTHER` handler (`0x6e8e40`, opcode `0x2a6`) fires
+    ///   **no FrameScript event at all** — its whole body is `0x60d040` + `0x614150`, the *unit's*
+    ///   cast state, and wow-re's boundary line for it lists no `-> ui` edge;
+    /// - and stock `CastingBarFrame.lua` guards its red arm with `not this.channeling`.
+    ///
+    /// Ours lands on the same behaviour by a **fourth** route, which is the one worth pinning:
+    /// [`spell_failed_other`]'s red edge is keyed to a live `Casting` component, and a channel
+    /// never has one — `Casting` is inserted only for `cast_time_ms > 0`, and `SMSG_SPELL_GO`
+    /// (which always precedes `MSG_CHANNEL_START` in `handle_immediate`) removes it regardless.
+    /// That is correct and it is also invisible: nothing in `spell_failed_other` says "channel",
+    /// so a future change to when `Casting` is armed would turn every broken channel red with no
+    /// test to catch it. This is that test.
+    #[test]
+    fn a_cancelled_channel_never_turns_the_bar_red() {
+        use crate::creature_anim::Casting;
+        use crate::net::{Guid, SelfPlayer};
+        use bevy::ecs::system::RunSystemOnce;
+
+        const BLIZZARD: u32 = 10;
+        let t0 = Instant::now();
+
+        let mut app = App::new();
+        app.add_message::<CastEvent>()
+            .init_resource::<GuidIndex>()
+            .init_resource::<SelfGuid>()
+            .init_resource::<CastBarFeed>()
+            .init_resource::<PendingCast>()
+            .init_resource::<QueuedMeleeSpell>()
+            .init_resource::<ActiveChannel>();
+        let self_e = app.world_mut().spawn((Guid(10), SelfPlayer)).id();
+        app.world_mut()
+            .resource_mut::<GuidIndex>()
+            .0
+            .insert(10, self_e);
+        app.world_mut().resource_mut::<SelfGuid>().0 = Some(10);
+
+        // 1-2. MSG_CHANNEL_START, then the server's own end: MSG_CHANNEL_UPDATE(0).
+        {
+            let world = app.world_mut();
+            let mut feed = world.remove_resource::<CastBarFeed>().unwrap();
+            let mut channel = world.remove_resource::<ActiveChannel>().unwrap();
+            channel_start(BLIZZARD, 8_000, &mut channel, &mut feed);
+            assert_eq!(
+                channel.current(t0 + Duration::from_secs(1)),
+                Some(BLIZZARD),
+                "the mirror is armed while the channel runs"
+            );
+            channel_update(0, &mut channel, &mut feed);
+            assert_eq!(
+                channel.current(t0 + Duration::from_secs(1)),
+                None,
+                "update 0 closes the mirror, so the action button unlights"
+            );
+            world.insert_resource(feed);
+            world.insert_resource(channel);
+        }
+
+        // 3. SendInterrupted(0) — SMSG_SPELL_FAILED_OTHER, addressed to us, for the channel's id.
+        app.world_mut()
+            .run_system_once(
+                move |mut commands: Commands,
+                      index: Res<GuidIndex>,
+                      casting: Query<&Casting>,
+                      mut cast_events: MessageWriter<CastEvent>,
+                      self_guid: Res<SelfGuid>,
+                      mut cast_bar: ResMut<CastBarFeed>,
+                      mut pending: ResMut<PendingCast>,
+                      mut queued_melee: ResMut<QueuedMeleeSpell>| {
+                    spell_failed_other(
+                        10,
+                        BLIZZARD,
+                        &mut commands,
+                        &index,
+                        &casting,
+                        &mut cast_events,
+                        &self_guid,
+                        &mut cast_bar,
+                        &mut pending,
+                        &mut queued_melee,
+                        1,
+                    );
+                },
+            )
+            .unwrap();
+
+        let feed = &app.world().resource::<CastBarFeed>().0;
+        assert!(
+            !feed
+                .iter()
+                .any(|e| matches!(e, CastBarEdge::Interrupted | CastBarEdge::Failed)),
+            "a cancelled channel pushes NO red edge — the bar flashes green and fades"
+        );
+        assert_eq!(feed.len(), 2, "exactly the two channel edges");
+        assert!(matches!(feed[0], CastBarEdge::ChannelStart { .. }));
+        assert!(matches!(
+            feed[1],
+            CastBarEdge::ChannelUpdate { remaining_ms: 0 }
+        ));
+    }
+
     /// **The GO's inline miss word: gold, gated, and only for an INSTANT spell** (decision 2229).
     ///
     /// Phase 2 shipped this emit unconditional and hardcoded white. The §5 closed both halves:
@@ -1550,6 +1685,7 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell_mods::SpellModifiers>()
                 .init_resource::<crate::ui_pet::PetBar>()
                 .init_resource::<crate::items::Items>();
             let self_e = app
@@ -1718,6 +1854,7 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell_mods::SpellModifiers>()
                 .init_resource::<crate::ui_pet::PetBar>()
                 .init_resource::<crate::items::Items>();
             let self_e = app
@@ -1852,6 +1989,7 @@ mod tests {
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
+            .init_resource::<crate::spell_mods::SpellModifiers>()
             .init_resource::<crate::ui_pet::PetBar>()
             .init_resource::<crate::items::Items>();
 
@@ -1982,6 +2120,7 @@ mod tests {
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
+            .init_resource::<crate::spell_mods::SpellModifiers>()
             .init_resource::<AutoRepeatActive>();
 
         let self_e = app
@@ -2263,6 +2402,7 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell_mods::SpellModifiers>()
                 .init_resource::<crate::ui_pet::PetBar>()
                 .init_resource::<crate::items::Items>();
             let self_e = app
@@ -2452,6 +2592,7 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell_mods::SpellModifiers>()
                 .init_resource::<AutoRepeatActive>()
                 .init_resource::<crate::ui_action::ChainCasts>();
             let self_e = app.world_mut().spawn((Guid(10), SelfPlayer)).id();

@@ -49,7 +49,7 @@ use bevy::prelude::*;
 use benilla_ui::script::keybind::{AddonBindingBody, KeybindCommand, KeybindRequest};
 use benilla_ui::script::UiScript;
 
-use crate::char_select::ClientState;
+use crate::char_select::InWorldGated;
 use crate::ui_script::{PlayerUiHover, PointerOverUiPanel, UiKeyboardCapture};
 
 pub(crate) mod chord;
@@ -274,9 +274,10 @@ impl Plugin for BindingsPlugin {
                         .chain()
                         .in_set(crate::ui_script::UiInput)
                         .in_set(BindingSet)
-                        .before(benilla_world::schedule::WorldStage::Input)
-                        .run_if(in_state(ClientState::InWorld)),
-                    drain_binding_requests,
+                        .in_set(InWorldGated),
+                    // After the tick: the requests are Lua's own (`SaveBindings`, `RunBinding`),
+                    // queued by handlers the tick dispatched, and a save must not wait a frame.
+                    drain_binding_requests.after(crate::ui_script::UiInput),
                 ),
             );
     }
@@ -498,7 +499,6 @@ fn sync_dispatch(script: Option<NonSendMut<UiScript>>, mut dispatch: ResMut<Bind
 
 /// The dispatch pass — see the module doc. Runs right after the UI key feed (same frame's
 /// capture gate), before `WorldStage::Input` (a bound key must act this frame, once).
-#[allow(clippy::too_many_arguments)]
 fn latch_and_dispatch(
     script: Option<NonSendMut<UiScript>>,
     mut keyboard: MessageReader<KeyboardInput>,
@@ -860,9 +860,7 @@ fn physically_down(
         BindKey::Mouse(b) => buttons.pressed(b),
         // A notch is a press and a release in one frame; it is never "held".
         BindKey::WheelUp | BindKey::WheelDown => false,
-        // CARRY (browser bridge): a synthetic hold has no physical key to read, so it can never
-        // read as released here — the bridge that asserted it is the one that releases it
-        // (`BindingsState::synth_release`), every frame it still wants the hold.
+        // Synthetic holds are released by the bridge, not physical input.
         BindKey::Synth(_) => true,
     }
 }
@@ -1993,24 +1991,16 @@ mod tests {
     }
 
     #[test]
-    fn the_typing_edge_drops_a_synthetic_held_like_a_keys() {
+    fn typing_preserves_a_synthetic_hold_until_the_bridge_releases_it() {
         let mut app = harness();
         app.update();
         state_mut(&mut app).synth_hold(cmd::MOVE_FORWARD);
         app.world_mut().resource_mut::<UiKeyboardCapture>().typing = true;
         app.update();
-        assert!(
-            !state(&app).pressed(cmd::MOVE_FORWARD),
-            "a box taking focus stops movement, synthetic or not"
-        );
-        app.world_mut().resource_mut::<UiKeyboardCapture>().typing = false;
+        assert!(state(&app).pressed(cmd::MOVE_FORWARD), "typing is not a physical release");
+        state_mut(&mut app).synth_release(cmd::MOVE_FORWARD);
         app.update();
-        assert!(
-            !state(&app).pressed(cmd::MOVE_FORWARD),
-            "and it stays stopped until re-asserted"
-        );
-        state_mut(&mut app).synth_hold(cmd::MOVE_FORWARD);
-        assert!(state(&app).pressed(cmd::MOVE_FORWARD));
+        assert!(!state(&app).pressed(cmd::MOVE_FORWARD), "the bridge can release while typing");
     }
 
     #[test]

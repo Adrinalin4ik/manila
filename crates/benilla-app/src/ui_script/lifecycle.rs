@@ -47,7 +47,7 @@ pub(crate) fn setup_script(world: &mut World) {
 /// down at `0x490c97`). Because [`end_ui_session`] routes every login through here, every session's
 /// VM gets the registry and every `inherits="GameFontNormal"` in FrameXML resolves. A design that
 /// dropped the VM and skipped index 0 on the in-game load would fail exactly there — verified in
-/// wow-re's §5 for this change (1291).
+/// wow-re's §5 for this change (2277).
 fn install_boot_vm(world: &mut World) {
     let mut script = match UiScript::new() {
         Ok(s) => s,
@@ -299,7 +299,7 @@ pub(crate) fn arm_entry_ui_load(world: &mut World) {
 /// phase can write CVars — the character screen's AddOns panel is the live case, a *Load out of
 /// date AddOns* click — and `sync_cvars` (1291) registers them onto whichever VM is in the world,
 /// so this is the last moment that table exists. Folded into the persist state, the
-/// `set_cvar_saved_base` + `register_cvars` pair in the load below starts the new VM at the
+/// `set_cvar_saved_base` + `seed_cvars` pair in the load below starts the new VM at the
 /// player's value. That is exactly the route `/reload` has always taken through
 /// [`end_ui_session`]; 2226 makes the first login take it too.
 ///
@@ -415,6 +415,12 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
         world.remove_resource::<PendingEntryUiLoad>();
         return;
     }
+    if matches!(
+        world.resource::<PendingEntryUiLoad>().stage,
+        EntryStage::Armed
+    ) {
+        mint_entry_vm(world);
+    }
     let Some(mut script) = world.remove_non_send_resource::<UiScript>() else {
         warn!("ui_script: entering the world with no VM — the in-game UI will not load");
         world.remove_resource::<PendingEntryUiLoad>();
@@ -518,50 +524,129 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
 /// from two places. Anything added to one belongs in the other: a step left on upstream's path
 /// alone simply does not happen in this fork, and the keybinding table is what proved it.
 fn entry_prepare(world: &mut World, script: &mut UiScript) -> (Option<(String, String)>, bool) {
+    // The character whose AddOn enable state applies. Resolved before the load because the
+    // enable file gates which addons run at all.
     let identity = world
         .get_resource::<crate::char_select::Roster>()
         .and_then(crate::ui_macro::identity);
+    // **The Lua index space, before a single addon file runs** (decision 2175). The reference has
+    // the array in hand well before `UI_Init 0x48fbf0` reaches the addon walk — `SMSG_ADDON_INFO`
+    // lands during the handshake — so an addon reading `GetNumAddOns()` at file scope sees a
+    // populated one. Seated here rather than off a message for exactly that reason: a feed running
+    // a frame later would seat it after every addon had already asked.
+    //
+    // A server that never answered leaves this `None`, and the array then stays empty for the
+    // session — which is the reference's behaviour too, not a fallback we chose.
+    if let Some(reply) = world
+        .get_resource::<crate::net::AddonInfoReply>()
+        .and_then(|r| r.0.clone())
+    {
+        script.note_addon_info_reply(&reply);
+    }
+    // **The CVar table goes in BEFORE the UI loads**, for the same reason and with a shipped-file
+    // consumer rather than an addon one (decision 2115): the reference's own `UIOptionsFrame.xml`
+    // — hidden, on the manifest for the addons that name it — reads `cameraSmoothStyle` and
+    // `cameraSmoothTrackingStyle` inside its two camera dropdowns' `OnLoad`, and a nil there is a
+    // concat error, not a default.
+    //
+    // The seed normally belongs to `cvars::sync_cvars`, a per-VM `Update` claim (1291), and on a
+    // FIRST login that has run many frames earlier. **The window is a VM replacement**: a
+    // `/reloadui` builds a fresh VM and loads the whole interface inside one call, before `Update`
+    // gets a turn — so this edge would load a client with no CVar table at all. Nothing had ever
+    // noticed, because until now no interface file read a CVar at load.
+    //
+    // The two lines are `sync_cvars`'s own seed, in its own order, and the order is
+    // load-bearing: the file's unclaimed entries go in FIRST so an addon's `RegisterCVar` starts
+    // its key at the player's value rather than the declared one (1291); then the registry's
+    // whole table at its live values (2303) — the store that outlived the last VM. `sync_cvars`
+    // still runs its own per-VM seed on the next `Update`; both are idempotent. A world with no
+    // registry (a bare test app) gets the registered defaults.
+    match world.get_resource::<crate::cvars::Cvars>() {
+        Some(cvars) => {
+            script.set_cvar_saved_base(cvars.orphans());
+            script.seed_cvars(cvars.vm_seed());
+        }
+        None => script.register_cvars(crate::cvars::registered_pairs()),
+    }
+    // The realm name goes in BEFORE the UI loads, because `GetRealmName()` is read at addon file
+    // scope — `MyAddonDB[GetRealmName()] = …` is the corpus idiom, and 24 addons stop on it
+    // (decision 1195). The roster carries the auth realm-list entry this session connected to.
     let realm = world
         .get_resource::<crate::char_select::Roster>()
         .and_then(|r| r.realm.as_ref().map(|r| r.name.clone()))
         .unwrap_or_default();
     script.set_realm_name(&realm);
+    // …and so does the PLAYER, for the same reason and with more riding on it — see
+    // [`seat_from_roster`], which is where the why lives.
+    //
+    // **The player RECORD first, and separately** (decisions 2261/2263). The reference keeps the
+    // local player's name, race, class and gender somewhere no cache, feed or object can reach — a
+    // copy of the char-enum row written at the Enter World commit (`0x5abd9e`) and never cleared —
+    // and `UnitName`/`UnitRace`/`UnitClass`/`UnitSex` read only that, unconditionally, even after
+    // the descriptor exists. The snapshot below is the descriptor's stand-in until the real one
+    // streams in and is replaced when it does; the record outlives every push. Seeded here because
+    // our VM is rebuilt per login (1290) while the reference's record simply persists, so each new
+    // VM has to be told once — before the addon walk, like the realm.
+    if let Some(record) = world
+        .get_resource::<crate::char_select::Roster>()
+        .and_then(record_from_roster)
+    {
+        script.set_player_record(record);
+    }
     if let Some(seat) = world
         .get_resource::<crate::char_select::Roster>()
         .and_then(seat_from_roster)
     {
         script.set_unit("player", Some(seat));
     }
-    let version_check = script
-        .cvar("checkAddonVersion")
-        .map(|v| v != "0")
-        .unwrap_or_else(|| {
-            world
-                .get_resource::<crate::cvars::CvarPersist>()
-                .is_none_or(crate::cvars::CvarPersist::addon_version_check)
-        });
-    // **The four seeds of decision 2241, which the sliced path needs exactly as the one-shot
-    // does.** Upstream moved them out of per-VM `Update` claims and into its single exclusive
-    // load call, on the premise that "the whole interface load happens inside one exclusive call
-    // that precedes the first `Update`". That premise does not hold here: this fork spreads the
-    // load across frames, because the browser has one thread and a single burst stalls it.
+    // The addon version gate (decision 1292): the live table when this VM has one, else the
+    // persisted value. **Every entry is now the reload case** (2226) — the VM was born a few
+    // lines up, so its table is whatever `register_cvars` just seeded off the persisted base, and
+    // that base is current by construction because the fold runs in the same call. Before 2226
+    // this read the glue phase's own live table, which is how a *Load out of date AddOns* click at
+    // character select reached here inside the save debounce; the fold carries that click now, by
+    // the route the reload path always used. Absent both (a bare test world) is the registrar
+    // default: check ON.
+    let version_check = world
+        .get_resource::<crate::cvars::Cvars>()
+        .is_none_or(crate::cvars::Cvars::addon_version_check);
+    // **…and the rest of the same class** (decision 2241). Each of these was a per-VM claim in
+    // `Update`, which answers *which* VM and not *when inside its life* — and every one of them
+    // backs a Lua getter the load burst below reads:
     //
-    // Left only on upstream's path, every one of them silently did not happen on ours — and the
-    // old `Update` systems that used to do the work are gone with the rewrite. The keybinding
-    // table was the visible half: the Key Bindings window enumerates `GetNumBindings`, so it
-    // opened with no rows at all, and an addon's `SetBinding` on a stock command was a silent nil.
-    // The other three fail the same way and quieter — `General` filed as a custom channel, the
-    // `[Language]` prefix gate unset, and `GetMapContinents`/`GetMapZones` empty at the file
-    // scope where Astrolabe builds its whole zone table.
+    // - the **zone-channel catalog**, whose empty state is not "no zone yet" to its three verbs
+    //   but *"no such built-in channel"* — the leg that files `General` as a custom channel in the
+    //   chat cache and puts a real `CMSG_JOIN_CHANNEL` on the wire;
+    // - the **keybinding table**, without which stock `ActionButton_OnLoad` paints a blank hotkey
+    //   corner and an addon's `SetBinding` on a stock command is a silent nil;
+    // - the **default language**, which `ChatFrame_OnEvent`'s `PLAYER_ENTERING_WORLD` arm turns
+    //   into the `[Language]` prefix gate for every chat line of the session.
     crate::ui_chat::seed_zone_channel_catalog(world, script);
     crate::bindings::seed_bindings_for_vm(world, script);
     crate::ui_unit::seed_default_language(world, script);
+    // **The world map's catalog, before the first addon file runs** (decision 2240). The continent
+    // and zone lists behind `GetMapContinents`/`GetMapZones` are static DBC data, and the corpus
+    // reads them at file scope: Astrolabe — the positioning library under Questie and Cartographer
+    // — builds its entire continent → zone table inside `AceLibrary:Register`'s synchronous
+    // `activate`. Pushed from an `Update` system it landed ~210 ms after this whole call returned,
+    // so that table was built from two empty lists and every icon placement afterwards indexed a
+    // nil zone. Same shape as the four seeds above, and the reference has no timing here at all.
     crate::ui_world_map::seed_world_map_catalog(world, script);
-    // The VM's raster seam — screen size and font engine — before the first `<OnLoad>` runs
-    // (decision 2028); the one-shot's own call carries the why. It belongs on this path for the
-    // same reason and one more: the sliced load spans frames, so a file loaded in slice one would
-    // otherwise measure 0 until whichever later frame `extract::drive_script` first seated a
-    // measurer. Upstream widened this helper from the measurer alone and renamed it to match.
+    // **The raster seam — the screen size and the font engine — before the first `<OnLoad>` runs**
+    // (decisions 2242 and 2028). The screen size is 2242's: a fresh VM starts at 1024×768 and the
+    // feed that corrects it is an `Update` system, so every OnLoad that *computes* from
+    // `GetScreenWidth()`/`GetScreenHeight()` baked the wrong number for the session — the stock
+    // world map's full-screen blackout quad among them.
+    //
+    // The font engine is 2028's. Every file the
+    // walk below loads may measure the text it just set — the era's own tab law is
+    // `label:GetStringWidth() + 40` at OnLoad, and the addon corpus writes the same pair — and a
+    // `GetStringWidth` with no measurer installed answers 0. Seated only from the per-frame pass
+    // (`extract::tick_script`, an `Update` system), a VM that is BORN and LOADED inside one
+    // exclusive `PreUpdate` slot never sees it: that is exactly `ReloadUI()`, which mints a fresh
+    // boot VM in `end_ui_session` and calls straight into here, so every `/reload` measured 0
+    // through its whole load edge and only converged a frame later off whatever poll the caller
+    // had written to survive it.
     seat_raster_seam_for_load(world, script);
     script.set_instruction_budget(addons::LOAD_INSTRUCTION_BUDGET);
     (identity, version_check)
@@ -697,116 +782,7 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
         warn!("ui_script: entering the world with no VM — the in-game UI will not load");
         return;
     };
-    // The character whose AddOn enable state applies. Resolved before the load because the
-    // enable file gates which addons run at all.
-    let identity = world
-        .get_resource::<crate::char_select::Roster>()
-        .and_then(crate::ui_macro::identity);
-    // **The Lua index space, before a single addon file runs** (decision 2175). The reference has
-    // the array in hand well before `UI_Init 0x48fbf0` reaches the addon walk — `SMSG_ADDON_INFO`
-    // lands during the handshake — so an addon reading `GetNumAddOns()` at file scope sees a
-    // populated one. Seated here rather than off a message for exactly that reason: a feed running
-    // a frame later would seat it after every addon had already asked.
-    //
-    // A server that never answered leaves this `None`, and the array then stays empty for the
-    // session — which is the reference's behaviour too, not a fallback we chose.
-    if let Some(reply) = world
-        .get_resource::<crate::net::AddonInfoReply>()
-        .and_then(|r| r.0.clone())
-    {
-        script.note_addon_info_reply(&reply);
-    }
-    // **The CVar table goes in BEFORE the UI loads**, for the same reason and with a shipped-file
-    // consumer rather than an addon one (decision 2115): the reference's own `UIOptionsFrame.xml`
-    // — hidden, on the manifest for the addons that name it — reads `cameraSmoothStyle` and
-    // `cameraSmoothTrackingStyle` inside its two camera dropdowns' `OnLoad`, and a nil there is a
-    // concat error, not a default.
-    //
-    // The seed normally belongs to `cvars::sync_cvars`, a per-VM `Update` claim (1291), and on a
-    // FIRST login that has run many frames earlier. **The window is a VM replacement**: a
-    // `/reloadui` builds a fresh VM and loads the whole interface inside one call, before `Update`
-    // gets a turn — so this edge would load a client with no CVar table at all. Nothing had ever
-    // noticed, because until now no interface file read a CVar at load.
-    //
-    // The two lines are `sync_cvars`'s own first two, in its own order, and the order is
-    // load-bearing: the saved config goes in FIRST so registration starts each key at the player's
-    // value rather than the factory one (1291) — reversed, a reload would quietly reset every
-    // knobless CVar to its default. `sync_cvars` still does its full knob-derived pass on the next
-    // `Update`; both calls are idempotent, and a re-register never clobbers a live value.
-    if let Some(persist) = world.get_resource::<crate::cvars::CvarPersist>() {
-        script.set_cvar_saved_base(persist.saved_base());
-    }
-    script.register_cvars(crate::cvars::registered_pairs());
-    // The realm name goes in BEFORE the UI loads, because `GetRealmName()` is read at addon file
-    // scope — `MyAddonDB[GetRealmName()] = …` is the corpus idiom, and 24 addons stop on it
-    // (decision 1195). The roster carries the auth realm-list entry this session connected to.
-    let realm = world
-        .get_resource::<crate::char_select::Roster>()
-        .and_then(|r| r.realm.as_ref().map(|r| r.name.clone()))
-        .unwrap_or_default();
-    script.set_realm_name(&realm);
-    // …and so does the PLAYER, for the same reason and with more riding on it — see
-    // [`seat_from_roster`], which is where the why lives.
-    if let Some(seat) = world
-        .get_resource::<crate::char_select::Roster>()
-        .and_then(seat_from_roster)
-    {
-        script.set_unit("player", Some(seat));
-    }
-    // The addon version gate (decision 1292): the live table when this VM has one, else the
-    // persisted value. **Every entry is now the reload case** (2226) — the VM was born a few
-    // lines up, so its table is whatever `register_cvars` just seeded off the persisted base, and
-    // that base is current by construction because the fold runs in the same call. Before 2226
-    // this read the glue phase's own live table, which is how a *Load out of date AddOns* click at
-    // character select reached here inside the save debounce; the fold carries that click now, by
-    // the route the reload path always used. Absent both (a bare test world) is the registrar
-    // default: check ON.
-    let version_check = script
-        .cvar("checkAddonVersion")
-        .map(|v| v != "0")
-        .unwrap_or_else(|| {
-            world
-                .get_resource::<crate::cvars::CvarPersist>()
-                .is_none_or(crate::cvars::CvarPersist::addon_version_check)
-        });
-    // **…and the rest of the same class** (decision 2241). Each of these was a per-VM claim in
-    // `Update`, which answers *which* VM and not *when inside its life* — and every one of them
-    // backs a Lua getter the load burst below reads:
-    //
-    // - the **zone-channel catalog**, whose empty state is not "no zone yet" to its three verbs
-    //   but *"no such built-in channel"* — the leg that files `General` as a custom channel in the
-    //   chat cache and puts a real `CMSG_JOIN_CHANNEL` on the wire;
-    // - the **keybinding table**, without which stock `ActionButton_OnLoad` paints a blank hotkey
-    //   corner and an addon's `SetBinding` on a stock command is a silent nil;
-    // - the **default language**, which `ChatFrame_OnEvent`'s `PLAYER_ENTERING_WORLD` arm turns
-    //   into the `[Language]` prefix gate for every chat line of the session.
-    crate::ui_chat::seed_zone_channel_catalog(world, &mut script);
-    crate::bindings::seed_bindings_for_vm(world, &mut script);
-    crate::ui_unit::seed_default_language(world, &mut script);
-    // **The world map's catalog, before the first addon file runs** (decision 2240). The continent
-    // and zone lists behind `GetMapContinents`/`GetMapZones` are static DBC data, and the corpus
-    // reads them at file scope: Astrolabe — the positioning library under Questie and Cartographer
-    // — builds its entire continent → zone table inside `AceLibrary:Register`'s synchronous
-    // `activate`. Pushed from an `Update` system it landed ~210 ms after this whole call returned,
-    // so that table was built from two empty lists and every icon placement afterwards indexed a
-    // nil zone. Same shape as the four seeds above, and the reference has no timing here at all.
-    crate::ui_world_map::seed_world_map_catalog(world, &mut script);
-    // **The raster seam — the screen size and the font engine — before the first `<OnLoad>` runs**
-    // (decisions 2242 and 2028). The screen size is 2242's: a fresh VM starts at 1024×768 and the
-    // feed that corrects it is an `Update` system, so every OnLoad that *computes* from
-    // `GetScreenWidth()`/`GetScreenHeight()` baked the wrong number for the session — the stock
-    // world map's full-screen blackout quad among them.
-    //
-    // The font engine is 2028's. Every file the
-    // walk below loads may measure the text it just set — the era's own tab law is
-    // `label:GetStringWidth() + 40` at OnLoad, and the addon corpus writes the same pair — and a
-    // `GetStringWidth` with no measurer installed answers 0. Seated only from the per-frame pass
-    // (`extract::tick_script`, an `Update` system), a VM that is BORN and LOADED inside one
-    // exclusive `PreUpdate` slot never sees it: that is exactly `ReloadUI()`, which mints a fresh
-    // boot VM in `end_ui_session` and calls straight into here, so every `/reload` measured 0
-    // through its whole load edge and only converged a frame later off whatever poll the caller
-    // had written to survive it.
-    seat_raster_seam_for_load(world, &mut script);
+    let (identity, version_check) = entry_prepare(world, &mut script);
     let _ = load_ingame_ui(&mut script, identity.as_ref(), version_check);
     // The Minimap widget was born a moment ago with `MinimapState::default()`; seed its two live
     // zoom indices from the persisted CVars now, before anything reads them — the reference's own
@@ -905,6 +881,43 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     }
 }
 
+/// The wire's gender byte (0 male, 1 female) on `UnitSex`'s own 2/3 scale — the one mapping, so
+/// the record and the snapshot can never disagree about which is which.
+fn roster_sex(gender: u8) -> u8 {
+    match gender {
+        0 => 2,
+        1 => 3,
+        _ => 0,
+    }
+}
+
+/// **The local player record the UI loads under** — our copy of the char-enum row the reference
+/// copies at the Enter World commit (decision 2263; the bytes are on
+/// [`benilla_ui::script::PlayerRecord`]).
+///
+/// The same roster row [`seat_from_roster`] builds the `"player"` *snapshot* from, and
+/// deliberately the same `race_names`/`class_names` lookups: the reference resolves the record's
+/// race and class bytes through `ChrRaces`/`ChrClasses` at call time, so resolving them once here
+/// is the same answer, and sharing the lookup is what stops the record and the snapshot drifting
+/// into two opinions about what race 4 is.
+///
+/// **The level is not here, and that is byte-verified, not an omission** — the reference's record
+/// carries a level at `+0x108` and ships an accessor for it (`0x5abe00`) that *nothing calls*, so
+/// `UnitLevel("player")` reads the descriptor.
+pub(crate) fn record_from_roster(
+    roster: &crate::char_select::Roster,
+) -> Option<benilla_ui::script::PlayerRecord> {
+    let row = roster.pending_row()?;
+    let race = crate::ui_unit::race_names(row.race);
+    let class = crate::ui_unit::class_names(row.class);
+    Some(benilla_ui::script::PlayerRecord {
+        name: row.name.clone(),
+        race: race.map(|(n, f)| (n.to_string(), f.to_string())),
+        class: class.map(|(n, f)| (n.to_string(), f.to_string())),
+        sex: roster_sex(row.gender),
+    })
+}
+
 /// The `"player"` snapshot the UI loads **under**, built from the roster row of the pick in
 /// flight — `None` when there is no pick (a capture, a scenario, a test world).
 ///
@@ -938,20 +951,32 @@ pub(crate) fn seat_from_roster(
     let row = roster.pending_row()?;
     let race = crate::ui_unit::race_names(row.race);
     let class = crate::ui_unit::class_names(row.class);
+    let sex = roster_sex(row.gender);
     Some(benilla_ui::script::UnitState {
-        exists: true,
+        // **`exists` is FALSE, and the level is 0 — the reference's answers, byte-verified**
+        // (decision 2263). `UnitExists("player")` `0x515fb0` has no fast path: it resolves the
+        // token, and the resolver reads the GUID out of the OBJECT (`0x515994`), not out of
+        // `[mgr+0xc0]` — so with no object it holds `0:0`. The roster fallback `0x491900` then
+        // bails on a zero GUID at `0x4e80aa je` *before* it fetches the active player, so the
+        // `0 == 0` that would otherwise answer "yes, that's me" is never reached: `0x516001
+        // lua_pushnil`. `UnitLevel 0x517fc0` likewise carries no `"player"` compare at all and
+        // reaches its total-miss arm `0x51813e push 0; push 0` — the **number 0**, not nil. The
+        // two misses are deliberately asymmetric and a client that modelled "no data" uniformly
+        // would be wrong on one of them (wow-re `ui/scratch/unit-verbs-before-player-object.md`
+        // §2-§3; it also corrected that repo's own `main`, which had published the opposite).
+        //
+        // This seat is no longer what makes the player *answerable* — the record above is — so it
+        // no longer has to claim a unit exists in order to deliver a name. What it still carries
+        // is the handful of fields the corpus reads at file scope that are neither the record's
+        // nor the descriptor's to say yet, the faction side below chief among them.
+        exists: false,
         name: Some(row.name.clone()),
-        level: u32::from(row.level),
         race: race.map(|(n, _)| n.to_string()),
         race_file: race.map(|(_, f)| f.to_string()),
         class: class.map(|(n, _)| n.to_string()),
         class_file: class.map(|(_, f)| f.to_string()),
         // The wire's 0/1 on `UnitSex`'s 2/3 scale — `ui_unit::snapshot`'s own mapping.
-        sex: match row.gender {
-            0 => 2,
-            1 => 3,
-            _ => 0,
-        },
+        sex,
         is_player: true,
         player_controlled: true,
         // Nil here is not "no faction", it is a state a player character cannot be in, and
@@ -1038,7 +1063,7 @@ pub(crate) fn arm_leaving_world_on_self_create(
 ///
 /// **The last step is not "destroy the Lua state"** — which is what three of wow-re's own notes
 /// said, until this client's teardown made the question load-bearing and a §5 cross-check settled
-/// it (`system/ui/scratch/lua-state-lifecycle.md`; 1291). `0x490c97` is the frame-script owner's
+/// it (`system/ui/scratch/lua-state-lifecycle.md`; 2277). `0x490c97` is the frame-script owner's
 /// scalar-deleting destructor — the widget tree and the native virtual-font registry — and the Lua
 /// state outlives it. The state is closed and re-opened at `0x703b80`, which reaches `InitLua` by a
 /// **tail-`jmp`** (`0x703b8e`) rather than a call, which is exactly why a call-census missed it.

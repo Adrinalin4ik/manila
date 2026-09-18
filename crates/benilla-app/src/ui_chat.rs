@@ -10,7 +10,7 @@
 
 use bevy::prelude::*;
 
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 
 #[cfg(test)]
 mod ace_gate_tests;
@@ -34,7 +34,7 @@ mod event;
 mod feed;
 mod frames;
 /// The idle handler — the 5-minute auto-sit / auto-AFK and the 30-minute camp.
-mod idle;
+pub(crate) mod idle;
 mod input;
 /// The language gate — the exemptions and the fluency lookup behind the chat garble (B262).
 mod language;
@@ -76,6 +76,7 @@ pub(crate) struct UiChatPlugin;
 
 impl Plugin for UiChatPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(combat::on_cvar);
         app.init_resource::<ChatLog>()
             .init_resource::<away::AfkMirror>()
             .init_resource::<away::AfkMirrorMemo>()
@@ -86,9 +87,9 @@ impl Plugin for UiChatPlugin {
             .init_resource::<recruitment::GuildRecruitmentCascade>()
             .init_resource::<language::ChatLanguages>()
             .init_resource::<combat::CombatLogRanges>()
-            // `CombatLogPeriodicSpells`' knob, beside its sibling range set — both are
-            // `KnobParams` members, so a missing one is not a dormant default but a
-            // STARTUP PANIC in `cvars::load_config` (which takes them all as `ResMut`).
+            // `CombatLogPeriodicSpells`' knob, beside its sibling range set — both are what
+            // `combat::on_cvar` writes, so a missing one is not a dormant default but a
+            // PANIC on the first write of either row (2303; before that, at startup).
             // 947ba585f registered it only in the `cvar_app()` test helper, and the client
             // stopped booting; the unit suites never noticed because each builds its own
             // world. `scripts/smoke.sh` is the gate that sees this class.
@@ -146,7 +147,12 @@ impl Plugin for UiChatPlugin {
             // The world broadcasts' resolve pass — before the drain that renders what it produces,
             // so an alarm or a shutdown countdown lands on the frame it decodes like every other
             // chat source.
-            .add_systems(Update, broadcast::feed_broadcasts.before(feed::feed_chat))
+            .add_systems(
+                Update,
+                broadcast::feed_broadcasts
+                    .in_set(crate::ui_script::UiFeed)
+                    .before(feed::feed_chat),
+            )
             // **Never against the boot VM** (B376's second half). `feed_chat` takes the whole
             // queue with `mem::take` and fires each line as a real `CHAT_MSG_*` — so a drain
             // against a VM with no ChatFrame does not defer the lines, it DESTROYS them, with no
@@ -184,7 +190,7 @@ impl Plugin for UiChatPlugin {
             .add_systems(
                 Update,
                 feed::feed_chat
-                    .before(UiInput)
+                    .in_set(UiFeed)
                     .after(crate::ui_unit::UnitFeed)
                     .after(crate::ui_guild::GuildFeed)
                     .run_if(crate::ui_script::ingame_ui_up),
@@ -195,11 +201,16 @@ impl Plugin for UiChatPlugin {
             .add_systems(Update, idle::stamp_input.before(UiInput))
             // A fresh VM gets the joined-channel mirror re-pushed once (decision 1291) — before
             // the feed, so the reload frame's first routed line already renders numbered.
-            .add_systems(Update, channels::seed_channels.before(feed::feed_chat))
+            .add_systems(
+                Update,
+                channels::seed_channels
+                    .in_set(crate::ui_script::UiFeed)
+                    .before(feed::feed_chat),
+            )
             // RequestTimePlayed() -> CMSG_PLAYED_TIME, and SMSG_PLAYED_TIME -> TIME_PLAYED_MSG.
             // Beside the chat feed because /played is a chat command and the answer prints there
             // too; before the input pass for the same reason feed_chat is.
-            .add_systems(Update, feed::played_time_bridge.before(UiInput))
+            .add_systems(Update, feed::played_time_bridge.in_set(UiFeed))
             // The input: open on ENTER (after the UI input pass has set UiKeyboardCapture, so we
             // don't reopen the box that's already eating keys), then drain any submitted line. Both
             // touch the single NonSend VM, so they chain. In-world only (decision 0193): at the
@@ -228,7 +239,7 @@ impl Plugin for UiChatPlugin {
                 )
                     .chain()
                     .after(UiInput)
-                    .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                    .in_set(crate::char_select::InWorldGated),
             )
             // The zone-channel auto-join (0288 P6): the client half of a handshake vmangos
             // deliberately leaves to us. In-world only, and it early-outs on an unchanged zone.
@@ -251,10 +262,8 @@ impl Plugin for UiChatPlugin {
                 Update,
                 (
                     channels::end_session_channels_on_disconnect,
-                    channels::auto_join_zone_channels
-                        .run_if(in_state(crate::char_select::ClientState::InWorld)),
-                    recruitment::guild_recruitment_cascade
-                        .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                    channels::auto_join_zone_channels.in_set(crate::char_select::InWorldGated),
+                    recruitment::guild_recruitment_cascade.in_set(crate::char_select::InWorldGated),
                 )
                     .chain()
                     .after(benilla_world::terrain_stream::AreaAuthoritySet),

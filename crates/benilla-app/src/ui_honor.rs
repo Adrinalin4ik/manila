@@ -56,7 +56,7 @@ use bevy::prelude::*;
 use benilla_ui::script::{HonorState, InspectHonorData, ScriptValue, UiScript};
 
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_script::{UiInput, VmMemo};
+use crate::ui_script::{UiFeed, VmMemo};
 
 /// The inspect-honor reply we currently hold, or `None` before one lands.
 ///
@@ -90,7 +90,7 @@ impl Plugin for UiHonorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<InspectHonor>()
             .init_resource::<HonorFeedState>()
-            .add_systems(Update, feed_honor.in_set(UiInput));
+            .add_systems(Update, feed_honor.in_set(UiFeed));
     }
 }
 
@@ -164,7 +164,6 @@ fn events_for(before: Option<&HonorState>, after: &HonorState) -> (bool, bool) {
 }
 
 /// Push the self snapshot and the inspect reply, fire what moved, and drain the pane's request.
-#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 fn feed_honor(
     script: Option<NonSendMut<UiScript>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,

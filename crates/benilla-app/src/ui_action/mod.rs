@@ -65,6 +65,13 @@ pub(crate) struct CooldownEvents;
 // `cast_send`, so a second send path cannot be written by accident (decision 0914).
 pub(crate) use cast_send::{CastCommit, CastLadder};
 pub(crate) use cast_target::AutoSelfCast;
+
+/// `autoSelfCast`'s change callback (decision 2303): a flag.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut auto: ResMut<AutoSelfCast>) {
+    if ev.is("autoSelfCast") {
+        auto.0 = ev.flag();
+    }
+}
 pub(crate) use errors::{
     attack_actor_blocked, attack_actor_refusal, keyed_line, keyed_line_s, reagent_totem_refusal,
     show_messages, ui_error_text, CastErrors, CastFail, Caster, FillArg, MessageSink, MountErrors,
@@ -211,9 +218,10 @@ impl Spells {
     /// `wave-cooldown.md`/`moving-cast-gate.md`, byte-verified): `CastingTimeIndex` resolves the
     /// [`Self::cast_times`] row, `base + perLevel·(casterLevel − baseLevel)` floors to the
     /// row's minimum (row 1, the all-zero instant sentinel, resolves 0). The level term keys on
-    /// the `SpellRec+0x70` column ([`SpellDisplay::base_level`]); spellmod op `0xa`
-    /// (SPELLMOD_CASTING_TIME) is unmodeled — benilla has no spellmod system — a named
-    /// micro-divergence (a talent-shortened 0-second cast doesn't exist in the 1.12 data).
+    /// the `SpellRec+0x70` column ([`SpellDisplay::base_level`]). Spell-mod op `0xa`
+    /// (SPELLMOD_CASTING_TIME) is still unread here — the tables themselves are live
+    /// ([`crate::spell_mods`]), only this consumer is not wired to them, so a talent-shortened
+    /// cast still shows its untalented length.
     /// A missing row reads 0 (instant), like a failed catalog load everywhere else.
     pub(crate) fn cast_time_ms(
         &self,
@@ -356,6 +364,7 @@ pub(crate) struct UiActionPlugin;
 
 impl Plugin for UiActionPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(on_cvar);
         app.init_resource::<PlayerActions>()
             .init_resource::<LearnedAbilities>()
             .init_resource::<CastErrors>()
@@ -388,12 +397,11 @@ impl Plugin for UiActionPlugin {
                     ranks::normalize_action_ranks
                         .in_set(UnitFeed)
                         .before(feed::feed_actions),
-                    feed::feed_actions.in_set(UnitFeed).before(UiInput),
+                    feed::feed_actions.in_set(UnitFeed),
                     state::feed_action_state
                         .in_set(UnitFeed)
                         .in_set(CooldownEvents)
-                        .after(feed::feed_actions)
-                        .before(UiInput),
+                        .after(feed::feed_actions),
                     drain::drain_action_sets.after(UiInput),
                     drain::drain_action_uses.after(UiInput),
                     // The T binding (0997): the attack arm's twin door, after the dispatch wrote
@@ -421,9 +429,7 @@ impl Plugin for UiActionPlugin {
                     // the next frame's cursor drive reads the mode. The cursor pre-empt, the
                     // right-press cancel, and the click commit register in the TARGET chain
                     // (ordering against the classifier and the select click is theirs to own).
-                    targeting::feed_targeting_to_vm
-                        .in_set(UnitFeed)
-                        .before(UiInput),
+                    targeting::feed_targeting_to_vm.in_set(UnitFeed),
                     targeting::drain_stop_targeting.after(UiInput),
                     // The item half's commit (decision 0923) — the bag / paper-doll click seam's
                     // `0x495d60`. A UI drain like the others: after the input pass, so a click

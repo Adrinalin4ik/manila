@@ -13,7 +13,9 @@ use benilla_ui::script::{
 use bevy::prelude::*;
 
 use crate::names::NameCache;
-use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{
+    ClientCommand, FieldChanged, FieldEdges, Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer,
+};
 use crate::target::Selection;
 use crate::ui_script::gate;
 
@@ -103,7 +105,6 @@ pub(crate) const GROUP_MEMBER_SUBGROUP: u8 = 0x07;
 /// events on their edges. The per-member unit state is the 0434 §2 **merged view**: a streamed
 /// member's live descriptor wins; the `PARTY_MEMBER_STATS` snapshot covers the rest — and the
 /// roster status byte overlays both (the descriptor never carries connected/AFK/DND).
-#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 pub(super) fn feed_party(
     // `ChrClasses.dbc` field 16 — `UnitHasRelicSlot`'s only input. Absent when the client data
     // failed to load, in which case no class reads as having a relic slot.
@@ -114,6 +115,8 @@ pub(super) fn feed_party(
     stores: Query<&ObjectStore>,
     changed_stores: Query<(), Changed<ObjectStore>>,
     mut removed_stores: RemovedComponents<ObjectStore>,
+    // The per-field edges (decision 2297), for `fire_transitions`' watch-bridge arms.
+    mut edges: MessageReader<FieldChanged>,
     self_q: Query<(Entity, &Guid, &ObjectStore), With<SelfPlayer>>,
     factions: Option<Res<crate::target::Factions>>,
     names: Res<NameCache>,
@@ -134,6 +137,7 @@ pub(super) fn feed_party(
         return;
     };
     let (fed, vm_reset) = fed.get_reset(&script);
+    let edges = FieldEdges::collect(&mut edges);
     // The ready-check summary the timeout tick composed (decision 1989) — a client-composed
     // `CHAT_MSG_SYSTEM` line, pushed the way every other one is. Ahead of the gate: the tick
     // runs on the frame clock, not on anything the gate watches.
@@ -334,7 +338,13 @@ pub(super) fn feed_party(
             gate.audit("feed_party", "a party-token snapshot");
             script.set_unit(token, snap.clone());
             if let Some(cur) = &snap {
-                crate::ui_unit::fire_transitions(&mut script, token, fed.units[i].as_ref(), cur);
+                crate::ui_unit::fire_transitions(
+                    &mut script,
+                    token,
+                    fed.units[i].as_ref(),
+                    cur,
+                    &edges,
+                );
             }
             fed.units[i] = snap;
         }
@@ -418,6 +428,7 @@ pub(super) fn feed_party(
                     token,
                     fed.raid_units[i].as_ref(),
                     cur,
+                    &edges,
                 );
             }
             fed.raid_units[i] = snap;
@@ -872,7 +883,7 @@ pub(super) fn drain_party(
     script: Option<NonSendMut<UiScript>>,
     mut group: ResMut<GroupState>,
     selection: Res<Selection>,
-    mut names: ResMut<NameCache>,
+    names: Res<NameCache>,
     self_q: Query<&Guid, With<SelfPlayer>>,
     commands: Res<NetCommands>,
     mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
