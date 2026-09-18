@@ -92,17 +92,28 @@ pub struct ParticleTuning {
     /// cheapest proxy for that. Density thins every effect everywhere, the one in your face
     /// included; a wall leaves that one alone and drops the ones behind the next hill.
     ///
-    /// Defaults to the top of [`crate::view::FARCLIP_RANGE`], which is *no* wall at all:
-    /// `min(farclip, this)` is then always `farclip`, so a player who never moves the slider gets
-    /// exactly today's behaviour.
+    /// Defaults to the top of [`EFFECTS_DISTANCE_RANGE`], which is past every farclip and so is
+    /// *no* wall at all: `min(farclip, this)` is then always `farclip`, and a player who never
+    /// moves the slider gets exactly today's behaviour.
     pub max_distance: f32,
 }
+
+/// The settable range of [`ParticleTuning::max_distance`], in yards — **ours, and chosen rather
+/// than quoted**, because 1.12 has no such CVar to quote from.
+///
+/// The top is deliberately past [`crate::view::FARCLIP_RANGE`]'s own 777, which makes the last stop
+/// mean **off**: `min(farclip, this)` can never bind there, whatever the player's terrain distance.
+/// The bottom is 25 yd because the knob has to be able to do something — the first range shipped
+/// here started at 177, borrowed from the farclip clamp on the reasoning that both are walls in
+/// yards, and at 177 yd almost no effect in a fight is culled at all. A slider whose aggressive end
+/// changes nothing is not a setting, and that was a real defect rather than a taste question.
+pub const EFFECTS_DISTANCE_RANGE: std::ops::RangeInclusive<f32> = 25.0..=800.0;
 
 impl Default for ParticleTuning {
     fn default() -> Self {
         Self {
             density: 1.0,
-            max_distance: *crate::view::FARCLIP_RANGE.end(),
+            max_distance: *EFFECTS_DISTANCE_RANGE.end(),
         }
     }
 }

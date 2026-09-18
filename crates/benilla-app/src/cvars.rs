@@ -355,7 +355,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // is 15 fps, turning away is 25), and a wall is the only knob that cuts the effects you are not
     // looking at while leaving the one in front of you intact. Default is the top of FARCLIP_RANGE,
     // i.e. no wall: `min(farclip, this)` is `farclip` until the slider moves.
-    same("effectsDistance", "777"),
+    same("effectsDistance", "800"),
     // **`nearclip` — farclip's other half, and a knob we had been holding as a constant** (2163).
     // `0x68867a` passes name `0x84ffb0` `"nearclip"`, default string `0x84fb48` `"0.1"`, help
     // "Near clip plane distance", flags `1`, callback `0x688d90`, record `[0xc7f348]` (wow-re

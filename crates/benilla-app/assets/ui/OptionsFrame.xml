@@ -3005,7 +3005,13 @@
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "particleDensity", "Effects Quality")
-                                                OptionsSliderRow_Setup(self, 0.25, 1.0, 0.25, "raw")
+                                                -- **No "raw" here**, and that is the whole fix for
+                                                -- a scale that read 0 and 1: `raw` prints
+                                                -- `%d` of the value, so a knob whose range IS
+                                                -- 0.25..1.0 rounded to two distinct labels. The
+                                                -- default format is `value * 100` as a percent,
+                                                -- which is what a density is — 25/50/75/100%.
+                                                OptionsSliderRow_Setup(self, 0.25, 1.0, 0.25)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowEffectsDistance" inherits="OptionsSliderRowTemplate">
@@ -3015,9 +3021,16 @@
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "effectsDistance", "Effects Distance")
-                                                -- Farclip's own grid: 177..777 step 60. The top is
-                                                -- the default and means "no wall".
-                                                OptionsSliderRow_Setup(self, 177, 777, 60, "raw")
+                                                -- **Its own grid, not farclip's** (EFFECTS_DISTANCE_RANGE):
+                                                -- 25..800 step 25. The first shipped version
+                                                -- borrowed farclip's 177..777, which put the
+                                                -- aggressive end at 177 yd — far enough that
+                                                -- nothing in a fight is culled, i.e. a slider that
+                                                -- does nothing at the end you reach for. The top
+                                                -- stop is past every farclip and means OFF, and it
+                                                -- is on the grid so the thumb can actually land on
+                                                -- it.
+                                                OptionsSliderRow_Setup(self, 25, 800, 25, "raw")
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowWorldDetail" inherits="OptionsSliderRowTemplate">

@@ -291,10 +291,15 @@ pub(crate) fn on_cvar(
         // The reference's own clamp, from its own handler (`0x688fb0`): [0.25, 1.0]. Scales
         // emission rate, so half density is half the particles and half the fill they cost.
         "particledensity" => particles.density = v.clamp(0.25, 1.0),
-        // Ours (see the cvar table). Shares FARCLIP_RANGE because it is the same wall measured the
-        // same way, and the top of that range means "no wall".
+        // Ours (see the cvar table), and on its OWN range rather than farclip's: the top is past
+        // every farclip and means "no wall", the bottom is low enough to actually cull a fight's
+        // effects. Borrowing the farclip clamp put the aggressive end at 177 yd, where nothing in
+        // a fight is culled — a slider that cannot do its job at its own extreme.
         "effectsdistance" => {
-            particles.max_distance = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end())
+            particles.max_distance = v.clamp(
+                *benilla_world::particles::EFFECTS_DISTANCE_RANGE.start(),
+                *benilla_world::particles::EFFECTS_DISTANCE_RANGE.end(),
+            )
         }
         // The reference REFUSES an out-of-range write here rather than clamping (`0x688d90`
         // echoes "NearClip must be in range 0.01 - 0.33" and returns 0). We clamp, which is the
