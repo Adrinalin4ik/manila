@@ -41,6 +41,7 @@ use benilla_assets::RenderConfig;
 use benilla_assets::{m2_url, wmo_url};
 
 mod collider;
+pub use collider::take_build_micros as take_collider_build_micros;
 mod furnish;
 pub mod merge;
 mod queries;

@@ -615,6 +615,9 @@ fn play_kit(
     visuals: &SpellVisualCatalog,
     out: &mut KitOut,
 ) {
+    // Counted for the FPS journal's `fx_kits` column — the reported drops are all in combat, and
+    // this is one of the two doors a cast's art comes through. One relaxed increment.
+    crate::perf::journal::note_fx_kit();
     if let Some(anim_id) = kit.anim_id {
         if play.stage_2 {
             // Stage 2: a COMPARISON, never a play ([`KitPlay::stage_2`]). The driver holds the
@@ -719,6 +722,8 @@ fn play_impact(
     visuals: &SpellVisualCatalog,
     out: &mut KitOut,
 ) {
+    // The other door — see `play_kit` above, and the `fx_impacts` column.
+    crate::perf::journal::note_fx_impact();
     let ImpactPlay {
         spell_id,
         weapon_visual,

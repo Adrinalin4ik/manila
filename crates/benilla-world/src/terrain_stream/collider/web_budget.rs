@@ -103,7 +103,25 @@ pub(super) async fn wait_turn() {
 }
 
 #[cfg(target_arch = "wasm32")]
+/// Every microsecond spent inside `Collider::trimesh` since the last read — the FPS journal's
+/// `col_us` column.
+///
+/// A global counter and not the thread-local [`BUDGET`] beside it, because the two answer different
+/// questions: the budget is *this frame's* pacing and resets with the frame, while the journal
+/// wants the whole second and must not disturb the pacing to read it. An atomic because the builds
+/// run on the compute pool — one thread in a browser, but the type must not encode that.
+static BUILD_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Read and clear. Called once per journal row, so each row is that second's collider cost alone.
+pub fn take_build_micros() -> u64 {
+    BUILD_US.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(super) fn finish_build(elapsed: Duration) {
+    BUILD_US.fetch_add(
+        elapsed.as_micros() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let wake = BUDGET.with(|budget| {
         let mut budget = budget.borrow_mut();
         budget.spent += elapsed;

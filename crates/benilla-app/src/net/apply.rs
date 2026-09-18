@@ -93,11 +93,25 @@ fn addressed_store<'a>(
 /// property 0006 built and 2265 said every split must keep.
 pub(crate) fn apply_net_updates(world: &mut World) {
     let events: Vec<SessionEvent> = world.resource::<NetEvents>().0.try_iter().collect();
+    // **Metered for the FPS journal's `net_pkts` / `net_us` columns.** In a browser there is one
+    // thread, so every packet this frame received is decoded and applied *inside the frame* —
+    // combat, where the update stream is at its heaviest, is exactly where that shows. The clock
+    // is taken only when something arrived, so an idle frame pays a `Vec::is_empty`.
+    //
+    // It covers the whole dispatch, claimed handlers included: the question is what the inbound
+    // stream costs the frame, and splitting that by handler is a later question this column has to
+    // justify first.
+    if events.is_empty() {
+        return;
+    }
+    let count = events.len() as u32;
+    let t0 = bevy::platform::time::Instant::now();
     super::handlers::dispatch(world, events, |world, unclaimed| {
         if let Err(e) = world.run_system_cached_with(apply_unpeeled, unclaimed) {
             panic!("the drain's dispatch match did not run: {e}");
         }
     });
+    crate::perf::journal::note_net(count, t0.elapsed().as_micros() as u64);
 }
 
 /// The dispatch `match` — every kind no subsystem has claimed yet (2305's migration runs one

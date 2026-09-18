@@ -68,7 +68,7 @@ pub(crate) struct FpsJournalSetting(pub(crate) bool);
 const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,mats,meshes,images,\
                               m2,uv,tint,pmat,emat,skin,cmat,tex,cgeo,evicted,fx,fy,fz,main_ms,\
                               gpu_ms,gpu_opaque,gpu_static,gpu_transp,gpu_glow,gpu_post,gpu_ui,\
-                              gpu_other,lua_errs,lua_err_us,msg_hashed\n";
+                              gpu_other,lua_errs,lua_err_us,msg_hashed,ui_us,col_us,emitters,fx_kits,fx_impacts,net_pkts,net_us\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -144,6 +144,28 @@ struct FpsJournal {
 static LUA_ERRS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static LUA_ERR_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static MSG_HASHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static UI_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// **The combat columns.** Spell-visual kits and impacts played this second — the two doors every
+/// cast's art comes through (`creature_anim::spell_visual`'s `play_kit` and `play_impact`).
+///
+/// They exist because the drop is reported in COMBAT and nowhere else: fighting a shaman, then a
+/// paladin, then "somewhere in fighting". That rules out one class's kit and points at the thing
+/// they share — somebody near you casting something. A rate is the first question to ask of it: if
+/// the slow seconds are the ones with many plays, the cost is per-effect and the fix is in the
+/// effect path; if the plays are flat while the frame doubles, it is not the spawning at all and
+/// the next column takes over. Neither answer is available without counting.
+static FX_KITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static FX_IMPACTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// **The network columns**, and the owner's own hypothesis: a browser has one thread, so every
+/// packet the session received is decoded and applied inside the frame that received it. Combat is
+/// when that stream is heaviest — movement for everyone in sight, spell casts, aura and health
+/// updates, combat log — which fits a drop that appears in fights and nowhere else just as well as
+/// the effect path does. Two candidates, one column pair each, one run to separate them.
+static NET_PKTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static NET_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Frames folded into [`UI_US`] this second — the divisor, so the column is per-frame and
+/// comparable with `mean_ms` directly rather than with a rate.
+static UI_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Called by the UI pass after draining this frame's script errors and warnings. `micros` covers
 /// the handler dispatch as well as the log writes: they are one act from the frame's point of view.
@@ -151,6 +173,43 @@ pub(crate) fn note_script_errors(count: u32, micros: u64) {
     use std::sync::atomic::Ordering::Relaxed;
     LUA_ERRS.fetch_add(count, Relaxed);
     LUA_ERR_US.fetch_add(micros, Relaxed);
+}
+
+/// Called every frame with the UI pass's own measured split — tick + resolve + measure, the three
+/// phases that run before the quad half. Summed over the second and divided by the frames in it,
+/// so `ui_us` reads as "microseconds of UI per frame".
+///
+/// **This is the column the last journal could not supply.** That run had `cpu_ms`, `main_ms` and
+/// every `gpu_*` empty for all 256 rows — the browser hands us no CPU time and no GPU spans — so
+/// it could say when the frame was slow and nothing whatever about where. Our own phases are the
+/// only timings available on that target, which makes measuring them the difference between
+/// another hypothesis and an answer.
+pub(crate) fn note_net(packets: u32, micros: u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    NET_PKTS.fetch_add(packets, Relaxed);
+    NET_US.fetch_add(micros, Relaxed);
+}
+
+fn take_net_costs() -> (u32, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (NET_PKTS.swap(0, Relaxed), NET_US.swap(0, Relaxed))
+}
+
+pub(crate) fn note_fx_kit() {
+    FX_KITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn note_fx_impact() {
+    FX_IMPACTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn take_fx_counts() -> (u32, u32) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (FX_KITS.swap(0, Relaxed), FX_IMPACTS.swap(0, Relaxed))
+}
+
+pub(crate) fn note_ui_micros(micros: u64) {
+    UI_US.fetch_add(micros, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Called every frame with the message-sweep counter's delta (`UiScript::msg_lines_hashed`).
@@ -166,6 +225,15 @@ fn take_script_costs() -> (u32, u64, u64) {
         LUA_ERR_US.swap(0, Relaxed),
         MSG_HASHED.swap(0, Relaxed),
     )
+}
+
+/// The UI pass's microseconds **per frame** over the second, or `None` when no frame reported —
+/// an empty cell then, because a zero there would claim the UI was free rather than unmeasured.
+fn take_ui_micros_per_frame() -> Option<u64> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let total = UI_US.swap(0, Relaxed);
+    let frames = UI_FRAMES.swap(0, Relaxed);
+    (frames > 0).then(|| total / frames)
 }
 
 /// The GPU columns after `gpu_ms`, in header order.
@@ -380,6 +448,11 @@ fn journal_fps(
     time: Res<Time<Real>>,
     player: Option<Res<crate::player::Player>>,
     streamed: Query<(), With<crate::net::NetEntity>>,
+    // Live particle emitters — the `emitters` column. A marker-only query, so this is a count
+    // of matched archetype rows and not a walk over their data. It is here rather than beside
+    // the fx counters because it answers the other half of the question: those say how many
+    // effects STARTED this second, this says how many are still running.
+    emitters: Query<(), With<benilla_world::particles::ParticleEmitter>>,
     entities: Query<()>,
     residency: JournalResidency,
     gpu: JournalGpu,
@@ -507,6 +580,21 @@ fn journal_fps(
     // that columns only ever grow at the end, so a journal started before this keeps parsing.
     let (errs, err_us, hashed) = take_script_costs();
     line.push_str(&format!(",{errs},{err_us},{hashed}"));
+    // The frame-split and combat trio. `ui_us` is an empty cell rather than a zero when no frame
+    // reported: unmeasured and free are different claims, and the last journal's all-empty timing
+    // columns are exactly what a zero there would have hidden.
+    match take_ui_micros_per_frame() {
+        Some(us) => line.push_str(&format!(",{us}")),
+        None => line.push(','),
+    }
+    line.push_str(&format!(
+        ",{},{}",
+        benilla_world::terrain_stream::take_collider_build_micros(),
+        emitters.iter().count()
+    ));
+    let (kits, impacts) = take_fx_counts();
+    let (pkts, net_us) = take_net_costs();
+    line.push_str(&format!(",{kits},{impacts},{pkts},{net_us}"));
     line.push('\n');
     #[cfg(target_arch = "wasm32")]
     web::append(&line);

@@ -787,6 +787,12 @@ pub(super) fn tick_script(
         }
     }
 
+    // The UI pass's own share of the frame, for the journal's `ui_us` column. Three `u128` adds on
+    // numbers this function already computed — the browser gives no CPU or GPU timings at all
+    // (every such column in the last journal was empty for all 256 rows), so our own phases are the
+    // only split available on that target.
+    crate::perf::journal::note_ui_micros((us_tick + us_resolve + us_measure) as u64);
+
     // ── The handover ────────────────────────────────────────────────────────────────────────
     // Everything the paint half derives from the window and the meter, published once here so the
     // two halves cannot disagree about the frame they are in.

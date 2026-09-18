@@ -22,6 +22,12 @@ use bevy::tasks::{block_on, AsyncComputeTaskPool, Task};
 #[cfg(any(target_arch = "wasm32", test))]
 mod web_budget;
 
+/// Microseconds spent building trimesh colliders since the last read — re-exported for the FPS
+/// journal, which is in another crate and has no business reaching into this module's internals.
+pub fn take_build_micros() -> u64 {
+    web_budget::take_build_micros()
+}
+
 /// Wall-clock spent per frame *attaching* finished colliders before deferring the rest to a later
 /// frame — the collider twin of `SPAWN_BUDGET`, and for the same reason. Measured cost of one attach
 /// (decision 0610): ~0.004 ms per entity plus ~1.8e-5 ms per triangle, so a burst of a thousand-odd
