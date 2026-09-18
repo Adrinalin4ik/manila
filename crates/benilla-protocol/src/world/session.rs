@@ -125,6 +125,14 @@ pub struct WorldSession {
     /// is either read from the offered module's `.cr` or stated by the server, and guessing one
     /// does not fail, it silently misreads every request.
     warden_profile: Option<warden::WardenProfile>,
+    /// Every distinct Warden message this session chose not to answer, so each is reported once
+    /// instead of once per round — a server re-asks on its own clock (~30 s), and the same
+    /// sentence every half minute buries the log it is supposed to explain.
+    ///
+    /// A set and not a counter because the *reasons* are the diagnosis: "asked for scans before any
+    /// encoding was known" and "asked something we cannot witness" are different problems with
+    /// different fixes, and a tally would merge them.
+    warden_unanswered: std::collections::HashSet<String>,
 }
 
 /// What one Warden message obliges the client to do.
@@ -417,6 +425,7 @@ impl WorldSession {
             session_key,
             warden: None,
             warden_profile,
+            warden_unanswered: Default::default(),
         };
 
         // 4. Wait for SMSG_AUTH_RESPONSE. Usually the first encrypted packet, but not always first
@@ -591,8 +600,35 @@ impl WorldSession {
         let decided = warden_reply(&message, xor, profile.as_mut());
         self.warden_profile = profile;
 
-        let Some(reply) = decided? else {
-            return Ok(());
+        // **We never end the session over Warden. The server does.**
+        //
+        // Every refusal [`warden_reply`] can produce lands here, and none of them propagates: a
+        // message we cannot answer honestly is answered with silence, and whether that silence is
+        // fatal is the server's call to make. The earlier policy made it ours, and that was the
+        // wrong half to decide from — a Turtle-derived server was observed sending scans it never
+        // enforced, so a client that bailed lost a session the server was content to keep.
+        //
+        // The trade is real and it is the reverse one: on a server that DOES enforce, the player
+        // now gets a silent drop on the server's clock instead of one honest sentence at the login
+        // screen. That is what this `warn!` is for — the log still names what was asked and what we
+        // could not say about it, so the silence has an explanation even though the screen does not.
+        //
+        // What does NOT change is that we never fabricate: results are matched to scans
+        // positionally, so a filler byte is a false answer to one specific question rather than a
+        // gap. Silence is the only honest alternative to an answer.
+        let reply = match decided {
+            Ok(Some(reply)) => reply,
+            Ok(None) => return Ok(()),
+            Err(e) => {
+                let reason = format!("{e:#}");
+                if self.warden_unanswered.insert(reason.clone()) {
+                    tracing::warn!(
+                        "warden: {reason} — sending nothing and leaving the disconnect to the \
+                         server, which may drop us on its own response clock (~30 s)"
+                    );
+                }
+                return Ok(());
+            }
         };
         self.send_warden(&reply.body)?;
         if let Some((client_key, server_key)) = reply.rekey {

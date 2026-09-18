@@ -43,7 +43,7 @@ use anyhow::{anyhow, bail, Result};
 use benilla_assets::LockRecover;
 use benilla_protocol::{
     host_port, messages, AuthReject, CharAction, LoginStage, Poll, SessionEnd, SessionEvent,
-    WardenRequired, WorldSession, WorldWriter, WORLD_PORT,
+    WorldSession, WorldWriter, WORLD_PORT,
 };
 use crossbeam_channel::{Receiver, Sender};
 
@@ -685,11 +685,11 @@ async fn run(
                 if canceled() {
                     return Ok(Cycle::Repark);
                 }
-                // A Warden refusal is the server's own answer, not a transport fault — say it plainly
-                // rather than wrapping it in handshake noise.
-                if let Some(w) = e.downcast_ref::<WardenRequired>() {
-                    return fail_terminal(w.to_string());
-                }
+                // **No Warden arm here any more, and its absence is the policy.** The session
+                // never ends over Warden from our side: `WorldSession::handle_warden` leaves an
+                // unanswerable message unanswered and reads on, so no `WardenRequired` can reach
+                // this match. An arm for it would be an unreachable branch promising a login-screen
+                // sentence the player will never see.
                 // The world server's own refusal, in its own enum — the screen owes the player the
                 // authored `AUTH_*` string for it, which it cannot recover from a formatted message.
                 if let Some(r) = e.downcast_ref::<benilla_protocol::WorldAuthReject>() {
@@ -740,9 +740,7 @@ async fn run(
                 if canceled() {
                     return Ok(Cycle::Repark);
                 }
-                if let Some(w) = e.downcast_ref::<WardenRequired>() {
-                    return fail_terminal(w.to_string());
-                }
+                // See the handshake arm above for why there is no Warden branch here either.
                 return fail(None, format!("character roster: {e:#}"));
             }
         };

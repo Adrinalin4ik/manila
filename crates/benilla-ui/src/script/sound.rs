@@ -109,7 +109,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // willPlay (queued), soundHandle (nil — module docs).
             Ok((true, Value::Nil))
         })?,
-    );
+    )?;
     // StopMusic() — arity 0, no returns: the music slot's cut. It rides the play queue (one seam
     // for every sound intent); the app tells the stop arm from the play arms by the variant.
     lua.globals().set(

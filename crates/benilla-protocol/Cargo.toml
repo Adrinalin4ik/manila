@@ -20,6 +20,13 @@ sha1.workspace = true
 # `SessionEventKind` — the fieldless twin of `SessionEvent`, the key the app's packet-handler
 # table dispatches on (decision 2305). A derive, so the two can never drift apart.
 strum = { version = "0.26", features = ["derive"] }
+# The ONE thing this crate logs: a Warden message it chose not to answer (`session.rs`).
+# Everything else here reports by return value, and that stays true — but the Warden policy is
+# to fall silent rather than bail, and a silence with no line anywhere is a session that dies
+# later for no stated reason. `tracing` and not bevy: the CLI probes in this crate must keep
+# building without a game engine. A probe that installs no subscriber simply drops the line,
+# which is right — `warden_probe` prints its own narrative.
+tracing = "0.1"
 
 [dev-dependencies]
 # The SRP probes re-derive the handshake by hand (to vary what `benilla-srp` fixes) — examples only.

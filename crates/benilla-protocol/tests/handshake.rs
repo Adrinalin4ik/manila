@@ -3,8 +3,9 @@
 //!
 //! What these pin down is the packet *ordering* tolerance the handshake needs. A server does not
 //! promise `SMSG_AUTH_RESPONSE` is the first encrypted packet — it interleaves its own traffic —
-//! and one of those interleaved packets, `SMSG_WARDEN_DATA`, means the server runs an anticheat we
-//! cannot answer and must be refused at login rather than entered and kicked ~30 s later.
+//! and one of those interleaved packets, `SMSG_WARDEN_DATA`, means the server runs an anticheat.
+//! What this client can answer of it, it answers; what it cannot, it leaves unanswered and reads
+//! on, because whether that is fatal belongs to the server and not to us.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -14,7 +15,7 @@ use benilla_protocol::messages::opcode;
 use benilla_protocol::world::warden::{
     self, Attestation, CheckType, FileHash, ScanWitness, WardenProfile,
 };
-use benilla_protocol::{messages, WardenRequired, WorldSession};
+use benilla_protocol::{messages, WorldSession};
 use benilla_srp::vanilla_header::HeaderCrypto;
 use benilla_srp::SESSION_KEY_LENGTH;
 
@@ -92,17 +93,23 @@ fn packets_ahead_of_the_auth_response_are_skipped() {
     assert!(WorldSession::connect(&addr, "one", SESSION_KEY).is_ok());
 }
 
-/// Warden among them is refused, with the error the login screen shows — never a session that
-/// would be kicked once the server's response clock expires.
+/// **A Warden message we cannot answer does not end the session — the server decides that.**
+///
+/// This body is 16 bytes of nothing, so it decodes to no message this client knows: the case that
+/// also catches a mis-keyed cipher. It used to be a refusal carried out to the login screen, on the
+/// premise that every Warden server arms an unconditional response clock. A Turtle-derived server
+/// was then observed sending Warden and never enforcing it, which made the premise false and the
+/// refusal a session thrown away for nothing.
+///
+/// So the client now falls silent and reads on. What it must never do — and this test does not
+/// cover, because `build_checks_result` owns it — is answer with filler: results are matched to
+/// scans positionally, so a padded reply is a wrong answer rather than a missing one.
 #[test]
-fn a_warden_server_is_refused_at_the_handshake() {
+fn a_warden_message_we_cannot_answer_leaves_the_session_alive() {
     let addr = fake_server(vec![(opcode::SMSG_WARDEN_DATA, vec![0u8; 16])]);
-    let Err(err) = WorldSession::connect(&addr, "one", SESSION_KEY) else {
-        panic!("a Warden server must not yield a session");
-    };
     assert!(
-        err.downcast_ref::<WardenRequired>().is_some(),
-        "expected WardenRequired, got: {err:#}"
+        WorldSession::connect(&addr, "one", SESSION_KEY).is_ok(),
+        "the unanswerable Warden message must not cost us the session"
     );
 }
 
@@ -250,10 +257,14 @@ fn a_profiled_session_answers_a_scan_request() {
     assert_eq!(&payload[1..], &[0x5A; 20], "the witness's digest, unaltered");
 }
 
-/// The same server, with no profile: still refused. The default has to stay the safe one, because a
-/// session that cannot answer Warden is a session that gets kicked 30 s in.
+/// The same request with no profile: unanswered, and the session lives.
+///
+/// The default profile is still `None` on purpose — an encoding has to be read from the offered
+/// module's `.cr` or stated by the server, and a guessed one does not fail, it silently misreads
+/// every request. What changed is only the consequence: an unreadable request is silence now, not
+/// a refusal.
 #[test]
-fn without_a_profile_the_same_request_is_still_refused() {
+fn without_a_profile_the_same_request_goes_unanswered() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
 
@@ -284,12 +295,9 @@ fn without_a_profile_the_same_request_is_still_refused() {
         thread::sleep(std::time::Duration::from_secs(2));
     });
 
-    let Err(err) = WorldSession::connect(&addr, "one", SESSION_KEY) else {
-        panic!("a profileless session must not answer Warden");
-    };
     assert!(
-        err.downcast_ref::<WardenRequired>().is_some(),
-        "expected WardenRequired, got: {err:#}"
+        WorldSession::connect(&addr, "one", SESSION_KEY).is_ok(),
+        "no profile means no honest answer, but it does not mean no session"
     );
 }
 
