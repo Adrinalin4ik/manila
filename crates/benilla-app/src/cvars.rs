@@ -344,6 +344,18 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `GetCVar("uiscale")`, and both read 0.9 there on every window we ship against.
     same("useUiScale", "0"),
     same("farclip", "350"),
+    // **`particleDensity` — the reference's own, and the cheapest lever we have on a browser.**
+    // Byte-verified: registrar handler `0x688fb0` clamps to [0.25, 1.0] and the getter's only two
+    // callers are the spawn-count `fmul`s, so it scales emission RATE and nothing else. The engine
+    // side has existed all along (`benilla_world::particles::ParticleTuning::density`) and was
+    // reachable only from the debug panel; registering it is what makes it a player setting.
+    same("particleDensity", "1"),
+    // **`effectsDistance` — OURS, and the only row on this table that is.** 1.12 has no particle
+    // draw-distance CVar; this one exists because the measured cost is overdraw (looking at a fight
+    // is 15 fps, turning away is 25), and a wall is the only knob that cuts the effects you are not
+    // looking at while leaving the one in front of you intact. Default is the top of FARCLIP_RANGE,
+    // i.e. no wall: `min(farclip, this)` is `farclip` until the slider moves.
+    same("effectsDistance", "777"),
     // **`nearclip` — farclip's other half, and a knob we had been holding as a constant** (2163).
     // `0x68867a` passes name `0x84ffb0` `"nearclip"`, default string `0x84fb48` `"0.1"`, help
     // "Near clip plane distance", flags `1`, callback `0x688d90`, record `[0xc7f348]` (wow-re

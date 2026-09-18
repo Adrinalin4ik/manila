@@ -258,6 +258,10 @@ impl Owners<'_, '_> {
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct SceneGates<'w, 's> {
     view: Res<'w, crate::view::ViewDistance>,
+    /// The effects wall — see [`crate::particles::ParticleTuning::max_distance`]. Read here
+    /// because this is the one place the draw-set's distance term is built, so there is no second
+    /// path an emitter could take around it.
+    tuning: Res<'w, crate::particles::ParticleTuning>,
     exterior_windows: Res<'w, crate::wmo_portal::ExteriorWindows>,
     camera_claim: Res<'w, crate::wmo_portal::CameraInteriorClaim>,
     portals: Query<'w, 's, &'static crate::wmo_portal::WmoPortalInstance>,
@@ -283,7 +287,9 @@ impl SceneGates<'_, '_> {
         cam: Option<(&GlobalTransform, &Projection)>,
     ) -> (f32, crate::exterior_cull::ExteriorGate, Option<Entity>) {
         (
-            self.view.farclip,
+            // The nearer of the two walls. Defaulting the effects one to the top of the farclip
+            // range makes this `farclip` exactly until a player moves the slider.
+            self.view.farclip.min(self.tuning.max_distance),
             crate::exterior_cull::ExteriorGate::build(&self.exterior_windows, cam),
             self.camera_claim.0.map(|c| c.room.instance),
         )

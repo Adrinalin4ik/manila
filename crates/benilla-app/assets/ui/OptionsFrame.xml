@@ -835,7 +835,7 @@
             },
             Graphics = {
                 "RowUiScale", "RowFarclip", "RowWorldDetail", "RowBrightness",
-                "RowWeatherDensity",
+                "RowWeatherDensity", "RowEffectsQuality", "RowEffectsDistance",
                 "RowDisplayMode", "RowVerticalSync", "RowRenderScale",
             },
             -- Player Guild Names (2180) rides as a CHILD of Player Names, which is the
@@ -2981,10 +2981,52 @@
                                                 OptionsSliderRow_Setup(self, min, max, step, "raw")
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowWorldDetail" inherits="OptionsSliderRowTemplate">
+                                        <!-- **The two effects knobs** (2026-09-18). The measured
+                                             symptom: looking at a fight is 15 fps and turning away
+                                             is 25, which is a rendering cost and not a CPU one —
+                                             a cloud of large transparent quads costs in proportion
+                                             to the screen it covers.
+
+                                             Quality is the reference's own `particleDensity`
+                                             (handler `0x688fb0` clamps [0.25, 1.0]; it scales
+                                             emission RATE, so half is half the particles and half
+                                             the fill). Distance is OURS: 1.12 ships no particle
+                                             draw-distance CVar, and it is here because density
+                                             thins the effect in front of you too, where a wall
+                                             leaves that one whole and drops the ones behind the
+                                             hill. Bounds are literal rather than
+                                             `BenillaGraphicsSliderBounds`: that helper is indexed
+                                             by the era's own row order, and these two rows have no
+                                             place in it to borrow. -->
+                                        <Frame name="$parentRowEffectsQuality" inherits="OptionsSliderRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowFarclip" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowFarclip" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "particleDensity", "Effects Quality")
+                                                OptionsSliderRow_Setup(self, 0.25, 1.0, 0.25, "raw")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowEffectsDistance" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowEffectsQuality" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowEffectsQuality" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "effectsDistance", "Effects Distance")
+                                                -- Farclip's own grid: 177..777 step 60. The top is
+                                                -- the default and means "no wall".
+                                                OptionsSliderRow_Setup(self, 177, 777, 60, "raw")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowWorldDetail" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <!-- Re-anchored off the two effects rows inserted
+                                                     above it; anchoring to Farclip still would
+                                                     stack this row on top of them. -->
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowEffectsDistance" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowEffectsDistance" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "WorldDetail", "Environment Detail",

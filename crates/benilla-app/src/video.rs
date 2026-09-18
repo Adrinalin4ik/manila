@@ -262,6 +262,9 @@ pub(crate) fn on_cvar(
     ev: On<crate::cvars::CvarChanged>,
     mut cfg: ResMut<VideoConfig>,
     mut view: ResMut<benilla_world::view::ViewDistance>,
+    // The two particle knobs this dispatch now owns — the reference's `particleDensity` and
+    // our own `effectsDistance`. One resource, because they are two fields of one tuning.
+    mut particles: ResMut<benilla_world::particles::ParticleTuning>,
     mut msaa: ResMut<benilla_world::view::MsaaSetting>,
     msaa_formats: Res<benilla_world::view::MsaaFormats>,
     mut tex_filter: ResMut<benilla_assets::TexFilterSetting>,
@@ -285,6 +288,14 @@ pub(crate) fn on_cvar(
         // "Windowed Mode"). `apply_window_mode` pushes it to the window when this moves.
         "gxwindow" => cfg.display = display_from_flag(v),
         "farclip" => view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
+        // The reference's own clamp, from its own handler (`0x688fb0`): [0.25, 1.0]. Scales
+        // emission rate, so half density is half the particles and half the fill they cost.
+        "particledensity" => particles.density = v.clamp(0.25, 1.0),
+        // Ours (see the cvar table). Shares FARCLIP_RANGE because it is the same wall measured the
+        // same way, and the top of that range means "no wall".
+        "effectsdistance" => {
+            particles.max_distance = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end())
+        }
         // The reference REFUSES an out-of-range write here rather than clamping (`0x688d90`
         // echoes "NearClip must be in range 0.01 - 0.33" and returns 0). We clamp, which is the
         // table's standing posture for every range — the consumer clamps at its own edge.

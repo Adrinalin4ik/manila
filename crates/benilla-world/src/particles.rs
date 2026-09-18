@@ -77,12 +77,33 @@ pub struct ParticleTuning {
     /// The vanilla `particleDensity` CVar (byte-verified: handler `0x688fb0` clamps to
     /// [0.25, 1.0], the getter's only two callers are the spawn-count `fmul`s). Scales emission
     /// RATE only — never size, alpha, or draw distance. Default 1.0.
-    pub(crate) density: f32,
+    /// `pub` rather than `pub(crate)` since 2026-09-18: the CVar that drives it lives in the app
+    /// crate, and a knob the settings screen cannot write is a knob only the debug panel has.
+    pub density: f32,
+    /// **The effects wall, in yards — ours, not the reference's.** Particles are already culled at
+    /// `farclip` (`sim::SceneGates::scene` hands that wall to every emitter's draw-set test); this
+    /// is the same wall brought closer for effects alone, so a distant fight's art stops drawing
+    /// while the terrain behind it still does.
+    ///
+    /// **A divergence, deliberately, and worth being plain about.** 1.12 ships no such CVar —
+    /// `particleDensity` is its only particle knob, and that one scales emission rate and
+    /// explicitly never draw distance. But the cost this exists to cut is OVERDRAW: a cloud of
+    /// large transparent quads costs in proportion to the screen it covers, and distance is the
+    /// cheapest proxy for that. Density thins every effect everywhere, the one in your face
+    /// included; a wall leaves that one alone and drops the ones behind the next hill.
+    ///
+    /// Defaults to the top of [`crate::view::FARCLIP_RANGE`], which is *no* wall at all:
+    /// `min(farclip, this)` is then always `farclip`, so a player who never moves the slider gets
+    /// exactly today's behaviour.
+    pub max_distance: f32,
 }
 
 impl Default for ParticleTuning {
     fn default() -> Self {
-        Self { density: 1.0 }
+        Self {
+            density: 1.0,
+            max_distance: *crate::view::FARCLIP_RANGE.end(),
+        }
     }
 }
 
