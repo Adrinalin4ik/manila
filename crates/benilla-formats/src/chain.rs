@@ -50,9 +50,12 @@ pub struct Chain {
 }
 
 /// The web build's `Chain`: no archives, just the web host's `/data` base URL every method fetches
-/// against (see the module header). `read` carries no cache — a sync XHR pays a round trip (or a
-/// browser-cache hit) every call, and the Bevy `AssetServer` above (`benilla-assets`) is what
-/// dedups by path, same as it would for a native disk read.
+/// against (see the module header). `read` DOES carry a cache, and this paragraph used to say the
+/// opposite: that a sync XHR could pay "a round trip (or a browser-cache hit)" every call because
+/// the Bevy `AssetServer` above (`benilla-assets`) dedups by path. It dedups the callers that go
+/// through it. Character texture composition does not - it reads raw bytes straight through here -
+/// and in a city that had one guild emblem fetched 19 times and a base skin 12. See
+/// [`Self::recent`] for the measurement and what it cost.
 ///
 /// **`contains` does carry one: the whole chain's name index**, fetched once from `/data/__index`
 /// on the first ask. Measured on world entry (2026-08-31): the UI's texture probes asked
@@ -83,6 +86,83 @@ pub struct Chain {
     /// distinct name, once, which is what keeps the sprite-candidate walk (`Foo.blp`, then
     /// `Foo.tga`) from paying per ask the way it did before the index existed.
     verified: std::sync::Mutex<std::collections::HashMap<String, bool>>,
+    /// **Bytes already read this session**, so a second ask for the same name costs no round
+    /// trip and no blocked frame.
+    ///
+    /// Measured in the browser standing in a city, 140 s window: **2481** synchronous reads
+    /// costing **19277 ms** of blocked main thread - 13.8% of wall clock, about 3 ms on every
+    /// frame, which is over half the gap between the 22 ms this client holds and the 16.7 ms it
+    /// wants. They were not 2481 distinct files. One guild-emblem tile was fetched **19 times**,
+    /// a base skin 12, a scalp texture 16 - once per character wearing it, because character
+    /// texture composition reads raw bytes through here and so never reaches the `AssetServer`
+    /// handle dedup this type's header relied on when it said `read` needs no cache.
+    ///
+    /// The browser's own HTTP cache does not rescue that. A synchronous XHR blocks the thread
+    /// for the whole call whatever answers it, and those repeats averaged 7.8 ms each **served
+    /// warm** - the round trip was never the expensive part.
+    ///
+    /// Safe to hold for a session: `/data/*` is served immutable, so a name's bytes cannot
+    /// change under us while the tab is open.
+    recent: std::sync::Mutex<ReadCache>,
+}
+
+/// [`Chain::recent`]'s store: bytes keyed by [`Chain::index_key`], bounded by TOTAL BYTES rather
+/// than entry count, evicted least-recently-used.
+///
+/// Bytes and not entries because the entries are game files and their sizes span four orders of
+/// magnitude: a 4 KB emblem tile and a 30 MB terrain read cannot share one budget expressed as a
+/// number of slots. [`Self::ENTRY_MAX`] then keeps a single large read from sweeping the small
+/// hot set out on its way through - the repeats this cache exists for are all small.
+#[cfg(target_arch = "wasm32")]
+#[derive(Default)]
+struct ReadCache {
+    entries: std::collections::HashMap<String, (Vec<u8>, u64)>,
+    bytes: usize,
+    /// Monotonic use counter. A timestamp would need a clock, and `Instant::now` on this target
+    /// is the page's time origin - a counter is the same ordering with no platform question.
+    clock: u64,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl ReadCache {
+    /// Total retained bytes. 64 MiB against a measured hot set of a few MB: the repeats are
+    /// character skins, hair and guild emblems, and a crowded city holds tens of them.
+    const BUDGET: usize = 64 * 1024 * 1024;
+    /// Per-entry ceiling. Anything larger is read straight through and never stored.
+    const ENTRY_MAX: usize = 4 * 1024 * 1024;
+
+    fn get(&mut self, key: &str) -> Option<Vec<u8>> {
+        self.clock += 1;
+        let clock = self.clock;
+        let (bytes, used) = self.entries.get_mut(key)?;
+        *used = clock;
+        Some(bytes.clone())
+    }
+
+    fn put(&mut self, key: String, bytes: &[u8]) {
+        if bytes.len() > Self::ENTRY_MAX {
+            return;
+        }
+        self.clock += 1;
+        if let Some((old, _)) = self.entries.remove(&key) {
+            self.bytes -= old.len();
+        }
+        while self.bytes + bytes.len() > Self::BUDGET {
+            let Some(victim) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(name, _)| name.clone())
+            else {
+                break;
+            };
+            if let Some((old, _)) = self.entries.remove(&victim) {
+                self.bytes -= old.len();
+            }
+        }
+        self.bytes += bytes.len();
+        self.entries.insert(key, (bytes.to_vec(), self.clock));
+    }
 }
 
 /// `patch-?.MPQ` with the reference's FindFirstFileW semantics: `?` matches **exactly one**
@@ -266,6 +346,7 @@ impl Chain {
             base: crate::web::data_base(),
             index: std::sync::OnceLock::new(),
             verified: std::sync::Mutex::new(std::collections::HashMap::new()),
+            recent: std::sync::Mutex::new(ReadCache::default()),
         })
     }
 
@@ -346,6 +427,12 @@ impl Chain {
         // (`Foo.blp`, then `Foo.tga`) asks for absent names by design, and once the host has said
         // "no" about one, asking again is exactly the round trip the index existed to save.
         let key = Self::index_key(name);
+        // Already read once this session — see [`Self::recent`]. Checked before the index and
+        // before `verified`, because a hit answers without consulting either: both of those exist
+        // only to decide whether a request is worth making, and here no request will be made.
+        if let Some(hit) = self.recent.lock().expect("chain read cache").get(&key) {
+            return Ok(hit);
+        }
         let listed = self.index().is_some_and(|set| set.contains(&key));
         if !listed && self.verified.lock().expect("chain verified cache").get(&key) == Some(&false)
         {
@@ -354,7 +441,13 @@ impl Chain {
         let got = crate::web::fetch_sync(&self.url_for(name));
         if !listed {
             // The GET is the verification — no extra HEAD for a name we were fetching anyway.
-            self.remember(key, got.is_ok());
+            self.remember(key.clone(), got.is_ok());
+        }
+        if let Ok(bytes) = got.as_ref() {
+            self.recent
+                .lock()
+                .expect("chain read cache")
+                .put(key, bytes);
         }
         got.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
