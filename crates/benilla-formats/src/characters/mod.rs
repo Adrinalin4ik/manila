@@ -26,6 +26,7 @@ mod sections;
 pub use customization::{CharCreateCatalog, DialRanges, StartOutfitItem};
 pub use geosets::{CharacterGeosets, EquipGeosets};
 pub use sections::{
+    take_decode_counts,
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
     BlitSource, CharSections, EmblemLayer, EquipBlit, GuildEmblem,
 };

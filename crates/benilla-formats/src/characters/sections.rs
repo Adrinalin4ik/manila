@@ -160,6 +160,23 @@ pub struct CharSections {
     decoded: std::sync::Mutex<DecodeCache>,
 }
 
+/// **Does [`CharSections::decoded`] actually hit?** Served-from-cache against decoded-here, for the
+/// journal's `tex_hit`/`tex_dec` columns.
+///
+/// Here because the cache without them is a mechanism nobody has watched work. This file's own
+/// history is the argument: the composite was priced at 40-50 ms, the decode named as the reason,
+/// the cache written - and the first journal after it showed the per-composite cost UNCHANGED.
+/// With no hit counter there was no way to tell a cache that never fires from a decode that was
+/// never the cost. A ratio settles it in one row.
+static TEX_HITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static TEX_DECODES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// This second's (hits, decodes), and reset. Read by the FPS journal.
+pub fn take_decode_counts() -> (u32, u32) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (TEX_HITS.swap(0, Relaxed), TEX_DECODES.swap(0, Relaxed))
+}
+
 /// [`CharSections::decoded`]'s store: decoded mip chains by path, bounded by TOTAL BYTES and
 /// evicted least-recently-used.
 ///
@@ -324,10 +341,13 @@ impl CharSections {
     /// missing name from being asked for twice, and it can tell a 404 from a browser that could not
     /// send the request.
     fn decoded_texture(&self, chain: &mut Chain, path: &str) -> Option<std::sync::Arc<BlpMipChain>> {
+        use std::sync::atomic::Ordering::Relaxed;
         let key = path.replace('/', "\\");
         if let Some(hit) = self.decoded.lock().ok()?.get(&key) {
+            TEX_HITS.fetch_add(1, Relaxed);
             return Some(hit);
         }
+        TEX_DECODES.fetch_add(1, Relaxed);
         let decoded = std::sync::Arc::new(read_texture_mip_chain(chain, &key).ok()?);
         if let Ok(mut cache) = self.decoded.lock() {
             cache.put(key, decoded.clone());

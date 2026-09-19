@@ -79,7 +79,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               gpu_ms,gpu_opaque,gpu_static,gpu_transp,gpu_glow,gpu_post,gpu_ui,\
                               gpu_other,lua_errs,lua_err_us,msg_hashed,ui_us,col_us,emitters,fx_kits,fx_impacts,net_pkts,net_us,pipes,\
                               rscale,farclip,\
-                              skins_new,skin_us\n";
+                              skins_new,skin_us,tex_hit,tex_dec\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -693,8 +693,13 @@ fn journal_fps(
         (None, None) => line.push_str(",,"),
     }
     // The composite FLOW, next to `skin`'s stock - see `note_skin_composite`.
+    // **Does the composite's decode cache fire?** Served-from-cache against decoded-here, per
+    // second. Without this pair the cache is a mechanism nobody has watched work: the first
+    // journal after it shipped showed the per-composite cost unchanged, and there was no way to
+    // tell a cache that never hits from a decode that was never the cost.
+    let (tex_hit, tex_dec) = benilla_formats::take_decode_counts();
     let (skins_new, skin_us) = take_skin_costs();
-    line.push_str(&format!(",{skins_new},{skin_us}"));
+    line.push_str(&format!(",{skins_new},{skin_us},{tex_hit},{tex_dec}"));
     line.push('\n');
     #[cfg(target_arch = "wasm32")]
     web::append(&line);
