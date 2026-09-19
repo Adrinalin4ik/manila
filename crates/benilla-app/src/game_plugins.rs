@@ -26,6 +26,7 @@ use bevy::app::PluginGroupBuilder;
 use bevy::prelude::*;
 
 use crate::blob_shadow::BlobShadowPlugin;
+use crate::player_distance::PlayerDistancePlugin;
 use crate::bowstring::BowstringPlugin;
 use crate::camera_shake::CameraShakePlugin;
 use crate::chr_classes::ChrClassesPlugin;
@@ -135,6 +136,7 @@ impl PluginGroup for GamePlugins {
             // animation's box (the byte-verified law — wow-re unit-blob-shadow RE), on the same
             // surface-decal projector as the selection ring.
             .add(BlobShadowPlugin)
+            .add(PlayerDistancePlugin)
             // Footprint decals (B212, decision 1006): the prints a walking unit leaves on snow/sand,
             // spawn-once projections on the same decal projector, fading off the effect stream.
             .add(CameraShakePlugin)

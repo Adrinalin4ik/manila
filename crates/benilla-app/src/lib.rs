@@ -96,6 +96,7 @@ mod pending_item_ops;
 mod perf;
 mod pipe_warm;
 mod player;
+mod player_distance;
 mod poi_marker;
 mod portrait;
 #[cfg(feature = "dev")]

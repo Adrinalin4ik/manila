@@ -356,6 +356,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // looking at while leaving the one in front of you intact. Default is the top of FARCLIP_RANGE,
     // i.e. no wall: `min(farclip, this)` is `farclip` until the slider moves.
     same("effectsDistance", "800"),
+    // **`playerDistance` - OURS, and the third wall on this table.** The world has `farclip` and
+    // the particles have `effectsDistance`; other players had none, and they are the one part of
+    // a city a client cannot budget for: their count, their gear and their composited skins all
+    // belong to other people. Measured standing in one street: 739 players one run and 947 the
+    // next, with the frame at 37 ms and 89 ms. `0` is a real setting ("draw none"), not a guard
+    // value. Default is the top of `FARCLIP_RANGE`, i.e. no wall of ours - every build before
+    // this one.
+    same("playerDistance", "777"),
     // **`nearclip` — farclip's other half, and a knob we had been holding as a constant** (2163).
     // `0x68867a` passes name `0x84ffb0` `"nearclip"`, default string `0x84fb48` `"0.1"`, help
     // "Near clip plane distance", flags `1`, callback `0x688d90`, record `[0xc7f348]` (wow-re

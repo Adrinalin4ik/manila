@@ -835,7 +835,7 @@
             },
             Graphics = {
                 "RowUiScale", "RowFarclip", "RowWorldDetail", "RowBrightness",
-                "RowWeatherDensity", "RowEffectsQuality", "RowEffectsDistance",
+                "RowWeatherDensity", "RowEffectsQuality", "RowEffectsDistance", "RowPlayerDistance",
                 "RowDisplayMode", "RowVerticalSync", "RowRenderScale",
             },
             -- Player Guild Names (2180) rides as a CHILD of Player Names, which is the
@@ -3031,6 +3031,22 @@
                                                 -- is on the grid so the thumb can actually land on
                                                 -- it.
                                                 OptionsSliderRow_Setup(self, 25, 800, 25, "raw")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowPlayerDistance" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowPlayerDistance" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowPlayerDistance" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "playerDistance", "Player Distance")
+                                                -- 0..777 step 25, and **0 is a real stop**: other players are
+                                                -- the one part of a city a client cannot budget for - their
+                                                -- count, their gear and their composited skins belong to other
+                                                -- people - so "draw none" has to be reachable. The top is
+                                                -- farclip's own ceiling and means no wall of ours. Both ends sit
+                                                -- on the grid so the thumb can land on them.
+                                                OptionsSliderRow_Setup(self, 0, 777, 25, "raw")
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowWorldDetail" inherits="OptionsSliderRowTemplate">

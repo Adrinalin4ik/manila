@@ -265,6 +265,7 @@ pub(crate) fn on_cvar(
     // The two particle knobs this dispatch now owns — the reference's `particleDensity` and
     // our own `effectsDistance`. One resource, because they are two fields of one tuning.
     mut particles: ResMut<benilla_world::particles::ParticleTuning>,
+    mut players: ResMut<crate::player_distance::PlayerDistance>,
     mut msaa: ResMut<benilla_world::view::MsaaSetting>,
     msaa_formats: Res<benilla_world::view::MsaaFormats>,
     mut tex_filter: ResMut<benilla_assets::TexFilterSetting>,
@@ -299,6 +300,14 @@ pub(crate) fn on_cvar(
             particles.max_distance = v.clamp(
                 *benilla_world::particles::EFFECTS_DISTANCE_RANGE.start(),
                 *benilla_world::particles::EFFECTS_DISTANCE_RANGE.end(),
+            )
+        }
+        // The crowd's own wall (see the cvar table). Clamped at its own edge like every other
+        // range here; `0` is inside the range on purpose and means "draw no other players".
+        "playerdistance" => {
+            players.0 = v.clamp(
+                *crate::player_distance::PLAYER_DISTANCE_RANGE.start(),
+                *crate::player_distance::PLAYER_DISTANCE_RANGE.end(),
             )
         }
         // The reference REFUSES an out-of-range write here rather than clamping (`0x688d90`
