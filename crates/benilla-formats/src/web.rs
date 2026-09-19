@@ -124,17 +124,19 @@ mod wasm {
 
     /// A blocking `HEAD` request: does the web host have this name? No body to decode, so no mime
     /// override is needed — just the status line.
-    pub fn exists_sync(url: &str) -> bool {
-        let Ok(xhr) = XmlHttpRequest::new() else {
-            return false;
-        };
-        if xhr.open_with_async("HEAD", url, false).is_err() {
-            return false;
-        }
-        if xhr.send().is_err() {
-            return false;
-        }
-        xhr.status().map(|status| status == 200).unwrap_or(false)
+    ///
+    /// **`None` is a third answer and it is load-bearing: "could not ask".** This used to return
+    /// a plain `bool`, which made a browser that refused to send the request indistinguishable
+    /// from a host that answered 404 — and [`crate::Chain::contains`] writes that answer into a
+    /// cache it never revisits. Observed live: Chrome began failing sends with
+    /// `ERR_NO_BUFFER_SPACE` under this client's request rate, and every name asked about during
+    /// the outage would have been remembered as ABSENT for the rest of the session, long after
+    /// the sockets came back. A transport failure is not a fact about the file.
+    pub fn exists_sync(url: &str) -> Option<bool> {
+        let xhr = XmlHttpRequest::new().ok()?;
+        xhr.open_with_async("HEAD", url, false).ok()?;
+        xhr.send().ok()?;
+        Some(xhr.status().ok()? == 200)
     }
 
     fn js_err(e: JsValue) -> std::io::Error {

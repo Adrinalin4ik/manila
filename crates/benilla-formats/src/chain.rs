@@ -386,7 +386,11 @@ impl Chain {
         if let Some(&known) = self.verified.lock().expect("chain verified cache").get(&key) {
             return known;
         }
-        let present = crate::web::exists_sync(&self.url_for(name));
+        // `None` = the browser could not send the request at all. Answer "no" for this call and
+        // remember NOTHING: see `web::exists_sync` for the outage that made the difference matter.
+        let Some(present) = crate::web::exists_sync(&self.url_for(name)) else {
+            return false;
+        };
         self.remember(key, present);
         present
     }
@@ -441,7 +445,20 @@ impl Chain {
         let got = crate::web::fetch_sync(&self.url_for(name));
         if !listed {
             // The GET is the verification — no extra HEAD for a name we were fetching anyway.
-            self.remember(key.clone(), got.is_ok());
+            //
+            // **Only a 404 is an answer about the file.** `got.is_ok()` was the condition here,
+            // which recorded "absent" for a transport failure too, permanently, in a cache that is
+            // never revisited. Observed live: Chrome started failing sends outright with
+            // `ERR_NO_BUFFER_SPACE`, and with `/data/__index` failing in the same storm nothing
+            // was `listed`, so every name read during the outage would have been marked missing
+            // for the rest of the session — the client refusing to ask for files that are there.
+            match got.as_ref() {
+                Ok(_) => self.remember(key.clone(), true),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    self.remember(key.clone(), false);
+                }
+                Err(_) => {}
+            }
         }
         if let Ok(bytes) = got.as_ref() {
             self.recent
