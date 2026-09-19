@@ -51,12 +51,15 @@ pub(crate) fn apply(
     wall: Res<PlayerDistance>,
     self_guid: Res<crate::net::SelfGuid>,
     camera: Query<&GlobalTransform, With<benilla_world::view::WorldCamera>>,
+    mut commands: Commands,
     mut units: Query<(
+        Entity,
         &crate::net::NetEntity,
         &crate::net::Guid,
         &GlobalTransform,
-        &mut Visibility,
+        Option<&mut Visibility>,
     )>,
+    mut reported: Local<Option<f32>>,
 ) {
     let Ok(eye) = camera.single() else {
         return;
@@ -65,20 +68,46 @@ pub(crate) fn apply(
     // Compared squared, so the per-unit test is a subtract and a dot rather than a square root.
     let limit = wall.0 * wall.0;
     let me = self_guid.0;
-    for (net, guid, at, mut vis) in &mut units {
+    let (mut players, mut hidden, mut inserted) = (0u32, 0u32, 0u32);
+    for (entity, net, guid, at, vis) in &mut units {
         if net.kind != EntityKind::Player || Some(guid.0) == me {
             continue;
         }
+        players += 1;
         let want = if at.translation().distance_squared(eye) <= limit {
             Visibility::Inherited
         } else {
+            hidden += 1;
             Visibility::Hidden
         };
-        if *vis != want {
-            *vis = want;
+        match vis {
+            // **`Option`, not a required component.** A streamed body is not spawned with a
+            // `Visibility` - the visual hangs off it, and the root carries the wire state and the
+            // pose. A plain `&mut Visibility` therefore matched NOTHING, and the wall moved with
+            // no effect and no complaint: the first build of this shipped a slider that did
+            // exactly nothing. Insert one on first contact; from then on it is a write.
+            Some(mut vis) => {
+                if *vis != want {
+                    *vis = want;
+                }
+            }
+            None => {
+                inserted += 1;
+                commands.entity(entity).insert(want);
+            }
         }
     }
+    // One line per setting change, never per frame: it names what the wall actually reached, which
+    // is the question a slider that appears to do nothing needs answered first.
+    if *reported != Some(wall.0) {
+        *reported = Some(wall.0);
+        info!(
+            "playerDistance {:.0} yd — {players} other players in range of the streamer,              {hidden} past the wall, {inserted} given a Visibility",
+            wall.0
+        );
+    }
 }
+
 
 /// Registers the wall.
 pub(crate) struct PlayerDistancePlugin;
