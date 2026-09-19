@@ -143,6 +143,78 @@ fn emblem_half(layer: usize) -> Option<&'static str> {
 /// (`sectionType 0`) and the head/pelvis region overlays the body composite blends on top (decision 0044).
 pub struct CharSections {
     sections: HashMap<(u8, u8, u8, u8, u8), [String; 3]>,
+    /// **Overlay textures already DECODED**, keyed by the path that produced them.
+    ///
+    /// [`read_texture_mip_chain`] is a read plus a decode of every authored mip into RGBA8, and
+    /// [`Self::composite_body`] calls it a dozen times or more per appearance. The reads are cached
+    /// a layer down (`Chain`'s own byte cache); the decodes were not, so a guild's worth of players
+    /// decoded the same emblem tile once each, and every human in view decoded the same base skin.
+    ///
+    /// Measured in the browser before this existed: **one composite cost 40-50 ms**, and entering a
+    /// crowded city spent 20.6 s of a 45 s window inside 401 of them - 46% of the wall clock, which
+    /// is what the world-entry freeze is made of. In the steady frame it is one composite a second,
+    /// so one ruined frame a second: the stutter when a stranger walks into view.
+    ///
+    /// Held behind a `Mutex` because `composite_body` takes `&self` and is called from the render
+    /// path; the lock is never held across a read.
+    decoded: std::sync::Mutex<DecodeCache>,
+}
+
+/// [`CharSections::decoded`]'s store: decoded mip chains by path, bounded by TOTAL BYTES and
+/// evicted least-recently-used.
+///
+/// Bytes rather than entries for the same reason the chain's byte cache uses them - a 4 KB emblem
+/// tile and a 256x512 body skin cannot share a budget counted in slots. An `Arc` so an overlay is
+/// handed out without copying; only the base skin, which the composite mutates, is cloned.
+#[derive(Default)]
+struct DecodeCache {
+    entries: HashMap<String, (std::sync::Arc<BlpMipChain>, u64)>,
+    bytes: usize,
+    clock: u64,
+}
+
+impl DecodeCache {
+    /// Total retained decoded bytes. Decoded RGBA8 runs several times the size of the BLP it came
+    /// from, so this is deliberately smaller than the chain's byte budget.
+    const BUDGET: usize = 48 * 1024 * 1024;
+
+    fn size_of(chain: &BlpMipChain) -> usize {
+        chain.mips.iter().map(Vec::len).sum()
+    }
+
+    fn get(&mut self, path: &str) -> Option<std::sync::Arc<BlpMipChain>> {
+        self.clock += 1;
+        let clock = self.clock;
+        let (chain, used) = self.entries.get_mut(path)?;
+        *used = clock;
+        Some(chain.clone())
+    }
+
+    fn put(&mut self, path: String, chain: std::sync::Arc<BlpMipChain>) {
+        let size = Self::size_of(&chain);
+        if size > Self::BUDGET / 4 {
+            return;
+        }
+        self.clock += 1;
+        if let Some((old, _)) = self.entries.remove(&path) {
+            self.bytes -= Self::size_of(&old);
+        }
+        while self.bytes + size > Self::BUDGET {
+            let Some(victim) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(name, _)| name.clone())
+            else {
+                break;
+            };
+            if let Some((old, _)) = self.entries.remove(&victim) {
+                self.bytes -= Self::size_of(&old);
+            }
+        }
+        self.bytes += size;
+        self.entries.insert(path, (chain, self.clock));
+    }
 }
 
 impl CharSections {
@@ -244,6 +316,25 @@ impl CharSections {
     ///
     /// `emblem` is the wearer's guild tabard (decision 1704), which paints the torso layers' cells
     /// 2/3/4 over the garment's own — see [`equip_blits`] for when it installs and when it does not.
+    /// A composite input, decoded once per path and kept - see [`Self::decoded`].
+    ///
+    /// `None` covers both "the chain has no such file" and "it did not decode", which is what every
+    /// call site here already treated alike: an overlay that cannot be had is skipped and the
+    /// garment stops early. A failure is NOT cached; the chain's own negative cache is what keeps a
+    /// missing name from being asked for twice, and it can tell a 404 from a browser that could not
+    /// send the request.
+    fn decoded_texture(&self, chain: &mut Chain, path: &str) -> Option<std::sync::Arc<BlpMipChain>> {
+        let key = path.replace('/', "\\");
+        if let Some(hit) = self.decoded.lock().ok()?.get(&key) {
+            return Some(hit);
+        }
+        let decoded = std::sync::Arc::new(read_texture_mip_chain(chain, &key).ok()?);
+        if let Ok(mut cache) = self.decoded.lock() {
+            cache.put(key, decoded.clone());
+        }
+        Some(decoded)
+    }
+
     pub fn composite_body(
         &self,
         chain: &mut Chain,
@@ -261,8 +352,13 @@ impl CharSections {
         let Some(base_path) = self.skin_texture(race, sex, skin) else {
             return Ok(None);
         };
-        let mut atlas = read_texture_mip_chain(chain, base_path)
-            .with_context(|| format!("reading base skin '{base_path}'"))?;
+        // The atlas is mutated by every blit below, so this one is a COPY of the cached decode.
+        // Copying ~700 KB costs a fraction of a millisecond against the tens the decode costs.
+        let mut atlas = self
+            .decoded_texture(chain, base_path)
+            .with_context(|| format!("reading base skin '{base_path}'"))?
+            .as_ref()
+            .clone();
         // The head overlays: (sectionType, variation, color, texColumn, destTile) — the verified fan-out
         // (RF-0067 §"section → cell core" + RF-0074 head map). Within a tile, order matters (later
         // overwrites/blends over earlier): base skin (already the canvas) → face → facial hair → hair.
@@ -282,7 +378,7 @@ impl CharSections {
             let Some(path) = self.tex(race, sex, ty, var, color, col) else {
                 continue;
             };
-            if let Ok(overlay) = read_texture_mip_chain(chain, path) {
+            if let Some(overlay) = self.decoded_texture(chain, path) {
                 blit_over(&mut atlas, &overlay, tile);
             }
         }
@@ -300,7 +396,7 @@ impl CharSections {
             let Some(path) = self.tex(race, sex, SECTION_UNDERWEAR, 0, skin, col) else {
                 continue;
             };
-            if let Ok(overlay) = read_texture_mip_chain(chain, path) {
+            if let Some(overlay) = self.decoded_texture(chain, path) {
                 blit_over(&mut atlas, &overlay, EQUIP_TILES[layer]);
             }
         }
@@ -313,7 +409,7 @@ impl CharSections {
             if let Some(overlay) = step
                 .candidates(sex)
                 .iter()
-                .find_map(|path| read_texture_mip_chain(chain, path).ok())
+                .find_map(|path| self.decoded_texture(chain, path))
             {
                 blit_over(&mut atlas, &overlay, EQUIP_TILES[step.layer]);
             }
@@ -357,7 +453,10 @@ impl CharSections {
                 }
             }
         }
-        Ok(Self { sections })
+        Ok(Self {
+            sections,
+            decoded: std::sync::Mutex::new(DecodeCache::default()),
+        })
     }
 }
 
@@ -812,7 +911,10 @@ mod tests {
                 String::new(),
             ],
         );
-        let cs = CharSections { sections };
+        let cs = CharSections {
+            sections,
+            decoded: std::sync::Mutex::new(DecodeCache::default()),
+        };
         assert_eq!(
             cs.skin_texture(1, 0, 3),
             Some("Character\\Human\\Male\\HumanMaleSkin00_03.blp")
