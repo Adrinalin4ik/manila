@@ -191,9 +191,21 @@ struct DecodeCache {
 }
 
 impl DecodeCache {
-    /// Total retained decoded bytes. Decoded RGBA8 runs several times the size of the BLP it came
-    /// from, so this is deliberately smaller than the chain's byte budget.
-    const BUDGET: usize = 48 * 1024 * 1024;
+    /// Total retained decoded bytes.
+    ///
+    /// Started at 48 MiB, on the reasoning that decoded RGBA8 runs several times the size of the
+    /// BLP it came from. The first journal with hit counters said that was too small to matter:
+    /// **44% hits**, 13.7 decodes still paid per composite, and 6232 distinct textures decoded on
+    /// entry to a crowded city - several hundred megabytes of decoded pixels against a 48 MiB
+    /// shelf. A cache that evicts what it is about to be asked for again pays its own cost and
+    /// returns nothing.
+    ///
+    /// 192 MiB is a guess at the working set, not a measurement of it, and it is meant to be
+    /// falsified: `tex_hit`/`tex_dec` in the journal answer directly. If the rate does not move,
+    /// the cache was never evicting and the misses are genuinely cold - every player's armour is
+    /// their own - and the budget goes back down rather than sitting there holding memory for
+    /// nothing.
+    const BUDGET: usize = 192 * 1024 * 1024;
 
     fn size_of(chain: &BlpMipChain) -> usize {
         chain.mips.iter().map(Vec::len).sum()
