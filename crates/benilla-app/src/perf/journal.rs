@@ -78,7 +78,8 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               m2,uv,tint,pmat,emat,skin,cmat,tex,cgeo,evicted,fx,fy,fz,main_ms,\
                               gpu_ms,gpu_opaque,gpu_static,gpu_transp,gpu_glow,gpu_post,gpu_ui,\
                               gpu_other,lua_errs,lua_err_us,msg_hashed,ui_us,col_us,emitters,fx_kits,fx_impacts,net_pkts,net_us,pipes,\
-                              rscale,farclip\n";
+                              rscale,farclip,\
+                              skins_new,skin_us\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -219,6 +220,34 @@ pub(crate) fn note_net(packets: u32, micros: u64) {
 fn take_net_costs() -> (u32, u64) {
     use std::sync::atomic::Ordering::Relaxed;
     (NET_PKTS.swap(0, Relaxed), NET_US.swap(0, Relaxed))
+}
+
+/// Character body atlases COMPOSITED this second, and what they cost - the `skins_new` and
+/// `skin_us` columns.
+///
+/// The `skin` residency column beside them counts atlases the cache HOLDS. That is a stock, and
+/// a stock cannot say whether the frame in front of you paid for one: in a crowd it climbs to
+/// several hundred and then sits still while the frame stays slow. These two are the flow.
+///
+/// Worth their own pair because the work is large and entirely on the main thread: a composite
+/// reads half a dozen BLPs off the shared chain, decodes them, layers the body texel by texel on
+/// the CPU and uploads the result. `char_skin.rs` calls that "fine behind the cache (once per
+/// look)", and once per look is once per distinct APPEARANCE - measured at 72 and 95 atlases in a
+/// quiet street and **621** in a crowd, where the frame was 45 ms against that street's 23.
+static SKINS_NEW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static SKIN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Called once per cache MISS on the way out, including a miss that fails to compose: the reads
+/// and the decode were paid either way, and the frame does not care that the result was dropped.
+pub(crate) fn note_skin_composite(micros: u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    SKINS_NEW.fetch_add(1, Relaxed);
+    SKIN_US.fetch_add(micros, Relaxed);
+}
+
+fn take_skin_costs() -> (u32, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (SKINS_NEW.swap(0, Relaxed), SKIN_US.swap(0, Relaxed))
 }
 
 pub(crate) fn note_fx_kit() {
@@ -663,6 +692,9 @@ fn journal_fps(
         (None, Some(v)) => line.push_str(&format!(",,{:.0}", v.farclip)),
         (None, None) => line.push_str(",,"),
     }
+    // The composite FLOW, next to `skin`'s stock - see `note_skin_composite`.
+    let (skins_new, skin_us) = take_skin_costs();
+    line.push_str(&format!(",{skins_new},{skin_us}"));
     line.push('\n');
     #[cfg(target_arch = "wasm32")]
     web::append(&line);

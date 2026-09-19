@@ -360,6 +360,20 @@ pub(super) fn build_char_skin_materials(
             match skin_cache.fetch(&key) {
                 Some(handle) => Some(handle),
                 None => {
+                    // **The composite's own meter** (`skins_new`/`skin_us`). A guard rather than a
+                    // pair of statements because this arm leaves through `?` twice below: a look
+                    // whose sections or display rows are missing costs the same reads and decode
+                    // and then returns nothing, and a frame does not care that the result was
+                    // dropped. Drop order runs it on every exit.
+                    struct Meter(bevy::platform::time::Instant);
+                    impl Drop for Meter {
+                        fn drop(&mut self) {
+                            crate::perf::journal::note_skin_composite(
+                                self.0.elapsed().as_micros() as u64,
+                            );
+                        }
+                    }
+                    let _meter = Meter(bevy::platform::time::Instant::now());
                     // The worn ItemDisplayInfo rows whose region textures dress the atlas
                     // (decision 0074); an unknown/zero display id contributes nothing.
                     let catalog = displays.map(|d| &d.catalog);
