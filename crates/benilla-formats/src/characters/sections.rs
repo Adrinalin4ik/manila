@@ -200,12 +200,19 @@ impl DecodeCache {
     /// shelf. A cache that evicts what it is about to be asked for again pays its own cost and
     /// returns nothing.
     ///
-    /// 192 MiB is a guess at the working set, not a measurement of it, and it is meant to be
-    /// falsified: `tex_hit`/`tex_dec` in the journal answer directly. If the rate does not move,
-    /// the cache was never evicting and the misses are genuinely cold - every player's armour is
-    /// their own - and the budget goes back down rather than sitting there holding memory for
-    /// nothing.
-    const BUDGET: usize = 192 * 1024 * 1024;
+    /// 192 MiB was tried and **lost**, which is why the number is back where it started. The hit
+    /// rate rose exactly as intended - 44% to 56% on entry, 43% to 70% standing still, 1444 fewer
+    /// decodes - and entry got twice as expensive anyway: 13.7 s of compositing became 28.3 s, and
+    /// the cost of a single decode went 2.06 ms to 5.45 ms.
+    ///
+    /// Removing decodes while making each survivor 2.6x dearer is a loss, and the mechanism is not
+    /// mysterious: every decode allocates its own RGBA8 buffer, and 192 MiB of retained pixels
+    /// beside the chain's 64 MiB of retained bytes is a large, fragmented wasm heap to allocate
+    /// into. The cache's own residency was costing more than the work it saved.
+    ///
+    /// So the ceiling here is not "how much would we like to keep" but "how much can be held
+    /// before holding it costs more than decoding again".
+    const BUDGET: usize = 48 * 1024 * 1024;
 
     fn size_of(chain: &BlpMipChain) -> usize {
         chain.mips.iter().map(Vec::len).sum()
