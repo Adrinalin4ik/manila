@@ -142,31 +142,56 @@ fn apply_global_sequences(
         }
         let mut rig = rigs.get_mut(host).ok();
         for (target, bone) in &drive.bones {
-            let tf: &mut Transform = match target {
+            let at = |period: f32| (t % f64::from(period.max(1e-3))) as f32;
+            // Sample into a COPY of the current value. A channel this bone does not carry leaves
+            // its component untouched, which is the rule this pass exists to honour (the eyelid
+            // keeps its rest translation and takes only the global scale), and seeding from the
+            // current transform is what preserves it.
+            let sample = |cur: &Transform| {
+                let mut out = *cur;
+                if let Some(c) = &bone.translation {
+                    out.translation = c.sample(at(c.period));
+                }
+                if let Some(c) = &bone.rotation {
+                    out.rotation = c.sample(at(c.period));
+                }
+                if let Some(c) = &bone.scale {
+                    out.scale = c.sample(at(c.period));
+                }
+                out
+            };
+            match target {
                 SeqTarget::Joint(joint) => {
-                    let Ok(tf) = joints.get_mut(*joint) else {
+                    let Ok(mut tf) = joints.get_mut(*joint) else {
                         continue;
                     };
-                    tf.into_inner()
+                    // **`into_inner()` marked this row changed unconditionally**, which is how a
+                    // blinking eyelid used to cost a transform-propagation subtree on every frame
+                    // of its cycle including the ones where it holds still. `Mut<Transform>`
+                    // raises `Changed` on `DerefMut`, never on a new value, so the compare has to
+                    // be ours. `*tf != posed` is a `Deref` and marks nothing.
+                    let posed = sample(&tf);
+                    if *tf != posed {
+                        *tf = posed;
+                    }
                 }
                 SeqTarget::Bone(b) => {
                     let Some(rig) = rig.as_mut() else { continue };
-                    rig.pose_dirty = true;
-                    let Some(tf) = rig.locals.get_mut(*b as usize) else {
+                    let Some(cur) = rig.locals.get(*b as usize).copied() else {
                         continue;
                     };
-                    tf
+                    let posed = sample(&cur);
+                    // `pose_dirty` now follows an actual change instead of the mere existence of a
+                    // drive. It was raised every frame for every unparked drive, so a lamp-post or
+                    // a banner never went quiet: `compose_rig_models` re-folded its pose and
+                    // re-seated its anchors for ever, at a city pin across ~4.8 k anchors
+                    // (`rig_anim/pose.rs:185`). Raising it before the bone index was even checked
+                    // also dirtied rigs whose channel names a bone the skeleton does not have.
+                    if cur != posed {
+                        rig.locals[*b as usize] = posed;
+                        rig.pose_dirty = true;
+                    }
                 }
-            };
-            let at = |period: f32| (t % f64::from(period.max(1e-3))) as f32;
-            if let Some(c) = &bone.translation {
-                tf.translation = c.sample(at(c.period));
-            }
-            if let Some(c) = &bone.rotation {
-                tf.rotation = c.sample(at(c.period));
-            }
-            if let Some(c) = &bone.scale {
-                tf.scale = c.sample(at(c.period));
             }
         }
     }

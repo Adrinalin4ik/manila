@@ -80,11 +80,31 @@ fn compose_rig_models(
                 continue;
             };
             let (scale, rotation, translation) = m.to_scale_rotation_translation();
-            *t = Transform {
+            let posed = Transform {
                 translation,
                 rotation,
                 scale,
             };
+            // **Compare before writing.** `Mut<Transform>` marks the row changed on `DerefMut`,
+            // not on a different value, so the unconditional `*t = posed` below raised
+            // `Changed<Transform>` on every anchor of every pose-dirty rig every frame - and a
+            // changed `Transform` is not free downstream: `mark_dirty_trees` walks it up to the
+            // root and `propagate_parent_transforms` then re-walks that whole subtree
+            // (`bevy_transform-0.18.1/src/systems.rs`). `*t != posed` is a `Deref`, so a bone that
+            // poses to the value it already holds now costs one comparison instead of a subtree.
+            //
+            // This is the same defect `billboard.rs:653-655` already fixed, whose comment names
+            // the symptom in the same words ("marked every card `Changed<Transform>` every
+            // frame"). It bites harder here because `apply_global_sequences`
+            // (`rig_anim/global_seq.rs:152`) raises `pose_dirty` every frame for every unparked
+            // `GlobalSeqDrive`, so every lamp-post and banner re-seats its anchors for ever even
+            // while posing to exactly the same place.
+            //
+            // Wake semantics are untouched: the parked/dirty rules above decide *whether* we
+            // compose, and this only decides whether the composed value is worth storing.
+            if *t != posed {
+                *t = posed;
+            }
         }
     }
 }
