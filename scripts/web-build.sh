@@ -51,7 +51,14 @@ if [ -n "${WASM_OPT}" ] && [ "${WEB_DEBUG:-0}" != 1 ]; then
   "${WASM_OPT}" -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
     --enable-mutable-globals --enable-reference-types --enable-multivalue \
     "${DIST}/wenilla_bg.wasm" -o "${DIST}/wenilla_bg.wasm.opt"
-  mv "${DIST}/wenilla_bg.wasm.opt" "${DIST}/wenilla_bg.wasm"
+  # wasm-opt has returned 0 without writing its output here (twice, on a ~90 MB module in a
+  # memory-constrained shell). Say so rather than letting `mv` fail with a stat error that reads
+  # like a path typo.
+  if [ ! -s "${DIST}/wenilla_bg.wasm.opt" ]; then
+    echo "web-build: wasm-opt produced no output - shipping the unoptimised module" >&2
+  else
+    mv "${DIST}/wenilla_bg.wasm.opt" "${DIST}/wenilla_bg.wasm"
+  fi
 elif [ "${WEB_DEBUG:-0}" = 1 ]; then
   echo "WEB_DEBUG=1 — skipping wasm-opt to preserve debugging symbols"
 else
@@ -60,8 +67,25 @@ fi
 
 # Precompressed siblings for wenilla-host's precompressed_br()/gzip(): ~90 MB of wasm goes
 # over the wire as ~15 MB without per-request CPU. brotli -q 5 is the speed/size knee.
+# **`if`, not `&&`.** Under `set -e` a bare `cmd-a && cmd-b` whose FIRST half fails is a failed
+# compound command, and the script dies on the spot. brotli is optional and was absent here, so
+# this loop exited the build before the gzip line ever ran - every build silently left the
+# PREVIOUS run's `.gz` in place, and `wenilla-host` serves `.gz` to any browser that asks for it.
+# A client was shipped that way twice: fresh `.wasm`, stale compressed twin, and the browser took
+# the stale one.
 for f in "${DIST}"/*.wasm "${DIST}"/*.js; do
-  command -v brotli >/dev/null && brotli -f -q 5 "$f" -o "$f.br"
-  command -v gzip >/dev/null && gzip -kf -6 "$f"
+  if command -v brotli >/dev/null; then brotli -f -q 5 "$f" -o "$f.br"; fi
+  if command -v gzip >/dev/null; then gzip -kf -6 "$f"; fi
+done
+# The compressed twins must not outlive their source. A `.gz` older than its `.wasm` is the exact
+# shape of the failure above, and it is invisible from the outside - the page loads, the code is
+# last build's.
+for f in "${DIST}"/*.wasm "${DIST}"/*.js; do
+  for z in "$f.gz" "$f.br"; do
+    if [ -e "$z" ] && [ "$z" -ot "$f" ]; then
+      echo "web-build: $z is older than $f - compression did not run" >&2
+      exit 1
+    fi
+  done
 done
 ls -la "${DIST}"
