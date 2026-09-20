@@ -39,7 +39,9 @@ static TOTALS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
 /// that were already asked about — without it, spans decided at startup stay decided.
 pub fn arm(on: bool) {
     ARMED.store(on, Ordering::Relaxed);
-    bevy::log::tracing::callsite::rebuild_interest_cache();
+    // One line, so "the profiler produced nothing" can be told from "the profiler never ran" -
+    // which is exactly the ambiguity that cost the first build of this.
+    bevy::log::tracing::info!("sysprof {}", if on { "armed" } else { "off" });
 }
 
 /// The costliest `n` systems since the last call, microseconds each, and a reset. Empty when the
@@ -88,17 +90,16 @@ impl<S> Layer<S> for SystemProfiler
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    fn enabled(
-        &self,
-        meta: &bevy::log::tracing::Metadata<'_>,
-        _ctx: Context<'_, S>,
-    ) -> bool {
-        // Only the system spans, and only while armed. Everything else this layer ignores
-        // outright, which keeps the client's own logging untouched.
-        meta.name() == "system" && ARMED.load(Ordering::Relaxed)
-    }
-
+    // **No `enabled` override, deliberately.** The first version had one, returning false for
+    // everything but the system spans - and in `tracing_subscriber` a layer's `enabled` is
+    // ANDed across the stack, so a `false` here does not mean "this layer is not interested",
+    // it means "nobody sees this event". That build shipped a profiler that recorded nothing and
+    // may have silenced the client's own log with it. Interest is not a per-layer opinion; the
+    // filtering belongs in the callbacks, where it only decides this layer's own work.
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        if attrs.metadata().name() != "system" || !ARMED.load(Ordering::Relaxed) {
+            return;
+        }
         let mut name = NameOf::default();
         attrs.record(&mut name);
         if let Some(span) = ctx.span(id) {
