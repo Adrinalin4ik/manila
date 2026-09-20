@@ -266,6 +266,7 @@ pub(crate) fn on_cvar(
     // our own `effectsDistance`. One resource, because they are two fields of one tuning.
     mut particles: ResMut<benilla_world::particles::ParticleTuning>,
     mut players: ResMut<crate::player_distance::PlayerDistance>,
+    mut commands: Commands,
     mut msaa: ResMut<benilla_world::view::MsaaSetting>,
     msaa_formats: Res<benilla_world::view::MsaaFormats>,
     mut tex_filter: ResMut<benilla_assets::TexFilterSetting>,
@@ -304,6 +305,26 @@ pub(crate) fn on_cvar(
         }
         // The crowd's own wall (see the cvar table). Clamped at its own edge like every other
         // range here; `0` is inside the range on purpose and means "draw no other players".
+        // **The transform propagation's static-tree threshold** (2026-09-20). Measured: the
+        // propagate step is 14.45 ms of a 74 ms frame over 29 082 entities, the single most
+        // expensive thing in the client. bevy tracks unchanged subtrees and skips them, but turns
+        // that tracking OFF when more than `threshold` of the world's entities moved this frame,
+        // on the reasoning that in a very dynamic scene the bookkeeping costs more than it saves
+        // (`bevy_transform-0.18.1/src/systems.rs:44-59`). Default is 0.30.
+        //
+        // A knob rather than a constant because the two directions are both plausible and only a
+        // measurement decides: `1` forces tracking always on, `0` forces it off, and `p_xform` in
+        // the journal answers within one run - which is the only comparison this client has been
+        // able to trust, the machine itself having been seen running 1.85x slower between runs.
+        "statictransforms" => {
+            commands.insert_resource(if v <= 0.0 {
+                bevy::transform::systems::StaticTransformOptimizations::disabled()
+            } else {
+                bevy::transform::systems::StaticTransformOptimizations::from_threshold(
+                    v.clamp(0.0, 1.0),
+                )
+            });
+        }
         "playerdistance" => {
             players.0 = v.clamp(
                 *crate::player_distance::PLAYER_DISTANCE_RANGE.start(),

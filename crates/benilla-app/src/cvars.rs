@@ -364,6 +364,13 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // value. Default is the top of `FARCLIP_RANGE`, i.e. no wall of ours - every build before
     // this one.
     same("playerDistance", "777"),
+    // **`staticTransforms` - OURS, a knob on bevy's own static-tree threshold.** Transform
+    // propagation measured 14.45 ms of a 74 ms frame over 29 082 entities - the single most
+    // expensive step in the client. bevy skips unchanged subtrees, but stops tracking them at all
+    // once more than this fraction of entities moved in a frame. Default 0.30 is bevy's own; `1`
+    // forces tracking always, `0` never. Which way is right is a measurement, not an opinion, and
+    // `p_xform` in the journal is the one that answers it.
+    same("staticTransforms", "0.3"),
     // **`nearclip` — farclip's other half, and a knob we had been holding as a constant** (2163).
     // `0x68867a` passes name `0x84ffb0` `"nearclip"`, default string `0x84fb48` `"0.1"`, help
     // "Near clip plane distance", flags `1`, callback `0x688d90`, record `[0xc7f348]` (wow-re
