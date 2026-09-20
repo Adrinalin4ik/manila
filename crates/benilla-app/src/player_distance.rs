@@ -58,7 +58,6 @@ pub(crate) fn apply(
     // slides the crowd in and out as the view swings, which is not what a draw-distance setting
     // means anywhere else in this client.
     player: Option<Res<crate::player::Player>>,
-    mut commands: Commands,
     mut units: Query<(
         Entity,
         &crate::net::NetEntity,
@@ -91,20 +90,20 @@ pub(crate) fn apply(
             }
             hidden += 1;
             let want = Visibility::Hidden;
+            // **Write only; never insert.** Streamed bodies carry a `Visibility` already - the
+            // counter below has read `0 given a Visibility` in every capture since it shipped -
+            // so the insert branch was dead code that could still move an archetype mid-frame,
+            // and an archetype move on an entity the render world has already collected as
+            // visible is the shape of the crash seen in `bevy_pbr`'s material specialization
+            // (material.rs:1061, an `unwrap` on a tick table the sweep had just emptied). Dead
+            // code is not worth a hazard, however small the odds.
             match vis {
-                // **`Option`, not a plain `&mut`.** A streamed body is not spawned with a
-                // `Visibility` - it carries the wire state and the pose, and the visual hangs off
-                // it - so a `&mut Visibility` matched nothing at all, and the slider shipped doing
-                // exactly nothing, in silence. Insert on first contact; a write from then on.
                 Some(mut vis) => {
                     if *vis != want {
                         *vis = want;
                     }
                 }
-                None => {
-                    inserted += 1;
-                    commands.entity(entity).insert(want);
-                }
+                None => inserted += 1,
             }
         }
     }
@@ -114,7 +113,7 @@ pub(crate) fn apply(
     if *reported != Some(wall.0) {
         *reported = Some(wall.0);
         info!(
-            "playerDistance {:.0} yd - player {}, {players} other players seen, {hidden} past the              wall, {inserted} given a Visibility",
+            "playerDistance {:.0} yd - player {}, {players} other players seen, {hidden} past the              wall, {inserted} without a Visibility at all",
             wall.0,
             if eye.is_some() { "found" } else { "ABSENT" }
         );
