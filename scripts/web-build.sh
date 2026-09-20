@@ -48,14 +48,17 @@ for m in web/boot-manifest.json web/world-manifest.json; do if [ -f "$m" ]; then
 WASM_OPT="${WASM_OPT:-$(pwd)/tools/binaryen/bin/wasm-opt}"
 command -v "${WASM_OPT}" >/dev/null || WASM_OPT="$(command -v wasm-opt || true)"
 if [ -n "${WASM_OPT}" ] && [ "${WEB_DEBUG:-0}" != 1 ]; then
+  # `|| opt_status=$?` rather than `|| true`: the latter swallows the code it was meant to
+  # report, and a wasm-opt that fails silently is exactly what this block exists for.
+  opt_status=0
   "${WASM_OPT}" -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
     --enable-mutable-globals --enable-reference-types --enable-multivalue \
-    "${DIST}/wenilla_bg.wasm" -o "${DIST}/wenilla_bg.wasm.opt"
+    "${DIST}/wenilla_bg.wasm" -o "${DIST}/wenilla_bg.wasm.opt" || opt_status=$?
   # wasm-opt has returned 0 without writing its output here (twice, on a ~90 MB module in a
   # memory-constrained shell). Say so rather than letting `mv` fail with a stat error that reads
   # like a path typo.
   if [ ! -s "${DIST}/wenilla_bg.wasm.opt" ]; then
-    echo "web-build: wasm-opt produced no output - shipping the unoptimised module" >&2
+    echo "web-build: wasm-opt exited $opt_status and produced no output - shipping the unoptimised module" >&2
   else
     mv "${DIST}/wenilla_bg.wasm.opt" "${DIST}/wenilla_bg.wasm"
   fi
