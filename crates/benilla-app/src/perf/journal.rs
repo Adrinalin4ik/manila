@@ -80,7 +80,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               gpu_other,lua_errs,lua_err_us,msg_hashed,ui_us,col_us,emitters,fx_kits,fx_impacts,net_pkts,net_us,pipes,\
                               rscale,farclip,\
                               skins_new,skin_us,tex_hit,tex_dec,\
-                              rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us\n";
+                              rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -143,11 +143,65 @@ fn sched_close(start: Res<SchedStart>) {
 }
 
 /// Microseconds of main schedule per frame this second, and the reset. `None` when no frame ran.
-fn take_sched_us() -> Option<u64> {
-    use std::sync::atomic::Ordering::Relaxed;
-    let frames = SCHED_FRAMES.swap(0, Relaxed);
-    let us = SCHED_US.swap(0, Relaxed);
+fn take_sched_frames() -> u64 {
+    SCHED_FRAMES.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn take_sched_us(frames: u64) -> Option<u64> {
+    let us = SCHED_US.swap(0, std::sync::atomic::Ordering::Relaxed);
     (frames > 0).then(|| us / frames)
+}
+
+/// **Which part of the main schedule**, to microseconds - the `s_first`..`s_last` columns.
+///
+/// `sched_us` answered the first question and made this the only one left: 50.10 ms of a 65.68 ms
+/// frame is the main schedule, 76 per cent, against 1.34 ms for the whole render graph and 3.50
+/// for the UI pass. The work is game logic over 37 166 entities, and "game logic" is not a place
+/// anyone can go and fix.
+///
+/// Five marks, one per phase. The boundaries are exact rather than approximate because they are
+/// **their own schedules**, spliced into [`MainScheduleOrder`] between the stock ones: a system
+/// inside a schedule has no guaranteed position within it, but a schedule inserted after `Update`
+/// runs after every system of `Update` and before every system of `PostUpdate`, by construction.
+static PHASE_US: [std::sync::atomic::AtomicU64; 5] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+/// The phase boundary schedules, in order. Each holds one system.
+#[derive(bevy::ecs::schedule::ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
+struct PhaseMark(u8);
+
+/// The previous boundary's instant, so each mark closes one phase and opens the next.
+#[derive(Resource)]
+struct PhaseClock(Instant);
+
+impl Default for PhaseClock {
+    fn default() -> Self {
+        Self(Instant::now())
+    }
+}
+
+/// Close phase `n`: the time since the last mark belongs to it.
+fn phase_mark<const N: usize>(mut clock: ResMut<PhaseClock>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let now = Instant::now();
+    PHASE_US[N].fetch_add((now - clock.0).as_micros() as u64, Relaxed);
+    clock.0 = now;
+}
+
+/// Per-frame microseconds for each phase this second, and the reset.
+fn take_phase_us(frames: u64) -> [u64; 5] {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut out = [0u64; 5];
+    for (slot, cell) in out.iter_mut().zip(&PHASE_US) {
+        let us = cell.swap(0, Relaxed);
+        *slot = if frames > 0 { us / frames } else { 0 };
+    }
+    out
 }
 
 impl Plugin for FpsJournalPlugin {
@@ -156,6 +210,18 @@ impl Plugin for FpsJournalPlugin {
         // `tracy` feature) the hook Tracy's GPU zones ride. Present in every build: its per-frame
         // cost is one query resolve and one buffer map on the render thread, and a player's
         // journal is exactly the build that has to carry it (2008).
+        {
+            // Spliced rather than added inside the stock schedules: a system has no guaranteed
+            // position within a schedule, but a schedule inserted after `Update` runs after every
+            // system of `Update`, by construction. That is the whole reason these boundaries can
+            // be trusted to the microsecond.
+            let mut order = app.world_mut().resource_mut::<bevy::app::MainScheduleOrder>();
+            order.insert_after(bevy::app::First, PhaseMark(0));
+            order.insert_after(bevy::app::PreUpdate, PhaseMark(1));
+            order.insert_after(bevy::app::Update, PhaseMark(2));
+            order.insert_after(bevy::app::PostUpdate, PhaseMark(3));
+            order.insert_after(bevy::app::Last, PhaseMark(4));
+        }
         app.add_plugins(RenderDiagnosticsPlugin)
             .init_resource::<SchedStart>()
             // First of `First` and last of `Last`: the main schedule end to end, with nothing of
@@ -163,6 +229,12 @@ impl Plugin for FpsJournalPlugin {
             // off - the same price the frame-time window already pays.
             .add_systems(bevy::app::First, sched_open)
             .add_systems(bevy::app::Last, sched_close)
+            .init_resource::<PhaseClock>()
+            .add_systems(PhaseMark(0), phase_mark::<0>)
+            .add_systems(PhaseMark(1), phase_mark::<1>)
+            .add_systems(PhaseMark(2), phase_mark::<2>)
+            .add_systems(PhaseMark(3), phase_mark::<3>)
+            .add_systems(PhaseMark(4), phase_mark::<4>)
             .init_resource::<FpsJournalSetting>()
             .add_observer(on_cvar)
             .insert_resource(FpsJournal {
@@ -796,9 +868,14 @@ fn journal_fps(
     let rcpu_cells = journal.rcpu.columns();
     line.push_str(&rcpu_cells);
     // The main schedule against the frame - see `SCHED_US`.
-    match take_sched_us() {
+    let frames = take_sched_frames();
+    match take_sched_us(frames) {
         Some(us) => line.push_str(&format!(",{us}")),
         None => line.push(','),
+    }
+    // ...and where inside it. See `PHASE_US`.
+    for us in take_phase_us(frames) {
+        line.push_str(&format!(",{us}"));
     }
     line.push('\n');
     #[cfg(target_arch = "wasm32")]
