@@ -50,7 +50,14 @@ impl Default for PlayerDistance {
 pub(crate) fn apply(
     wall: Res<PlayerDistance>,
     self_guid: Res<crate::net::SelfGuid>,
-    camera: Query<&GlobalTransform, With<benilla_world::view::WorldCamera>>,
+    // **The wall measures from the PLAYER, not the camera**, and the first build measured from the
+    // camera and died on it: `camera.single()` returns `Err` for zero matches as well as two, the
+    // function returned there, and every line below - including the one meant to explain a slider
+    // that does nothing - was unreachable. A diagnostic behind an early return is not a
+    // diagnostic. The player's own position is the honest origin anyway: a wall the camera carries
+    // slides the crowd in and out as the view swings, which is not what a draw-distance setting
+    // means anywhere else in this client.
+    player: Option<Res<crate::player::Player>>,
     mut commands: Commands,
     mut units: Query<(
         Entity,
@@ -61,49 +68,49 @@ pub(crate) fn apply(
     )>,
     mut reported: Local<Option<f32>>,
 ) {
-    let Ok(eye) = camera.single() else {
-        return;
-    };
-    let eye = eye.translation();
+    let eye = player.as_deref().filter(|p| p.active).map(|p| p.pos);
     // Compared squared, so the per-unit test is a subtract and a dot rather than a square root.
     let limit = wall.0 * wall.0;
     let me = self_guid.0;
     let (mut players, mut hidden, mut inserted) = (0u32, 0u32, 0u32);
-    for (entity, net, guid, at, vis) in &mut units {
-        if net.kind != EntityKind::Player || Some(guid.0) == me {
-            continue;
-        }
-        players += 1;
-        let want = if at.translation().distance_squared(eye) <= limit {
-            Visibility::Inherited
-        } else {
-            hidden += 1;
-            Visibility::Hidden
-        };
-        match vis {
-            // **`Option`, not a required component.** A streamed body is not spawned with a
-            // `Visibility` - the visual hangs off it, and the root carries the wire state and the
-            // pose. A plain `&mut Visibility` therefore matched NOTHING, and the wall moved with
-            // no effect and no complaint: the first build of this shipped a slider that did
-            // exactly nothing. Insert one on first contact; from then on it is a write.
-            Some(mut vis) => {
-                if *vis != want {
-                    *vis = want;
-                }
+    if let Some(eye) = eye {
+        for (entity, net, guid, at, vis) in &mut units {
+            if net.kind != EntityKind::Player || Some(guid.0) == me {
+                continue;
             }
-            None => {
-                inserted += 1;
-                commands.entity(entity).insert(want);
+            players += 1;
+            let want = if at.translation().distance_squared(eye) <= limit {
+                Visibility::Inherited
+            } else {
+                hidden += 1;
+                Visibility::Hidden
+            };
+            match vis {
+                // **`Option`, not a plain `&mut`.** A streamed body is not spawned with a
+                // `Visibility` - it carries the wire state and the pose, and the visual hangs off
+                // it - so a `&mut Visibility` matched nothing at all, and the slider shipped doing
+                // exactly nothing, in silence. Insert on first contact; a write from then on.
+                Some(mut vis) => {
+                    if *vis != want {
+                        *vis = want;
+                    }
+                }
+                None => {
+                    inserted += 1;
+                    commands.entity(entity).insert(want);
+                }
             }
         }
     }
-    // One line per setting change, never per frame: it names what the wall actually reached, which
-    // is the question a slider that appears to do nothing needs answered first.
+    // One line per setting change, never per frame, and **outside every early return**: "the
+    // slider does nothing" is a question about what the code reached, and the code has to be able
+    // to answer it even when it reached nothing.
     if *reported != Some(wall.0) {
         *reported = Some(wall.0);
         info!(
-            "playerDistance {:.0} yd — {players} other players in range of the streamer,              {hidden} past the wall, {inserted} given a Visibility",
-            wall.0
+            "playerDistance {:.0} yd - player {}, {players} other players seen, {hidden} past the              wall, {inserted} given a Visibility",
+            wall.0,
+            if eye.is_some() { "found" } else { "ABSENT" }
         );
     }
 }
