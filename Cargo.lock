@@ -861,6 +861,7 @@ dependencies = [
  "send_wrapper",
  "sha1 0.10.6",
  "strum",
+ "tracing",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

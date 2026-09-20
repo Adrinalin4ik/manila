@@ -622,7 +622,12 @@ const TARGET_BUFFER_FRAMES: u32 = 2048;
 #[cfg(target_arch = "wasm32")]
 fn backend_settings() -> (CpalBackendSettings, Option<u32>) {
     let fallback = CpalBackendSettings::default();
-    let Some(device) = cpal::default_host().default_output_device() else {
+    // The default host here is `WebAudioHost` - render-ahead into `AudioBuffer`s, scheduled from
+    // the MAIN thread, so a frame that overruns tears the sound. cpal's `audioworklet` host fixes
+    // exactly that and is gated on `target_feature = "atomics"`, so it arrives with wasm threads
+    // and not before; see the note beside the dependency.
+    let host = cpal::default_host();
+    let Some(device) = host.default_output_device() else {
         return (fallback, None);
     };
     let Ok(supported) = device.default_output_config() else {
@@ -648,6 +653,11 @@ fn backend_settings() -> (CpalBackendSettings, Option<u32>) {
     (
         CpalBackendSettings {
             config: Some(config),
+            // kira would otherwise build its own `default_host()` device and discard the one
+            // chosen above; the settings carry a device precisely so a caller can pick the host
+            // (`third_party/kira/.../cpal/wasm.rs:37`). Passing it now is what makes the switch to
+            // the worklet host a one-line change when atomics arrive.
+            device: Some(device),
             ..fallback
         },
         Some(rate),

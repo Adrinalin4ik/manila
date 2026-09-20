@@ -215,6 +215,18 @@ js-sys = "0.3"
 # `sound::mixer` is the seam. Features are additive across target sections, so this only adds
 # `cpal` to the kira declared above; `CpalBackendSettings`' fields ARE cpal types, so cpal must
 # stay the exact version kira resolves — one cpal in the graph.
+#
+# **`audioworklet` is NOT enabled, and cannot be from here.** cpal's default host on this target
+# is `WebAudioHost`, which renders ahead into `AudioBuffer`s and schedules them on the MAIN
+# thread: a frame that overruns misses the moment to queue the next block and the sound tears.
+# That is this client's crackle, and at 40-70 ms frames it overruns constantly. cpal does ship
+# the fix - an `audioworklet` host that runs the same callback on the browser's own realtime
+# audio thread - but it is gated on `target_feature = "atomics"`
+# (cpal-0.17.1/src/host/mod.rs:12-17), so it exists only in a build with wasm threads.
+#
+# So the crackle and the threads are one task, not two. That is why keldurn's compute worker
+# sequences audio init before rayon: with both on, the rayon bootstrap's `Atomics.wait` is
+# forbidden inside `AudioWorkletGlobalScope` and the two races.
 cpal = "0.17"
 kira = { version = "0.12", features = ["cpal"] }
 # `Response`/`fetch` and the audio-decode surfaces are `sound::web_load`'s: the zone soundscape
