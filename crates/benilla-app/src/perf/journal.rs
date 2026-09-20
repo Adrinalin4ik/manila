@@ -83,7 +83,8 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               rscale,farclip,\
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
-                              u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved\n";
+                              u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -249,6 +250,42 @@ fn take_moved() -> u64 {
     } else {
         0
     }
+}
+
+/// **The streamer's own five timers**, per frame - the `t_*` columns.
+///
+/// `u_stream` measured 6.94 ms of a 42.91 ms frame standing perfectly still, which is the one
+/// number in the whole breakdown that looks wrong rather than expensive: terrain residency with
+/// nobody moving should be finding nothing to do. The engine has always timed its own chain
+/// (`StreamActivity`'s five `_ms` fields), but the only reader was `WOW_STREAM_TRACE`, which is
+/// an env var and a file path - neither of which exists in a browser. So the numbers were being
+/// taken every frame and dropped on the floor on the one target that needed them.
+///
+/// Fed from `trace_stream`, which already consumes the resource per frame by contract.
+static STREAM_US: [std::sync::atomic::AtomicU64; 5] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+/// Called once a frame with the chain's own split, in milliseconds as the streamer keeps them.
+pub(crate) fn note_stream_ms(parts: [f32; 5]) {
+    use std::sync::atomic::Ordering::Relaxed;
+    for (cell, ms) in STREAM_US.iter().zip(parts) {
+        cell.fetch_add((ms * 1000.0) as u64, Relaxed);
+    }
+}
+
+fn take_stream_us(frames: u64) -> [u64; 5] {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut out = [0u64; 5];
+    for (slot, cell) in out.iter_mut().zip(&STREAM_US) {
+        let us = cell.swap(0, Relaxed);
+        *slot = if frames > 0 { us / frames } else { 0 };
+    }
+    out
 }
 
 impl Plugin for FpsJournalPlugin {
@@ -953,6 +990,10 @@ fn journal_fps(
         line.push_str(&format!(",{us}"));
     }
     line.push_str(&format!(",{}", take_moved()));
+    // The streamer's own split of `u_stream` - see `STREAM_US`.
+    for us in take_stream_us(frames) {
+        line.push_str(&format!(",{us}"));
+    }
     // **The costliest systems of that second, by name.** A `#` line, so every existing reader of
     // this file skips it and the columns stay a table. This is what ends the
     // guess-a-suspect-then-rebuild loop: one capture names them all.

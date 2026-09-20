@@ -51,6 +51,16 @@ pub(super) fn trace_stream(
 ) {
     // Taken every frame — the counters are per-frame by contract, tracing or not.
     let a = std::mem::take(&mut *activity);
+    // The FPS journal is the only reader of these on the web target: `StreamTrace`'s own path is
+    // an env var and a file, and a browser has neither. Published here because this is where the
+    // per-frame contract is honoured - the take above is what makes them per-frame at all.
+    crate::perf::journal::note_stream_ms([
+        a.stream_ms,
+        a.furnish_ms,
+        a.mfurnish_ms,
+        a.spawn_ms,
+        a.collider_ms,
+    ]);
     let pipes_created = pipes.0.created.load(std::sync::atomic::Ordering::Relaxed);
     let pipes_settled = pipes.0.settled.load(std::sync::atomic::Ordering::Relaxed);
     let pipes_new = pipes_created.saturating_sub(trace.prev_pipes_created);
