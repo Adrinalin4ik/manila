@@ -518,9 +518,18 @@ pub(super) fn attach_entity_visuals(
             // the strength of a delivery state we do not model). `insert_if_new` so a gear-change
             // re-attach keeps the already-ramped state instead of resetting it (no one-frame
             // lighting pop).
+            // **Silenced, not plain.** This runs from a deferred command, and between the frame
+            // that scheduled it and the frame that applies it the unit can have left: a player
+            // walking out of the streamer's range, a creature dying. The entity is then gone and
+            // the insert panics the whole app with "Entity despawned ... generation 1" - observed
+            // live. A body that left before it could be shaded needs no shade; that is the entire
+            // handling.
             commands
                 .entity(entity)
-                .insert_if_new(benilla_world::entity_shade::GroundShade::default());
+                .queue_silenced(bevy::ecs::system::entity_command::insert(
+                    benilla_world::entity_shade::GroundShade::default(),
+                    bevy::ecs::bundle::InsertMode::Keep,
+                ));
             // The root's canonical fold reference: held items share the root's interior verdict
             // (one light node per unit — the reference aliases the wearer's collector into each
             // equipped item, wow-re `unit-light-combine-storm.md`), and their classifier fold must

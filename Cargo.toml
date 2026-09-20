@@ -44,14 +44,15 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "ui_bevy_render",
     "scene",
     "picking",
-    # Per-system `info_span!`s (bevy_ecs function_system.rs:52,658). They are what
-    # `benilla_world::sysprof` listens to, and they do not exist without this. Inert until the
-    # profiler is armed: the layer refuses the callsite, so a disabled span is an atomic read.
-    "trace",
-    # Without it every system reports its name as
-    # `<Enable the debug feature to see the name>`, which is what the first profiling capture
-    # came back with: one row, all systems folded under one placeholder.
-    "debug",
+    # **`trace` and `debug` are OFF, and the measurement that took them off is the point.** They
+    # are what `benilla_world::sysprof` needs - the per-system `info_span!`s (bevy_ecs
+    # function_system.rs:52,658) and the real names behind `DebugName`. With them the client was
+    # unusable: the frame went from ~65 ms to 535-642 ms and the world would not finish loading.
+    # A span entered and exited around every system of every frame is not a diagnostic that rides
+    # along; it is a different program.
+    #
+    # So per-system timing needs a cheaper mechanism than tracing. Until there is one the profiler
+    # stays in the tree and inert - it costs nothing without these.
 ] }
 # The render app's raw GPU handles (the WOW_GPU_MS meter's query set): bevy 0.18 does not wrap
 # wgpu's QuerySet family, so the meter reaches for the same wgpu the workspace already builds.
