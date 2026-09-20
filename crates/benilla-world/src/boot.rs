@@ -48,7 +48,15 @@ pub fn tuned_default_plugins(mut primary_window: Window) -> PluginGroupBuilder {
         // stderr shows for the crash report (`log_ring`; decision 2266 §B2).
         .set(bevy::log::LogPlugin {
             filter: "wgpu=error,naga=warn".into(),
-            custom_layer: |_| Some(Box::new(crate::log_ring::LogRing)),
+            // Two layers, composed: the crash ring, and the system profiler that answers "which
+            // system" from one capture instead of one rebuild per suspect. The profiler is inert
+            // until `sysprof::arm` flips it.
+            custom_layer: |_| {
+                use bevy::log::tracing_subscriber::Layer as _;
+                Some(Box::new(
+                    crate::log_ring::LogRing.and_then(crate::sysprof::SystemProfiler),
+                ))
+            },
             ..default()
         })
         // Asset streaming is this client's load bottleneck: every M2/WMO/BLP read decompresses from

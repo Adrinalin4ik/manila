@@ -44,6 +44,10 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "ui_bevy_render",
     "scene",
     "picking",
+    # Per-system `info_span!`s (bevy_ecs function_system.rs:52,658). They are what
+    # `benilla_world::sysprof` listens to, and they do not exist without this. Inert until the
+    # profiler is armed: the layer refuses the callsite, so a disabled span is an atomic read.
+    "trace",
 ] }
 # The render app's raw GPU handles (the WOW_GPU_MS meter's query set): bevy 0.18 does not wrap
 # wgpu's QuerySet family, so the meter reaches for the same wgpu the workspace already builds.

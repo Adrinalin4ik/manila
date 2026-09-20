@@ -148,6 +148,7 @@ pub mod interior;
 pub mod lighting;
 pub mod liquid;
 pub mod log_ring;
+pub mod sysprof;
 
 /// macOS `Cmd+Q`, re-pointed at the window close so the gesture goes through an exit the client
 /// can actually observe (decision 1528).

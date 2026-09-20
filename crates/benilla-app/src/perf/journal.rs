@@ -51,6 +51,8 @@ use std::path::PathBuf;
 // `web_time` there and std's everywhere else. Same carry as `net.rs` and `items.rs`.
 use bevy::platform::time::Instant;
 
+use std::fmt::Write as _;
+
 use bevy::diagnostic::DiagnosticsStore;
 use bevy::prelude::*;
 use bevy::render::diagnostic::RenderDiagnosticsPlugin;
@@ -81,7 +83,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               rscale,farclip,\
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
-                              u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis\n";
+                              u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -105,6 +107,10 @@ pub(crate) fn on_cvar(
         if journal.0 {
             ui_cost.0 = true;
         }
+        // The per-system profiler rides the journal switch: far too expensive to leave on for a
+        // player who asked for nothing, and exactly what a player who turned the journal on is
+        // asking for.
+        benilla_world::sysprof::arm(journal.0);
     }
 }
 
@@ -211,6 +217,40 @@ fn take_phase_us(frames: u64) -> [u64; PHASES] {
     out
 }
 
+/// **How many entities had their `Transform` written this frame** - the `moved` column, against
+/// `entities` beside it.
+///
+/// The premise this tests is bevy's, not ours: it tracks unchanged subtrees and skips them during
+/// propagation, then stops tracking at all once more than 30% of entities moved in a frame
+/// (`bevy_transform-0.18.1/src/systems.rs:44-59`). A city where almost nothing moves should be far
+/// under that line and should be getting the skip for free.
+///
+/// Worth a column rather than an argument because the span that was supposed to answer it did not:
+/// `p_xform` sat at 12.0-13.5 ms while `entities` went 19 706 -> 34 173, a 73% rise for a 5% cost.
+/// Work that does not scale with the thing it is supposed to walk is not that work. This counts
+/// the input directly instead of inferring it from a timing.
+static MOVED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MOVED_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Runs at the very top of `Last`, where every write of the frame has landed and bevy's own
+/// change ticks have not yet rolled over.
+fn count_moved(moved: Query<(), Changed<Transform>>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    MOVED.fetch_add(moved.iter().count() as u64, Relaxed);
+    MOVED_FRAMES.fetch_add(1, Relaxed);
+}
+
+fn take_moved() -> u64 {
+    use std::sync::atomic::Ordering::Relaxed;
+    let frames = MOVED_FRAMES.swap(0, Relaxed);
+    let moved = MOVED.swap(0, Relaxed);
+    if frames > 0 {
+        moved / frames
+    } else {
+        0
+    }
+}
+
 impl Plugin for FpsJournalPlugin {
     fn build(&self, app: &mut App) {
         // bevy's per-pass render diagnostics — the source of the GPU columns, and (under the
@@ -235,7 +275,7 @@ impl Plugin for FpsJournalPlugin {
             // the render app in it. Two `Instant` reads a frame whether the journal is on or
             // off - the same price the frame-time window already pays.
             .add_systems(bevy::app::First, sched_open)
-            .add_systems(bevy::app::Last, sched_close)
+            .add_systems(bevy::app::Last, (count_moved, sched_close).chain())
             .init_resource::<PhaseClock>()
             .add_systems(PhaseMark(0), phase_mark::<0>)
             .add_systems(PhaseMark(1), phase_mark::<1>)
@@ -911,6 +951,21 @@ fn journal_fps(
     // ...and where inside it. See `PHASE_US`.
     for us in take_phase_us(frames) {
         line.push_str(&format!(",{us}"));
+    }
+    line.push_str(&format!(",{}", take_moved()));
+    // **The costliest systems of that second, by name.** A `#` line, so every existing reader of
+    // this file skips it and the columns stay a table. This is what ends the
+    // guess-a-suspect-then-rebuild loop: one capture names them all.
+    let top = benilla_world::sysprof::take_top(12);
+    if !top.is_empty() {
+        let mut names = String::from("# systems");
+        for (name, us) in top {
+            // The type path is most of every name and none of the information.
+            let short = name.rsplit("::").next().unwrap_or(&name).to_string();
+            let _ = write!(names, " {short}={us}");
+        }
+        names.push('\n');
+        line.push_str(&names);
     }
     line.push('\n');
     #[cfg(target_arch = "wasm32")]
