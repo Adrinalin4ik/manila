@@ -80,7 +80,8 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               gpu_other,lua_errs,lua_err_us,msg_hashed,ui_us,col_us,emitters,fx_kits,fx_impacts,net_pkts,net_us,pipes,\
                               rscale,farclip,\
                               skins_new,skin_us,tex_hit,tex_dec,\
-                              rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last\n";
+                              rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
+                              u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -152,7 +153,14 @@ fn take_sched_us(frames: u64) -> Option<u64> {
     (frames > 0).then(|| us / frames)
 }
 
-/// **Which part of the main schedule**, to microseconds - the `s_first`..`s_last` columns.
+/// **Which part of the main schedule**, to microseconds - the `s_first`..`s_last` columns, then
+/// the seven that cut open the two phases those named.
+///
+/// **`s_first` is not `First`, and the sum of the five is the FRAME, not `sched_us`.** The mark
+/// after `Last` closes only when the next frame opens, and the render app runs in between - so
+/// that column carries extract, prepare, submit and present along with `First` itself. It read
+/// 19.25 ms of a 79.62 ms frame, which is the same 24% the render half measured on its own, so the
+/// two agree; the name is simply narrower than the thing.
 ///
 /// `sched_us` answered the first question and made this the only one left: 50.10 ms of a 65.68 ms
 /// frame is the main schedule, 76 per cent, against 1.34 ms for the whole render graph and 3.50
@@ -163,13 +171,12 @@ fn take_sched_us(frames: u64) -> Option<u64> {
 /// **their own schedules**, spliced into [`MainScheduleOrder`] between the stock ones: a system
 /// inside a schedule has no guaranteed position within it, but a schedule inserted after `Update`
 /// runs after every system of `Update` and before every system of `PostUpdate`, by construction.
-static PHASE_US: [std::sync::atomic::AtomicU64; 5] = [
-    std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0),
-];
+#[allow(clippy::declare_interior_mutable_const, reason = "an array of zeroed atomics")]
+const ZERO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PHASE_US: [std::sync::atomic::AtomicU64; PHASES] = [ZERO; PHASES];
+
+/// Five phase boundaries, three inside `Update`, four inside `PostUpdate`.
+const PHASES: usize = 12;
 
 /// The phase boundary schedules, in order. Each holds one system.
 #[derive(bevy::ecs::schedule::ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
@@ -194,9 +201,9 @@ fn phase_mark<const N: usize>(mut clock: ResMut<PhaseClock>) {
 }
 
 /// Per-frame microseconds for each phase this second, and the reset.
-fn take_phase_us(frames: u64) -> [u64; 5] {
+fn take_phase_us(frames: u64) -> [u64; PHASES] {
     use std::sync::atomic::Ordering::Relaxed;
-    let mut out = [0u64; 5];
+    let mut out = [0u64; PHASES];
     for (slot, cell) in out.iter_mut().zip(&PHASE_US) {
         let us = cell.swap(0, Relaxed);
         *slot = if frames > 0 { us / frames } else { 0 };
@@ -235,6 +242,34 @@ impl Plugin for FpsJournalPlugin {
             .add_systems(PhaseMark(2), phase_mark::<2>)
             .add_systems(PhaseMark(3), phase_mark::<3>)
             .add_systems(PhaseMark(4), phase_mark::<4>)
+            // **Inside** the two phases that hold three quarters of the frame. Unlike the five
+            // above these are ordinary systems, so they are pinned to sets that already exist -
+            // the world's own stage order in `Update`, bevy's transform and visibility sets in
+            // `PostUpdate` - and each mark closes the span since the one before it.
+            .add_systems(
+                bevy::app::Update,
+                (
+                    phase_mark::<5>.after(benilla_world::schedule::WorldStage::Net),
+                    phase_mark::<6>.after(benilla_world::schedule::WorldStage::Input),
+                    phase_mark::<7>.after(benilla_world::schedule::WorldStage::Stream),
+                )
+                    .chain(),
+            )
+            .add_systems(
+                bevy::app::PostUpdate,
+                (
+                    phase_mark::<8>.before(bevy::transform::TransformSystems::Propagate),
+                    phase_mark::<9>
+                        .after(bevy::transform::TransformSystems::Propagate)
+                        .before(benilla_world::exterior_cull::ExteriorCullSet),
+                    phase_mark::<10>
+                        .after(benilla_world::exterior_cull::ExteriorCullSet)
+                        .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate),
+                    phase_mark::<11>
+                        .after(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
+                )
+                    .chain(),
+            )
             .init_resource::<FpsJournalSetting>()
             .add_observer(on_cvar)
             .insert_resource(FpsJournal {
