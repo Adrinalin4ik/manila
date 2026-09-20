@@ -50,6 +50,9 @@
 //! than timed — the one that runs long while the CPU meters stay flat, read side by side in the
 //! journal or a probe line.
 
+/// The shipping archetype census (CVar-armed, `info!`-reported) - see its module doc for why
+/// `census`'s copy cannot answer a browser question.
+pub(crate) mod arch;
 #[cfg(feature = "dev")]
 mod blend_check;
 #[cfg(feature = "dev")]

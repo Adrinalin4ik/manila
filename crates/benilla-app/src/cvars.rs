@@ -1162,6 +1162,17 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "2008: benilla's own — 1.12 has no player-side perf log; its nearest thing is the \
          Ctrl+R framerate label, a number with no file behind it",
     ),
+    // **The archetype census** - benilla's own, and the second instrument that ships:
+    // `/console archCensus 1` prints one line per non-empty archetype to the console, entity
+    // count beside component set, largest first. It answers "what ARE these 37,266 entities",
+    // which the FPS journal counts but cannot break down, and it is the only way to ask that in
+    // a browser - `perf::census`'s copy is env-armed, `eprintln!`-reported and `dev`-gated, and
+    // fails all three ways on wasm (see [`crate::perf::arch`]).
+    ours(
+        "archCensus",
+        "0",
+        "2008: benilla's own - the reference has no entity model to take a census of",
+    ),
     same(crate::char_select::CVAR_LAST_CHARACTER, "0"),
 ];
 

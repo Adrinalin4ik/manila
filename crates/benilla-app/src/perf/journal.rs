@@ -93,7 +93,24 @@ pub(crate) fn on_cvar(
     ev: On<crate::cvars::CvarChanged>,
     mut journal: ResMut<FpsJournalSetting>,
     mut ui_cost: ResMut<crate::ui_script::UiCostWanted>,
+    mut commands: Commands,
 ) {
+    // `/console archCensus 1` - one archetype dump to the console. Run through
+    // `run_system_cached` rather than registered in a schedule, so the instrument costs a player
+    // who never asks for it exactly nothing (`crate::perf::arch`).
+    if ev.is("archCensus") && ev.flag() {
+        commands.run_system_cached(crate::perf::arch::arch_census);
+        // Disarm, because every row here persists. Left at "1" the value would survive the
+        // session, and the next boot would either dump a census of a world that does not exist
+        // yet or - worse - refuse the next `archCensus 1` as a no-op write, which reads exactly
+        // like a broken instrument. `mirror` rather than `set`: it moves the row without firing
+        // an observer, so this cannot re-enter itself (`cvars.rs:1456-1462`).
+        commands.queue(|world: &mut World| {
+            world
+                .resource_mut::<crate::cvars::Cvars>()
+                .mirror("archCensus", "0");
+        });
+    }
     if ev.is("fpsJournal") {
         journal.0 = ev.flag();
         // **Arm the UI cost meter with the journal, and never disarm it.** `ui_us` read a flat
