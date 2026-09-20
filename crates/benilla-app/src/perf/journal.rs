@@ -163,18 +163,34 @@ fn take_sched_us(frames: u64) -> Option<u64> {
 /// **Which part of the main schedule**, to microseconds - the `s_first`..`s_last` columns, then
 /// the seven that cut open the two phases those named.
 ///
-/// **`s_first` is not `First`, and the sum of the five is the FRAME, not `sched_us`.** The mark
-/// after `Last` closes only when the next frame opens, and the render app runs in between - so
-/// that column carries extract, prepare, submit and present along with `First` itself. It read
-/// 19.25 ms of a 79.62 ms frame, which is the same 24% the render half measured on its own, so the
-/// two agree; the name is simply narrower than the thing.
+/// **The twelve are DISJOINT and together they tile the frame; none of them contains another.**
+/// Read that before reading a number off them, because the five `s_*` names invite the opposite
+/// reading and it cost two rounds here. Every mark closes the span since *the previous mark* and
+/// advances one shared [`PhaseClock`], so splicing the seven inner marks did not subdivide the
+/// five - it SHORTENED them. `s_upd` is not `Update`; it is what is left of `Update` after the
+/// Stream stage, once `u_net`, `u_input` and `u_stream` have taken their pieces. `s_post` is
+/// likewise only the tail of `PostUpdate` after visibility. The header carried "the sum of the
+/// five is the FRAME" from when five was all there was, and it stayed true-looking while being
+/// false: on journal 33 those five sum to 13.03 ms of a 40.6 ms frame, and `s_upd` (5.09) came
+/// out SMALLER than the three marks supposedly inside it (16.27). A part larger than its whole is
+/// the tell; there is no nesting.
+///
+/// To read a real phase, ADD its tiles:
+///   `Update`     = `u_net` + `u_input` + `u_stream` + `s_upd`
+///   `PostUpdate` = `p_pre` + `p_xform` + `p_cull` + `p_vis` + `s_post`
+/// and all twelve sum to the frame. Journal 33, steady state, 40.6 ms:
+/// `Update` 21.36 (53%), `PostUpdate` 10.76 (27%), `s_first` 6.99 (17%), the rest 0.45.
+///
+/// **`s_first` is not `First`.** Its mark closes only when the next frame opens and the render app
+/// runs in between, so the column carries extract, prepare, submit and present along with `First`
+/// itself. It read 19.25 ms of a 79.62 ms frame, the same 24% the render half measured on its own,
+/// so the two agree; the name is simply narrower than the thing.
 ///
 /// `sched_us` answered the first question and made this the only one left: 50.10 ms of a 65.68 ms
 /// frame is the main schedule, 76 per cent, against 1.34 ms for the whole render graph and 3.50
-/// for the UI pass. The work is game logic over 37 166 entities, and "game logic" is not a place
-/// anyone can go and fix.
+/// for the UI pass. The work is game logic over 37 166 entities.
 ///
-/// Five marks, one per phase. The boundaries are exact rather than approximate because they are
+/// The five phase boundaries are exact rather than approximate because they are
 /// **their own schedules**, spliced into [`MainScheduleOrder`] between the stock ones: a system
 /// inside a schedule has no guaranteed position within it, but a schedule inserted after `Update`
 /// runs after every system of `Update` and before every system of `PostUpdate`, by construction.
@@ -182,7 +198,8 @@ fn take_sched_us(frames: u64) -> Option<u64> {
 const ZERO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PHASE_US: [std::sync::atomic::AtomicU64; PHASES] = [ZERO; PHASES];
 
-/// Five phase boundaries, three inside `Update`, four inside `PostUpdate`.
+/// Twelve tiles: five phase boundaries, three more inside `Update`, four inside `PostUpdate`.
+/// Disjoint, not nested - see the note above before adding any two of them together.
 const PHASES: usize = 12;
 
 /// The phase boundary schedules, in order. Each holds one system.
