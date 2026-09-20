@@ -80,7 +80,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               gpu_other,lua_errs,lua_err_us,msg_hashed,ui_us,col_us,emitters,fx_kits,fx_impacts,net_pkts,net_us,pipes,\
                               rscale,farclip,\
                               skins_new,skin_us,tex_hit,tex_dec,\
-                              rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other\n";
+                              rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -107,6 +107,49 @@ pub(crate) fn on_cvar(
     }
 }
 
+/// **The main schedule's own wall time**, summed over the second and divided by its frames - the
+/// `sched_us` column.
+///
+/// The frame is 85 ms and everything this file measures accounts for ten of them: the render
+/// graph's whole CPU side is 4.4 ms (`rcpu_ms`), the UI pass under four, composites about two per
+/// cent, Lua and colliders nothing. Meanwhile the browser says the main thread is busy 94% of the
+/// wall. Work that large, on that thread, invisible to every column here, has three places left
+/// to be: the main schedule (game logic over 32 000 entities), the render app's extract and
+/// prepare (the same 32 000 turned into draw data), and the blocking wait on the GPU at submit.
+///
+/// This pair splits the first from the other two. `sched_us` is the main schedule end to end;
+/// `mean_ms` minus it is everything else together. One number decides which half to open.
+static SCHED_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SCHED_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Stamped at the top of `First`, read at the bottom of `Last`.
+#[derive(Resource)]
+struct SchedStart(Instant);
+
+impl Default for SchedStart {
+    fn default() -> Self {
+        Self(Instant::now())
+    }
+}
+
+fn sched_open(mut start: ResMut<SchedStart>) {
+    start.0 = Instant::now();
+}
+
+fn sched_close(start: Res<SchedStart>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    SCHED_US.fetch_add(start.0.elapsed().as_micros() as u64, Relaxed);
+    SCHED_FRAMES.fetch_add(1, Relaxed);
+}
+
+/// Microseconds of main schedule per frame this second, and the reset. `None` when no frame ran.
+fn take_sched_us() -> Option<u64> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let frames = SCHED_FRAMES.swap(0, Relaxed);
+    let us = SCHED_US.swap(0, Relaxed);
+    (frames > 0).then(|| us / frames)
+}
+
 impl Plugin for FpsJournalPlugin {
     fn build(&self, app: &mut App) {
         // bevy's per-pass render diagnostics — the source of the GPU columns, and (under the
@@ -114,6 +157,12 @@ impl Plugin for FpsJournalPlugin {
         // cost is one query resolve and one buffer map on the render thread, and a player's
         // journal is exactly the build that has to carry it (2008).
         app.add_plugins(RenderDiagnosticsPlugin)
+            .init_resource::<SchedStart>()
+            // First of `First` and last of `Last`: the main schedule end to end, with nothing of
+            // the render app in it. Two `Instant` reads a frame whether the journal is on or
+            // off - the same price the frame-time window already pays.
+            .add_systems(bevy::app::First, sched_open)
+            .add_systems(bevy::app::Last, sched_close)
             .init_resource::<FpsJournalSetting>()
             .add_observer(on_cvar)
             .insert_resource(FpsJournal {
@@ -746,6 +795,11 @@ fn journal_fps(
     // The render graph's own CPU split. Never empty here, unlike the gpu_* twins.
     let rcpu_cells = journal.rcpu.columns();
     line.push_str(&rcpu_cells);
+    // The main schedule against the frame - see `SCHED_US`.
+    match take_sched_us() {
+        Some(us) => line.push_str(&format!(",{us}")),
+        None => line.push(','),
+    }
     line.push('\n');
     #[cfg(target_arch = "wasm32")]
     web::append(&line);
