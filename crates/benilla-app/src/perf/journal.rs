@@ -958,7 +958,11 @@ fn journal_fps(
     // guess-a-suspect-then-rebuild loop: one capture names them all.
     let top = benilla_world::sysprof::take_top(12);
     if !top.is_empty() {
-        let mut names = String::from("# systems");
+        // **Its own line.** The first build appended this to the end of the data row, so every
+        // reader saw a CSV whose last column ended in `6552# systems …` - and my own grep for
+        // `^# systems` found nothing and reported the profiler dead for two rounds. It was
+        // working the whole time.
+        let mut names = String::from("\n# systems");
         for (name, us) in top {
             // The type path is most of every name and none of the information.
             let short = name.rsplit("::").next().unwrap_or(&name).to_string();

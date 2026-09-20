@@ -48,6 +48,10 @@ bevy = { version = "0.18.1", default-features = false, features = [
     # `benilla_world::sysprof` listens to, and they do not exist without this. Inert until the
     # profiler is armed: the layer refuses the callsite, so a disabled span is an atomic read.
     "trace",
+    # Without it every system reports its name as
+    # `<Enable the debug feature to see the name>`, which is what the first profiling capture
+    # came back with: one row, all systems folded under one placeholder.
+    "debug",
 ] }
 # The render app's raw GPU handles (the WOW_GPU_MS meter's query set): bevy 0.18 does not wrap
 # wgpu's QuerySet family, so the meter reaches for the same wgpu the workspace already builds.
