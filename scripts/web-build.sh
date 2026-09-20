@@ -80,15 +80,33 @@ for f in "${DIST}"/*.wasm "${DIST}"/*.js; do
   if command -v brotli >/dev/null; then brotli -f -q 5 "$f" -o "$f.br"; fi
   if command -v gzip >/dev/null; then gzip -kf -6 "$f"; fi
 done
-# The compressed twins must not outlive their source. A `.gz` older than its `.wasm` is the exact
-# shape of the failure above, and it is invisible from the outside - the page loads, the code is
-# last build's.
+# The compressed twins must decompress to their source. A twin left over from the previous build
+# is invisible from the outside - the page loads, every check on the `.wasm` reports the new hash,
+# and the browser runs last build's code because `wenilla-host` serves the twin.
+#
+# **Compare CONTENT LENGTH, never mtime.** The first version of this guard tested `"$z" -ot "$f"`
+# and failed every build: gzip copies its source's mtime onto its output and truncates the
+# sub-second part, so a `.gz` written seconds later reads as ~0.2 s OLDER than the `.wasm` it was
+# made from. A guard that cries stale on every healthy build is worse than no guard, because the
+# line gets skipped by eye. (fdca1966's message says this was already fixed. It was not - that
+# commit only touched the wasm-opt block, and the timestamp test survived it.)
 for f in "${DIST}"/*.wasm "${DIST}"/*.js; do
-  for z in "$f.gz" "$f.br"; do
-    if [ -e "$z" ] && [ "$z" -ot "$f" ]; then
-      echo "web-build: $z is older than $f - compression did not run" >&2
+  want=$(stat -c%s "$f")
+  if [ -e "$f.gz" ]; then
+    # `gzip -l` reads the uncompressed length out of the trailer - no decompression pass.
+    got=$(gzip -l "$f.gz" | awk 'NR==2 {print $2}')
+    if [ "$got" != "$want" ]; then
+      echo "web-build: $f.gz decompresses to $got bytes, $f is $want - stale twin" >&2
       exit 1
     fi
-  done
+  fi
+  if [ -e "$f.br" ]; then
+    # brotli has no trailer to read, so this one costs a decompression pass.
+    got=$(brotli -dc "$f.br" | wc -c)
+    if [ "$got" != "$want" ]; then
+      echo "web-build: $f.br decompresses to $got bytes, $f is $want - stale twin" >&2
+      exit 1
+    fi
+  fi
 done
 ls -la "${DIST}"
