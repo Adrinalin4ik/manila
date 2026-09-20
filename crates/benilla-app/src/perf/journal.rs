@@ -79,7 +79,8 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               gpu_ms,gpu_opaque,gpu_static,gpu_transp,gpu_glow,gpu_post,gpu_ui,\
                               gpu_other,lua_errs,lua_err_us,msg_hashed,ui_us,col_us,emitters,fx_kits,fx_impacts,net_pkts,net_us,pipes,\
                               rscale,farclip,\
-                              skins_new,skin_us,tex_hit,tex_dec\n";
+                              skins_new,skin_us,tex_hit,tex_dec,\
+                              rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -131,6 +132,7 @@ impl Plugin for FpsJournalPlugin {
                 cpu_at_flush: None,
                 main_at_flush: None,
                 gpu: GpuAccum::default(),
+                rcpu: GpuAccum::default(),
             })
             .add_systems(Update, journal_fps);
     }
@@ -155,6 +157,9 @@ struct FpsJournal {
     main_at_flush: Option<f64>,
     /// This second's GPU spans, folded per frame from the diagnostics store.
     gpu: GpuAccum,
+    /// The render graph's CPU cost, same buckets - see [`cpu_bucket`]. bevy records these with
+    /// no query set and no timestamp feature, so unlike `gpu` they are never empty in a browser.
+    rcpu: GpuAccum,
 }
 
 /// **What a script error and a chat line cost, per second** — the three columns after `gpu_other`.
@@ -324,7 +329,25 @@ const GPU_BUCKETS: usize = 7;
 /// Which column a diagnostics path lands in. `None` = not a top-level GPU span: a CPU span, a
 /// non-render diagnostic, or a span nested under another (its parent already carries it).
 fn gpu_bucket(path: &str) -> Option<GpuBucket> {
-    let pass = path.strip_prefix("render/")?.strip_suffix("/elapsed_gpu")?;
+    bucket_of(path, "/elapsed_gpu")
+}
+
+/// The same classification for the **CPU** side of a render-graph span.
+///
+/// bevy records `elapsed_cpu` for every span it opens, through `bevy_platform::time::Instant`
+/// and nothing else - no query set, no timestamp feature, no readback
+/// (`bevy_render-0.18.1/src/diagnostic/internal.rs:370,460`). It has therefore been recording the
+/// render graph's per-pass CPU cost in this browser the whole time, while this file filtered every
+/// one of those measurements out on the way past, because `gpu_bucket` demanded the `_gpu` suffix.
+///
+/// That is the hole twenty journals could not see into: the frame is 40 ms, everything measured
+/// accounts for about five of them, and the rest was never asked about.
+fn cpu_bucket(path: &str) -> Option<GpuBucket> {
+    bucket_of(path, "/elapsed_cpu")
+}
+
+fn bucket_of(path: &str, suffix: &str) -> Option<GpuBucket> {
+    let pass = path.strip_prefix("render/")?.strip_suffix(suffix)?;
     if pass.contains('/') {
         return None;
     }
@@ -368,15 +391,29 @@ fn passes_armed() -> bool {
 impl GpuAccum {
     /// Fold in every GPU measurement newer than the last fold.
     fn fold(&mut self, store: &DiagnosticsStore) {
+        self.fold_with(store, gpu_bucket, "/elapsed_gpu");
+    }
+
+    /// The CPU twin - see [`cpu_bucket`]. Same accumulator, same arithmetic, the other suffix.
+    fn fold_cpu(&mut self, store: &DiagnosticsStore) {
+        self.fold_with(store, cpu_bucket, "/elapsed_cpu");
+    }
+
+    fn fold_with(
+        &mut self,
+        store: &DiagnosticsStore,
+        bucket: fn(&str) -> Option<GpuBucket>,
+        suffix: &str,
+    ) {
         let mut newest = self.seen;
         let mut frame_times: Vec<Instant> = Vec::new();
         for diagnostic in store.iter() {
             let path = diagnostic.path().as_str();
-            let Some(bucket) = gpu_bucket(path) else {
+            let Some(bucket) = bucket(path) else {
                 continue;
             };
             let pass = passes_armed()
-                .then(|| path.strip_prefix("render/")?.strip_suffix("/elapsed_gpu"))
+                .then(|| path.strip_prefix("render/")?.strip_suffix(suffix))
                 .flatten();
             for m in diagnostic
                 .measurements()
@@ -547,6 +584,7 @@ fn journal_fps(
             journal.path = None;
             journal.window.clear();
             journal.gpu = GpuAccum::default();
+            journal.rcpu = GpuAccum::default();
             return;
         }
         (true, false) => {
@@ -587,6 +625,10 @@ fn journal_fps(
                 seen: Some(Instant::now()),
                 ..GpuAccum::default()
             };
+            journal.rcpu = GpuAccum {
+                seen: Some(Instant::now()),
+                ..GpuAccum::default()
+            };
             journal.path = Some(path);
         }
         (true, true) => {}
@@ -594,6 +636,7 @@ fn journal_fps(
     journal.window.push(time.delta_secs() * 1000.0);
     if let Some(store) = gpu.store.as_deref() {
         journal.gpu.fold(store);
+        journal.rcpu.fold_cpu(store);
     }
     if now - journal.last_flush < 1.0 {
         return;
@@ -700,6 +743,9 @@ fn journal_fps(
     let (tex_hit, tex_dec) = benilla_formats::take_decode_counts();
     let (skins_new, skin_us) = take_skin_costs();
     line.push_str(&format!(",{skins_new},{skin_us},{tex_hit},{tex_dec}"));
+    // The render graph's own CPU split. Never empty here, unlike the gpu_* twins.
+    let rcpu_cells = journal.rcpu.columns();
+    line.push_str(&rcpu_cells);
     line.push('\n');
     #[cfg(target_arch = "wasm32")]
     web::append(&line);
