@@ -32,6 +32,13 @@ use bevy::log::tracing_subscriber::Layer;
 use bevy::platform::time::Instant;
 
 static ARMED: AtomicBool = AtomicBool::new(false);
+/// **How many system spans the layer has been handed since arming.** Two builds of this profiler
+/// produced no output and two different explanations were plausible each time - the flag never
+/// flipped, the spans never existed, the layer never ran, the names never matched. From outside
+/// they look identical, and each round of telling them apart cost a fifteen-minute rebuild. These
+/// separate them in one line.
+static SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TIMED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Name → microseconds accumulated since the last drain.
 static TOTALS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
 
@@ -41,16 +48,26 @@ pub fn arm(on: bool) {
     ARMED.store(on, Ordering::Relaxed);
     // One line, so "the profiler produced nothing" can be told from "the profiler never ran" -
     // which is exactly the ambiguity that cost the first build of this.
+    SEEN.store(0, Ordering::Relaxed);
+    TIMED.store(0, Ordering::Relaxed);
     bevy::log::tracing::info!("sysprof {}", if on { "armed" } else { "off" });
 }
 
 /// The costliest `n` systems since the last call, microseconds each, and a reset. Empty when the
 /// profiler is off or nothing ran.
 pub fn take_top(n: usize) -> Vec<(String, u64)> {
+    let (seen, timed) = (SEEN.swap(0, Ordering::Relaxed), TIMED.swap(0, Ordering::Relaxed));
     let Ok(mut guard) = TOTALS.lock() else {
         return Vec::new();
     };
     let Some(map) = guard.take() else {
+        // Armed and empty is the failure this line exists for: `seen` is every span the layer was
+        // offered, `timed` every one it closed. 0 and 0 means the spans are not reaching the
+        // layer; a large `seen` with `timed` at 0 means they reach it and the name test rejects
+        // them, which names the next fix without another build.
+        if ARMED.load(Ordering::Relaxed) {
+            bevy::log::tracing::warn!("sysprof armed but empty: seen={seen} timed={timed}");
+        }
         return Vec::new();
     };
     let mut rows: Vec<(String, u64)> = map.into_iter().collect();
@@ -97,7 +114,11 @@ where
     // may have silenced the client's own log with it. Interest is not a per-layer opinion; the
     // filtering belongs in the callbacks, where it only decides this layer's own work.
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
-        if attrs.metadata().name() != "system" || !ARMED.load(Ordering::Relaxed) {
+        if !ARMED.load(Ordering::Relaxed) {
+            return;
+        }
+        SEEN.fetch_add(1, Ordering::Relaxed);
+        if attrs.metadata().name() != "system" {
             return;
         }
         let mut name = NameOf::default();
@@ -129,6 +150,7 @@ where
         let Some(started) = t.entered.take() else {
             return;
         };
+        TIMED.fetch_add(1, Ordering::Relaxed);
         let us = started.elapsed().as_micros() as u64;
         let name = t.name.clone();
         drop(ext);
