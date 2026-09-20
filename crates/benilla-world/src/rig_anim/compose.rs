@@ -102,7 +102,9 @@ fn compose_rig_models(
             //
             // Wake semantics are untouched: the parked/dirty rules above decide *whether* we
             // compose, and this only decides whether the composed value is worth storing.
-            if *t != posed {
+            let differs = *t != posed;
+            super::note_anchor_write(differs);
+            if differs {
                 *t = posed;
             }
         }

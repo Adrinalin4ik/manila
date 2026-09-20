@@ -32,8 +32,17 @@ use bevy::prelude::*;
 /// `ApplyDeferred` sync that an exclusive system standing in `Last` would force on every frame.
 pub(crate) fn arch_census(world: &mut World) {
     // Component paths trimmed to their last two segments: the census reads as lanes, not imports.
+    // **Never return an empty name.** The first run of this census printed 254 archetypes as
+    // nothing but `+` separators, and the reason was this helper, not the data: without bevy's
+    // `debug` feature every component name is the literal string "<Enable the debug feature to
+    // see the name>", and splitting on `<` and taking what comes before it yields "". The
+    // instrument hid the one fact it most needed to report. The fallback makes that condition
+    // say its own name instead of vanishing.
     let short = |full: &str| -> String {
         let base = full.split('<').next().unwrap_or(full);
+        if base.is_empty() {
+            return full.to_string();
+        }
         let segs: Vec<&str> = base.split("::").collect();
         segs[segs.len().saturating_sub(2)..].join("::")
     };

@@ -84,7 +84,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -1046,6 +1046,14 @@ fn journal_fps(
         names.push('\n');
         line.push_str(&names);
     }
+    // **Does the pose guard bite?** Writes that landed against writes it suppressed, per frame,
+    // so the pair is comparable to `moved` beside it and independent of how populated the pin
+    // happened to be. `rig_sk` near zero means the poses genuinely differ every frame and the
+    // guard buys nothing - a real possibility for a global sequence, which samples a continuous
+    // curve at an advancing `t`. See `benilla_world::rig_anim::take_anchor_writes`.
+    let (rig_wr, rig_sk) = benilla_world::rig_anim::take_anchor_writes();
+    let per = frames.max(1);
+    let _ = write!(line, ",{},{}", rig_wr / per, rig_sk / per);
     line.push('\n');
     #[cfg(target_arch = "wasm32")]
     web::append(&line);

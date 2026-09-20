@@ -44,15 +44,24 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "ui_bevy_render",
     "scene",
     "picking",
-    # **`trace` and `debug` are OFF, and the measurement that took them off is the point.** They
-    # are what `benilla_world::sysprof` needs - the per-system `info_span!`s (bevy_ecs
-    # function_system.rs:52,658) and the real names behind `DebugName`. With them the client was
-    # unusable: the frame went from ~65 ms to 535-642 ms and the world would not finish loading.
-    # A span entered and exited around every system of every frame is not a diagnostic that rides
-    # along; it is a different program.
+    # **`trace` is OFF. `debug` is ON, and they are not one decision** - the note that stood here
+    # named them as a pair, and I read my own measurement back wrongly because of it. What was
+    # measured was the PAIR: with both, the frame went from ~65 ms to 535-642 ms and the world
+    # would not finish loading. Only `trace` can explain that. It is `["std", "dep:tracing"]`, and
+    # it puts an `info_span!` around every system plus a `system.name().to_string()` allocation
+    # around every condition check, every system, every frame (bevy_ecs function_system.rs:52,658
+    # and executor/single_threaded.rs:79-83). That is not a diagnostic riding along; it is a
+    # different program.
     #
-    # So per-system timing needs a cheaper mechanism than tracing. Until there is one the profiler
-    # stays in the tree and inert - it costs nothing without these.
+    # `debug` is `["bevy_utils/debug", "bevy_reflect?/debug"]` - no tracing, no dependency on it,
+    # and no per-frame work at all. It stores the real string behind `DebugName` instead of the
+    # literal "<Enable the debug feature to see the name>", at registration time. Without it the
+    # archetype census (`perf::arch`) counts entities but cannot say what a single one of them IS,
+    # which is the question the 22-37k population has been blocking on.
+    "debug",
+    #
+    # Per-system TIMING still needs a cheaper mechanism than tracing, so `benilla_world::sysprof`
+    # stays in the tree and inert until there is one. Naming things needed only the cheap half.
 ] }
 # The render app's raw GPU handles (the WOW_GPU_MS meter's query set): bevy 0.18 does not wrap
 # wgpu's QuerySet family, so the meter reaches for the same wgpu the workspace already builds.

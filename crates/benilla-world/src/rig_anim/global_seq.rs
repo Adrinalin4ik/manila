@@ -171,7 +171,9 @@ fn apply_global_sequences(
                     // raises `Changed` on `DerefMut`, never on a new value, so the compare has to
                     // be ours. `*tf != posed` is a `Deref` and marks nothing.
                     let posed = sample(&tf);
-                    if *tf != posed {
+                    let differs = *tf != posed;
+                    super::note_anchor_write(differs);
+                    if differs {
                         *tf = posed;
                     }
                 }
@@ -187,7 +189,9 @@ fn apply_global_sequences(
                     // re-seated its anchors for ever, at a city pin across ~4.8 k anchors
                     // (`rig_anim/pose.rs:185`). Raising it before the bone index was even checked
                     // also dirtied rigs whose channel names a bone the skeleton does not have.
-                    if cur != posed {
+                    let differs = cur != posed;
+                    super::note_anchor_write(differs);
+                    if differs {
                         rig.locals[*b as usize] = posed;
                         rig.pose_dirty = true;
                     }
