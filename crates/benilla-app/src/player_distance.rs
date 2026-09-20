@@ -79,12 +79,18 @@ pub(crate) fn apply(
                 continue;
             }
             players += 1;
-            let want = if at.translation().distance_squared(eye) <= limit {
-                Visibility::Inherited
-            } else {
-                hidden += 1;
-                Visibility::Hidden
-            };
+            // **This pass only ever HIDES.** `benilla_world::exterior_cull` writes `Visibility` on
+            // every body each frame - it is the window and frustum cull - so showing is its job and
+            // its alone. Two systems writing one component with no order between them is what the
+            // first build did, and the cull won: 84 bodies were marked hidden every frame and not
+            // one of them left the screen. Writing only one direction composes instead of racing,
+            // and a wall slid back out restores itself because the cull restates the bodies it can
+            // see on the very next frame.
+            if at.translation().distance_squared(eye) <= limit {
+                continue;
+            }
+            hidden += 1;
+            let want = Visibility::Hidden;
             match vis {
                 // **`Option`, not a plain `&mut`.** A streamed body is not spawned with a
                 // `Visibility` - it carries the wire state and the pose, and the visual hangs off
@@ -126,7 +132,11 @@ impl Plugin for PlayerDistancePlugin {
             // After the frame's transforms are final and before visibility is propagated, so a
             // unit that moved across the wall this frame is drawn correctly on this frame rather
             // than the next.
-            apply.before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate),
+            apply
+                // After the cull, so the wall has the last word on the bodies it hides, and
+                // before propagation, so that word reaches the children this same frame.
+                .after(benilla_world::exterior_cull::ExteriorCullSet)
+                .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate),
         );
     }
 }
