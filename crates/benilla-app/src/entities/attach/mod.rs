@@ -499,7 +499,9 @@ pub(super) fn attach_entity_visuals(
                 if let Ok(mut ec) = commands.get_entity(child) {
                     ec.despawn();
                 }
-                commands.entity(entity).remove::<super::mount::MountChild>();
+                commands.entity(entity).queue_silenced(
+                    bevy::ecs::system::entity_command::remove::<super::mount::MountChild>(),
+                );
             }
             // Real model: submesh children inherit the entity's (pose-driven) transform; bake scale onto it.
             let kind = match net.kind {
@@ -533,11 +535,20 @@ pub(super) fn attach_entity_visuals(
             // The root's canonical fold reference: held items share the root's interior verdict
             // (one light node per unit — the reference aliases the wearer's collector into each
             // equipped item, wow-re `unit-light-combine-storm.md`), and their classifier fold must
-            // reference the BODY's centre, not the carried position. Plain `insert`: a display-id
-            // change re-derives it with the new body model.
+            // reference the BODY's centre, not the carried position. `Replace`, not `Keep`: a
+            // display-id change has to re-derive it with the new body model.
+            //
+            // **Silenced for the same reason as the shade eight lines up, which I silenced and
+            // then left this one plain.** Same deferred block, same `entity`, same window between
+            // the frame that schedules and the frame that applies - and it panicked the client
+            // live ("Entity despawned ... generation 2"). Every command on `entity` in this block
+            // carries the risk, so they are all silenced now rather than one at a time.
             commands
                 .entity(entity)
-                .insert(benilla_world::interior::BodyBakeCenter(bake_center));
+                .queue_silenced(bevy::ecs::system::entity_command::insert(
+                    benilla_world::interior::BodyBakeCenter(bake_center),
+                    bevy::ecs::bundle::InsertMode::Replace,
+                ));
             // The light node's ATTACH MODE — the reference's `[node+0x90]` bit 13, written once at
             // node creation from the descriptor TYPEMASK (`0x613e10`/`0x670db0`) and dispatched at
             // `0x6a86d0`: a GameObject attaches by CONTAINMENT (`0x6a8c10`), anchored at the world
@@ -546,14 +557,19 @@ pub(super) fn attach_entity_visuals(
             // mutually exclusive by construction rather than by that argument (decision 0776).
             match net.kind {
                 EntityKind::GameObject => {
-                    commands
-                        .entity(entity)
-                        .insert(benilla_world::interior::ContainmentAttach);
+                    commands.entity(entity).queue_silenced(
+                        bevy::ecs::system::entity_command::insert(
+                            benilla_world::interior::ContainmentAttach,
+                            bevy::ecs::bundle::InsertMode::Replace,
+                        ),
+                    );
                 }
                 _ => {
-                    commands
-                        .entity(entity)
-                        .remove::<benilla_world::interior::ContainmentAttach>();
+                    commands.entity(entity).queue_silenced(
+                        bevy::ecs::system::entity_command::remove::<
+                            benilla_world::interior::ContainmentAttach,
+                        >(),
+                    );
                 }
             }
             // Identity for the mouseover inspector (and, later, hover tooltips / targeting).
@@ -614,7 +630,15 @@ pub(super) fn attach_entity_visuals(
                                 Visibility::default(),
                             ))
                             .id();
-                        commands.entity(entity).add_child(node);
+                        // Silenced like every other command on `entity` in this block: the
+                        // parent can be gone by the time this applies, and an `add_child` onto a
+                        // despawned parent panics exactly as the insert did. The node spawned
+                        // just above is then parentless and collected with the scene's own sweep.
+                        commands.entity(entity).queue_silenced(
+                            move |mut parent: bevy::ecs::world::EntityWorldMut| {
+                                parent.add_child(node);
+                            },
+                        );
                         joints_root = node;
                     }
                     setup_skinned_instance(
