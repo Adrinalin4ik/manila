@@ -200,6 +200,72 @@ impl ShadeSel {
     }
 }
 
+/// **Which AXIS of [`MatKey`] widened** — the `# axes` line of the FPS journal.
+///
+/// The lane counter (`benilla_assets::materials`) said `batch=25905` against double digits
+/// everywhere else, so the materials are minted here, by `model_material`, on a cache miss. It
+/// could not say WHY the key space is 5.6x what it was at the same pin (4,930 standing materials
+/// against journal 33's 883, with `rapp` 17.74 ms and the frame 64.95 ms at FEWER entities). A key
+/// is a conjunction of eighteen fields; widening any one of them multiplies the whole space, and
+/// reading the struct says nothing about which one is moving in a live city.
+///
+/// So this counts DISTINCT VALUES per axis, over the session, for the axes that can plausibly be
+/// many: everything else in the key is a handful of bools and enums whose product is bounded and
+/// known. `keys` beside them is the total, so the arithmetic is checkable — if one axis's count is
+/// close to `keys`, that axis IS the key.
+///
+/// Memory is the measurement's own size: a set per axis holding exactly the distinct values it is
+/// reporting. That is affordable precisely while the counts are small, and if one of them is not
+/// small, that is the answer.
+#[derive(Default)]
+struct KeyAxes {
+    keys: usize,
+    light: std::collections::HashSet<bevy::render::render_resource::BufferId>,
+    texture: std::collections::HashSet<Option<AssetId<Image>>>,
+    batch_order: std::collections::HashSet<u16>,
+    uv_anim: std::collections::HashSet<Option<usize>>,
+    rgb_anim: std::collections::HashSet<Option<usize>>,
+    instance: std::collections::HashSet<Option<Entity>>,
+    sidn: std::collections::HashSet<Option<[u8; 3]>>,
+}
+
+static KEY_AXES: std::sync::Mutex<Option<KeyAxes>> = std::sync::Mutex::new(None);
+
+/// Record one key the cache MISSED on — the only keys that cost anything.
+fn note_key_axes(key: &MatKey) {
+    let Ok(mut guard) = KEY_AXES.lock() else { return };
+    let a = guard.get_or_insert_with(KeyAxes::default);
+    a.keys += 1;
+    a.light.insert(key.light);
+    a.texture.insert(key.texture);
+    a.batch_order.insert(key.batch_order);
+    a.uv_anim.insert(key.uv_anim);
+    a.rgb_anim.insert(key.rgb_anim);
+    a.instance.insert(key.instance);
+    a.sidn.insert(key.sidn);
+}
+
+/// `(axis, distinct values)` for the `# axes` journal line, with `keys` first. Empty before any
+/// material has been built.
+pub fn key_axis_counts() -> Vec<(&'static str, usize)> {
+    let Ok(guard) = KEY_AXES.lock() else {
+        return Vec::new();
+    };
+    let Some(a) = guard.as_ref() else {
+        return Vec::new();
+    };
+    vec![
+        ("keys", a.keys),
+        ("light", a.light.len()),
+        ("texture", a.texture.len()),
+        ("order", a.batch_order.len()),
+        ("uvanim", a.uv_anim.len()),
+        ("rgbanim", a.rgb_anim.len()),
+        ("instance", a.instance.len()),
+        ("sidn", a.sidn.len()),
+    ]
+}
+
 /// A material-dedup cache. Each model-spawning subsystem (terrain doodads/WMOs, streamed entities)
 /// keeps its own so its handles drop with it — and, since decision 0793, so its entries expire by
 /// **distance** ([`benilla_assets::SpatialCache`]) instead of living until the next map change. A
@@ -517,6 +583,8 @@ pub fn model_material(
             },
         },
     );
+    // The miss is the only key that cost anything — see `KeyAxes`.
+    note_key_axes(&key);
     cache.insert(key, handle.clone());
     handle
 }
@@ -681,6 +749,8 @@ pub fn zfill_material(
             },
         },
     );
+    // The miss is the only key that cost anything — see `KeyAxes`.
+    note_key_axes(&key);
     cache.insert(key, handle.clone());
     handle
 }

@@ -1089,6 +1089,20 @@ fn journal_fps(
             line.push_str(&names);
         }
     }
+    // **And which AXIS of the material key widened** — the lane counter above says the materials
+    // are minted by `model_material`; this says what makes each one distinct. If one axis's count
+    // sits near `keys`, that axis IS the key space.
+    {
+        let axes = benilla_world::model_render::key_axis_counts();
+        if !axes.is_empty() {
+            let mut names = String::from("\n# axes");
+            for (name, n) in axes {
+                let _ = write!(names, " {name}={n}");
+            }
+            names.push('\n');
+            line.push_str(&names);
+        }
+    }
     // **The costliest systems of that second, by name.** A `#` line, so every existing reader of
     // this file skips it and the columns stay a table. This is what ends the
     // guess-a-suspect-then-rebuild loop: one capture names them all.
