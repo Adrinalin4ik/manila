@@ -211,15 +211,19 @@ impl ShadeSel {
 ///
 /// So this counts DISTINCT VALUES per axis, over the session, for the axes that can plausibly be
 /// many: everything else in the key is a handful of bools and enums whose product is bounded and
-/// known. `keys` beside them is the total, so the arithmetic is checkable — if one axis's count is
-/// close to `keys`, that axis IS the key.
+/// known. `misses` beside them is the **cache-MISS count**, not a distinct-key count - it was
+/// labelled `keys` on its first outing and read as one, which is wrong and matters: on journal 38
+/// it stood at 25,983 and climbing 7.45/s while EVERY axis was frozen (texture +0.67/s, order and
+/// the rest flat at 3,089). A total that grows while its inputs do not is not a widening key
+/// space - it is the same keys being rebuilt, the distance sweep expiring an entry and the next
+/// spawn missing on it. The standing population is the `mats` column, and it holds at ~4,948.
 ///
 /// Memory is the measurement's own size: a set per axis holding exactly the distinct values it is
 /// reporting. That is affordable precisely while the counts are small, and if one of them is not
 /// small, that is the answer.
 #[derive(Default)]
 struct KeyAxes {
-    keys: usize,
+    misses: usize,
     light: std::collections::HashSet<bevy::render::render_resource::BufferId>,
     texture: std::collections::HashSet<Option<AssetId<Image>>>,
     batch_order: std::collections::HashSet<u16>,
@@ -235,7 +239,7 @@ static KEY_AXES: std::sync::Mutex<Option<KeyAxes>> = std::sync::Mutex::new(None)
 fn note_key_axes(key: &MatKey) {
     let Ok(mut guard) = KEY_AXES.lock() else { return };
     let a = guard.get_or_insert_with(KeyAxes::default);
-    a.keys += 1;
+    a.misses += 1;
     a.light.insert(key.light);
     a.texture.insert(key.texture);
     a.batch_order.insert(key.batch_order);
@@ -245,7 +249,7 @@ fn note_key_axes(key: &MatKey) {
     a.sidn.insert(key.sidn);
 }
 
-/// `(axis, distinct values)` for the `# axes` journal line, with `keys` first. Empty before any
+/// `(axis, distinct values)` for the `# axes` journal line, with the MISS count first. Empty
 /// material has been built.
 pub fn key_axis_counts() -> Vec<(&'static str, usize)> {
     let Ok(guard) = KEY_AXES.lock() else {
@@ -255,7 +259,7 @@ pub fn key_axis_counts() -> Vec<(&'static str, usize)> {
         return Vec::new();
     };
     vec![
-        ("keys", a.keys),
+        ("misses", a.misses),
         ("light", a.light.len()),
         ("texture", a.texture.len()),
         ("order", a.batch_order.len()),
