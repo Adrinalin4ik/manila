@@ -1059,6 +1059,22 @@ fn journal_fps(
     for us in take_stream_us(frames) {
         line.push_str(&format!(",{us}"));
     }
+    // **Which lane minted the materials**, cumulative - a `#` line for the same reason as the
+    // one below, and because a lane list is not a fixed column set. `mats` beside it counts what
+    // `Assets<WowModelMaterial>` holds; this says who asked for them. At one pin 19 yards apart
+    // that total read 883 (flat for 90 s) in journal 33 and 6,002 (still climbing) in journal 36,
+    // with the frame 41 -> 70 ms, and nothing in the code could say which lane widened.
+    {
+        let counts = benilla_assets::materials::material_counts();
+        if counts.iter().any(|&n| n > 0) {
+            let mut names = String::from("\n# mats");
+            for (name, n) in benilla_assets::materials::MAT_LANE_NAMES.iter().zip(counts) {
+                let _ = write!(names, " {name}={n}");
+            }
+            names.push('\n');
+            line.push_str(&names);
+        }
+    }
     // **The costliest systems of that second, by name.** A `#` line, so every existing reader of
     // this file skips it and the columns stay a table. This is what ends the
     // guess-a-suspect-then-rebuild loop: one capture names them all.

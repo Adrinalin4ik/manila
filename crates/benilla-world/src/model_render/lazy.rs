@@ -83,6 +83,11 @@ impl<A: Asset> Parked<A> {
     pub fn defer(&mut self, store: &Assets<A>, asset: A) -> Handle<A> {
         let handle = store.reserve_handle();
         self.0.insert(handle.id(), asset);
+        // Counted where the material is BORN, not where it is realized: a parked value is already
+        // a distinct key the cache will hold for ever, and the `# mats` line asks which lane
+        // widened the key space (`benilla_assets::materials`). Realization only decides when it
+        // reaches the store.
+        crate::model_render::note_lazy_material::<A>();
         handle
     }
 

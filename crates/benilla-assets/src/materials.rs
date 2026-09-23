@@ -750,3 +750,59 @@ mod tests {
         assert_eq!(at(0), shallow, "row 0 is the shallow endpoint verbatim");
     }
 }
+
+/// **Which lane mints a [`WowModelMaterial`]** — the `# mats` line of the FPS journal.
+///
+/// The question it exists to answer: at one pin, 19 yards and a comparable crowd apart, journal 33
+/// held **883** materials, flat for 90 s, and journal 36 held **6,002** and was still climbing at
+/// 9.4/s while the player stood still. Meshes were the same (11,078 vs 10,976). The render app's
+/// span (`rapp`) went 7 -> 19 ms with it and the frame 41 -> 70 ms.
+///
+/// Monotonic growth is not by itself the bug: `model_material`'s cache holds a STRONG handle per
+/// distinct key, so `mats` counts distinct keys ever built and never falls. The bug, if there is
+/// one, is that the key space got six times wider at the same place — and no amount of reading the
+/// key's fields says which lane widened it. Five hypotheses failed here in one sitting (the sync,
+/// then not the sync; the position, then not the position; three separate creation sites, each
+/// cached after all), which is the signal to stop reasoning and count.
+///
+/// Cumulative, not per-second: the composition of the standing population is the question, not the
+/// rate. One relaxed increment on a path that has just built a material.
+pub const MAT_LANES: usize = 8;
+
+/// The lane names, in slot order — what the `# mats` line prints.
+pub const MAT_LANE_NAMES: [&str; MAT_LANES] = [
+    "batch", "clutter", "fartwin", "portrait", "dress", "spellfx", "uimodel", "warm",
+];
+
+/// Slot indices, named so a call site reads as its lane rather than as a number.
+pub mod mat_lane {
+    pub const BATCH: usize = 0;
+    pub const CLUTTER: usize = 1;
+    pub const FAR_TWIN: usize = 2;
+    pub const PORTRAIT: usize = 3;
+    pub const DRESS: usize = 4;
+    pub const SPELL_FX: usize = 5;
+    pub const UI_MODEL: usize = 6;
+    pub const WARM: usize = 7;
+}
+
+#[allow(clippy::declare_interior_mutable_const, reason = "an array of zeroed atomics")]
+const MAT_ZERO: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static MAT_MADE: [std::sync::atomic::AtomicU32; MAT_LANES] = [MAT_ZERO; MAT_LANES];
+
+/// One material was just minted on `lane` (see [`mat_lane`]).
+pub fn note_material(lane: usize) {
+    if let Some(cell) = MAT_MADE.get(lane) {
+        cell.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Every lane's running total. **Not reset** — the journal prints the standing composition each
+/// second, so a row is a snapshot of the population rather than of the second's churn.
+pub fn material_counts() -> [u32; MAT_LANES] {
+    let mut out = [0u32; MAT_LANES];
+    for (slot, cell) in out.iter_mut().zip(&MAT_MADE) {
+        *slot = cell.load(std::sync::atomic::Ordering::Relaxed);
+    }
+    out
+}

@@ -764,6 +764,7 @@ impl WorldAssets {
                 ..default()
             },
         };
+        crate::materials::note_material(crate::materials::mat_lane::CLUTTER);
         let handle = materials.add(WowModelMaterial {
             base,
             extension: WowModelExt {

@@ -181,6 +181,7 @@ fn own_per_sequence_materials(
         // A clone leaves the shared table (decision 1381): its rows are its own, and a carried
         // slot would add the shared delta on top of them.
         mat.extension.anim_slots = Vec4::ZERO;
+        benilla_assets::materials::note_material(benilla_assets::materials::mat_lane::DRESS);
         Some(own.store.add(mat))
     };
     let owned = OwnedMaterials {

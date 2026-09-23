@@ -218,6 +218,7 @@ fn fx_part_material(
         mat.extension.sun_scale.z = t0[0];
         mat.extension.sun_scale.w = t0[1];
     }
+    benilla_assets::materials::note_material(benilla_assets::materials::mat_lane::SPELL_FX);
     let handle = mats.store.add(mat);
     if let Some(anim) = &part.rgb_anim {
         mats.tint.0.insert(handle.id(), (anim.clone(), now));

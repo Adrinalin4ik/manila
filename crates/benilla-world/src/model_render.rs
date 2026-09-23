@@ -220,6 +220,15 @@ pub type MaterialCache = benilla_assets::SpatialCache<MatKey, Handle<WowModelMat
 /// test at all. The source blend is what sets [`TWIN_CUTOUT_MARKER`] right (decision 0842: a twin
 /// built as `Blend` cut every texel under 224/255 out of a stealthed Opaque batch, which erased
 /// Gressil's blade body and left only its high-alpha rune pattern).
+/// Count a lazily-parked asset when, and only when, it is a [`WowModelMaterial`] — the `# mats`
+/// line's `batch` lane. `lazy` is generic over every asset the parking mechanism serves, so the
+/// discrimination has to happen here, at the one instantiation the counter is about.
+pub(crate) fn note_lazy_material<A: bevy::asset::Asset>() {
+    if std::any::TypeId::of::<A>() == std::any::TypeId::of::<WowModelMaterial>() {
+        benilla_assets::materials::note_material(benilla_assets::materials::mat_lane::BATCH);
+    }
+}
+
 pub fn model_material(
     cache: &mut MaterialCache,
     materials: &mut Assets<WowModelMaterial>,
@@ -1128,6 +1137,7 @@ fn far_twin(
         return h.clone();
     }
     let twin = far_twin_of(materials.get(near.id()).unwrap());
+    benilla_assets::materials::note_material(benilla_assets::materials::mat_lane::FAR_TWIN);
     let h = materials.add(twin);
     twins.to_far.insert(near.id(), h.clone());
     twins.to_near.insert(h.id(), near.clone());

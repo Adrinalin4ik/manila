@@ -169,6 +169,7 @@ pub(crate) fn material_variant(
             benilla_formats::FogPolicy::Off,
         );
     }
+    benilla_assets::materials::note_material(benilla_assets::materials::mat_lane::PORTRAIT);
     let handle = materials.add(twin);
     variants.insert(world.id(), handle.clone());
     Some(handle)

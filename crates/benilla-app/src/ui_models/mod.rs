@@ -1916,6 +1916,7 @@ fn build_tile(
                 .then(|| render.table.alloc())
                 .flatten()
                 .inspect(|&slot| own.extension.anim_slots.z = f32::from(slot));
+            benilla_assets::materials::note_material(benilla_assets::materials::mat_lane::UI_MODEL);
             let handle = render.mats.materials().add(own);
             if animated {
                 uv_parts.push(UvPart {
