@@ -8,8 +8,8 @@ use super::{
     container, craft, cursor, death, duel, follow, gossip, guild, inspect, item_text, loot,
     loot_roll, macros, mail, merchant, party, petition, pvp, quest, quest_log, reputation, session,
     simplehtml, skills, slider, social, spellbook, stable, taxi, trade, tradeskill, trainer,
-    weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView, PlayerReqState,
-    RegionData, ScriptValue, SoundRequest, UnitState,
+    weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView, MusicRequest,
+    PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -756,6 +756,12 @@ pub(crate) struct Model {
     /// [`UiScript::take_sounds`] drain — the outbound Lua→app intent seam ([`sound`]).
     pub(crate) sound_queue: Vec<SoundRequest>,
 
+    /// `PlayMusic`/`StopMusic` intents queued since the app's last
+    /// [`UiScript::take_music`] drain — the same seam, a different *slot*: these drive the music
+    /// stream the reference gives the Lua caller (`[0xb06ccc]`), not the kit player ([`sound`]).
+    /// Order-bearing, so a start and a stop in one frame settle the slot the way they were called.
+    pub(crate) music_queue: Vec<MusicRequest>,
+
     /// **The UI-load sound-suppression depth** — `[0xb05fa0]` in the reference, a counted scope
     /// with exactly three references image-wide: `0x458f50` (`inc`), `0x458f60` (`dec`), and one
     /// reader at `0x458046`, inside `PlaySoundByName 0x458030`. The whole-UI load `0x48fbf0`
@@ -833,6 +839,10 @@ pub(crate) struct Model {
     /// The globals `RegisterForSave` declared, in registration order — the saved-variables set the
     /// host writes out at logout/exit and re-executes at load (decision 1128, [`super::saved`]).
     pub(crate) saved_names: Vec<String>,
+    /// The saved-variables files that failed to load this session ([`super::saved`]'s
+    /// `hold_saved_file`) — the shutdown write leaves each one on disk rather than replacing a
+    /// settings file it never read with the defaults it ran on instead.
+    pub(crate) held_saved_files: Vec<std::path::PathBuf>,
 
     /// The key-binding table (decision 0997, [`super::keybind`]) — the chord→command store the
     /// Key Bindings window edits, plus its stored account/character sets. The CVar table's twin:
@@ -1076,7 +1086,9 @@ pub(crate) struct Model {
     ///
     /// The **pet** payload arm is excluded (decision 1010): `PlaceAction` refuses it, so lighting
     /// the action bar's empty slots for a payload that cannot land there would be an invitation to
-    /// a no-op. It drives [`Self::pet_grid_shown`] instead.
+    /// a no-op. It drives [`Self::pet_grid_shown`] instead. So is the **vendor row** (mode 5): its
+    /// grab setter `0x4950f0` fires `ACTIONBAR_SHOWGRID` for mode 7 alone (wow-re
+    /// `merchant-cursor-law.md` §5).
     pub(crate) cursor_grid_shown: bool,
     /// The same mirror for the PET bar's grid — `PET_BAR_SHOWGRID`/`PET_BAR_HIDEGRID`, which the
     /// reference fires from inside the pet-action pickup builder itself (`0x494f28`) rather than
@@ -1441,16 +1453,16 @@ pub(crate) struct Model {
     pub(crate) death_actions: Vec<death::DeathAction>,
 
     /// The quest-log seam ([`quest_log`]): the snapshot the app pushes, the engine-owned
-    /// synchronous selection + click-time abandon mark (1-based entry indices, `0` = none), and
-    /// the drained abandon intents.
+    /// synchronous selection (a 1-based entry index, `0` = none), the click-time abandon mark (a
+    /// QUEST ID, `0` = none — the reference's `0xbb7484`), and the drained abandon intents (quest
+    /// ids).
     pub(crate) quest_log: quest_log::QuestLogState,
     pub(crate) quest_log_selection: u32,
     pub(crate) quest_log_abandon_mark: u32,
     pub(crate) quest_log_abandons: Vec<u32>,
     /// Quest ids `QuestLogPushQuest()` queued for the app to push to the party (decision 1733).
-    /// **Ids, not entry indices** — unlike the abandon mark above, whose two-step confirm is the
-    /// whole reason it pins an index: a push is one click, so the id is resolved right then and a
-    /// log shuffle between click and drain cannot retarget it.
+    /// **Ids, not entry indices**, like the abandon mark above: the id is resolved at click time,
+    /// so a log shuffle between click and drain cannot retarget it.
     pub(crate) quest_log_pushes: Vec<u32>,
     /// How many times `ConfirmAcceptQuest()` was called — the escort confirm's Yes. A counter, not
     /// a quest id: the reference's verb takes no argument and answers whatever confirm the client
@@ -2042,6 +2054,7 @@ impl Model {
             action_bar_toggles: None,
             action_bar_toggle_sends: Vec::new(),
             sound_queue: Vec::new(),
+            music_queue: Vec::new(),
             sound_suppression: 0,
             cvars: HashMap::new(),
             cvars_saved_base: HashMap::new(),
@@ -2054,6 +2067,7 @@ impl Model {
             video_caps: super::cvars::VideoCaps::default(),
             restart_gx_asks: 0,
             saved_names: Vec::new(),
+            held_saved_files: Vec::new(),
             keybinds: super::keybind::KeybindState::default(),
             actions: HashMap::new(),
             action_states: HashMap::new(),
@@ -2408,6 +2422,67 @@ impl Model {
         match self.frame_to_id.get(&h) {
             Some(&id) => self.touch_layout_node(id),
             None => self.touch_layout(),
+        }
+    }
+
+    /// A **REPARENT** that names its nodes: `SetParent` moved the effective scale of every frame
+    /// in the subtree rooted at `root`, and moved nothing else the layout graph is made of
+    /// (decision 2314, extending 1388).
+    ///
+    /// ## Why a reparent is a value-only write here
+    ///
+    /// `LayoutInput.scale` is the only layout input a reparent touches: the arena recomputes the
+    /// subtree's `effective_scale` and the derive syncs it per frame. Nothing else moves —
+    /// **an anchor's target is an id resolved at `SetPoint` time** ([`super::object::anchor_args::
+    /// resolve_rel_target`]), not a live "my parent" link, so no edge is retargeted; no node is
+    /// born or dies, so the roster is unchanged; and visibility, strata and level are not layout
+    /// inputs at all (the derive walks liveness, not `effective_visible`). A region carries no
+    /// scale of its own — it reads its owner frame's — so naming the frames is enough: the dirty
+    /// closure pulls the regions that read them.
+    ///
+    /// ## Why it is worth naming a whole subtree
+    ///
+    /// `SetParent` used to take [`Self::touch_layout`], on the reading that a reparent is
+    /// human-rate. **It is not.** A pooled widget's recycle is a reparent, and an addon's map-note
+    /// pool recycles hundreds per redraw: with the director's addon set, every quest-log change
+    /// cost two frames of ~160 ms, of which `WOW_LAYOUT_PROF` attributed **128 ms to 58 full
+    /// graph derivations** — 5,267 frames and 16,124 anchored regions walked and hashed, ~3.2 ms
+    /// each, and `WOW_LAYOUT_DERIVE_TRACE` put all fourteen sampled give-ups on this one call.
+    /// A subtree is a handful of nodes; the roster is twenty thousand.
+    ///
+    /// Falls back to the conservative touch the moment a node of the subtree is not a node of the
+    /// cached graph — [`Self::touch_layout_frame`]'s own rule, and the same "worst case is a
+    /// derivation" safety every precise touch has.
+    pub(crate) fn touch_layout_reparent(&mut self, root: FrameHandle) {
+        // The walk first, then the writing: `touch_layout_frame` takes `&mut self` and the arena
+        // walk holds `&self`.
+        let mut subtree = vec![root];
+        let mut at = 0;
+        while at < subtree.len() {
+            let h = subtree[at];
+            at += 1;
+            if let Some(f) = self.arena.frame(h) {
+                subtree.extend(f.children.iter().copied());
+            }
+        }
+        // **The write itself, not only its name.** `LayoutInput.scale` was synced from the arena
+        // inside [`super::UiScript::resolve_layout`]'s DERIVATION — so a pass that skips the
+        // derivation never learned the new scale, and a named-but-unwritten node is the one shape
+        // that ships a stale rect. `WOW_LAYOUT_VERIFY` caught exactly that on the first run of
+        // `setparent::a_reparent_under_a_scale_change_moves_the_childs_rect`; naming is a claim
+        // about what moved, and this is what makes the claim true.
+        let Model {
+            arena,
+            layout_inputs,
+            ..
+        } = self;
+        for &h in &subtree {
+            if let Some(f) = arena.frame(h) {
+                layout_inputs.entry(h).or_default().scale = f.effective_scale;
+            }
+        }
+        for h in subtree {
+            self.touch_layout_frame(h);
         }
     }
 

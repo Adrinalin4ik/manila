@@ -1189,10 +1189,11 @@ impl SoundKits {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
+            // **Two stores, one rule** — the chain, then an addon's own loose file
+            // (upstream's `read_file_or_loose`, decision 1322's resolver): `PlaySoundFile` is a
+            // by-path verb, and the audio an addon ships lives on disk, never in an MPQ.
             let bytes = assets
-                .chain
-                .lock_recover()
-                .read_file(path)
+                .read_file_or_loose(path)
                 .with_context(|| format!("reading {path}"))?;
             let data = mixer::sfx_from_bytes(bytes)?;
             self.cache.insert(key, data.clone());
@@ -1201,6 +1202,7 @@ impl SoundKits {
             DECODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(Some(data))
         }
+
     }
 }
 

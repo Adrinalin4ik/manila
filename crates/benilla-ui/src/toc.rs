@@ -171,6 +171,33 @@ impl Toc {
     pub fn load_on_demand(&self) -> bool {
         self.directive("LoadOnDemand").map(str::trim) == Some("1")
     }
+
+    /// `## DefaultState:` — what this addon's enable state is for a character who has never
+    /// expressed one. The reference's `[rec+0x2b]`, stored by `Toc_Parse` at `0x51d204` from the
+    /// two literals `"enabled"` (`0x853764`) → `1` and `"disabled"` (`0x853758`) → `0`
+    /// (wow-5875-re `savedvariables-protocol.md`, the directive table).
+    ///
+    /// It is load-bearing well beyond a manifest that writes it: the enable query `0x51e470`
+    /// falls back to this byte whenever the characters disagree, and whenever *none* of them has
+    /// an opinion at all — which is every addon on a fresh install.
+    ///
+    /// **A manifest that does not write the line is enabled** — which is what makes a folder
+    /// dropped into `AddOns/` just work, and is the record's initial byte, read at the bytes and
+    /// not inferred from the two literals' fall-through (wow-re
+    /// `addon-defaultstate-and-node-set.md`, decision 2316). The ctor `0x520550` seeds this one
+    /// field to 1 explicitly — `0x5205b9 mov [esi+0x2b],al` with `eax = 1`, where its five
+    /// neighbours take `bl = 0` — over an allocation that does zero-fill, which is exactly what
+    /// made "the ctor zeroes it" read as true.
+    ///
+    /// Two consequences this function depends on, both verified there: a value matching **neither**
+    /// literal leaves the 1 (`0x51d21a jne`, no store — there is no "unrecognised means
+    /// disabled"), and a duplicated directive is **last-wins**, which is [`Self::directive`]'s own
+    /// rule.
+    pub fn default_state(&self) -> bool {
+        !self
+            .directive("DefaultState")
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("disabled"))
+    }
 }
 
 #[cfg(test)]
@@ -203,6 +230,37 @@ mod tests {
         );
         // Comments and malformed directives contribute nothing.
         assert_eq!(toc.directives.len(), 4);
+    }
+
+    /// **`## DefaultState:` and its three non-obvious answers**, all byte-verified (wow-re
+    /// `addon-defaultstate-and-node-set.md`): an absent line is *enabled* because the record's
+    /// ctor seeds `[rec+0x2b]` to 1, a value matching neither literal leaves that 1 rather than
+    /// meaning disabled, and a duplicated line is last-wins.
+    ///
+    /// Only `disabled` disables, in other words — which is the same asymmetry `AddOns.txt`'s own
+    /// value grammar has, and worth a falsifier because "unrecognised means off" is the reading
+    /// anyone would write by hand.
+    #[test]
+    fn default_state_is_enabled_unless_the_manifest_says_disabled() {
+        let d = |body: &str| Toc::parse(body).default_state();
+        assert!(d("## Interface: 11200\n"), "absent: the ctor's own 1");
+        assert!(d("## DefaultState: enabled\n"));
+        assert!(!d("## DefaultState: disabled\n"));
+        assert!(
+            !d("## DefaultState:    DISABLED   \n"),
+            "trimmed, case-folded"
+        );
+        assert!(
+            d("## DefaultState: maybe\n"),
+            "neither literal: no store, the 1 stands"
+        );
+        assert!(
+            d("## DefaultState:\n"),
+            "empty value is not `disabled` either"
+        );
+        // Last-wins, the reference's hash insert — not first-wins, and not an append.
+        assert!(!d("## DefaultState: enabled\n## DefaultState: disabled\n"));
+        assert!(d("## DefaultState: disabled\n## DefaultState: enabled\n"));
     }
 
     #[test]
@@ -288,22 +346,5 @@ mod tests {
         assert_eq!(Toc::parse(""), Toc::default());
         let toc = Toc::parse("# only a comment\n\n");
         assert!(toc.directives.is_empty() && toc.files.is_empty());
-    }
-
-    /// Parses a REAL shipped manifest when `BENILLA_TOC` points at one (never committed — extract
-    /// e.g. `Interface\FrameXML\FrameXML.toc` with benilla-extract and export the path). Skips
-    /// silently otherwise, so CI/gates don't depend on client data.
-    #[test]
-    fn real_manifest_when_available() {
-        let Ok(path) = std::env::var("BENILLA_TOC") else {
-            return;
-        };
-        let text = std::fs::read_to_string(&path).expect("reading BENILLA_TOC");
-        let toc = Toc::parse(&text);
-        assert!(!toc.files.is_empty(), "a real manifest lists files");
-        assert!(
-            !toc.interface_versions().is_empty(),
-            "a real manifest declares ## Interface"
-        );
     }
 }

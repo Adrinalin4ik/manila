@@ -245,7 +245,9 @@ impl AreaSpiritHealer {
 }
 
 /// The three battleground queue slots (`0xb6e9d0`, stride `0x20`), each with the moment its
-/// status landed — the clock every stamp in the slot is relative to.
+/// status landed — the clock every stamp in the slot is relative to. Kept across an in-session
+/// world enter (§8, `0x4a9db0`); zeroed whole at the session end, as the reference's module init
+/// zeroes it at every login (`net::on_session_end`).
 #[derive(Resource, Default)]
 pub(crate) struct BattlefieldQueue {
     slots: [Option<(BattlefieldStatus, Instant)>; 3],
@@ -1080,10 +1082,90 @@ fn poll_area_spirit_healer(
     }
 }
 
+/// The dialog verbs' packet handlers (in the net handler table since 2313) — each parks a
+/// question or a countdown on its own store for the feed to turn into a StaticPopup.
+mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::{AreaSpiritHealer, BattlefieldQueue, InstanceBoot, MeetingStone, PetUnlearnState};
+    use crate::net::NetHandlerApp;
+
+    /// Register the handlers — called from [`super::UiDialogVerbsPlugin`].
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::PetUnlearnConfirm, on_pet_unlearn_confirm)
+            .net_handler(K::RaidGroupOnly, on_raid_group_only)
+            .net_handler(K::AreaSpiritHealerTime, on_area_spirit_healer_time)
+            .net_handler(K::BattlefieldStatus, on_battlefield_status)
+            .net_handler(K::MeetingStoneSetQueue, on_meeting_stone)
+            .net_handler(K::MeetingStoneNotice, on_meeting_stone)
+            .net_handler(K::Disconnected, on_session_end);
+    }
+
+    /// The battleground queue is zeroed at every login (wow-re `battlefield-verb-family.md` §8:
+    /// module init `0x4a9c40`, from `InitializeGame` — the three slots, `[0x8457cc] = -1`, the
+    /// scalars), and vmangos never sends a clear for the queue of a player who logged out. A
+    /// listener on the session end (a second handler on the kind, after the bridge's own
+    /// teardown). The in-session world enter (`0x4a9db0`) is a different edge that KEEPS the slots,
+    /// and it does not come through here.
+    fn on_session_end(In(_): In<SessionEvent>, mut queue: ResMut<BattlefieldQueue>) {
+        *queue = BattlefieldQueue::default();
+    }
+
+    /// The pet trainer's question (decision 1963) — the talent wipe's twin
+    /// ([`crate::ui_talent_wipe`]); a zero guid is the reference's own `ERR_TALENT_WIPE_ERROR`
+    /// leg, carried over as observed.
+    fn on_pet_unlearn_confirm(
+        In(ev): In<SessionEvent>,
+        mut unlearn: ResMut<PetUnlearnState>,
+        mut errors: ResMut<crate::ui_action::UiErrorKeys>,
+    ) {
+        if let SessionEvent::PetUnlearnConfirm { trainer, cost } = ev {
+            if trainer == 0 {
+                debug!("net: pet unlearn refused (zero trainer) — no dialog");
+                errors
+                    .0
+                    .push(crate::ui_action::UiError::key("ERR_TALENT_WIPE_ERROR"));
+            } else {
+                debug!("net: trainer {trainer:#x} asks to unlearn the pet for {cost} copper");
+                unlearn.ask(trainer, cost);
+            }
+        }
+    }
+
+    fn on_raid_group_only(In(ev): In<SessionEvent>, mut boot: ResMut<InstanceBoot>) {
+        if let SessionEvent::RaidGroupOnly { delay_ms, reason } = ev {
+            boot.apply(delay_ms, reason, bevy::platform::time::Instant::now());
+        }
+    }
+
+    fn on_area_spirit_healer_time(In(ev): In<SessionEvent>, mut spirit: ResMut<AreaSpiritHealer>) {
+        if let SessionEvent::AreaSpiritHealerTime { healer, ms } = ev {
+            spirit.on_time(healer, ms, bevy::platform::time::Instant::now());
+        }
+    }
+
+    fn on_battlefield_status(In(ev): In<SessionEvent>, mut queue: ResMut<BattlefieldQueue>) {
+        if let SessionEvent::BattlefieldStatus(status) = ev {
+            queue.apply(status);
+        }
+    }
+
+    fn on_meeting_stone(In(ev): In<SessionEvent>, mut stone: ResMut<MeetingStone>) {
+        match ev {
+            SessionEvent::MeetingStoneSetQueue { area, status } => stone.apply(area, status),
+            SessionEvent::MeetingStoneNotice(notice) => stone.apply_notice(notice),
+            _ => {}
+        }
+    }
+}
+
 pub(crate) struct UiDialogVerbsPlugin;
 
 impl Plugin for UiDialogVerbsPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<PetUnlearnState>()
             .init_resource::<InstanceBoot>()
             .init_resource::<AreaSpiritHealer>()
@@ -1992,5 +2074,66 @@ mod tests {
         pet.close();
         assert_eq!(pet.pending(), None);
         assert_eq!(pet.cost, 0);
+    }
+
+    /// **The queue is zeroed at every login, not kept across it** (wow-re
+    /// `battlefield-verb-family.md` §8): module init `0x4a9c40`, run from `InitializeGame`,
+    /// zeroes the three slots, the active index (`[0x8457cc] = -1`) and the scalars, and vmangos
+    /// never sends a clear for a queue whose player logged out. So a slot, the active map and the
+    /// instance clocks from the last session must not reach the next — only an in-session world
+    /// enter (`0x4a9db0`) keeps the slots, and that is `ui_battlefield`'s, untouched here.
+    #[test]
+    fn the_session_end_zeroes_the_battlefield_queue() {
+        let mut app = App::new();
+        app.init_resource::<BattlefieldQueue>();
+        net::register(&mut app);
+        let now = Instant::now();
+        {
+            let mut q = app.world_mut().resource_mut::<BattlefieldQueue>();
+            q.apply_at(
+                BattlefieldStatus {
+                    slot: 0,
+                    map_id: 489,
+                    bracket: 0,
+                    instance_id: 3,
+                    status: 3,
+                    time_ms: None,
+                    in_progress: Some((90_000, 30_000)),
+                    queued: None,
+                },
+                now,
+            );
+            q.apply_at(
+                BattlefieldStatus {
+                    slot: 1,
+                    map_id: 30,
+                    bracket: 0,
+                    instance_id: 0,
+                    status: 1,
+                    time_ms: Some(0),
+                    in_progress: None,
+                    queued: None,
+                },
+                now,
+            );
+        }
+
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![benilla_protocol::SessionEvent::Disconnected {
+                reason: "logged out".into(),
+                end: benilla_protocol::SessionEnd::LoggedOut,
+            }],
+        );
+
+        let mut q = app.world_mut().resource_mut::<BattlefieldQueue>();
+        assert!(
+            q.slots().iter().all(Option::is_none),
+            "all three slots empty"
+        );
+        assert_eq!(q.active_map(), None);
+        assert_eq!(q.run_time_ms(now), 0);
+        assert_eq!(q.instance_expiration_ms(now), 0);
+        assert!(!q.take_score_dirty());
     }
 }

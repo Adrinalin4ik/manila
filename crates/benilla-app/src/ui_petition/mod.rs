@@ -52,7 +52,7 @@
 //!   `SMSG_PETITION_SIGN_RESULTS` to both parties and **no fresh signatures packet**
 //!   (`:299`, `:312-316`), while the reference's `PetitionFrame` registers only `PETITION_SHOW` and
 //!   `PETITION_CLOSED`. Nothing would ever repaint the name rows. So an `OK` result naming the open
-//!   charter re-sends `CMSG_PETITION_SHOW_SIGNATURES` ([`apply::sign_results`]) — INFERRED, and
+//!   charter re-sends `CMSG_PETITION_SHOW_SIGNATURES` ([`net::sign_results`]) — INFERRED, and
 //!   flagged as such below.
 //! - **Two success paths are silent on the wire and speak locally.** Offering a charter answers the
 //!   *target*, not us, and finding no charter to turn in is refused before any packet is built —
@@ -402,6 +402,16 @@ impl PetitionState {
         self.open = None;
     }
 
+    /// The session end: the open charter, the in-flight sign and the undrained lines are the old
+    /// session's and go with it — silently, with **no** decline (the socket is gone, and a
+    /// decline is the close verb's, not the teardown's). The record cache stays: it is keyed by
+    /// the server's petition id, and the world-enter release already re-arms its asks.
+    fn clear_session(&mut self) {
+        self.open = None;
+        self.signing = false;
+        self.lines.clear();
+    }
+
     /// The open charter's item guid — what `SignPetition` / `OfferPetition` / `RenamePetition`
     /// address. `None` = nothing open, and the verb is dropped rather than sent against a guess.
     fn open_item(&self) -> Option<u64> {
@@ -414,6 +424,7 @@ pub(crate) struct UiPetitionPlugin;
 
 impl Plugin for UiPetitionPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         crate::query_cache::register::<PetitionState>(app);
         app.init_resource::<GuildRegistrarState>()
             .init_resource::<PetitionState>()
@@ -435,9 +446,126 @@ impl Plugin for UiPetitionPlugin {
 ///
 /// **Nothing here fires an event or writes a chat line directly.** Composed lines go onto
 /// [`PetitionState::lines`] and the feed drains them, because the red `UI_ERROR_MESSAGE` channel
-/// needs the `script` handle and apply has none (`crate::ui_bank`'s `BankErrors` shape).
-pub(crate) mod apply {
+/// needs the `script` handle and a packet handler has none (`crate::ui_bank`'s `BankErrors`
+/// shape). In the net handler table since 2312.
+pub(crate) mod net {
     use super::*;
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+
+    use crate::net::NetHandlerApp;
+
+    use crate::net::{GuidIndex, ObjectStore, SelfGuid};
+    use crate::ui_social::SocialState;
+
+    /// Register the family's handlers — called from [`UiPetitionPlugin`].
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::PetitionShowList, on_show_list)
+            .net_handler(K::PetitionShowSignatures, on_show_signatures)
+            .net_handler(K::PetitionQueryResponse, on_query_response)
+            .net_handler(K::PetitionSignResults, on_sign_results)
+            .net_handler(K::TurnInPetitionResults, on_turn_in_results)
+            .net_handler(K::PetitionDeclined, on_declined)
+            .net_handler(K::PetitionRenamed, on_renamed)
+            .net_handler(K::Disconnected, on_session_end);
+    }
+
+    /// The charter window and the registrar die with the socket — a listener on the session end
+    /// (a second handler on the kind, after the bridge's own teardown). Without it the next
+    /// login's fresh VM saw `None → Some` and fired `PETITION_SHOW` for the old session's charter,
+    /// and closing that ghost declined it on the wire. The registrar's walk-away guard cannot
+    /// stand in: it measures from a self player, and there is none until the next world entry.
+    fn on_session_end(
+        In(_): In<SessionEvent>,
+        mut petition: ResMut<PetitionState>,
+        mut registrar: ResMut<GuildRegistrarState>,
+    ) {
+        petition.clear_session();
+        registrar.close();
+    }
+
+    /// The registrar's two `UNIT_NPC_FLAGS` gates are on LIVE NPC state rather than on the
+    /// packet, so the flags are read here, off the store. An unstreamed guid reads `None` and
+    /// fails the gate, as the client's own resolve does.
+    fn on_show_list(
+        In(ev): In<SessionEvent>,
+        mut registrar: ResMut<GuildRegistrarState>,
+        index: Res<GuidIndex>,
+        stores: Query<&ObjectStore>,
+    ) {
+        if let SessionEvent::PetitionShowList(list) = ev {
+            let flags = index
+                .0
+                .get(&list.npc)
+                .and_then(|e| stores.get(*e).ok())
+                .map(|s| s.0.unit_npc_flags());
+            show_list(&mut registrar, list, flags);
+        }
+    }
+
+    /// An ignored owner suppresses the ENTIRE update — no record fetch, no list, no event, no
+    /// error line (`0x5eeefe`). Consulted before anything else happens.
+    fn on_show_signatures(
+        In(ev): In<SessionEvent>,
+        mut petition: ResMut<PetitionState>,
+        social: Res<SocialState>,
+        commands: Res<NetCommands>,
+    ) {
+        if let SessionEvent::PetitionShowSignatures(sigs) = ev {
+            let ignored = social.is_ignored(sigs.owner);
+            show_signatures(&mut petition, sigs, ignored, &commands);
+        }
+    }
+
+    fn on_query_response(In(ev): In<SessionEvent>, mut petition: ResMut<PetitionState>) {
+        if let SessionEvent::PetitionQueryResponse(response) = ev {
+            query_response(&mut petition, response);
+        }
+    }
+
+    fn on_sign_results(
+        In(ev): In<SessionEvent>,
+        mut petition: ResMut<PetitionState>,
+        names: Res<NameCache>,
+        self_guid: Res<SelfGuid>,
+        commands: Res<NetCommands>,
+    ) {
+        if let SessionEvent::PetitionSignResults(results) = ev {
+            sign_results(
+                &mut petition,
+                &names,
+                self_guid.0.unwrap_or(0),
+                results,
+                &commands,
+            );
+        }
+    }
+
+    fn on_turn_in_results(
+        In(ev): In<SessionEvent>,
+        mut petition: ResMut<PetitionState>,
+        mut registrar: ResMut<GuildRegistrarState>,
+    ) {
+        if let SessionEvent::TurnInPetitionResults { result } = ev {
+            turn_in_results(&mut petition, &mut registrar, result);
+        }
+    }
+
+    fn on_declined(
+        In(ev): In<SessionEvent>,
+        mut petition: ResMut<PetitionState>,
+        names: Res<NameCache>,
+    ) {
+        if let SessionEvent::PetitionDeclined { player } = ev {
+            declined(&mut petition, &names, player);
+        }
+    }
+
+    fn on_renamed(In(ev): In<SessionEvent>, mut petition: ResMut<PetitionState>) {
+        if let SessionEvent::PetitionRenamed(rename) = ev {
+            renamed(&mut petition, rename);
+        }
+    }
 
     /// `SMSG_PETITION_SHOWLIST` — the registrar's charter list, subject to its three gates.
     ///
@@ -725,7 +853,7 @@ mod tests {
             min_signatures: 9,
             ..Default::default()
         });
-        apply::renamed(
+        net::renamed(
             &mut petition,
             PetitionRename {
                 item: 0x99,
@@ -735,7 +863,7 @@ mod tests {
         assert_eq!(open_title(&petition), Some("Second"));
 
         // An echo for a charter we do not have open is not ours to apply.
-        apply::renamed(
+        net::renamed(
             &mut petition,
             PetitionRename {
                 item: 0xdead,
@@ -743,5 +871,45 @@ mod tests {
             },
         );
         assert_eq!(open_title(&petition), Some("Second"));
+    }
+
+    /// **The charter window and the in-flight sign die with the session.** Only the Lua close,
+    /// a sign result or a turn-in cleared `open`, and a logout's fresh VM never runs the old
+    /// one's `OnHide` — so the next login's feed saw `None → Some` and fired `PETITION_SHOW` into
+    /// the new character's UI, and closing that ghost put `MSG_PETITION_DECLINE` on the wire for
+    /// the old session's charter. Driven through the real registration.
+    #[test]
+    fn the_session_end_closes_the_charter_and_forgets_the_sign() {
+        let (commands, _rx) = commands();
+        let mut app = App::new();
+        app.add_plugins(UiPetitionPlugin);
+        {
+            let mut petition = app.world_mut().resource_mut::<PetitionState>();
+            petition.show(signatures(0x99, 0xaa, 7, &[0xbb]), &commands);
+            petition.signing = true;
+        }
+        app.world_mut()
+            .resource_mut::<GuildRegistrarState>()
+            .open(&show_list(0x2a1f, &[(1000, 1)]), Some(REGISTRAR_NPC_FLAGS));
+
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![benilla_protocol::SessionEvent::Disconnected {
+                reason: "socket".into(),
+                end: benilla_protocol::SessionEnd::Lost,
+            }],
+        );
+
+        assert_eq!(app.world().resource::<GuildRegistrarState>().npc(), None);
+        let petition = app.world().resource::<PetitionState>();
+        assert_eq!(
+            petition.open_item(),
+            None,
+            "no charter carried into the next login"
+        );
+        assert!(
+            !petition.signing,
+            "no sign of the old session still in flight"
+        );
     }
 }

@@ -24,7 +24,9 @@ use crate::names::NameCache;
 use crate::net::{Guid, NetEntity, NetStatus, ObjectStore, Reputations, SelfGuid, SelfPlayer};
 use crate::player::Player;
 use crate::target::{ring_reaction, Factions, Hovered, Selection};
-use crate::ui_cast::{ActiveChannel, PendingCast};
+// Both moved from `ui_cast` into `spell::inflight` upstream (decision 2337's cast ladder) and are
+// re-exported from `spell`; `ui_cast`'s own import of them is private.
+use crate::spell::{ActiveChannel, PendingCast};
 use crate::ui_chat::ChatEvent;
 
 use super::BridgeConfig;

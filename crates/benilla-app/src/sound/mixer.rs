@@ -117,6 +117,14 @@ impl<Error> StreamingSoundHandle<Error> {
     pub(crate) fn stop(&mut self, tween: Tween) {
         self.0.stop(tween);
     }
+    /// The pause/resume pair, grown here exactly as the note above anticipated: upstream's music
+    /// pump gained a pause leg (`0x4603b0`) and calls both on this handle.
+    pub(crate) fn pause(&mut self, tween: Tween) {
+        self.0.pause(tween);
+    }
+    pub(crate) fn resume(&mut self, tween: Tween) {
+        self.0.resume(tween);
+    }
 }
 
 /// An immediate (zero-duration) parameter change. kira requires a tween on every setter; the
