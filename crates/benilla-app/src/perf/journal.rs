@@ -84,7 +84,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -198,10 +198,18 @@ fn take_sched_us(frames: u64) -> Option<u64> {
 /// and all twelve sum to the frame. Journal 33, steady state, 40.6 ms:
 /// `Update` 21.36 (53%), `PostUpdate` 10.76 (27%), `s_first` 6.99 (17%), the rest 0.45.
 ///
-/// **`s_first` is not `First`.** Its mark closes only when the next frame opens and the render app
-/// runs in between, so the column carries extract, prepare, submit and present along with `First`
-/// itself. It read 19.25 ms of a 79.62 ms frame, the same 24% the render half measured on its own,
-/// so the two agree; the name is simply narrower than the thing.
+/// **`s_first` was not `First`, and now it is.** Its mark closed only when the next frame opened,
+/// with the render app running in between, so the column carried extract, prepare, submit and
+/// present along with `First` itself. That is now split: a thirteenth mark sits BEFORE `First`
+/// (the frame's first label), so `rapp` is the between-schedules span and `s_first` is `First`
+/// alone.
+///
+/// The split was worth its two clock reads because the merged column behaved impossibly: 7.16 ms
+/// at 37,330 entities and 8.45 ms at 20,179 - it grew as the scene SHRANK - and a fit across four
+/// journals put a fixed 20.79 ms in the frame that no entity count explains
+/// (`frame = 20.79 ms + 0.519 us x entities`, residuals inside the 1.4 ms that two journals of the
+/// same pin differ by). Something in that floor is why 60 fps is unreachable here whatever is
+/// culled, and this column is the first cut at whether half of `s_first` holds it.
 ///
 /// `sched_us` answered the first question and made this the only one left: 50.10 ms of a 65.68 ms
 /// frame is the main schedule, 76 per cent, against 1.34 ms for the whole render graph and 3.50
@@ -215,9 +223,13 @@ fn take_sched_us(frames: u64) -> Option<u64> {
 const ZERO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PHASE_US: [std::sync::atomic::AtomicU64; PHASES] = [ZERO; PHASES];
 
-/// Twelve tiles: five phase boundaries, three more inside `Update`, four inside `PostUpdate`.
+/// Thirteen tiles: five phase boundaries, three more inside `Update`, four inside `PostUpdate`,
+/// and one BEFORE `First` that cuts `s_first` in half (slot 12, the `rapp` column).
 /// Disjoint, not nested - see the note above before adding any two of them together.
-const PHASES: usize = 12;
+const PHASES: usize = 13;
+/// The slot the `rapp` column reads, emitted apart from the other twelve so the header keeps its
+/// append-only rule.
+const RAPP: usize = 12;
 
 /// The phase boundary schedules, in order. Each holds one system.
 #[derive(bevy::ecs::schedule::ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
@@ -334,6 +346,20 @@ impl Plugin for FpsJournalPlugin {
             // system of `Update`, by construction. That is the whole reason these boundaries can
             // be trusted to the microsecond.
             let mut order = app.world_mut().resource_mut::<bevy::app::MainScheduleOrder>();
+            // **Before `First`, which is the frame's first label** - so this mark closes the
+            // span since the mark after `Last`, i.e. everything that happens between two main
+            // schedules: the render sub-app (extract, prepare, queue, render, present), the
+            // event-loop hop, and any wait at present. `s_first` used to carry all of that plus
+            // `First` itself, which is why its own doc said "the name is simply narrower than the
+            // thing" - it read 7.16 ms at 37k entities and 8.45 ms at 20k, growing as the scene
+            // SHRANK, and nothing could say which half did that. Now `rapp` is that span and
+            // `s_first` is `First` alone.
+            //
+            // The span is wall time, so law 0717 applies to it: while synced it measures the
+            // display's present grant, not our cost. It is honest at the frame rates this client
+            // runs at (31-41 ms against a 16.7 ms refresh, so present is not what is waiting),
+            // and it would stop being honest the day the frame fits in the interval.
+            order.insert_before(bevy::app::First, PhaseMark(RAPP as u8));
             order.insert_after(bevy::app::First, PhaseMark(0));
             order.insert_after(bevy::app::PreUpdate, PhaseMark(1));
             order.insert_after(bevy::app::Update, PhaseMark(2));
@@ -348,6 +374,7 @@ impl Plugin for FpsJournalPlugin {
             .add_systems(bevy::app::First, sched_open)
             .add_systems(bevy::app::Last, (count_moved, sched_close).chain())
             .init_resource::<PhaseClock>()
+            .add_systems(PhaseMark(RAPP as u8), phase_mark::<RAPP>)
             .add_systems(PhaseMark(0), phase_mark::<0>)
             .add_systems(PhaseMark(1), phase_mark::<1>)
             .add_systems(PhaseMark(2), phase_mark::<2>)
@@ -1019,8 +1046,12 @@ fn journal_fps(
         Some(us) => line.push_str(&format!(",{us}")),
         None => line.push(','),
     }
-    // ...and where inside it. See `PHASE_US`.
-    for us in take_phase_us(frames) {
+    // ...and where inside it. See `PHASE_US`. The thirteenth tile (`rapp`) is held back and
+    // written at the end of the row: the columns only ever grow there (see `JOURNAL_HEADER`), and
+    // emitting it in slot order would have pushed every column after it one place along, so every
+    // journal already recorded would parse one column out of step from `moved` onward.
+    let phases = take_phase_us(frames);
+    for us in &phases[..RAPP] {
         line.push_str(&format!(",{us}"));
     }
     line.push_str(&format!(",{}", take_moved()));
@@ -1054,6 +1085,10 @@ fn journal_fps(
     let (rig_wr, rig_sk) = benilla_world::rig_anim::take_anchor_writes();
     let per = frames.max(1);
     let _ = write!(line, ",{},{}", rig_wr / per, rig_sk / per);
+    // **Everything between two main schedules** - the render sub-app, the event-loop hop and
+    // present. Held back to here so the header keeps growing only at its end; the mark's own
+    // comment has what the span is and when it would stop being honest.
+    let _ = write!(line, ",{}", phases[RAPP]);
     line.push('\n');
     #[cfg(target_arch = "wasm32")]
     web::append(&line);
