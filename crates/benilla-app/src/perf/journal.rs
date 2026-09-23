@@ -84,7 +84,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -231,6 +231,64 @@ const PHASES: usize = 13;
 /// append-only rule.
 const RAPP: usize = 12;
 
+/// **Inside `rapp`** — the seven `r_*` columns, the same trick one schedule down.
+///
+/// `rapp` is 18.93 ms of a 67.18 ms frame and the only third of it nothing could name: the render
+/// graph's own CPU (`rcpu_ms`, bevy's diagnostic) accounts for 5.23, leaving 13.7 in extract,
+/// prepare, queue and present. It matters because the other two thirds are already named and
+/// neither can leave the main thread: bevy disables `multi_threaded` on wasm32 in its own cfg
+/// (`bevy_tasks/src/lib.rs:21`, `bevy_ecs/schedule/executor/mod.rs:56`), so 94% of this frame is
+/// work a worker cannot take and a fork is not on the table.
+///
+/// Same rule as the twelve above: DISJOINT tiles, each closing the span since the previous mark,
+/// one shared clock. The open sits before `ExtractCommands` and accumulates nothing. What the
+/// seven do NOT cover is `ExtractSchedule` (it runs in the main world, before this schedule) and
+/// present (after it) - `rapp` minus their sum is those two together.
+///
+/// Slot order, which is also the header's order: `r_extract` (ExtractCommands), `r_assets`
+/// (PrepareAssets + PrepareMeshes), `r_queue` (ManageViews + Queue + QueueMeshes + QueueSweep),
+/// `r_sort` (PhaseSort), `r_prepare` (Prepare + PrepareResources + PrepareBindGroups),
+/// `r_render` (Render), `r_clean` (Cleanup). Written positionally rather than from a name array,
+/// because a second list of names is a second place for the header to drift from.
+const RPHASES: usize = 7;
+
+static RAPP_US: [std::sync::atomic::AtomicU64; RPHASES] = [ZERO; RPHASES];
+
+/// The render app's own boundary clock — its schedule runs after the main one, so it cannot share
+/// [`PhaseClock`], which lives in a different `World`.
+#[derive(Resource)]
+struct RClock(Instant);
+
+impl Default for RClock {
+    fn default() -> Self {
+        Self(Instant::now())
+    }
+}
+
+/// Start the render app's chain; accumulates nothing.
+fn rmark_open(mut clock: ResMut<RClock>) {
+    clock.0 = Instant::now();
+}
+
+/// Close render-app tile `N`.
+fn rmark<const N: usize>(mut clock: ResMut<RClock>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let now = Instant::now();
+    RAPP_US[N].fetch_add((now - clock.0).as_micros() as u64, Relaxed);
+    clock.0 = now;
+}
+
+/// Per-frame microseconds for each render-app tile this second, and the reset.
+fn take_rapp_us(frames: u64) -> [u64; RPHASES] {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut out = [0u64; RPHASES];
+    for (slot, cell) in out.iter_mut().zip(&RAPP_US) {
+        let us = cell.swap(0, Relaxed);
+        *slot = if frames > 0 { us / frames } else { 0 };
+    }
+    out
+}
+
 /// The phase boundary schedules, in order. Each holds one system.
 #[derive(bevy::ecs::schedule::ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
 struct PhaseMark(u8);
@@ -365,6 +423,29 @@ impl Plugin for FpsJournalPlugin {
             order.insert_after(bevy::app::Update, PhaseMark(2));
             order.insert_after(bevy::app::PostUpdate, PhaseMark(3));
             order.insert_after(bevy::app::Last, PhaseMark(4));
+        }
+        // **The render app's own tiles.** Pinned between `RenderSystems` sets exactly as the
+        // main-schedule marks are pinned between schedules: `.after(X).before(Y)` brackets each
+        // one on both sides, so a system that opts into neither set can still float into a tile,
+        // and the tile is an upper bound on its set rather than a measurement of it. That is the
+        // same caveat the `u_*` tiles carry, and it is worth saying out loud because the `u_*`
+        // ones were read as stage measurements for two rounds and were not.
+        if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
+            use bevy::render::{Render, RenderSystems as RS};
+            render_app.init_resource::<RClock>().add_systems(
+                Render,
+                (
+                    rmark_open.before(RS::ExtractCommands),
+                    rmark::<0>.after(RS::ExtractCommands).before(RS::PrepareAssets),
+                    rmark::<1>.after(RS::PrepareMeshes).before(RS::ManageViews),
+                    rmark::<2>.after(RS::QueueSweep).before(RS::PhaseSort),
+                    rmark::<3>.after(RS::PhaseSort).before(RS::Prepare),
+                    rmark::<4>.after(RS::PrepareBindGroups).before(RS::Render),
+                    rmark::<5>.after(RS::Render).before(RS::Cleanup),
+                    rmark::<6>.after(RS::Cleanup),
+                )
+                    .chain(),
+            );
         }
         app.add_plugins(RenderDiagnosticsPlugin)
             .init_resource::<SchedStart>()
@@ -1066,6 +1147,11 @@ fn journal_fps(
     // present. Held back to here so the header keeps growing only at its end; the mark's own
     // comment has what the span is and when it would stop being honest.
     let _ = write!(line, ",{}", phases[RAPP]);
+    // ...and `rapp` cut into the render schedule's own sets. `rapp` minus their sum is
+    // `ExtractSchedule` (main world, ahead of this schedule) plus present.
+    for us in take_rapp_us(frames) {
+        let _ = write!(line, ",{us}");
+    }
     // **Every `#` line goes AFTER the last column, not before it.** Both blocks below used to sit
     // above the trailing columns, which was invisible while the systems one stayed empty and split
     // every row of journal 37 in half the moment the mats one started printing: the row ended at
