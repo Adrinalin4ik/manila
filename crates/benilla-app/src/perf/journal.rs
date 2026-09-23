@@ -1059,6 +1059,20 @@ fn journal_fps(
     for us in take_stream_us(frames) {
         line.push_str(&format!(",{us}"));
     }
+    let (rig_wr, rig_sk) = benilla_world::rig_anim::take_anchor_writes();
+    let per = frames.max(1);
+    let _ = write!(line, ",{},{}", rig_wr / per, rig_sk / per);
+    // **Everything between two main schedules** - the render sub-app, the event-loop hop and
+    // present. Held back to here so the header keeps growing only at its end; the mark's own
+    // comment has what the span is and when it would stop being honest.
+    let _ = write!(line, ",{}", phases[RAPP]);
+    // **Every `#` line goes AFTER the last column, not before it.** Both blocks below used to sit
+    // above the trailing columns, which was invisible while the systems one stayed empty and split
+    // every row of journal 37 in half the moment the mats one started printing: the row ended at
+    // `t_collider`, the `#` line followed, and `,rig_wr,rig_sk,rapp` landed on a third line. A
+    // reader that checks field count against the header - mine does - then parsed 1 row of 383.
+    // The comment inside the systems block already described this exact failure from the last time
+    // it happened, three lines below where I inserted the new one.
     // **Which lane minted the materials**, cumulative - a `#` line for the same reason as the
     // one below, and because a lane list is not a fixed column set. `mats` beside it counts what
     // `Assets<WowModelMaterial>` holds; this says who asked for them. At one pin 19 yards apart
@@ -1098,13 +1112,6 @@ fn journal_fps(
     // happened to be. `rig_sk` near zero means the poses genuinely differ every frame and the
     // guard buys nothing - a real possibility for a global sequence, which samples a continuous
     // curve at an advancing `t`. See `benilla_world::rig_anim::take_anchor_writes`.
-    let (rig_wr, rig_sk) = benilla_world::rig_anim::take_anchor_writes();
-    let per = frames.max(1);
-    let _ = write!(line, ",{},{}", rig_wr / per, rig_sk / per);
-    // **Everything between two main schedules** - the render sub-app, the event-loop hop and
-    // present. Held back to here so the header keeps growing only at its end; the mark's own
-    // comment has what the span is and when it would stop being honest.
-    let _ = write!(line, ",{}", phases[RAPP]);
     line.push('\n');
     #[cfg(target_arch = "wasm32")]
     web::append(&line);
