@@ -6,9 +6,7 @@ use crate::transport::{ConnReader, ReadExactAsync};
 
 use super::recv_packet;
 
-/// Read half of a split [`WorldSession`](super::WorldSession) — owns the read half of the
-/// connection + the decrypter. Lives on the network thread (native) or in the sequencer task
-/// (web), streaming decoded [`crate::SessionEvent`]s (via [`Self::poll_async`]).
+/// The read half of a split [`WorldSession`](super::WorldSession): cloned socket and decrypter.
 pub struct WorldReader {
     pub(super) reader: ConnReader,
     pub(super) decrypter: DecrypterHalf,
@@ -59,9 +57,6 @@ impl WorldReader {
                 events: crate::decode(packet),
                 tail,
             }),
-            // Include the raw body (capped) so an unparseable packet can be decoded by hand — a parse
-            // bug is otherwise invisible past "failed to fill whole buffer". The opcode rides
-            // separately so the net thread can feed the app's dropped-packet tally.
             Err(e) => Ok(crate::Poll::Skipped {
                 opcode,
                 reason: format!(
@@ -74,8 +69,7 @@ impl WorldReader {
     }
 }
 
-/// Space-separated hex of the first `max` bytes of `body` (with a `…` when truncated) — the diagnostic
-/// tail on a [`crate::Poll::Skipped`] reason so an unparseable packet's layout can be decoded by hand.
+/// Hex of the first `max` bytes of `body`, `…` when truncated, for decoding a packet by hand.
 fn hex_preview(body: &[u8], max: usize) -> String {
     use std::fmt::Write;
     let mut s = String::new();

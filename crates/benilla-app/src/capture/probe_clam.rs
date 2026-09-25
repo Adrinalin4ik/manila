@@ -4,7 +4,7 @@
 //! The director, 2026-08-22: *"Clams don't open anymore. I right click them and they turn gray
 //! correctly but no loot window opens ever."* Both halves of that sentence are readings this probe
 //! takes separately, because they come from two different pre-send writes in the same emitter
-//! (`0x5edc80`, wow-re `loot-anim-leg.md` §5 / `inventory-change-failure-display.md` §8):
+//! (`0x5edc80`):
 //!
 //! - the **grey lock** ([`PendingItemOps`], `0x4953e0` at `0x5edcd9`) — the half that kept working;
 //! - the **loot latch** ([`LootLatch`], `0x5edcc0`) — the half decision 1477 left unmodelled, on
@@ -34,8 +34,8 @@
 //! WOW_NOSOUND=1 WOW_USER=probe0 WOW_PASS=pprobe0 WOW_CHAR=Probezero \
 //!     WOW_PROBE_CLAM=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — `pool-N` → `probeN`/`pprobeN`/`Probe<N-spelled>`, `method.md`
-//! "The local vmangos server"). `WOW_PROBE_CLAM=<entry>` aims it at a different openable template;
+//! (the checkout's probe identity — `.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR; the `probe`
+//! skill). `WOW_PROBE_CLAM=<entry>` aims it at a different openable template;
 //! the default is a Small Barnacled Clam (7973 — `Flags` LOOTABLE with `LockID = 0`, so it is
 //! openable the moment it exists: no key, no lockpicking). The probe `.additem`s its own copy and
 //! subtracts it again on the way out, so it leaves the character as it found it.

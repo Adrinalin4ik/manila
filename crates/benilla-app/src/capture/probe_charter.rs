@@ -16,7 +16,7 @@
 //! fork arm whose whole evidence is "no other arm accepts a charter". Those are only visible
 //! against real bytes.
 //!
-//! ## The registrar (live-DB verified this session, `/Users/sam/dev/vmangos-deploy` → `mangos` DB)
+//! ## The registrar (live-DB verified against the local vmangos, `mangos` DB)
 //!
 //! Aldwin Laughlin, the Stormwind guild registrar — `creature_template.entry = 4974`, spawn
 //! `creature.guid = 79681`, **map 0**, position `(-8885.25, 614.395, 95.2576)`,
@@ -85,10 +85,9 @@
 //! account to sign, and #5 (`ERR_GUILD_FOUNDER_S` on a successful turn-in) needs nine of them —
 //! neither is reachable from one client, so the whole sign/offer/turn-in half of the family
 //! (`SignPetition`, `OfferPetition`, `TurnInGuildCharter`, `MSG_PETITION_DECLINE`) still has no
-//! live coverage after this probe. #3 (the two closes send nothing) is *superseded*: the wow-re
-//! carve that landed alongside this file finds that closing a charter you do NOT own can send
-//! `MSG_PETITION_DECLINE`, so this probe deliberately asserts nothing about either close rather
-//! than pinning a claim that is being rewritten.
+//! live coverage after this probe. #3 (the two closes send nothing) is *superseded*: closing a
+//! charter you do NOT own can send `MSG_PETITION_DECLINE` (`0x4f3f60`), so this probe deliberately
+//! asserts nothing about either close rather than pinning a claim that is being rewritten.
 //!
 //! ## The run recipe
 //!
@@ -96,8 +95,7 @@
 //! WOW_NOSOUND=1 WOW_USER=probe0 WOW_PASS=pprobe0 WOW_CHAR=Probezero \
 //!     WOW_PROBE_CHARTER=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — this worktree is `pool-0` → `probe0`/`pprobe0`/`Probezero`;
-//! method.md "The local vmangos server". **Never the default `one` account** — a login on it kicks
+//! (the checkout's probe identity, the `probe` skill. **Never a player's account** — a login on it kicks
 //! the director's live session.) `WOW_NOSOUND=1` because an unattended probe must not play zone
 //! music into the director's room; `caffeinate -dis` is **not** needed for a run this short — the
 //! whole sequence is a handful of round trips and finishes in well under a minute.
@@ -162,7 +160,7 @@ const REQUIRED_SIGNATURES: i64 = 9;
 const FRESH_SIGNATURES: i64 = 0;
 /// Copper handed to the probe body up front so the buy can never fail for funds. `.modify money`
 /// is `SEC_BASIC_ADMIN` (4) in vmangos's `Chat.cpp` command table and every `probeN` account is
-/// gmlevel **6** (method.md, decision 0651), so it lands; with no selection it targets the sender
+/// gmlevel **6** (docs/METHOD.md, decision 0651), so it lands; with no selection it targets the sender
 /// (`ChatHandler::GetSelectedPlayer`, `Chat.cpp:2601-2612`), which is why it is sent before the
 /// probe touches an NPC.
 const FUND_COPPER: u32 = 100_000;

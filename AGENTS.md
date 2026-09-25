@@ -1,5 +1,11 @@
 # Working in this repository
 
+**Upstream's own rules apply to upstream's code.** benilla carries `docs/METHOD.md` (binding for
+every session), `docs/MAP.md` (what is built right now, generated) and `docs/CONTRIBUTING.md` (how
+a change is judged). Read them before changing anything under `crates/benilla-*`; what follows is
+the FORK's map — the browser build, the realm service, and the rules that bite here.
+
+
 wenilla is a fork of [samwhosung/benilla](https://github.com/samwhosung/benilla), a from-scratch
 WoW 1.12.1 client in Rust + Bevy, that adds a browser build and a realm service to host it. The
 fork rides on upstream: upstream is merged into `main` as it publishes, and our own work lives
