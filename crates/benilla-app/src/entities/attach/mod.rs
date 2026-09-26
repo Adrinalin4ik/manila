@@ -112,10 +112,17 @@ fn setup_skinned_instance(
             let slot = rig.slot;
             // `RigStarved` means slot-less: a rebuild that lands a slot clears it, or the healer
             // loops.
+            // Silenced: this runs deferred, and the unit can leave between the frame that
+            // queues it and the frame that applies it. A body that left needs no skin.
             commands
                 .entity(entity)
-                .insert(rig)
-                .remove::<benilla_world::rig_palette::RigStarved>();
+                .queue_silenced(bevy::ecs::system::entity_command::insert(
+                    rig,
+                    bevy::ecs::bundle::InsertMode::Replace,
+                ))
+                .queue_silenced(bevy::ecs::system::entity_command::remove::<
+                    benilla_world::rig_palette::RigStarved,
+                >());
             slot
         }
         // Nothing to skin: no starvation marker, or `heal_rig_starved` would rebuild the body for a
@@ -125,7 +132,10 @@ fn setup_skinned_instance(
             // Table full: static bind-pose parts until `heal_rig_starved` rebuilds with a slot.
             commands
                 .entity(entity)
-                .insert(benilla_world::rig_palette::RigStarved);
+                .queue_silenced(bevy::ecs::system::entity_command::insert(
+                    benilla_world::rig_palette::RigStarved,
+                    bevy::ecs::bundle::InsertMode::Replace,
+                ));
             0
         }
     };

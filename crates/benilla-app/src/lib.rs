@@ -233,6 +233,20 @@ pub fn run(build: BuildId) -> AppExit {
     crash::install(build);
 
     let mut app = App::new();
+    // **A command against a despawned entity warns; it does not panic.** bevy's default handler
+    // is `panic`, and in a browser tab that is `RuntimeError: unreachable` and a dead client.
+    //
+    // Three crashes in one week were this and nothing else - `GroundShade`, then
+    // `BodyBakeCenter`, then `RigSkin` - each a different component on the same streamed unit,
+    // each queued while the unit was alive and applied after it had left. Silencing them one call
+    // site at a time was losing: the dressing path alone queues a dozen, and every new one is a
+    // fresh way to kill a session in a crowd, where units arrive and leave constantly.
+    //
+    // `warn`, not `ignore`: the message and its context still reach the console, so a command
+    // failing for a REAL reason is still reported. What changes is that it stops being fatal,
+    // which for a condition the reference client handles by doing nothing is the right posture.
+    // A site whose failure is expected still gets `queue_silenced`, so the log stays readable.
+    app.set_error_handler(bevy::ecs::error::warn);
     // The panel footer and the preflight banner read the stamp back.
     app.insert_resource(build);
     // Static-scene transform tracking pinned on: the default threshold re-decides every frame with
