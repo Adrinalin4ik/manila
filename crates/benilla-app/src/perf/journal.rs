@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -582,6 +582,21 @@ pub(crate) fn note_script_errors(count: u32, micros: u64) {
 /// it could say when the frame was slow and nothing whatever about where. Our own phases are the
 /// only timings available on that target, which makes measuring them the difference between
 /// another hypothesis and an answer.
+/// **What the two debug gates refused this second** - the `drop_chat`/`drop_other` columns.
+///
+/// An instrument that only shows the frame cannot tell "the switch did nothing" from "the switch
+/// never fired", and this session has already lost two rounds to exactly that confusion. These say
+/// which: a `netOthers 0` capture whose `drop_other` is 0 means the gate is not seeing the traffic,
+/// not that the traffic is free.
+pub(crate) fn note_net_dropped(chat: u32, other: u32) {
+    use std::sync::atomic::Ordering::Relaxed;
+    NET_DROP_CHAT.fetch_add(chat, Relaxed);
+    NET_DROP_OTHER.fetch_add(other, Relaxed);
+}
+
+static NET_DROP_CHAT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static NET_DROP_OTHER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 pub(crate) fn note_net(packets: u32, micros: u64) {
     use std::sync::atomic::Ordering::Relaxed;
     NET_PKTS.fetch_add(packets, Relaxed);
@@ -1121,6 +1136,18 @@ fn journal_fps(
     // `ExtractSchedule` (main world, ahead of this schedule) plus present.
     for us in take_rapp_us(frames) {
         let _ = write!(line, ",{us}");
+    }
+    // What `netChat 0` / `netOthers 0` refused this second - see `note_net_dropped`. Per second,
+    // not per frame: these are counts of packets, and a packet is a thing that happened, not a
+    // rate the frame divides.
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        let _ = write!(
+            line,
+            ",{},{}",
+            NET_DROP_CHAT.swap(0, Relaxed),
+            NET_DROP_OTHER.swap(0, Relaxed)
+        );
     }
     // **Every `#` line goes AFTER the last column, not before it.** Both blocks below used to sit
     // above the trailing columns, which was invisible while the systems one stayed empty and split

@@ -7,6 +7,54 @@ use bevy::prelude::*;
 
 use super::{Guid, NetEvents, SelfGuid, SelfPlayer};
 
+// ── The debug gates' classifiers ─────────────────────────────────────────────────────────────────
+
+/// Is this event a CHAT line, for `/console netChat 0`? The player-visible chat surface: the
+/// message itself, the channel notices a join prints, and the server's own broadcasts. `TextEmote`
+/// is here rather than with the unit events because "X waves at Y" is a chat line that happens to
+/// name a unit - it is checked first, so it goes with chat when both gates are down.
+fn is_chat(ev: &SessionEvent) -> bool {
+    use SessionEvent as E;
+    matches!(
+        ev,
+        E::Chat(_)
+            | E::TextEmote { .. }
+            | E::ChannelNotify { .. }
+            | E::ChannelList { .. }
+            | E::ChatPlayerNotFound { .. }
+            | E::ChatWrongFaction
+            | E::ChatRestricted
+            | E::ServerMessage { .. }
+    )
+}
+
+/// The guid an event is ABOUT, for `/console netOthers 0`. `None` means it is not about one unit
+/// and is never dropped.
+///
+/// **Per-frame churn only.** `ObjectCreate` and `ObjectDestroyed` are deliberately absent: they
+/// are a one-off cost per unit, and dropping them would empty the world rather than quiet it -
+/// a different experiment, and one the player-distance slider already ran. What is here is what
+/// arrives again and again for the same unit: its movement, its descriptor fields (which is where
+/// a gear change lands), its casts, its melee swings and its emotes.
+fn subject_guid(ev: &SessionEvent) -> Option<u64> {
+    use SessionEvent as E;
+    Some(match ev {
+        E::ObjectMove { guid, .. }
+        | E::UnitMove { guid, .. }
+        | E::MonsterMove { guid, .. }
+        | E::ObjectValues { guid, .. }
+        | E::MoveTimeSkipped { guid, .. }
+        | E::Emote { guid, .. }
+        | E::SpeedChanged { guid, .. }
+        | E::ForceSpeedChange { guid, .. }
+        | E::SplineMoveMode { guid, .. }
+        | E::MoveMode { guid, .. } => *guid,
+        E::SpellStart { caster, .. } | E::SpellGo { caster, .. } => *caster,
+        E::AttackStart { attacker, .. } | E::AttackStop { attacker, .. } => *attacker,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod seam_tests;
 
@@ -16,7 +64,37 @@ mod seam_tests;
 /// handler's commands applied before the next, before anything else in
 /// [`benilla_world::schedule::WorldStage::Net`] runs.
 pub(crate) fn apply_net_updates(world: &mut World) {
-    let events: Vec<SessionEvent> = world.resource::<NetEvents>().0.try_iter().collect();
+    let mut events: Vec<SessionEvent> = world.resource::<NetEvents>().0.try_iter().collect();
+    // **The two debug gates** (`/console netChat 0`, `/console netOthers 0`) - see [`NetDebug`].
+    // Filtered HERE, before the handler table, because that is the one place a packet can be
+    // refused without any subsystem knowing it exists: a gate inside a handler would still pay
+    // the dispatch, and a gate on the draw side (which is what the player-distance slider was)
+    // stops pixels, not work.
+    {
+        let gate = *world.resource::<super::NetDebug>();
+        if !gate.chat || !gate.others {
+            let me = world.resource::<SelfGuid>().0;
+            let before = events.len();
+            let mut chat_dropped = 0u32;
+            events.retain(|ev| {
+                if !gate.chat && is_chat(ev) {
+                    chat_dropped += 1;
+                    return false;
+                }
+                if !gate.others {
+                    // Ours is never dropped: the experiment is about the CROWD, and a client that
+                    // stops applying its own movement is not a slower client, it is a broken one.
+                    if let Some(g) = subject_guid(ev) {
+                        if Some(g) != me {
+                            return false;
+                        }
+                    }
+                }
+                true
+            });
+            crate::perf::journal::note_net_dropped(chat_dropped, (before - events.len()) as u32 - chat_dropped);
+        }
+    }
     // The journal's `net_pkts`/`net_us` pair (ours). Measured around the dispatch itself, and the
     // empty early-out is what keeps the column a measurement rather than a shape: without it every
     // idle frame files a 0-packet sample and the per-packet average reads as whatever the idle

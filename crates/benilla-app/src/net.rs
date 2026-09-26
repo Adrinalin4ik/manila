@@ -61,12 +61,60 @@ pub(crate) struct NetPlugin {
 #[derive(Resource)]
 pub(crate) struct NetOffline;
 
+/// **The two inbound debug gates**, `/console netChat 0` and `/console netOthers 0`.
+///
+/// Both default ON, so a player who types neither is on the ordinary path and pays one bool read
+/// per frame for the privilege. They exist to answer one question the draw-side gates could not:
+/// the player-distance slider hid other characters and changed nothing, because hiding stops
+/// pixels while the per-entity sweeps go on paying. These stop the WORK at its source - the wire -
+/// so what the crowd actually costs can be measured by removing it.
+///
+/// `netOthers` never drops our own unit (the filter compares against `SelfGuid`) and never drops a
+/// create or a destroy: emptying the world is a different experiment, and one already run.
+#[derive(Resource, Clone, Copy)]
+pub(crate) struct NetDebug {
+    /// Apply chat lines. `/console netChat 0` drops them at the drain.
+    pub(crate) chat: bool,
+    /// Apply other units' movement, descriptor fields, casts, swings and emotes.
+    pub(crate) others: bool,
+}
+
+impl Default for NetDebug {
+    fn default() -> Self {
+        Self {
+            chat: true,
+            others: true,
+        }
+    }
+}
+
+/// `/console netChat`/`netOthers` → [`NetDebug`]. A CVar rather than a build flag because the
+/// whole point is an A/B inside one session, on the owner's own machine and his own crowd.
+pub(crate) fn on_net_debug_cvar(
+    ev: On<crate::cvars::CvarChanged>,
+    mut gate: ResMut<NetDebug>,
+) {
+    if ev.is("netChat") {
+        gate.chat = ev.flag();
+        info!("net debug: chat {}", if gate.chat { "ON" } else { "OFF" });
+    }
+    if ev.is("netOthers") {
+        gate.others = ev.flag();
+        info!(
+            "net debug: other units {}",
+            if gate.others { "ON" } else { "OFF" }
+        );
+    }
+}
+
 impl Plugin for NetPlugin {
     fn build(&self, app: &mut App) {
         // The release-on-enter for the ask-once caches this plugin owns.
         crate::query_cache::register::<crate::names::NameCache>(app);
         crate::query_cache::register::<crate::go_templates::GameObjectTemplates>(app);
         crate::query_cache::register::<crate::items::Items>(app);
+        app.init_resource::<NetDebug>()
+            .add_observer(on_net_debug_cvar);
         let handles = io::spawn_net(io::NetConfig::from_env(), self.connect);
         if !self.connect {
             app.insert_resource(NetOffline);

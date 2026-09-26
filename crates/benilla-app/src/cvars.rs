@@ -676,6 +676,21 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "0",
         "2008: benilla's own - the reference has no entity model to take a census of",
     ),
+    // **The two inbound debug gates** (benilla's own) - `crate::net::NetDebug`. `netChat 0` stops
+    // applying chat; `netOthers 0` stops applying other units' movement, descriptor fields, casts,
+    // swings and emotes, ours excepted. Both are measurement switches for an A/B inside one
+    // session: the draw-side player-distance slider changed nothing, because hiding an entity
+    // stops pixels while every per-entity sweep goes on paying. These refuse the packet instead.
+    ours(
+        "netChat",
+        "1",
+        "benilla's own - 1.12 has no way to refuse a packet the client already parsed",
+    ),
+    ours(
+        "netOthers",
+        "1",
+        "benilla's own - 1.12 has no way to refuse a packet the client already parsed",
+    ),
     same(crate::char_select::CVAR_LAST_CHARACTER, "0"),
 ];
 
