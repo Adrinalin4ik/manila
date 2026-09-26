@@ -2,9 +2,9 @@
 //! what**.
 //!
 //! The instrument the two "outfit texture" reports needed and nobody had. A dressed character's
-//! body is one 256² atlas of ten fixed tiles (the RF-0062 bbox table), and every visible defect in
-//! that class — a garment that stops early, a boot repainting a robe's hem, a bare band below the
-//! knee — is one tile receiving the wrong contribution. Reading that off a screenshot means
+//! body uses the ten tiles of the reference 256² layout (the RF-0062 bbox table), scaled to its
+//! skin resolution. Every visible defect in that class — a garment that stops early, a boot
+//! repainting a robe's hem, a bare band below the knee — is one tile receiving the wrong contribution. Reading that off a screenshot means
 //! guessing; reading it off the atlas means measuring.
 //!
 //! Three things it prints, all derived from the composite's own law
@@ -24,8 +24,9 @@
 
 use anyhow::{Context, Result};
 use benilla_formats::{
-    equip_blits, equip_tile, forearm_dressed, load_item_display_catalog, BlitSource, Chain,
-    CharSections, CharacterGeosets, EmblemLayer, EquipGeosets, GuildEmblem, ItemDisplay,
+    equip_blits, equip_tile, forearm_dressed, load_item_display_catalog, scale_body_tile,
+    BlitSource, Chain, CharSections, CharacterGeosets, EmblemLayer, EquipGeosets, GuildEmblem,
+    ItemDisplay,
 };
 
 /// The ten atlas tiles by group, for the per-tile report — the five head/left-column ones included,
@@ -112,12 +113,22 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
         }
     }
 
+    let base_path = sections
+        .skin_texture(look.race, look.sex, look.skin)
+        .context("no base skin row for this appearance")?;
+    let (atlas_width, atlas_height, _) =
+        blp_shape(chain, base_path).context("reading base skin dimensions")?;
+
     // (1) The plan — the composite's own order, with what each name resolved to. Worn garments and
     // the guild tabard's three layers come through the same list, because they land in the same
     // rows and the question ("what repainted this cell?") is the same one.
     println!("\nequipment blits (by ascending cell; later covers earlier within a tile):");
     for step in equip_blits(&equipment, look.emblem, false) {
-        let (_x, y, w, h) = equip_tile(step.layer).expect("layer < 8");
+        let (_x, y, w, h) = scale_body_tile(
+            equip_tile(step.layer).expect("layer < 8"),
+            atlas_width,
+            atlas_height,
+        );
         let candidates = step.candidates(look.sex);
         let basename = |p: &str| p.rsplit('\\').next().unwrap_or(p).to_string();
         let (who, name) = match step.source {
@@ -144,7 +155,7 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
                 let fits = if (bw, bh) == (w, h) {
                     ""
                 } else {
-                    "  SIZE≠TILE"
+                    "  RESAMPLED"
                 };
                 println!(
                     "  g{} y{:>3}..{:<3} cell {} {:6} {:34} → {} ({}x{}, alpha {alpha} {cover}){fits}",
@@ -211,6 +222,7 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
         dressed.mips.len()
     );
     for (name, x, y, tw, th) in TILES {
+        let (x, y, tw, th) = scale_body_tile((x, y, tw, th), dressed.width, dressed.height);
         let painted: Vec<u32> = (0..th)
             .map(|r| {
                 (0..tw)

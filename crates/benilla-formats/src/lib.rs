@@ -30,7 +30,7 @@ pub use install::{candidates, wow_data};
 mod characters;
 pub use characters::{
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
-    BlitSource, CharCreateCatalog, CharSections, CharacterGeosets, DialRanges, EmblemLayer,
+    scale_body_tile, BlitSource, CharCreateCatalog, CharSections, CharacterGeosets, DialRanges, EmblemLayer,
     EquipBlit, EquipGeosets, GuildEmblem, StartOutfitItem,
 };
 mod camera_shakes;

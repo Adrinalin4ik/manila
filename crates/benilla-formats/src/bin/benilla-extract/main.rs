@@ -105,7 +105,7 @@ enum Command {
         /// paints when the tabard slot holds a guild-emblem display (20621 is the shipped one).
         #[arg(long, value_delimiter = ',')]
         emblem: Option<Vec<i32>>,
-        /// Write the composited atlas here as a PNG (256²).
+        /// Write the composited atlas here as a PNG at the base skin's authored resolution.
         #[arg(long)]
         out: Option<PathBuf>,
     },
