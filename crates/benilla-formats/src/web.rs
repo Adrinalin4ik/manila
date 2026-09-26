@@ -44,6 +44,43 @@ mod wasm {
         format!("{origin}/data")
     }
 
+    /// **The mounted install's fingerprint** (`GET /data/__chain`), fetched once and appended to
+    /// every `/data/*` URL as `?v=`.
+    ///
+    /// It is a cache key, not a parameter: the host ignores the query, and the browser keys its
+    /// cache on the whole URL. Every file there is served `immutable, max-age=31536000` while the
+    /// path alone says nothing about WHICH install is mounted, so pointing the host at a different
+    /// `--data` otherwise leaves a year of the previous one answering under the same addresses.
+    ///
+    /// **One source of truth on purpose.** Three places build these URLs - the chain's sync reads,
+    /// bevy's async asset reader, and the page's boot prefetch (`web/boot.js`) - and they must
+    /// agree byte for byte or the prefetch warms an address the reads never ask for. That would
+    /// silently undo the one thing the prefetch exists for.
+    ///
+    /// Empty when the host has no such route: the URLs are then exactly what they were before the
+    /// pin, which is the only acceptable failure for something whose job is to make a cache
+    /// correct.
+    pub fn cache_pin() -> &'static str {
+        static PIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        PIN.get_or_init(|| {
+            fetch_sync(&format!("{}/__chain", data_base()))
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && s.len() <= 32 && s.chars().all(|c| c.is_ascii_hexdigit()))
+                .unwrap_or_default()
+        })
+    }
+
+    /// `{data_base()}/{encoded name}` with the cache pin appended - the one URL builder.
+    pub fn data_url(name: &str) -> String {
+        let pin = cache_pin();
+        if pin.is_empty() {
+            return format!("{}/{}", data_base(), super::encode_name(name));
+        }
+        format!("{}/{}?v={pin}", data_base(), super::encode_name(name))
+    }
+
     /// Append `name` to the page's boot-read trace, if the page armed one — the input to
     /// `web/boot-manifest.json` (see `web/boot.js`). A page that wants the trace defines
     /// `window.__wenilla_boottrace = []` before `init()` (the `?boottrace=1` switch does);
@@ -145,4 +182,4 @@ mod wasm {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use wasm::{data_base, exists_sync, fetch_sync, log_index_misses, trace};
+pub use wasm::{cache_pin, data_base, data_url, exists_sync, fetch_sync, log_index_misses, trace};

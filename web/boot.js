@@ -115,6 +115,32 @@ async function fetchWasm(url, onBytes) {
 /// full-body fetches. Failures are counted as done and otherwise ignored — a miss just means
 /// that file loads the old way. A missing/invalid manifest resolves immediately (line hides).
 /// Used twice: the boot set before `init()`, the world-entry set after `ready`.
+// The mounted chain's fingerprint, appended to every /data/ URL as `?v=`.
+//
+// **It has to match what the client asks for, byte for byte.** The client version-pins its own
+// reads (benilla-formats/src/chain.rs, `cache_key`), because /data/* is served immutable for a
+// year and the path alone does not say WHICH install is mounted. A prefetch that omitted the
+// pin would warm a different URL than the one the sync XHR then asks for, and this whole
+// function's purpose — the sync reads finding a warm HTTP cache instead of ~100 serial round
+// trips — would silently stop working. Fetched once; an older host without the route leaves it
+// empty, which is exactly the URL shape both sides used before the pin existed.
+let chainPin = null;
+async function dataPin() {
+  if (chainPin !== null) return chainPin;
+  try {
+    const r = await fetch('/data/__chain');
+    const t = r.ok ? (await r.text()).trim() : '';
+    chainPin = /^[a-f0-9]{1,32}$/.test(t) ? t : '';
+  } catch (_) {
+    chainPin = '';
+  }
+  return chainPin;
+}
+function dataUrl(name, pin) {
+  const base = '/data/' + encodeURIComponent(name);
+  return pin ? base + '?v=' + pin : base;
+}
+
 async function prefetchManifest(manifestUrl, onProgress) {
   const r = await fetch(manifestUrl);
   if (!r.ok) return onProgress(0, 0);
@@ -123,13 +149,14 @@ async function prefetchManifest(manifestUrl, onProgress) {
   if (!names.length) return onProgress(0, 0);
   let done = 0;
   onProgress(0, names.length);
+  const pin = await dataPin();
   const queue = names.slice();
   async function worker() {
     for (;;) {
       const name = queue.shift();
       if (name === undefined) return;
       try {
-        const resp = await fetch('/data/' + encodeURIComponent(name));
+        const resp = await fetch(dataUrl(name, pin));
         if (resp.ok) await resp.arrayBuffer(); // body fully read = body fully cached
       } catch (_) {
         /* offline blip, 404 drift — the sync XHR path will deal with it */

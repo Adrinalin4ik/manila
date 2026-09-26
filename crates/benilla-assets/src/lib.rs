@@ -114,11 +114,10 @@ impl AssetReader for MpqAssetReader {
         // archive name the web host resolves.
         let stripped = strip_sampler_marker(raw);
         let internal = stripped.as_deref().unwrap_or(raw);
-        let url = format!(
-            "{}/{}",
-            benilla_formats::web::data_base(),
-            benilla_formats::web::encode_name(internal)
-        );
+        // The SAME builder the chain's sync reads and the page's boot prefetch use: three URL
+        // shapes for one file would mean three cache entries, and a prefetch that warms none of
+        // the addresses actually read.
+        let url = benilla_formats::web::data_url(internal);
         let bytes = wasm_fetch(&url).await.map_err(|e| match e {
             WasmFetchError::NotFound => AssetReaderError::NotFound(path.to_path_buf()),
             WasmFetchError::Other(msg) => AssetReaderError::Io(Arc::new(std::io::Error::other(msg))),

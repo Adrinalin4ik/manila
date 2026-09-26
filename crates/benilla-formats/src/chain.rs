@@ -67,8 +67,6 @@ pub struct Chain {
 #[cfg(target_arch = "wasm32")]
 pub struct Chain {
     base: String,
-    /// The mounted install's fingerprint, fetched once - see [`Chain::cache_key`].
-    chain_id: std::sync::OnceLock<String>,
     /// `None` inside = the index could not be fetched/parsed; `contains` falls back to `HEAD`.
     index: std::sync::OnceLock<Option<std::collections::HashSet<String>>>,
     /// Names the INDEX does not list, and what the host said about them — one entry per distinct
@@ -364,35 +362,10 @@ impl Chain {
     pub fn open(_path: &Path) -> Result<Self> {
         Ok(Self {
             base: crate::web::data_base(),
-            chain_id: std::sync::OnceLock::new(),
             index: std::sync::OnceLock::new(),
             verified: std::sync::Mutex::new(std::collections::HashMap::new()),
             recent: std::sync::Mutex::new(ReadCache::default()),
         })
-    }
-
-    /// The mounted chain's fingerprint (`GET /data/__chain`), fetched once and remembered.
-    ///
-    /// It is the cache key, and it exists because every file below is served
-    /// `immutable, max-age=31536000` while the URL carries nothing about WHICH install is mounted.
-    /// Point the host at a different `--data` and the browser answers a year of the previous one
-    /// from disk, under the same addresses: a client running a mix of two game installs, with
-    /// nothing anywhere saying so. That happened here, moving a host from a vanilla chain to an HD
-    /// one, and it silently invalidated a round of HD testing.
-    ///
-    /// An empty string when the host has no such route (an older one, or a failure). Then the URLs
-    /// are what they always were and the behaviour is exactly today's - the fingerprint can make
-    /// the cache correct, and must never make the client refuse to run.
-    fn cache_key(&self) -> &str {
-        self.chain_id
-            .get_or_init(|| {
-                crate::web::fetch_sync(&format!("{}/__chain", self.base))
-                    .ok()
-                    .and_then(|b| String::from_utf8(b).ok())
-                    .filter(|s| !s.is_empty() && s.len() <= 32)
-                    .unwrap_or_default()
-            })
-            .as_str()
     }
 
     /// The chain file's Data URL scheme address — the client half of the Lane A ↔ Lane H contract.
@@ -401,11 +374,7 @@ impl Chain {
     /// its cache on the whole URL. So one install's files stay `immutable` for the year they
     /// deserve, and a different install is a different address rather than a stale hit.
     fn url_for(&self, name: &str) -> String {
-        let key = self.cache_key();
-        if key.is_empty() {
-            return format!("{}/{}", self.base, crate::web::encode_name(name));
-        }
-        format!("{}/{}?v={key}", self.base, crate::web::encode_name(name))
+        crate::web::data_url(name)
     }
 
     /// The index's key for a name: MPQ hashing's equivalence — case-insensitive, `/` ≡ `\`.
