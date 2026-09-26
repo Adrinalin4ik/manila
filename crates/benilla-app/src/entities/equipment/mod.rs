@@ -264,6 +264,30 @@ pub(in crate::entities) fn ensure_item_model(
                 // verified against its listing). Anything outside the playable range falls back to
                 // the Human stem rather than indexing garbage.
                 const RACE_PREFIX: [&str; 10] = ["Hu", "Or", "Dw", "Ni", "Sc", "Ta", "Gn", "Tr", "Go", "Be"];
+                // **The sentence above was false and the clamp is why.** `clamp(1, 10)` cannot
+                // produce an out-of-range index, so `unwrap_or("Hu")` is unreachable and race 11
+                // or 21 does not fall back to Human - it becomes index 9, **Blood Elf**. A Blood
+                // Elf helm on another race's head is the wrong size and sits above the skull,
+                // which is what the owner is looking at on Stormwind's guards while his own
+                // character is fine: a player's race is 1..=10, an NPC's comes from
+                // CreatureDisplayInfoExtra and this data family carries ids past 20.
+                //
+                // Not silently corrected, because neither stem is verified: a Turtle-derived
+                // chain may ship its own suffix for that race, and Human would be as wrong as
+                // Blood Elf. The warning names the id ONCE per (race, sex) so the right answer can
+                // be looked up instead of guessed - a silent fallback is how this went unnoticed.
+                if !(1..=10).contains(&race) {
+                    static SEEN: std::sync::Mutex<Vec<(u8, u8)>> = std::sync::Mutex::new(Vec::new());
+                    if let Ok(mut seen) = SEEN.lock() {
+                        if !seen.contains(&(race, sex)) {
+                            seen.push((race, sex));
+                            warn!(
+                                "helm model: race {race} sex {sex} is outside the 1..=10 table,                                  so this helm is wearing the Blood Elf stem `_Be{}`. If it looks                                  wrong on that body, the table is missing this race.",
+                                if sex == 1 { 'F' } else { 'M' }
+                            );
+                        }
+                    }
+                }
                 let prefix = RACE_PREFIX
                     .get((race.clamp(1, 10) - 1) as usize)
                     .copied()

@@ -194,18 +194,34 @@ const SAMPLER_MARKER: char = '@';
 /// the extension (`…/leaves01@cc.blp`), which must stay `.blp` to pick the loader.
 pub fn texture_url(internal: &str, wrap: (bool, bool)) -> String {
     let path = internal.replace('\\', "/").to_ascii_lowercase();
+    // **The extension is normalised, not trusted** - the same rule `m2_url` below already
+    // applies to model references, and for the same reason: what a file NAMES is not what the
+    // archive HOLDS. `RedridgeTreeCanopy01.m2` in the Capybara HD chain stores both its
+    // textures as `world\azeroth\redridge\passivedoodads\trees\redtreecanopy_base02`
+    // - lowercase, backslashes, and NO extension - while the archive holds that name with
+    // `.blp`, which answers 200 the moment the extension is on the address (verified against
+    // the running host's own index and a GET). Asking for the name verbatim 404s, the canopy
+    // draws untextured and the tree reads as missing. The 1.12.1 chain never showed this
+    // because its own models spell the extension out - which is why the owner sees trees on
+    // the legacy data and holes on the HD data from the same build.
+    //
+    // An M2 texture is always a BLP, so a stored `.tga`/`.png` is REPLACED rather than appended
+    // to. Doing it before the sampler marker also means the marker always has an extension to
+    // sit in front of, which the doc above says it must have to pick the loader.
+    let stem = path
+        .strip_suffix(".blp")
+        .or_else(|| path.strip_suffix(".tga"))
+        .or_else(|| path.strip_suffix(".png"))
+        .unwrap_or(&path);
     if wrap == (true, true) {
-        return format!("mpq://{path}");
+        return format!("mpq://{stem}.blp");
     }
     let tag = match wrap {
         (true, false) => "rc",
         (false, true) => "cr",
         _ => "cc",
     };
-    match path.rsplit_once('.') {
-        Some((stem, ext)) => format!("mpq://{stem}{SAMPLER_MARKER}{tag}.{ext}"),
-        None => format!("mpq://{path}{SAMPLER_MARKER}{tag}"),
-    }
+    format!("mpq://{stem}{SAMPLER_MARKER}{tag}.blp")
 }
 
 /// The `Map.dbc` [`MapCatalog`] (`mapId` to directory and `LoadingScreenID`) as a Bevy resource; a
@@ -654,4 +670,23 @@ mod tests {
             drawn.len()
         );
     }
+
+    /// The Capybara HD chain stores this model texture with no extension while the archive
+    /// holds it with `.blp` — verified against the running host's index and a GET that
+    /// answered 200. Asking verbatim 404s and the tree draws untextured, which is the
+    /// "missing trees inside WMOs" the owner reported on HD data and not on 1.12.1 data.
+    #[test]
+    fn a_texture_name_without_an_extension_still_asks_for_a_blp() {
+        let raw = r"world\azeroth\redridge\passivedoodads\trees\redtreecanopy_base02";
+        assert_eq!(
+            super::texture_url(raw, (true, true)),
+            "mpq://world/azeroth/redridge/passivedoodads/trees/redtreecanopy_base02.blp"
+        );
+        // A name that already spells it out is untouched, marker and all.
+        assert_eq!(
+            super::texture_url(r"Foo\Bar.blp", (false, false)),
+            "mpq://foo/bar@cc.blp"
+        );
+    }
+
 }
