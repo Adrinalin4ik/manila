@@ -135,7 +135,11 @@ pub use light::{Atmosphere, LightCatalog, Submersion, ZERO_KEY_COLOR, ZERO_KEY_S
 // MONKEY (fog): `LightFogBand.dbc`.
 pub use light::{FogBand, FogBandCatalog, FOG_BANDS_PER_PARAM};
 // MONKEY (skybox): the skybox row and the zone walk's entries.
-pub use light::{SkyboxDef, ZoneSkybox, SKYBOX_FOG_BLEND, SKYBOX_FULL_DAY, SKYBOX_KEEP_CELESTIAL};
+// MONKEY (leftovers): + the 0x8 / 0x10 flags.
+pub use light::{
+    SkyboxDef, ZoneSkybox, SKYBOX_FOG_BLEND, SKYBOX_FORCE_SUN_SHAFTS, SKYBOX_FULL_DAY,
+    SKYBOX_KEEP_CELESTIAL, SKYBOX_NO_SUN_FOG,
+};
 mod loading_screen;
 pub use loading_screen::{load_loading_screens, LoadingScreenCatalog};
 mod liquid;

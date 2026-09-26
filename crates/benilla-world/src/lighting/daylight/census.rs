@@ -306,10 +306,18 @@ fn lamp_terrain_occlusion_scan() {
             .find_map(|c| benilla_formats::terrain_height_at(c, [x, y, 1.0e4]))
     };
     let mut rows = Vec::new();
+    // MONKEY (leftovers): optional 6th field = light height above the doodad origin (default the
+    // lamppost's 3.5 yd; a campfire's flame sits near 1 yd).
+    let lift = p.get(5).and_then(|v| v.parse::<f32>().ok()).unwrap_or(3.5);
+    // 7th field = how far the ground must rise above the ray to count (default 5 cm; the receiver's
+    // normal offset is 0.15 yd, so a grazing 5 cm crest is below what a cube map can resolve).
+    let clear = p.get(6).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.05);
     for l in lamps {
-        let head = Vec3::new(l[0], l[1], l[2] + 3.5);
+        let head = Vec3::new(l[0], l[1], l[2] + lift);
         let (mut total, mut blocked) = (0u32, 0u32);
         let mut best = (0.0f32, 0.0f32);
+        // MONKEY (leftovers): blocked samples inside 15 yd, where a fire's pool is still visible.
+        let mut near = 0u32;
         for ring in 1..=10 {
             let d = ring as f32 * 2.5;
             for k in 0..36 {
@@ -321,22 +329,23 @@ fn lamp_terrain_occlusion_scan() {
                 let steps = (d / 0.5) as i32;
                 let hit = (1..steps).any(|s| {
                     let q = head.lerp(target, s as f32 / steps as f32);
-                    h(q.x, q.y).is_some_and(|g| g > q.z + 0.05)
+                    h(q.x, q.y).is_some_and(|g| g > q.z + clear)
                 });
                 if hit {
                     blocked += 1;
                     best = (a.to_degrees(), d);
+                    near += (d <= 15.0) as u32;
                 }
             }
         }
         if total > 0 {
-            rows.push((blocked as f32 / total as f32, l, best));
+            rows.push((blocked as f32 / total as f32, l, best, near, h(l[0], l[1]).unwrap_or(f32::NAN)));
         }
     }
-    rows.sort_by(|a, b| b.0.total_cmp(&a.0));
-    for (f, l, (a, d)) in rows.iter().take(12) {
+    rows.sort_by(|a, b| b.3.cmp(&a.3).then(b.0.total_cmp(&a.0)));
+    for (f, l, (a, d), near, g) in rows.iter().take(12) {
         println!(
-            "lamp ({:8.1},{:7.1},{:6.1})  terrain-blocked {:5.1}%  e.g. bearing {a:5.0} deg at {d:4.1} yd",
+            "lamp ({:8.1},{:7.1},{:6.1}) ground {g:6.2}  terrain-blocked {:5.1}% ({near} within 15 yd)  e.g. bearing {a:5.0} deg at {d:4.1} yd",
             l[0], l[1], l[2], f * 100.0
         );
     }

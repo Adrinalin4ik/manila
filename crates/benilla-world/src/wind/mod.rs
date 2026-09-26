@@ -91,6 +91,37 @@ impl FoliageWind {
     }
 }
 
+/// MONKEY (fix-wind): the player's foliage sway strength (`foliageWindStrength`), a plain gain on
+/// the sway amplitude: 0.25..3, 1 = the shipped tuning. Parting around units ignores it.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct FoliageWindStrength(pub f32);
+
+impl FoliageWindStrength {
+    pub const MIN: f32 = 0.25;
+    pub const MAX: f32 = 3.0;
+    /// The registered default.
+    pub const REGISTERED: f32 = 1.0;
+
+    /// A CVar value into the slider's range (non-finite reads as the default).
+    pub fn from_cvar(v: f32) -> Self {
+        Self(if v.is_finite() {
+            v.clamp(Self::MIN, Self::MAX)
+        } else {
+            Self::REGISTERED
+        })
+    }
+}
+
+impl Default for FoliageWindStrength {
+    fn default() -> Self {
+        Self(Self::REGISTERED)
+    }
+}
+
+/// MONKEY (fix-wind): a storm swings the foliage harder, up to +60 % at a full storm, on top of the
+/// faster travel the storm's wind speed already gives.
+pub const STORM_SWAY_GAIN: f32 = 0.6;
+
 impl Default for FoliageWind {
     fn default() -> Self {
         // The resource exists before the CVar host. Its ordinary default therefore has to equal
@@ -186,11 +217,24 @@ fn update_wind(
     time: Res<Time>,
     weather: Res<WeatherState>,
     quality: Res<FoliageWind>,
+    strength: Option<Res<FoliageWindStrength>>,
     mut wind: ResMut<WindField>,
     mut frame: ResMut<MonkeyFrame>,
     mut clock: Local<WindClock>,
     mut offset: Local<Option<f64>>,
+    mut logged_tier: Local<Option<u8>>,
 ) {
+    // MONKEY (fix-wind): name the live tier in the log (boot and every change), so a player run
+    // shows what the foliage receivers were given.
+    if *logged_tier != Some(quality.0) {
+        *logged_tier = Some(quality.0);
+        info!(
+            "MONKEY wind: foliageWind tier {} (grass {}, trees {})",
+            quality.0,
+            quality.0 >= 1,
+            quality.0 >= 2
+        );
+    }
     let offset = *offset.get_or_insert_with(capture_wind_offset);
     let seconds = time.elapsed_secs_f64() + offset;
     let storm = storm_blend(weather.sky_density);
@@ -209,7 +253,16 @@ fn update_wind(
     frame.wind_base_heading = wind.profile.heading_deg.to_radians();
     frame.wind_gust = wind.sample.gust;
     frame.wind_travel = clock.travel as f32;
-    frame.sway_strength = if quality.0 > 0 { 1.0 } else { 0.0 };
+    // MONKEY (fix-wind): `sway_strength` carries the player's gain and the storm swing; the tier
+    // flags stay 0/1 (the grass parting reads only the grass flag, so it keeps its size).
+    let gain = strength.map_or(FoliageWindStrength::REGISTERED, |s| {
+        FoliageWindStrength::from_cvar(s.0).0
+    });
+    frame.sway_strength = if quality.0 > 0 {
+        gain * (1.0 + STORM_SWAY_GAIN * storm)
+    } else {
+        0.0
+    };
     frame.grass_strength = if quality.0 >= 1 { 1.0 } else { 0.0 };
     frame.tree_strength = if quality.0 >= 2 { 1.0 } else { 0.0 };
 }
@@ -279,6 +332,7 @@ impl Plugin for WindPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<WindField>()
             .init_resource::<FoliageWind>()
+            .init_resource::<FoliageWindStrength>() // MONKEY (fix-wind)
             // MONKEY (integration): one ordered writer run of `MonkeyFrame`'s wind rows, before
             // the lighting resolve (the fog model writes the same resource there).
             .add_systems(
@@ -329,6 +383,52 @@ mod tests {
             assert!((0.0..=1.0).contains(&s.gust));
             assert!(s.speed >= 0.0);
         }
+    }
+
+    /// MONKEY (fix-wind): the player path — no capture pin, the registered tier — publishes live
+    /// grass and tree rows every frame, and the travel keeps moving; tier 0 clears them.
+    #[test]
+    fn default_tier_publishes_moving_grass_and_tree_rows() {
+        use bevy::ecs::system::RunSystemOnce;
+        use std::time::Duration;
+        assert_eq!(FoliageWind::REGISTERED, 2);
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(WeatherState::default());
+        world.insert_resource(FoliageWind(FoliageWind::REGISTERED));
+        world.insert_resource(WindField::default());
+        world.insert_resource(MonkeyFrame::default());
+        let mut travel = Vec::new();
+        for _ in 0..3 {
+            world
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_millis(500));
+            world.run_system_once(update_wind).unwrap();
+            let rows = world.resource::<MonkeyFrame>().pack(0.5, 0.0);
+            assert_eq!(rows[5][1..], [1.0, 1.0, 1.0], "sway, grass, tree strength");
+            travel.push(rows[5][0]);
+        }
+        assert!(travel[0] < travel[1] && travel[1] < travel[2], "{travel:?}");
+        // The player's strength scales the sway only; a storm swings it harder still.
+        world.insert_resource(FoliageWindStrength::from_cvar(2.0));
+        world.run_system_once(update_wind).unwrap();
+        assert_eq!(world.resource::<MonkeyFrame>().pack(0.5, 0.0)[5][1..], [2.0, 1.0, 1.0]);
+        world.resource_mut::<WeatherState>().sky_density = 1.0;
+        world.run_system_once(update_wind).unwrap();
+        let sway = world.resource::<MonkeyFrame>().sway_strength;
+        assert!((sway - 2.0 * (1.0 + STORM_SWAY_GAIN)).abs() < 1.0e-6, "{sway}");
+        world.insert_resource(FoliageWind(0));
+        world.run_system_once(update_wind).unwrap();
+        let rows = world.resource::<MonkeyFrame>().pack(0.5, 0.0);
+        assert_eq!(rows[5][1..], [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn strength_clamps_to_the_slider_range() {
+        assert_eq!(FoliageWindStrength::from_cvar(0.0).0, 0.25);
+        assert_eq!(FoliageWindStrength::from_cvar(9.0).0, 3.0);
+        assert_eq!(FoliageWindStrength::from_cvar(f32::NAN).0, 1.0);
+        assert_eq!(FoliageWindStrength::default().0, 1.0);
     }
 
     #[test]

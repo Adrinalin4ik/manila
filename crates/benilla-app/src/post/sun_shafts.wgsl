@@ -4,6 +4,14 @@
 
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
 
+struct Shafts {
+    sun: vec4<f32>,
+    color: vec4<f32>,
+    // MONKEY (leftovers): world-up of the view ray in NDC (xyz) and the sky threshold (w).
+    horizon: vec4<f32>,
+    ray: vec4<f32>,
+};
+
 #ifdef SHAFT_MASK
 
 #ifdef MULTISAMPLED
@@ -11,6 +19,7 @@
 #else
 @group(0) @binding(0) var depth: texture_depth_2d;
 #endif
+@group(0) @binding(1) var<uniform> shafts: Shafts;
 
 @fragment
 fn fs_mask(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
@@ -19,7 +28,12 @@ fn fs_mask(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // MONKEY (fix-post): one sample, not a max over all of them: the march is a blur.
     // Only the cleared / sky-pinned depth (exactly 0 on infinite reverse-Z) is sky; a ramp on
     // `near / z` would move with the live `nearclip` cvar and pour shafts through far terrain.
-    let sky = select(0.0, 1.0, textureLoad(depth, p, 0) <= 1.0e-7);
+    // MONKEY (leftovers): water writes no depth, so depth 0 under the horizon is the sea (or the
+    // far-clipped ground), never sky.
+    let ndc = (vec2<f32>(p) + 0.5) / vec2<f32>(dims) * vec2(2.0, -2.0) + vec2(-1.0, 1.0);
+    let up = dot(shafts.horizon.xyz, vec3(ndc, 1.0))
+        / length(vec3(ndc * shafts.ray.xy, 1.0));
+    let sky = select(0.0, 1.0, textureLoad(depth, p, 0) <= 1.0e-7 && up > shafts.horizon.w);
     return vec4(sky, 0.0, 0.0, 1.0);
 }
 
@@ -28,11 +42,6 @@ fn fs_mask(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 @group(0) @binding(0) var scene: texture_2d<f32>;
 @group(0) @binding(1) var scene_sampler: sampler;
 @group(0) @binding(2) var mask: texture_2d<f32>;
-
-struct Shafts {
-    sun: vec4<f32>,
-    color: vec4<f32>,
-};
 @group(0) @binding(3) var<uniform> shafts: Shafts;
 
 @fragment

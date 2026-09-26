@@ -63,6 +63,11 @@ pub(super) struct WarmLanes<'w> {
     /// The UI quad store (2262): the minimap interior composite's tile material is built here
     /// through its own production builder, for the tile-quad warm rig below.
     ui_quads: ResMut<'w, Assets<crate::ui_pass::UiQuadMaterial>>,
+    /// MONKEY (leftovers): the two sun-shadow proxy lanes, `ShadowCasterMaterial` (solid) and
+    /// `CutoutShadowCasterMaterial` (alpha-tested leaves).
+    /// `Option`: an app without the shadow plugins (tests, the glue) has no store.
+    shadow_solid: Option<ResMut<'w, Assets<crate::shadow_core::ShadowCasterMaterial>>>,
+    shadow_cutout: Option<ResMut<'w, Assets<crate::world_shadow::CutoutShadowCasterMaterial>>>,
 }
 
 /// One portrait/paperdoll booth camera + its layer ([`crate::portrait`], 0938): the booths run
@@ -699,6 +704,52 @@ pub(super) fn spawn_menagerie(
         WarmRig,
     ));
     count += 1;
+
+    // MONKEY (leftovers): the sun-shadow proxy lanes. Production proxies live on the private
+    // layer 31, which the sun rig's directional light casts from and the world camera also draws
+    // (forward discards every fragment). The solid proxy usually compiles at entry anyway (the
+    // player's own caster), but the cutout one first appears with the first leaf card in reach,
+    // which can be long after the cover lifts. Each rig sits on layers 0 and 31: the world camera
+    // mints the forward pipeline, the shadow views (when a sun rig is live) the depth one. Meshes
+    // are the production attribute sets (`empty_shadow_mesh` / `empty_cutout_mesh`), non-empty.
+    let proxy_layers = bevy::camera::visibility::RenderLayers::from_layers(&[
+        0,
+        crate::shadow_core::PLAYER_SHADOW_LAYER,
+    ]);
+    let tri = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]];
+    let mut solid_mesh = crate::shadow_core::empty_shadow_mesh();
+    solid_mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, tri.to_vec());
+    solid_mesh.insert_indices(Indices::U32(vec![0, 1, 2]));
+    let mut cutout_mesh = crate::shadow_core::empty_cutout_mesh();
+    cutout_mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, tri.to_vec());
+    cutout_mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32, 0.0], [1.0, 0.0], [1.0, 1.0]]);
+    cutout_mesh.insert_indices(Indices::U32(vec![0, 1, 2]));
+    if let Some(store) = lanes.shadow_solid.as_mut() {
+        let solid = store.add(crate::shadow_core::ShadowCasterMaterial {});
+        spawn_lane_rig(
+            commands,
+            cam,
+            Some(proxy_layers.clone()),
+            &meshes.add(solid_mesh),
+            None,
+            solid,
+            &mut count,
+        );
+    }
+    if let Some(store) = lanes.shadow_cutout.as_mut() {
+        // A real stand-in leaf, so the `#[texture]` binding never lands on the retry path.
+        let leaf = lanes.images.add(Image::default());
+        let cutout = store.add(crate::world_shadow::CutoutShadowCasterMaterial { leaf });
+        spawn_lane_rig(
+            commands,
+            cam,
+            Some(proxy_layers),
+            &meshes.add(cutout_mesh),
+            None,
+            cutout,
+            &mut count,
+        );
+    }
 
     count
 }

@@ -204,6 +204,8 @@ pub(super) fn update_fog_model(
     eye_liquid: crate::liquid::EyeLiquid,
     viewer: Res<crate::view::Viewer>,
     weather: Option<Res<crate::weather::WeatherState>>,
+    // MONKEY (leftovers): LightSkybox flag 0x10 (last frame's backdrop; the skybox resolves later).
+    sky: Option<Res<crate::skybox::CameraSkybox>>,
     mut frame: ResMut<MonkeyFrame>,
 ) {
     let derived = derived_band(&lighting);
@@ -233,6 +235,9 @@ pub(super) fn update_fog_model(
     };
     let mut next = *frame;
     fill_frame(&mut next, setting.0, &lighting, &band);
+    // MONKEY (leftovers): a `0x10` skybox fades the sun-fog lobe out by its weight.
+    let no_sun = sky.map_or(0.0, |s| s.flag_weight(benilla_formats::SKYBOX_NO_SUN_FOG));
+    next.sun_fog_strength *= 1.0 - no_sun.clamp(0.0, 1.0);
     if *frame != next {
         *frame = next;
     }

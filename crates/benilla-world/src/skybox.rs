@@ -92,6 +92,15 @@ impl CameraSkybox {
             })
     }
 
+    /// MONKEY (leftovers): the heaviest main layer's weight among those carrying `flag`, 0 if none.
+    pub fn flag_weight(&self, flag: u32) -> f32 {
+        self.0
+            .iter()
+            .filter(|l| !l.celestial && l.flags & flag != 0)
+            .map(|l| l.weight)
+            .fold(0.0, f32::max)
+    }
+
     fn layer(&self, path: &str) -> Option<&SkyboxLayer> {
         self.0.iter().find(|l| l.path == path)
     }
@@ -1083,5 +1092,24 @@ mod tests {
             ..layer("c", 1.0)
         });
         assert_eq!(sky.primary().map(|l| l.path.as_str()), Some("b"));
+    }
+
+    /// MONKEY (leftovers): a flag's weight is its heaviest main carrier; celestial layers and
+    /// layers without the flag do not count.
+    #[test]
+    fn flag_weight_is_the_heaviest_main_carrier() {
+        let with = |path, w, flags| SkyboxLayer {
+            flags,
+            ..layer(path, w)
+        };
+        let mut sky = CameraSkybox(vec![with("a", 0.3, 0x8), with("b", 0.7, 0x1), with("c", 0.5, 0x18)]);
+        sky.0.push(SkyboxLayer {
+            celestial: true,
+            ..with("d", 1.0, 0x18)
+        });
+        assert_eq!(sky.flag_weight(benilla_formats::SKYBOX_FORCE_SUN_SHAFTS), 0.5);
+        assert_eq!(sky.flag_weight(benilla_formats::SKYBOX_NO_SUN_FOG), 0.5);
+        assert_eq!(sky.flag_weight(benilla_formats::SKYBOX_FOG_BLEND), 0.0);
+        assert_eq!(CameraSkybox::default().flag_weight(0x8), 0.0);
     }
 }
