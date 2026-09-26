@@ -16,6 +16,9 @@ default = ["dev"]
 dev = []
 
 [dependencies]
+# `BodyPlan` crosses a worker boundary as JSON (`characters::sections`), so the shape needs
+# derives. serde is already in this graph via serde_json; this only makes the use direct.
+serde = { version = "1", features = ["derive"] }
 anyhow.workspace = true
 clap.workspace = true
 benilla-adt = { path = "../benilla-adt" }
@@ -42,6 +45,10 @@ web-sys = { version = "0.3.99", features = [
     "Location",
     "XmlHttpRequest",
     "XmlHttpRequestResponseType",
+    # `web.rs::log_index_misses` calls it. Declared here rather than relied on: this crate
+    # compiled only because another member of the app's graph happened to enable it, and a
+    # second consumer (`manila-skin`, the worker) does not pull that member.
+    "console",
 ] }
 serde_json = "1"
 # The boot-read trace (web.rs::trace) reads window.__wenilla_boottrace as a js_sys::Array.

@@ -1,0 +1,31 @@
+# The character-skin compositor, as its own wasm module for a Web Worker.
+#
+# Why a second module and not a thread: bevy disables `multi_threaded` on wasm32 in its own cfg
+# (`bevy_tasks/src/lib.rs:21`), and cpal's worklet host - the other thing that wants threads - is
+# gated on `target_feature = "atomics"`. A separate instance with its OWN linear memory needs
+# neither: the plan goes in as JSON, the atlas comes back as bytes, and `postMessage` transfers
+# the buffer rather than copying it.
+[package]
+name = "manila-skin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+benilla-formats = { path = "../benilla-formats", default-features = false }
+serde_json = "1"
+wasm-bindgen = "=0.2.122"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+
+[dependencies.web-sys]
+version = "0.3"
+features = ["Request", "RequestInit", "Response", "WorkerGlobalScope"]
+
+[lints]
+workspace = true

@@ -826,6 +826,7 @@ dependencies = [
  "glam 0.31.1",
  "image",
  "js-sys",
+ "serde",
  "serde_json",
  "wasm-bindgen",
  "web-sys",
@@ -4987,6 +4988,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "manila-skin"
+version = "0.1.0"
+dependencies = [
+ "benilla-formats",
+ "js-sys",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

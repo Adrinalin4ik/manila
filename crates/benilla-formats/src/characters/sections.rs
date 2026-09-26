@@ -20,7 +20,9 @@ const SECTION_UNDERWEAR: u8 = 4;
 const HAIR_SUBSTITUTE_VARIATION: u8 = 1;
 
 /// An atlas rect `(x, y, w, h)` in the reference 256² layout.
-type Tile = (u32, u32, u32, u32);
+/// `(x, y, w, h)` in the 256-wide authored space - `scale_body_tile` maps it onto the real atlas.
+/// Public because a [`BodyStep`] carries one across a worker boundary.
+pub type Tile = (u32, u32, u32, u32);
 
 /// The head strip of the 256² partition `0x475c50` writes: g8 the upper band, g9 the lower.
 const TILE_G8: Tile = (0, 160, 128, 32);
@@ -249,9 +251,35 @@ impl DecodeCache {
     }
 }
 
+/// **Execute a [`BodyPlan`] against any source of decoded textures.**
+///
+/// The one implementation of the blit stack, written against a reader rather than a chain so the
+/// same code runs on the main thread (where the reader is this catalog's decode cache) and in a
+/// worker (where it is an HTTP fetch and there is no catalog at all). Two copies of this would be
+/// two copies of a texel-exact layering order, which is precisely the kind of thing that drifts
+/// silently and shows up as a character with the wrong face.
+///
+/// `None` only when the BASE skin cannot be read: an overlay that is missing is normal - most
+/// looks do not use most steps - and is skipped, which is what a step's candidate LIST already
+/// says.
+pub fn render_plan_with(
+    plan: &BodyPlan,
+    read: &mut dyn FnMut(&str) -> Option<std::sync::Arc<BlpMipChain>>,
+) -> Option<BlpMipChain> {
+    // The atlas is mutated by every blit below, so this one is a COPY of the cached decode.
+    // Copying ~700 KB costs a fraction of a millisecond against the tens the decode costs.
+    let mut atlas = read(&plan.base)?.as_ref().clone();
+    for step in &plan.steps {
+        if let Some(overlay) = step.candidates.iter().find_map(|path| read(path)) {
+            blit_over(&mut atlas, &overlay, step.tile);
+        }
+    }
+    Some(atlas)
+}
+
 /// One overlay of a [`BodyPlan`]: the paths to try, in order, and where the first that decodes
 /// lands. A LIST because only a read can say which candidate an item actually ships.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BodyStep {
     pub candidates: Vec<String>,
     pub tile: Tile,
@@ -259,7 +287,7 @@ pub struct BodyStep {
 
 /// A body atlas as pure DATA - no catalog, no chain, nothing that cannot cross a `postMessage`.
 /// That is the point: the rendering half has to be able to run where this catalog does not exist.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BodyPlan {
     pub base: String,
     pub steps: Vec<BodyStep>,
@@ -421,26 +449,13 @@ impl CharSections {
         Some(BodyPlan { base, steps })
     }
 
-    /// Execute a [`BodyPlan`]: decode the base skin, blit every step's first decodable candidate
-    /// onto it. This is the half that costs - see [`Self::plan_body`] for the numbers.
+    /// Execute a [`BodyPlan`] against this catalog's decode cache and the patch chain - the
+    /// main-thread form. The work itself is [`render_plan_with`]; this only supplies the reader.
     pub fn render_plan(&self, chain: &mut Chain, plan: &BodyPlan) -> Result<Option<BlpMipChain>> {
-        // The atlas is mutated by every blit below, so this one is a COPY of the cached decode.
-        // Copying ~700 KB costs a fraction of a millisecond against the tens the decode costs.
-        let mut atlas = self
-            .decoded_texture(chain, &plan.base)
-            .with_context(|| format!("reading base skin '{}'", plan.base))?
-            .as_ref()
-            .clone();
-        for step in &plan.steps {
-            if let Some(overlay) = step
-                .candidates
-                .iter()
-                .find_map(|path| self.decoded_texture(chain, path))
-            {
-                blit_over(&mut atlas, &overlay, step.tile);
-            }
-        }
-        Ok(Some(atlas))
+        let mut read = |path: &str| self.decoded_texture(chain, path);
+        render_plan_with(plan, &mut read)
+            .with_context(|| format!("reading base skin '{}'", plan.base))
+            .map(Some)
     }
 
     /// Plan, then render. The one-call form every caller on the main thread still uses.
