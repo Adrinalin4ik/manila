@@ -1808,6 +1808,16 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         minute: 0,
         ui: None,
     },
+    // MONKEY (leftovers): the Westfall sea with the visible sun ~5° up on its fixed 45° bearing
+    // (minute 1200), framed so the sun sits above the open water: the sun-shaft sky mask test.
+    Scenario {
+        name: "leftovers-sea-sunset",
+        map: Some(MAP_AZEROTH),
+        eye: [-10500.0, 2112.0, 6.0],
+        look: [-10420.0, 2192.0, 8.0],
+        minute: 1200,
+        ui: None,
+    },
 ];
 
 /// MONKEY (p0 baseline): the Elwynn programme view, above the canopy east of Goldshire looking

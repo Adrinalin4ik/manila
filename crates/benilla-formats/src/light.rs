@@ -19,7 +19,11 @@ mod tables;
 
 pub use atmosphere::Atmosphere;
 pub use fog_band::{FogBand, FogBandCatalog, FOG_BANDS_PER_PARAM};
-pub use skybox::{SkyboxDef, ZoneSkybox, SKYBOX_FOG_BLEND, SKYBOX_FULL_DAY, SKYBOX_KEEP_CELESTIAL};
+// MONKEY (leftovers): + the 0x8 / 0x10 flags.
+pub use skybox::{
+    SkyboxDef, ZoneSkybox, SKYBOX_FOG_BLEND, SKYBOX_FORCE_SUN_SHAFTS, SKYBOX_FULL_DAY,
+    SKYBOX_KEEP_CELESTIAL, SKYBOX_NO_SUN_FOG,
+};
 use atmosphere::{
     FB_CLOUD_DENSITY, FB_FOG_END, FB_FOG_START_MULT, IB_AMBIENT, IB_CLOUD_GBASE, IB_CLOUD_SLOPE,
     IB_CLOUD_SUN, IB_DIFFUSE, IB_FOG_COLOR, IB_OCEAN_DEEP, IB_OCEAN_SHALLOW, IB_RIVER_DEEP,
