@@ -26,12 +26,34 @@ const REGION_BASES: [u16; 16] = [
 #[derive(Debug)]
 pub struct VisibleGeosets {
     selected: Vec<u16>,
+    /// The `> 1700` rule as it stood when this body was dressed. Snapshotted rather than read
+    /// per submesh so one body cannot be half-dressed under two policies — and so the test costs
+    /// a bool, not an atomic load, on a path that runs once per submesh per dress.
+    unmanaged_visible: bool,
+}
+
+/// **The `> 1700` rule, switchable — `/console unmanagedGeosets 0`.**
+///
+/// The rule above is right for the data upstream runs: 1.12.1 authors nothing above 1700, so
+/// letting those IDs through changes nothing there and rescues Reforged's eye-glow cards at 1702.
+/// On an HD or custom data set that range is exactly where the extra geometry lives, and ALL of it
+/// is then forced visible whatever the helm's hide-mask says.
+///
+/// This exists to answer that question with a look instead of a rebuild, because the owner's data
+/// is the only place the two policies differ and only he can see the difference. Default `true`,
+/// which is upstream's behaviour unchanged.
+static UNMANAGED_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Set whether geosets above 1700 bypass the selection. Takes effect on the next dress, so a
+/// standing NPC keeps the policy it was built under until it respawns.
+pub fn set_unmanaged_geosets_visible(on: bool) {
+    UNMANAGED_VISIBLE.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 impl VisibleGeosets {
     /// Whether a model submesh survives the character compositor's geoset selection.
     pub fn contains(&self, geoset_id: &u16) -> bool {
-        *geoset_id > 1700 || self.selected.contains(geoset_id)
+        (self.unmanaged_visible && *geoset_id > 1700) || self.selected.contains(geoset_id)
     }
 }
 
@@ -183,7 +205,10 @@ impl CharacterGeosets {
         // The client sets a flag per submesh (`0x7110d0`), so a repeated enable is a no-op there.
         set.sort_unstable();
         set.dedup();
-        VisibleGeosets { selected: set }
+        VisibleGeosets {
+            selected: set,
+            unmanaged_visible: UNMANAGED_VISIBLE.load(std::sync::atomic::Ordering::Relaxed),
+        }
     }
 
     /// Load the customization DBCs from the patch chain. A repeated `(race, sex, variation)` key

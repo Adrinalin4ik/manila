@@ -26,7 +26,9 @@ mod geosets;
 mod sections;
 
 pub use customization::{CharCreateCatalog, DialRanges, StartOutfitItem};
-pub use geosets::{CharacterGeosets, EquipGeosets, VisibleGeosets};
+pub use geosets::{
+    set_unmanaged_geosets_visible, CharacterGeosets, EquipGeosets, VisibleGeosets,
+};
 #[cfg(target_arch = "wasm32")]
 pub use sections::plan_to_json;
 pub use sections::{

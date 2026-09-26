@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -92,6 +92,15 @@ pub(crate) fn on_cvar(
     // `/console archCensus 1` - one archetype dump to the console. Run through
     // `run_system_cached` rather than registered in a schedule, so the instrument costs a player
     // who never asks for it exactly nothing (`crate::perf::arch`).
+    // **`/console unmanagedGeosets 0`** - the A/B for upstream PR 438's `> 1700` rule (see
+    // `benilla_formats::characters::geosets`). It only matters on data that authors geosets up
+    // there, which is the owner's and not upstream's, so the question is his to look at. A body
+    // keeps the policy it was dressed under, so walk out of range and back after toggling.
+    if ev.is("unmanagedGeosets") {
+        let on = ev.flag();
+        benilla_formats::set_unmanaged_geosets_visible(on);
+        info!("geosets above 1700 bypass the selection: {on}");
+    }
     if ev.is("skinCacheMb") {
         let mb = benilla_formats::set_skin_cache_mb(ev.num() as usize);
         info!("skin decode cache: {mb} MiB");
@@ -271,9 +280,35 @@ impl Default for RClock {
     }
 }
 
-/// Start the render app's chain; accumulates nothing.
+/// **The span the seven tiles could not name** - `r_between`.
+///
+/// Journal 45 measured `rapp` at 44.82 s of which the seven named tiles were 9.82: **78%
+/// unnamed**, and on the 65 spiking seconds 29.70 s of 43.9. The `RPHASES` header already said
+/// what the residual is - ExtractSchedule plus present - but not in what proportion, and the two
+/// have opposite cures: extract is ours to make cheaper, present is the browser and is not.
+///
+/// The same capture had that residual tracking bytes read (`rd_kb`, r = +0.69 over all rows AND
+/// +0.69 inside the spikes alone) while tracking entity count NEGATIVELY (r = -0.10), which
+/// argues against extract, whose cost scales with entities. Argues, not settles: `entities`
+/// barely moved there, so the negative has little to stand on, and a correlation that agrees
+/// with the hypothesis is the kind this project has been burned by twice. Hence a number.
+///
+/// Held apart from `RAPP_US` on purpose: that array is written into the MIDDLE of the row, so
+/// growing it would shift every column after `rapp` and break the header's append-only rule.
+static RBETWEEN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Start the render app's chain, closing [`RBETWEEN_US`] - everything since the previous frame's
+/// `Cleanup`, which is the main schedules, ExtractSchedule, present and the browser's idle
+/// together. Subtracting the five `s_*` tiles leaves exactly the pair in question, and that is
+/// deliberately the SAME quantity `rapp` minus the seven named tiles gives, reached from the
+/// other end. Two routes to one number: if they disagree the instrument is wrong, not the world.
+///
+/// It used to discard this span, which is how 78% of `rapp` went unnamed.
 fn rmark_open(mut clock: ResMut<RClock>) {
-    clock.0 = Instant::now();
+    use std::sync::atomic::Ordering::Relaxed;
+    let now = Instant::now();
+    RBETWEEN_US.fetch_add((now - clock.0).as_micros() as u64, Relaxed);
+    clock.0 = now;
 }
 
 /// Close render-app tile `N`.
@@ -1173,6 +1208,13 @@ fn journal_fps(
     {
         let (hit, miss, kb, big) = benilla_formats::take_read_counts();
         let _ = write!(line, ",{hit},{miss},{kb},{big}");
+    }
+    // The last column, and it must STAY last: `RBETWEEN_US` is held apart from `RAPP_US` exactly
+    // so that naming this span appends instead of shifting everything after `rapp`. Per frame,
+    // like every other tile here.
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        let _ = write!(line, ",{}", RBETWEEN_US.swap(0, Relaxed) / frames.max(1));
     }
     // **Every `#` line goes AFTER the last column, not before it.** Both blocks below used to sit
     // above the trailing columns, which was invisible while the systems one stayed empty and split

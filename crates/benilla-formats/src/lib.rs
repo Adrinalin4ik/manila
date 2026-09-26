@@ -27,7 +27,7 @@ mod characters;
 #[cfg(target_arch = "wasm32")]
 pub use characters::plan_to_json;
 pub use characters::{
-    decode_atlas, encode_atlas, render_plan_with, set_skin_cache_mb, take_decode_counts, take_oversize_count, BodyPlan,
+    decode_atlas, encode_atlas, render_plan_with, set_unmanaged_geosets_visible, set_skin_cache_mb, take_decode_counts, take_oversize_count, BodyPlan,
     BodyStep,
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
     scale_body_tile, BlitSource, CharCreateCatalog, CharSections, CharacterGeosets, DialRanges,
