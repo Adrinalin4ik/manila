@@ -940,7 +940,8 @@ mod tests {
             let swim_delta = 0.75 * (ours_before - reference);
             assert!(
                 swim_delta.abs() > 0.05,
-                "{label}: the two readings must actually differ, else this test asserts nothing                  (reference {reference}, form-derived {ours_before})"
+                "{label}: the two readings must actually differ, else this test asserts nothing \
+                 (reference {reference}, form-derived {ours_before})"
             );
             worst = worst.max(swim_delta.abs());
         }
@@ -959,7 +960,7 @@ mod tests {
         // The tauren bear value seen live: h = 2.083 × 1.35.
         assert!(
             (h(2289, 1.35) - 2.083 * 1.35).abs() < 5e-3,
-            "tauren bear form-derived h should reproduce 0695's observed 2.812"
+            "tauren bear form-derived h should reproduce the 2.812 seen live"
         );
     }
 

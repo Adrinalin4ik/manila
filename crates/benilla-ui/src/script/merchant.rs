@@ -76,14 +76,22 @@ pub struct MerchantState {
     pub buyback: Vec<MerchantItem>,
     /// Whether this vendor repairs (the `UNIT_NPC_FLAGS` repair bit).
     pub can_repair: bool,
-    /// The repair-all cost in copper; 0 disables the button (`MerchantFrame_OnShow`).
-    pub repair_all_cost: u32,
 }
 
 impl super::UiScript {
-    /// Push (or clear, with `None`) the open vendor.
+    /// Push (or clear, with `None`) the open vendor. Clearing it leaves repair mode, as the
+    /// merchant-close handler restores the Point base mode (`0x4fadf0`).
     pub fn set_merchant(&mut self, state: Option<MerchantState>) {
+        let closing = state.is_none();
         self.model_mut().merchant = state;
+        if closing {
+            self.model_mut().repair_mode = false;
+        }
+    }
+
+    /// Push `GetRepairAllCost`'s total in copper, swept by the app ahead of the events that read it.
+    pub fn set_repair_all_cost(&mut self, copper: u32) {
+        self.model_mut().repair_all_cost = copper;
     }
 
     /// Drain the `(row, quantity)` buys `BuyMerchantItem` queued, the row 1-based.
@@ -119,6 +127,12 @@ impl super::UiScript {
     /// The repair-mode latch: while set, a bag or equipment click repairs the item.
     pub fn repair_mode(&self) -> bool {
         self.model_ref().repair_mode
+    }
+
+    /// Leave repair mode, as `HideRepairCursor` does, for the world's right mouse-down, which
+    /// resets the Repair base mode to Point (`0x492c68`).
+    pub fn end_repair_mode(&mut self) {
+        self.model_mut().repair_mode = false;
     }
 }
 
@@ -441,13 +455,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetRepairAllCost() → cost, canRepair: whether there is damage to pay for, which enables the
-    // repair-all button (`MerchantFrame.lua:38`).
+    // repair-all button (`MerchantFrame.lua:38`); 0 away from a vendor that repairs (`0x4fbd60`).
     g.set(
         "GetRepairAllCost",
         lua.create_function(|lua, ()| {
             let cost = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model.merchant.as_ref().map_or(0, |m| m.repair_all_cost)
+                if model.merchant.as_ref().is_some_and(|m| m.can_repair) {
+                    model.repair_all_cost
+                } else {
+                    0
+                }
             };
             Ok(MultiValue::from_vec(vec![
                 Value::Integer(i64::from(cost)),
@@ -468,9 +486,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "ShowRepairCursor",
         lua.create_function(|lua, ()| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .repair_mode = true;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            // `0x4fbcc0`: a targeting spell or a vendor without repair service leaves the
+            // cursor untouched. `ClearCursor(1,1)` returns any held item before mode 0x11 arms.
+            if model.spell_targeting || !model.merchant.as_ref().is_some_and(|m| m.can_repair) {
+                return Ok(());
+            }
+            crate::script::cursor::clear_cursor(&mut model);
+            model.repair_mode = true;
+            model.ui_cursor = None;
+            model.ui_cursor_dirty = true;
             Ok(())
         })?,
     )?;
@@ -542,7 +567,7 @@ fn arm_vendor_cursor(lua: &Lua, price_of: impl FnOnce(&MerchantState) -> Option<
 #[cfg(test)]
 mod tests {
     use super::{ItemStatsHead, MerchantItem, MerchantState};
-    use crate::script::UiScript;
+    use crate::script::{ContainerSlot, ContainerState, UiScript};
 
     fn stock() -> MerchantState {
         MerchantState {
@@ -789,6 +814,22 @@ mod tests {
         assert!(s.take_merchant_buybacks().is_empty(), "drained");
     }
 
+    /// Away from a vendor that repairs, the total reads 0, as `0x4fbd60` pushes there.
+    #[test]
+    fn the_repair_all_total_reads_zero_away_from_a_repairer() {
+        let mut s = UiScript::new().unwrap();
+        s.set_repair_all_cost(1234);
+        assert!(
+            s.eval::<bool>("return GetRepairAllCost() == 0").unwrap(),
+            "no vendor"
+        );
+        s.set_merchant(Some(stock()));
+        assert!(
+            s.eval::<bool>("return GetRepairAllCost() == 0").unwrap(),
+            "a vendor that does not repair"
+        );
+    }
+
     #[test]
     fn repair_reads_intents_and_mode_latch() {
         let mut s = UiScript::new().unwrap();
@@ -796,8 +837,8 @@ mod tests {
 
         let mut state = stock();
         state.can_repair = true;
-        state.repair_all_cost = 1234;
         s.set_merchant(Some(state));
+        s.set_repair_all_cost(1234);
         assert!(s.eval::<bool>("return CanMerchantRepair() == 1").unwrap());
         assert!(s
             .eval::<bool>("local c, can = GetRepairAllCost()\nreturn c == 1234 and can == true",)
@@ -806,13 +847,99 @@ mod tests {
         s.run("RepairAllItems()").unwrap();
         assert!(s.take_repair_all());
         assert!(!s.take_repair_all(), "drained");
+        assert!(
+            s.take_sounds().is_empty(),
+            "the stock button's OnClick plays ITEM_REPAIR"
+        );
 
         assert!(s.eval::<bool>("return InRepairMode() == nil").unwrap());
         s.run("ShowRepairCursor()").unwrap();
         assert!(s.repair_mode());
         assert!(s.eval::<bool>("return InRepairMode() == 1").unwrap());
+        assert_eq!(s.ui_cursor(), None, "repair clears a stale hover override");
         s.run("HideRepairCursor()").unwrap();
         assert!(!s.repair_mode());
+
+        s.run("ShowRepairCursor()").unwrap();
+        s.set_merchant(None);
+        assert!(
+            !s.repair_mode(),
+            "closing the merchant hides the repair cursor"
+        );
+    }
+
+    #[test]
+    fn show_repair_cursor_checks_targeting_and_vendor_then_returns_held_item() {
+        let mut s = UiScript::new().unwrap();
+        let mut bag = ContainerState {
+            num_slots: 1,
+            ..Default::default()
+        };
+        bag.slots.insert(
+            1,
+            ContainerSlot {
+                item_id: 117,
+                count: 1,
+                ..Default::default()
+            },
+        );
+        s.set_container(0, Some(bag));
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        assert!(s.cursor_item().is_some());
+
+        s.run("ShowRepairCursor()").unwrap();
+        assert!(!s.repair_mode(), "no vendor cannot arm repair");
+        assert!(s.cursor_item().is_some(), "early return keeps held item");
+
+        s.set_merchant(Some(stock()));
+        s.run("ShowRepairCursor()").unwrap();
+        assert!(!s.repair_mode(), "non-repair vendor cannot arm repair");
+        assert!(s.cursor_item().is_some());
+
+        let mut vendor = stock();
+        vendor.can_repair = true;
+        s.set_merchant(Some(vendor));
+        s.set_spell_targeting(true);
+        s.run("ShowRepairCursor()").unwrap();
+        assert!(!s.repair_mode(), "targeting spell wins over repair");
+        assert!(s.cursor_item().is_some());
+
+        s.set_spell_targeting(false);
+        s.run("ShowRepairCursor()").unwrap();
+        assert!(s.repair_mode());
+        assert!(
+            s.cursor_item().is_none(),
+            "ClearCursor returned the held item"
+        );
+        assert!(s
+            .eval::<bool>("local _, _, locked = GetContainerItemInfo(0, 1) return not locked")
+            .unwrap());
+        assert!(s.take_container_moves().is_empty());
+    }
+
+    /// The targeting arm writes the Cast base mode over Repair (`0x6e50b0`) and its end restores
+    /// Point (`0x6e49f5`, `0x6e554c`), so arming ends repair mode for good. The idle feed pushes
+    /// false every frame, which must leave repair mode standing.
+    #[test]
+    fn arming_spell_targeting_ends_repair_mode_and_disarming_does_not_restore_it() {
+        let mut s = UiScript::new().unwrap();
+        let mut vendor = stock();
+        vendor.can_repair = true;
+        s.set_merchant(Some(vendor));
+        s.run("ShowRepairCursor()").unwrap();
+        s.set_spell_targeting(false);
+        assert!(s.repair_mode(), "the idle feed keeps repair mode");
+
+        s.set_spell_targeting(true);
+        assert!(!s.repair_mode(), "the targeting arm ends repair mode");
+        assert!(s.eval::<bool>("return InRepairMode() == nil").unwrap());
+
+        s.set_spell_targeting(false);
+        assert!(
+            !s.repair_mode(),
+            "ending the targeting restores Point, not Repair"
+        );
+        assert!(s.eval::<bool>("return InRepairMode() == nil").unwrap());
     }
 
     #[test]
@@ -1018,8 +1145,9 @@ mod tests {
         (n("updates"), n("shows"), n("hides"))
     }
 
-    /// The grab goes through the cursor setter (`0x4950f0`): `CURSOR_UPDATE` at `0x495159`, and
-    /// no `ACTIONBAR_SHOWGRID` since mode 5 is not mode 7.
+    /// The grab goes through the cursor setter (`0x4950f0`): its `ClearCursor(1,1)` (`0x495112`)
+    /// signals `CURSOR_UPDATE` from the clear's tail, the set signals it again (`0x495159`), and no
+    /// `ACTIONBAR_SHOWGRID` since mode 5 is not mode 7.
     #[test]
     fn a_vendor_grab_fires_cursor_update_but_not_the_bar_grid() {
         let mut s = UiScript::new().unwrap();
@@ -1028,12 +1156,12 @@ mod tests {
         s.run("PickupMerchantItem(1)").unwrap();
         assert_eq!(
             cursor_event_counts(&mut s),
-            (1, 0, 0),
+            (2, 0, 0),
             "(CURSOR_UPDATE, ACTIONBAR_SHOWGRID, ACTIONBAR_HIDEGRID) after a vendor grab"
         );
         // The toggle-off is a plain clear: one more CURSOR_UPDATE, no HIDEGRID.
         s.run("PickupMerchantItem(1)").unwrap();
-        assert_eq!(cursor_event_counts(&mut s), (2, 0, 0));
+        assert_eq!(cursor_event_counts(&mut s), (3, 0, 0));
     }
 
     #[test]
