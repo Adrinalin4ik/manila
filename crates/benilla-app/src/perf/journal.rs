@@ -96,6 +96,14 @@ pub(crate) fn on_cvar(
         let mb = benilla_formats::set_skin_cache_mb(ev.num() as usize);
         info!("skin decode cache: {mb} MiB");
     }
+    if ev.is("dumpSchedule") && ev.flag() {
+        commands.run_system_cached(crate::perf::sched_dump::dump_schedule);
+        commands.queue(|world: &mut World| {
+            world
+                .resource_mut::<crate::cvars::Cvars>()
+                .mirror("dumpSchedule", "0");
+        });
+    }
     if ev.is("archCensus") && ev.flag() {
         commands.run_system_cached(crate::perf::arch::arch_census);
         // Disarm, because every row here persists. Left at "1" the value would survive the

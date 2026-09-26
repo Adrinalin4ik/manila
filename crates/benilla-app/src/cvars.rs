@@ -671,6 +671,16 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // which the FPS journal counts but cannot break down, and it is the only way to ask that in
     // a browser - `perf::census`'s copy is env-armed, `eprintln!`-reported and `dev`-gated, and
     // fails all three ways on wasm (see [`crate::perf::arch`]).
+    // **What is in each phase tile** - `crate::perf::sched_dump`. The journal's `u_stream` read
+    // 12.14 ms of a 50.26 ms frame with the streamer idle and the network off, because the `u_*`
+    // tiles measure whatever the executor ran between two marks, not the stage they are named
+    // after. This lists Update and PostUpdate in run order with the marks in place, so the
+    // membership of the frame's largest line can be read rather than guessed.
+    ours(
+        "dumpSchedule",
+        "0",
+        "benilla's own - 1.12 has no scheduler to list",
+    ),
     ours(
         "archCensus",
         "0",

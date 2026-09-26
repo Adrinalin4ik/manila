@@ -23,6 +23,8 @@
 /// The shipping archetype census (CVar-armed, `info!`-reported) - see its module doc for why
 /// `census`'s copy cannot answer a browser question.
 pub(crate) mod arch;
+/// The one-shot schedule listing (`/console dumpSchedule 1`) - what is in each phase tile.
+pub(crate) mod sched_dump;
 #[cfg(feature = "dev")]
 mod blend_check;
 #[cfg(feature = "dev")]
