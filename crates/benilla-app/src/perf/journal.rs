@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -92,6 +92,10 @@ pub(crate) fn on_cvar(
     // `/console archCensus 1` - one archetype dump to the console. Run through
     // `run_system_cached` rather than registered in a schedule, so the instrument costs a player
     // who never asks for it exactly nothing (`crate::perf::arch`).
+    if ev.is("skinCacheMb") {
+        let mb = benilla_formats::set_skin_cache_mb(ev.num() as usize);
+        info!("skin decode cache: {mb} MiB");
+    }
     if ev.is("archCensus") && ev.flag() {
         commands.run_system_cached(crate::perf::arch::arch_census);
         // Disarm, because every row here persists. Left at "1" the value would survive the
@@ -1149,6 +1153,10 @@ fn journal_fps(
             NET_DROP_OTHER.swap(0, Relaxed)
         );
     }
+    // Decoded textures refused by the cache for being over a quarter of its budget - never
+    // admitted, so re-decoded on every composite however often they are asked for. A non-zero
+    // `tex_big` beside a low `tex_hit` says the ceiling is the defect, not the size.
+    let _ = write!(line, ",{}", benilla_formats::take_oversize_count());
     // **Every `#` line goes AFTER the last column, not before it.** Both blocks below used to sit
     // above the trailing columns, which was invisible while the systems one stayed empty and split
     // every row of journal 37 in half the moment the mats one started printing: the row ended at

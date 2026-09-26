@@ -129,6 +129,27 @@ static TEX_HITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::ne
 static TEX_DECODES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// This second's (hits, decodes), and reset. Read by the FPS journal.
+/// The decode cache's byte ceiling, moved by `/console skinCacheMb <n>`. Default 48 MiB, which is
+/// what a 256-wide vanilla atlas was measured against; an HD chain wants more (see `budget`).
+static BUDGET_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(48 * 1024 * 1024);
+
+/// Entries refused for being over a quarter of the budget - the `tex_big` column.
+static TEX_TOO_BIG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Set the decode cache's ceiling in MiB. Clamped to 8..=1024: below 8 nothing useful is held,
+/// and above 1024 a wasm heap of retained RGBA8 is its own problem (the 192 MiB note).
+pub fn set_skin_cache_mb(mb: usize) -> usize {
+    let mb = mb.clamp(8, 1024);
+    BUDGET_BYTES.store(mb * 1024 * 1024, std::sync::atomic::Ordering::Relaxed);
+    mb
+}
+
+/// Entries refused for size since the last call, and the reset.
+pub fn take_oversize_count() -> u32 {
+    TEX_TOO_BIG.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn take_decode_counts() -> (u32, u32) {
     use std::sync::atomic::Ordering::Relaxed;
     (TEX_HITS.swap(0, Relaxed), TEX_DECODES.swap(0, Relaxed))
@@ -169,7 +190,19 @@ impl DecodeCache {
     ///
     /// So the ceiling here is not "how much would we like to keep" but "how much can be held
     /// before holding it costs more than decoding again".
-    const BUDGET: usize = 48 * 1024 * 1024;
+    /// **Runtime-settable, because the right number depends on the CHAIN.** 48 MiB was measured
+    /// against a 256-wide vanilla atlas. On an HD chain the same pixels are several times larger,
+    /// so the same byte cap holds several times fewer of them: journal 39 (Capybara HD) read a
+    /// **12%** hit rate against journal 38's (twmoa) 41%, 20.9 decodes per composite against 14.6,
+    /// and 369 ms per composite against 87 - with single composites reaching 2.1 SECONDS on the
+    /// main thread. That is the freeze, and it is not the crowd.
+    ///
+    /// `/console skinCacheMb <n>` moves it. 192 MiB was tried once on the vanilla chain and lost
+    /// (the note below), which is exactly why this is a knob to measure rather than a new constant
+    /// to believe in: the losing run and the thrashing run are different chains.
+    fn budget() -> usize {
+        BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+    }
 
     fn size_of(chain: &BlpMipChain) -> usize {
         chain.mips.iter().map(Vec::len).sum()
@@ -185,14 +218,20 @@ impl DecodeCache {
 
     fn put(&mut self, path: String, chain: std::sync::Arc<BlpMipChain>) {
         let size = Self::size_of(&chain);
-        if size > Self::BUDGET / 4 {
+        // **An entry over a quarter of the budget is never cached at all** - not evicted, never
+        // admitted. At 48 MiB that ceiling is 12 MiB, and a decoded RGBA8 HD body atlas with its
+        // mips clears it, so on an HD chain the base skin is re-decoded on EVERY composite however
+        // often it is asked for. Counted, because "the cache is too small" and "the entry cannot
+        // enter the cache" are different defects with the same symptom.
+        if size > Self::budget() / 4 {
+            TEX_TOO_BIG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return;
         }
         self.clock += 1;
         if let Some((old, _)) = self.entries.remove(&path) {
             self.bytes -= Self::size_of(&old);
         }
-        while self.bytes + size > Self::BUDGET {
+        while self.bytes + size > Self::budget() {
             let Some(victim) = self
                 .entries
                 .iter()

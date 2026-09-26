@@ -691,6 +691,18 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1",
         "benilla's own - 1.12 has no way to refuse a packet the client already parsed",
     ),
+    // **The character skin decode cache's ceiling, in MiB** - `benilla_formats::set_skin_cache_mb`.
+    // 48 is what a 256-wide vanilla atlas was measured against; an HD chain's pixels are several
+    // times larger, so the same byte cap holds several times fewer and the cache thrashes
+    // (journal 39 on Capybara HD: 12% hits against twmoa's 41%, 369 ms per composite against 87,
+    // single composites reaching 2.1 s on the main thread). A knob rather than a new constant
+    // because 192 MiB was tried once on the VANILLA chain and lost - different chain, different
+    // answer, and the only way to tell is to measure this one.
+    ours(
+        "skinCacheMb",
+        "48",
+        "benilla's own - 1.12 composites into a fixed slot and caches nothing",
+    ),
     same(crate::char_select::CVAR_LAST_CHARACTER, "0"),
 ];
 

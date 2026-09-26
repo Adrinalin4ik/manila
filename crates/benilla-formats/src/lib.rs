@@ -25,7 +25,7 @@ pub use install::{addon_corpus, addon_corpus_candidates, candidates, skipped, wo
 pub mod web;
 mod characters;
 pub use characters::{
-    take_decode_counts,
+    set_skin_cache_mb, take_decode_counts, take_oversize_count,
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
     scale_body_tile, BlitSource, CharCreateCatalog, CharSections, CharacterGeosets, DialRanges,
     EmblemLayer, EquipBlit, EquipGeosets, GuildEmblem, StartOutfitItem, VisibleGeosets,
