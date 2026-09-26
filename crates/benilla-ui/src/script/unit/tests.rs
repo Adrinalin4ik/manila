@@ -469,7 +469,7 @@ fn power_bindings_read_the_active_type() {
     assert!(
         s.eval::<bool>("return UnitPower == nil and UnitPowerMax == nil")
             .unwrap(),
-        "the Era spellings must not linger beside the 1.12 ones"
+        "UnitPower and UnitPowerMax are not 1.12 globals"
     );
     // An absent unit is the number 0, never nil: `UnitFrame.lua:122` indexes `ManaBarColor` by it.
     assert_eq!(
@@ -861,7 +861,7 @@ fn unit_is_plus_mob_reads_the_flag_bit_and_not_the_rank() {
     let mut s = UiScript::new().unwrap();
     s.set_unit("player", Some(player()));
 
-    // The server sets the bit on `!IsPet() && rank > 0` (`Creature.h:185`), so rare carries it.
+    // The server sets the bit on `!IsPet() && rank > 0` (`Creature.h:186`), so rare carries it.
     for (rank, word) in [
         (1u32, "elite"),
         (2, "rareelite"),
@@ -1804,7 +1804,7 @@ fn the_player_record_outlives_every_snapshot() {
     assert_eq!(
         s.eval::<String>(r#"return UnitRace("player")"#).unwrap(),
         "Night Elf",
-        "the same holds for the other three fields of the record (2263)"
+        "the same holds for the other three fields of the record"
     );
     assert_eq!(
         s.eval::<String>(r#"local _, t = UnitClass("player"); return t"#)
