@@ -6,6 +6,8 @@
 use super::bloom::BloomLabel;
 use crate::video::VideoConfig;
 use benilla_world::{lighting::WowLighting, view::WorldCamera, wmo_portal::CameraInteriorClaim};
+// MONKEY (leftovers): LightSkybox flag 0x8.
+use benilla_world::skybox::CameraSkybox;
 use bevy::{
     core_pipeline::{
         core_3d::graph::{Core3d, Node3d},
@@ -36,6 +38,12 @@ struct ShaftView {
     sun: Vec4,
     // Gamma-space sun colour; the framebuffer is still gamma-space here.
     color: Vec4,
+    // MONKEY (leftovers): the view ray's world height is `dot(horizon.xyz, (ndc.x, ndc.y, 1))`
+    // over `length((ndc.x * ray.x, ndc.y * ray.y, 1))`; the mask counts a depth-0 pixel as sky
+    // only above `horizon.w` (sin elevation). Water writes no depth, so the sea read as sky.
+    horizon: Vec4,
+    // xy = tan half-FOV per axis (1/P00, 1/P11); zw unused.
+    ray: Vec4,
 }
 
 impl Plugin for SunShaftsPlugin {
@@ -79,6 +87,7 @@ fn update_views(
     video: Res<VideoConfig>,
     lighting: Res<WowLighting>,
     interior: Res<CameraInteriorClaim>,
+    sky: Option<Res<CameraSkybox>>,
     mut cameras: Query<
         (
             Entity,
@@ -92,6 +101,11 @@ fn update_views(
     >,
 ) {
     let to_sun = lighting.celestial_dir().normalize_or_zero();
+    // MONKEY (leftovers): a `0x8` sky forces the shafts: its weight lifts the daylight ramp, so
+    // a low or just-set sun keeps full shafts (a sun far below the horizon still ends them).
+    let force = sky.map_or(0.0, |s| {
+        s.flag_weight(benilla_formats::SKYBOX_FORCE_SUN_SHAFTS)
+    });
     for (entity, camera, transform, projection, mut camera3d, old) in &mut cameras {
         let disabled =
             !video.sun_shafts || !camera.is_active || interior.0.is_some() || to_sun == Vec3::ZERO;
@@ -121,23 +135,43 @@ fn update_views(
         )
         .max_element();
         let edge_fade = 1.0 - smoothstep(0.0, 0.18, outside);
-        let daylight = smoothstep(-0.02, 0.16, to_sun.y);
+        let daylight = smoothstep(-0.02, 0.16, to_sun.y)
+            .max(force.clamp(0.0, 1.0) * smoothstep(-0.12, -0.02, to_sun.y));
         let strength = edge_fade * daylight;
         if strength <= 0.001 {
             commands.entity(entity).remove::<ShaftView>();
             continue;
         }
         camera3d.depth_texture_usages.0 |= TextureUsages::TEXTURE_BINDING.bits();
+        let (horizon, ray) = horizon_row(transform, projection);
         let next = ShaftView {
             sun: uv.extend(strength).extend(28.0),
             color: Vec3::from_array(lighting.diffuse)
                 .lerp(Vec3::ONE, 0.18)
                 .extend(0.0),
+            horizon,
+            ray,
         };
         if old != Some(&next) {
             commands.entity(entity).insert(next);
         }
     }
+}
+
+/// MONKEY (leftovers): the view ray's world-up component as a linear form in NDC, plus the per-axis
+/// ray scale to normalise it. A pixel is sky only above `-0.01` (≈ 0.6° below the horizon): a sun
+/// just under the horizon still finds sky next to it, the sea below it never does.
+fn horizon_row(transform: &GlobalTransform, projection: &Projection) -> (Vec4, Vec4) {
+    let Projection::Perspective(p) = projection else {
+        // No horizon test: `(0, 0, 1)` is always "up".
+        return (Vec4::new(0.0, 0.0, 1.0, -2.0), Vec4::new(0.0, 0.0, 0.0, 0.0));
+    };
+    let ty = (p.fov * 0.5).tan();
+    let tx = ty * p.aspect_ratio;
+    let rot = transform.affine().matrix3;
+    // View dir = right·x·tx + up·y·ty − back; only its world Y matters.
+    let row = Vec3::new(rot.x_axis.y * tx, rot.y_axis.y * ty, -rot.z_axis.y);
+    (row.extend(-0.01), Vec4::new(tx, ty, 0.0, 0.0))
 }
 
 fn smoothstep(a: f32, b: f32, value: f32) -> f32 {
@@ -197,13 +231,17 @@ fn init_pipeline(
     let mask_layouts = [false, true].map(|multisampled| {
         BindGroupLayoutDescriptor::new(
             "post_sun_shafts_mask_layout",
-            &BindGroupLayoutEntries::single(
+            // MONKEY (leftovers): + the view uniform, for the horizon row.
+            &BindGroupLayoutEntries::sequential(
                 ShaderStages::FRAGMENT,
-                if multisampled {
-                    texture_depth_2d_multisampled()
-                } else {
-                    texture_depth_2d()
-                },
+                (
+                    if multisampled {
+                        texture_depth_2d_multisampled()
+                    } else {
+                        texture_depth_2d()
+                    },
+                    uniform_buffer::<ShaftView>(false),
+                ),
             ),
         )
     });
@@ -302,7 +340,12 @@ fn prepare_masks(
         let Some(size) = camera.physical_viewport_size else {
             continue;
         };
-        let rows = [shaft.sun.to_array(), shaft.color.to_array()];
+        let rows = [
+            shaft.sun.to_array(),
+            shaft.color.to_array(),
+            shaft.horizon.to_array(),
+            shaft.ray.to_array(),
+        ];
         match uniform {
             Some(uniform) => queue.write_buffer(&uniform.0, 0, bytemuck::cast_slice(&rows)),
             None => {
@@ -376,7 +419,7 @@ impl ViewNode for ShaftNode {
         let mask_bind = device.create_bind_group(
             "post_sun_shafts_mask",
             &cache.get_bind_group_layout(&settings.mask_layouts[multisampled]),
-            &BindGroupEntries::single(depth.view()),
+            &BindGroupEntries::sequential((depth.view(), uniform.0.as_entire_binding())),
         );
         let out = target.post_process_write();
         let bind = device.create_bind_group(
@@ -443,5 +486,30 @@ mod tests {
         assert_eq!(smoothstep(0.0, 1.0, -1.0), 0.0);
         assert_eq!(smoothstep(0.0, 1.0, 2.0), 1.0);
         assert!((smoothstep(0.0, 1.0, 0.5) - 0.5).abs() < 1.0e-6);
+    }
+
+    /// MONKEY (leftovers): the shader's horizon form, evaluated on the CPU, is the view ray's
+    /// world-up sine: the screen centre of a level camera sits on the horizon, a pitched-down one
+    /// sees below it, and the top/bottom edges sit at ±half the vertical FOV.
+    #[test]
+    fn horizon_row_is_the_view_ray_elevation() {
+        let p = PerspectiveProjection {
+            fov: 1.0,
+            aspect_ratio: 16.0 / 9.0,
+            ..default()
+        };
+        let proj = Projection::Perspective(p.clone());
+        let up = |t: &Transform, ndc: Vec2| {
+            let (h, r) = horizon_row(&GlobalTransform::from(*t), &proj);
+            h.truncate().dot(ndc.extend(1.0)) / (ndc * r.truncate().truncate()).extend(1.0).length()
+        };
+        let level = Transform::default().looking_to(Vec3::X, Vec3::Y);
+        assert!(up(&level, Vec2::ZERO).abs() < 1e-5);
+        assert!((up(&level, Vec2::new(0.0, 1.0)) - 0.5f32.sin()).abs() < 1e-4);
+        assert!((up(&level, Vec2::new(0.0, -1.0)) + 0.5f32.sin()).abs() < 1e-4);
+        let down = Transform::default().looking_to(Vec3::new(1.0, -0.3, 0.0), Vec3::Y);
+        let dir = Vec3::new(1.0, -0.3, 0.0).normalize();
+        assert!((up(&down, Vec2::ZERO) - dir.y).abs() < 1e-5);
+        assert!(up(&down, Vec2::ZERO) < -0.01, "sea below the horizon is not sky");
     }
 }
