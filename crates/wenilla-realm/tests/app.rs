@@ -50,7 +50,7 @@ async fn harness() -> Harness {
     std::fs::create_dir_all(&conf_dir).unwrap();
     std::fs::create_dir_all(&www).unwrap();
     std::fs::write(
-        www.join("wenilla.js"),
+        www.join("manila.js"),
         "export default async function init() {}",
     )
     .unwrap();
@@ -355,7 +355,7 @@ async fn admin_creates_player_who_can_fetch_hidden_game_credentials() {
     let r = send(&h.app, get("/", Some(&alice))).await;
     assert_eq!(r.status, StatusCode::SEE_OTHER);
     assert_eq!(r.location(), "/account/password");
-    for path in ["/api/play", "/data/__index", "/ws/8085", "/wenilla.js"] {
+    for path in ["/api/play", "/data/__index", "/ws/8085", "/manila.js"] {
         let r = send(
             &h.app,
             Request::get(path)
@@ -451,7 +451,7 @@ async fn admin_creates_player_who_can_fetch_hidden_game_credentials() {
 async fn game_routes_are_locked_without_a_session() {
     let h = harness().await;
     let admin = run_setup(&h).await;
-    for path in ["/wenilla.js", "/ws/8085", "/data/__index", "/api/play"] {
+    for path in ["/manila.js", "/ws/8085", "/data/__index", "/api/play"] {
         let r = send(&h.app, Request::get(path).body(Body::empty()).unwrap()).await;
         assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{path} must be locked");
         assert_eq!(
@@ -464,7 +464,7 @@ async fn game_routes_are_locked_without_a_session() {
     }
     let r = send(
         &h.app,
-        Request::get("/wenilla.js")
+        Request::get("/manila.js")
             .header(header::COOKIE, &admin)
             .body(Body::empty())
             .unwrap(),

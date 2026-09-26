@@ -1,8 +1,8 @@
-//! Static hosting for the browser build's output directory (`index.html`, `wenilla.js`,
-//! `wenilla_bg.wasm`) — everything `scripts/web-build.sh` writes to `web/dist/`.
+//! Static hosting for the browser build's output directory (`index.html`, `manila.js`,
+//! `manila_bg.wasm`) — everything `scripts/web-build.sh` writes to `web/dist/`.
 //!
 //! Everything under `--www` gets `no-cache` rather than the immutable long cache the `/data/*`
-//! route uses — that directory holds only `index.html`/`wenilla.js`/`wenilla_bg.wasm`,
+//! route uses — that directory holds only `index.html`/`manila.js`/`manila_bg.wasm`,
 //! and the wasm bundle changes on every rebuild but keeps the same filename (no content-hash),
 //! so a long cache would pin a stale client against a server that has already moved on — dev-
 //! cycle friction the `/data/*` files don't have (those are content the game itself never

@@ -48,7 +48,7 @@ export async function boot(init, opts = {}) {
   // Compile immediately: merely fetching a Response leaves its body backpressured until
   // someone consumes it. Instantiation must still wait for the cache warmup because the
   // game's Startup performs synchronous reads of the prefetched catalogs.
-  const wasm = compileWasm(new URL('./wenilla_bg.wasm', import.meta.url), (got, total) =>
+  const wasm = compileWasm(new URL('./manila_bg.wasm', import.meta.url), (got, total) =>
     ui.setWasmProgress(got, total)
   );
   let w;

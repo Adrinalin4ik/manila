@@ -10,7 +10,7 @@
 //! which softens the blow to "no full-screen button" — but the trap is one static import away.)
 //!
 //! So: every `./name.js` the pages ask for that exists in `web/` must appear in that `cp`.
-//! Build outputs (`wenilla.js`, from wasm-bindgen) have no source file in `web/` and are skipped.
+//! Build outputs (`manila.js`, from wasm-bindgen) have no source file in `web/` and are skipped.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -54,7 +54,7 @@ fn every_page_script_that_lives_in_web_is_copied_into_dist() {
 
     for page in ["web/index.html", "crates/wenilla-realm/templates/play.html"] {
         for name in referenced_scripts(&read(page)) {
-            // Not every import has a source file: wenilla.js is wasm-bindgen's output, written
+            // Not every import has a source file: manila.js is wasm-bindgen's output, written
             // straight into dist by the build itself.
             if !root().join("web").join(&name).exists() {
                 continue;

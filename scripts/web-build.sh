@@ -33,7 +33,10 @@ mkdir -p "${DIST}"
 # The name section is half the file (~170 MB -> ~90 MB) and only feeds stack-trace symbols.
 strip=(--remove-name-section --remove-producers-section)
 [ "${WEB_DEBUG:-0}" = 1 ] && strip=()
-wasm-bindgen --target web --no-typescript "${strip[@]}" --out-dir "${DIST}" "${WASM}"
+# `--out-name manila`: the artifact is this fork's, and the page loads it by name. The CRATE
+# stays `wenilla` - renaming it would move `wenilla-host`/`wenilla-realm` and the pin bot's
+# `WENILLA_COMMIT`, which is prod's, for a filename.
+wasm-bindgen --target web --no-typescript "${strip[@]}" --out-name manila --out-dir "${DIST}" "${WASM}"
 cp web/index.html web/wasi_stubs.js web/boot.js web/platform.js web/bridge.js "${DIST}/"
 # The bridge examples (web/README.md § "JavaScript bridge"): a HUD, an idle loop.
 mkdir -p "${DIST}/examples" && cp web/examples/*.js "${DIST}/examples/"
@@ -53,14 +56,14 @@ if [ -n "${WASM_OPT}" ] && [ "${WEB_DEBUG:-0}" != 1 ]; then
   opt_status=0
   "${WASM_OPT}" -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
     --enable-mutable-globals --enable-reference-types --enable-multivalue \
-    "${DIST}/wenilla_bg.wasm" -o "${DIST}/wenilla_bg.wasm.opt" || opt_status=$?
+    "${DIST}/manila_bg.wasm" -o "${DIST}/manila_bg.wasm.opt" || opt_status=$?
   # wasm-opt has returned 0 without writing its output here (twice, on a ~90 MB module in a
   # memory-constrained shell). Say so rather than letting `mv` fail with a stat error that reads
   # like a path typo.
-  if [ ! -s "${DIST}/wenilla_bg.wasm.opt" ]; then
+  if [ ! -s "${DIST}/manila_bg.wasm.opt" ]; then
     echo "web-build: wasm-opt exited $opt_status and produced no output - shipping the unoptimised module" >&2
   else
-    mv "${DIST}/wenilla_bg.wasm.opt" "${DIST}/wenilla_bg.wasm"
+    mv "${DIST}/manila_bg.wasm.opt" "${DIST}/manila_bg.wasm"
   fi
 elif [ "${WEB_DEBUG:-0}" = 1 ]; then
   echo "WEB_DEBUG=1 — skipping wasm-opt to preserve debugging symbols"

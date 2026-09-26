@@ -29,7 +29,7 @@ struct Cli {
     /// network unauthenticated (see `--help`).
     #[arg(long, default_value = "127.0.0.1:8090")]
     bind: String,
-    /// Directory holding the wasm-bindgen output (`index.html`, `wenilla.js`, `*.wasm`) —
+    /// Directory holding the wasm-bindgen output (`index.html`, `manila.js`, `*.wasm`) —
     /// `scripts/web-build.sh`'s `web/dist/`.
     #[arg(long)]
     www: PathBuf,

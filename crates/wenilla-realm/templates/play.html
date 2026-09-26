@@ -87,7 +87,7 @@
   if (!r.ok) { msg.textContent = 'Could not fetch your realm credentials (' + r.status + '). Try again in a minute.'; throw new Error('play ' + r.status); }
   const env = await r.json();
   window.__wenilla_env = { user: env.user, pass: env.pass, host: env.host, ...(env.dev_query_creds ? { dev_query_creds: '1' } : {}) };
-  const { default: init } = await import('./wenilla.js');
+  const { default: init } = await import('./manila.js');
   const { bind } = await import('./wasi_stubs.js');
   const { boot } = await import('./boot.js');
   msg.remove(); // boot()'s overlay takes over from here — see web/boot.js
