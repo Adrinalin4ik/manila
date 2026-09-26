@@ -17,6 +17,24 @@ const REGION_BASES: [u16; 16] = [
     1, 101, 201, 301, 401, 501, 601, 702, 801, 901, 1001, 1101, 1201, 1301, 1401, 1501,
 ];
 
+/// Character geoset visibility: the selected variants plus the model's unmanaged geosets.
+///
+/// The 1.12.1 selector (`0x477520`) first disables only **0..=1700** (`0x6a4`), then enables
+/// the body, customization and equipment variants. Model submeshes start enabled, so IDs above
+/// that inclusive bound stay visible. Reforged uses 1702 for Night Elf eye-glow cards; treating
+/// the explicit selections as a closed set hid those cards in both previews and the world.
+#[derive(Debug)]
+pub struct VisibleGeosets {
+    selected: Vec<u16>,
+}
+
+impl VisibleGeosets {
+    /// Whether a model submesh survives the character compositor's geoset selection.
+    pub fn contains(&self, geoset_id: &u16) -> bool {
+        *geoset_id > 1700 || self.selected.contains(geoset_id)
+    }
+}
+
 /// The customization → geoset tables, resolving an appearance to the set of visible geosets.
 pub struct CharacterGeosets {
     /// (race, sex, hairStyle) → hair `GeosetID` (group 0).
@@ -58,12 +76,12 @@ impl CharacterGeosets {
     /// set) plus **all eight** equipment branches B1–B8 of `0x477520` (decisions 0074, 1864 —
     /// implemented from the transcription's *arithmetic*; its prose labels were mislabels wow-re
     /// corrected in RF-0088/RF-0089, and the branch comments below name each one at its address).
-    /// A body submesh whose `skinSectionId` is in this set is drawn; all others hidden. Most
+    /// Use [`VisibleGeosets::contains`] to test a submesh: IDs above 1700 remain visible. Most
     /// branches gate on an ItemDisplayInfo `geosetGroup` field being non-zero ("section present");
     /// B3 and B6 do not, and read [`EquipGeosets::forearm_dressed`] / [`EquipGeosets::tabard_preview`].
     ///
-    /// Returned **sorted and deduplicated**: the client toggles a per-submesh flag, where several
-    /// branches re-enable a base the opening loop already set, so a list needs normalising once.
+    /// Explicit selections are **sorted and deduplicated**: the client toggles a per-submesh flag.
+    /// Several branches re-enable a base the opening loop already set, so normalise the list once.
     pub fn visible_geosets(
         &self,
         race: u8,
@@ -71,7 +89,7 @@ impl CharacterGeosets {
         hair_style: u8,
         facial_hair: u8,
         equip: &EquipGeosets,
-    ) -> Vec<u16> {
+    ) -> VisibleGeosets {
         let mut set = REGION_BASES.to_vec();
         set.push(0); // geoset 0 (the body), enabled unconditionally
                      // Entry 0 (group 0 = hair): the chosen hairstyle's geoset, clamped ≥1 (`0x478540`
@@ -199,7 +217,7 @@ impl CharacterGeosets {
         // loop already added. Normalise once at the end so the result is a canonical set.
         set.sort_unstable();
         set.dedup();
-        set
+        VisibleGeosets { selected: set }
     }
 
     /// Load both customization DBCs from the patch chain.
@@ -342,6 +360,72 @@ pub(crate) fn char_facial_hair_schema() -> Schema {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn geoset_visibility_preserves_unmanaged_ids() {
+        let cg = CharacterGeosets {
+            hair: HashMap::new(),
+            facial: HashMap::new(),
+            helmet_vis: HashMap::new(),
+        };
+        let mut boots = EquipGeosets::default();
+        boots.bodyslots[4] = Some([2, 0, 0]);
+        for equip in [EquipGeosets::default(), boots] {
+            let visible = cg.visible_geosets(4, 1, 0, 0, &equip);
+            assert!(
+                visible.contains(&0),
+                "stock eye glow stays on the body geoset"
+            );
+            for id in [2, 302, 1600, 1699, 1700] {
+                assert!(!visible.contains(&id), "unselected managed geoset {id}");
+            }
+            for id in [1701, 1702, 2001, u16::MAX] {
+                assert!(visible.contains(&id), "unmanaged geoset {id} stays visible");
+            }
+        }
+        let visible = cg.visible_geosets(4, 1, 0, 0, &boots);
+        assert!(!visible.contains(&501), "boots still hide the bare ankle");
+        assert!(
+            visible.contains(&503),
+            "the equipped boot variant is visible"
+        );
+    }
+
+    /// Run with either stock or Reforged WOW_DATA. Both Night Elf sexes carry two glow cards;
+    /// stock uses geoset 0, while Reforged uses 1702. Exercise the same selection as preview,
+    /// world spawn, and equipment changes, without depending on a renderer or a server.
+    #[test]
+    fn geoset_visibility_keeps_night_elf_eye_glow() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cg = CharacterGeosets::load(&mut chain).expect("load customization tables");
+        for (sex, name) in [(0, "Male"), (1, "Female")] {
+            let path = format!("Character\\NightElf\\{name}\\NightElf{name}.m2");
+            let parts = crate::load_m2_mesh(&mut chain, &path).expect("Night Elf model");
+            let eyes: Vec<_> = parts
+                .iter()
+                .filter(|p| {
+                    p.texture
+                        .as_ref()
+                        .is_some_and(|t| t.to_ascii_lowercase().ends_with("eyeglow.blp"))
+                })
+                .collect();
+            assert_eq!(eyes.len(), 2, "{name} has two eye-glow cards");
+            assert!(eyes.iter().all(|p| p.billboard.is_some() && p.additive));
+            let mut robe = EquipGeosets::default();
+            robe.bodyslots[1] = Some([0, 0, 1]);
+            for equip in [EquipGeosets::default(), robe] {
+                let visible = cg.visible_geosets(4, sex, 0, 0, &equip);
+                assert_eq!(
+                    eyes.iter()
+                        .filter(|p| visible.contains(&p.geoset_id))
+                        .count(),
+                    2,
+                    "{name}: both eye-glow cards must survive the character filter"
+                );
+            }
+        }
+    }
 
     /// The equipment geoset branches (decisions 0074/1864, from the RF-0038 arithmetic):
     /// gloves/boots/robe/cloak **replace** their groups, and a robe suppresses the tabard branch.

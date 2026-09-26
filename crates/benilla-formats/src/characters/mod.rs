@@ -6,9 +6,10 @@
 //! the real client renders only the selected ones. The selection is the compositor's geoset dispatch
 //! `0x477520` (wow-re charactermodel RF-0038). For a character with **no equipment** the 8 per-item
 //! branches all no-op (their `ItemDisplayInfo` records are null), leaving only the unconditional opening
-//! block: disable every geoset, enable geoset 0, then enable the 16 region-base entries of `cc+0x144` —
+//! block: disable geosets 0..=1700, enable geoset 0, then enable the 16 region-base entries of `cc+0x144` —
 //! entries 0–3 overwritten by the customization DBCs (the chosen hair + 3 facial-hair geosets), entries
-//! 4–15 the default group bases. We render an M2 submesh iff its `skinSectionId` is in that set.
+//! 4–15 the default group bases. Higher geoset IDs retain their default visibility;
+//! [`VisibleGeosets::contains`] handles both the explicit selections and that unmanaged range.
 //!
 //! **Skin textures.** A character body's `M2TextureType::Other(1)` (body skin) batches have no embedded
 //! texture — the client supplies a runtime composite keyed on the appearance ([`CharSections::composite_body`],
@@ -24,7 +25,7 @@ mod geosets;
 mod sections;
 
 pub use customization::{CharCreateCatalog, DialRanges, StartOutfitItem};
-pub use geosets::{CharacterGeosets, EquipGeosets};
+pub use geosets::{CharacterGeosets, EquipGeosets, VisibleGeosets};
 pub use sections::{
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
     scale_body_tile, BlitSource, CharSections, EmblemLayer, EquipBlit, GuildEmblem,

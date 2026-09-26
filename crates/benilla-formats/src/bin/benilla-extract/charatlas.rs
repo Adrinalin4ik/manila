@@ -260,7 +260,7 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
     eq.forearm_dressed = forearm_dressed(&equipment);
     // Sorted + deduplicated at the source (`visible_geosets`).
     let ids = geosets.visible_geosets(look.race, look.sex, look.hair_style, look.facial_hair, &eq);
-    println!("\nvisible geosets: {ids:?}");
+    println!("\nvisible geosets: {ids:?} + all IDs above 1700");
 
     if let Some(path) = out {
         let img =
