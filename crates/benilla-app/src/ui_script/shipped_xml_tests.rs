@@ -71,7 +71,7 @@ fn loading_the_shipped_ui_queues_no_sounds() {
         s.take_sounds(),
         vec![],
         "loading the UI played a sound — a load-time handler is ringing; see \
-         UnitPopup_HideButtons / UIDropDownMenu_Initialize (decision 1033)"
+         UnitPopup_HideButtons / UIDropDownMenu_Initialize"
     );
 }
 
@@ -173,7 +173,7 @@ fn the_autocast_brackets_reach_each_buttons_corners() {
         assert!(
             (brackets / button - 0.997).abs() < 0.01,
             "{name}: a {brackets:.1}-unit bracket square on a {button}-unit button is {:.3}x — the \
-             pet button's is 0.997x, which is what puts brackets IN the corners (decision 1393)",
+             pet button's is 0.997x, which is what puts brackets IN the corners",
             brackets / button
         );
     }
@@ -211,7 +211,7 @@ fn the_shine_panes_ask_for_the_rims_we_meant() {
             (rim / view - 1.024).abs() < 1e-3,
             "{name}: a {rim}-unit rim in a {view}-unit viewport is {:.3}x, not the pet button's \
              1.024x — a rim that does not reach its own viewport edge is never clipped, and reads \
-             as a wash rather than a rim (decisions 1387/1392)",
+             as a wash rather than a rim",
             rim / view
         );
     }
@@ -680,7 +680,7 @@ fn every_texture_frame_outranks_its_status_bars() {
         let Some(base) = texture_frame.strip_suffix("TextureFrame") else {
             continue;
         };
-        for suffix in ["HealthBar", "ManaBar", "ManaBar"] {
+        for suffix in ["HealthBar", "ManaBar"] {
             let bar = format!("{base}{suffix}");
             let Some(&(bar_strata, bar_level)) = level_of.get(&bar) else {
                 continue;
@@ -699,9 +699,9 @@ fn every_texture_frame_outranks_its_status_bars() {
     }
     // The reference names two TextureFrames, `TargetFrameTextureFrame` and
     // `TargetofTargetTextureFrame` (TargetFrame.xml); the player, pet and party frames nest their
-    // art in anonymous frames instead. Two families × the three suffixes (ManaBar twice) = 6.
+    // art in anonymous frames instead: two families with two bars each.
     assert!(
-        checked >= 6,
+        checked >= 4,
         "only {checked} texture-frame/bar pairs checked — the name sweep found nothing"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());

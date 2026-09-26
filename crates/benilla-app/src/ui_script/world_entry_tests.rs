@@ -152,7 +152,7 @@ fn the_second_login_runs_addon_file_scope_under_the_second_character() {
         probe_saw(&world).as_deref(),
         Some("Onewarrior"),
         "the second login's addon file scope must read the SECOND character — this is the \
-         director's \"always Onewarrior\" report, from the other side"
+         \"always Onewarrior\" bug, from the other side"
     );
     assert_eq!(
         probe_loads(&world),
@@ -354,7 +354,7 @@ fn logging_out_leaves_no_in_game_frames_behind() {
     );
     assert!(
         !frame_exists(&world, "PlayerFrame"),
-        "and so is the in-game frame tree — 1051 measured 193 quads' worth of it surviving \
+        "and so is the in-game frame tree — a leftover tree once drew 193 quads' worth \
          behind the glue screen's opaque node"
     );
     assert!(
@@ -405,7 +405,7 @@ fn reload_ui_is_a_fresh_login_in_place() {
             .expect("in-world VM")
             .session(),
         first_session,
-        "the VM identity changed, so every VmMemo about the old session expires (1290)"
+        "the VM identity changed, so every VmMemo about the old session expires"
     );
     assert!(
         frame_exists(&world, "PlayerFrame"),
@@ -442,7 +442,7 @@ fn a_disable_staged_in_the_session_applies_at_the_reload() {
         .expect("DisableAddOn");
     assert!(
         probe_saw(&world).is_some(),
-        "disabling alone changes nothing in the live session — there is no unload (1197)"
+        "disabling alone changes nothing in the live session — there is no unload"
     );
 
     reload(&mut world, crate::char_select::ClientState::InWorld);
@@ -542,7 +542,7 @@ fn an_addon_error_while_entering_world_reports_on_screen_and_the_sibling_loads()
     let dir = tmp.join("benilla-config/AddOns/AaBroken");
     std::fs::create_dir_all(&dir).expect("broken addon dir");
     std::fs::write(dir.join("AaBroken.toc"), "## Interface: 11200\nboom.lua\n").expect("toc");
-    std::fs::write(dir.join("boom.lua"), "error('B271: file-scope boom')\n").expect("lua");
+    std::fs::write(dir.join("boom.lua"), "error('file-scope boom')\n").expect("lua");
     let mut world = booted_world();
 
     log_in_as(&mut world, "Onehunter", 1);
@@ -569,7 +569,7 @@ fn an_addon_error_while_entering_world_reports_on_screen_and_the_sibling_loads()
         .expect("eval")
         .unwrap_or_default();
     assert!(
-        shown.contains("B271: file-scope boom"),
+        shown.contains("file-scope boom"),
         "the dialog names the actual error, got: {shown:?}"
     );
     drop(script);
@@ -993,10 +993,10 @@ fn a_repeating_error_is_one_row_with_a_count_not_a_flood() {
     let before = script.diagnostics().len();
     // The same failure through the engine's catch path: a slash command whose body raises.
     script
-        .run("SlashCmdList = SlashCmdList or {} SLASH_B293BOOM1 = '/b293boom' SlashCmdList['B293BOOM'] = function() error('every frame') end")
+        .run("SlashCmdList = SlashCmdList or {} SLASH_ERRBOOM1 = '/errboom' SlashCmdList['ERRBOOM'] = function() error('every frame') end")
         .expect("register");
     for _ in 0..500 {
-        script.run_slash_command("b293boom", "");
+        script.run_slash_command("errboom", "");
     }
 
     let rows = script.diagnostics();
@@ -1029,7 +1029,7 @@ fn place_a_window(world: &mut World) {
         .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
         .expect("a VM to place a window in")
         .run(
-            "local f = CreateFrame(\"Frame\", \"B353Probe\") \
+            "local f = CreateFrame(\"Frame\", \"LayoutProbe\") \
              f:SetWidth(413) f:SetHeight(147) \
              f:SetPoint(\"BOTTOMLEFT\", 61, 29) \
              f:SetMovable(true) f:SetResizable(true) f:SetUserPlaced(true)",
@@ -1046,7 +1046,7 @@ fn layout_cache(character: &str) -> Option<String> {
 /// What a saved window's row has to say for the player to get it back.
 fn assert_probe_row(text: &str) {
     for want in [
-        "Frame: B353Probe",
+        "Frame: LayoutProbe",
         "W: 413",
         "H: 147",
         "Point: BOTTOMLEFT - BOTTOMLEFT 61 29",
@@ -1120,7 +1120,7 @@ fn each_character_gets_its_own_layout_cache() {
     assert_probe_row(&layout_cache("Onehunter").expect("the first character's file"));
     let second = layout_cache("Onewarrior").expect("the second character's file");
     assert!(
-        !second.contains("B353Probe"),
+        !second.contains("LayoutProbe"),
         "a character who placed nothing must not inherit another's window:\n{second}"
     );
 
@@ -1135,7 +1135,7 @@ fn author_a_window(world: &mut World) {
         .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
         .expect("a VM to author a window in")
         .run(
-            "local f = CreateFrame(\"Frame\", \"B353Probe\") \
+            "local f = CreateFrame(\"Frame\", \"LayoutProbe\") \
              f:SetWidth(100) f:SetHeight(100) \
              f:SetPoint(\"BOTTOMLEFT\", 0, 0) \
              f:SetMovable(true) f:SetResizable(true)",
@@ -1149,8 +1149,8 @@ fn window_geometry(world: &World) -> (f32, f32, String, f32, f32) {
         .get_non_send_resource::<benilla_ui::script::UiScript>()
         .expect("a VM")
         .eval::<(f32, f32, String, f32, f32)>(
-            "local p, _, _, x, y = B353Probe:GetPoint(1) \
-             return B353Probe:GetWidth(), B353Probe:GetHeight(), p, x, y",
+            "local p, _, _, x, y = LayoutProbe:GetPoint(1) \
+             return LayoutProbe:GetWidth(), LayoutProbe:GetHeight(), p, x, y",
         )
         .expect("read the probe window back")
 }
@@ -1264,7 +1264,7 @@ fn the_ui_is_not_up_in_the_frame_between_the_wire_and_the_state() {
     world.insert_resource(super::PendingEntryUiLoad::default());
     assert!(
         !run_ingame_ui_up(&mut world),
-        "the deferral window — 1978's parked VM, and nothing to receive an event"
+        "the deferral window — a parked VM, and nothing to receive an event"
     );
 
     // The deferred load ran: the frame tree exists.
@@ -1476,7 +1476,7 @@ ScreenProbeHeight = GetScreenHeight()
     assert_eq!(
         read("ScreenProbeHeight"),
         Some(768.0),
-        "…and the height is the 768-tall virtual base (decision 0582)"
+        "…and the height is the 768-tall virtual base"
     );
 
     drop(world);
@@ -1498,7 +1498,7 @@ fn the_entry_load_seeds_a_record_the_feed_cannot_take_away() {
     assert_eq!(
         probe_saw(&world).as_deref(),
         Some("Nelprifour"),
-        "addon file scope reads the live character, as it always has (1230)"
+        "addon file scope reads the live character, as it always has"
     );
 
     let mut script = world
@@ -1528,7 +1528,7 @@ fn the_entry_load_seeds_a_record_the_feed_cannot_take_away() {
             .unwrap()
             .as_deref(),
         Some("WARRIOR"),
-        "…and the same for the other three fields the reference reads off that record (2263)"
+        "…and the same for the other three fields the reference reads off that record"
     );
 
     // A logout despawn removes the token altogether.

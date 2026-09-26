@@ -1721,7 +1721,7 @@ mod clip_plumb_tests {
             frame:SetScrollChild(child)
             local marker = child:CreateTexture(nil, "ARTWORK")
             marker:SetTexture(1, 0, 0)          -- pathless colored quad: no BLP asset needed
-            marker:SetAllPoints()               -- templateless Lua region: no implicit anchor (1310)
+            marker:SetAllPoints()               -- templateless Lua region: no implicit anchor
         "#,
             )
             .unwrap();
@@ -1807,7 +1807,7 @@ mod clip_plumb_tests {
             plain:SetWidth(50); plain:SetHeight(50)
             local m = plain:CreateTexture(nil, "ARTWORK")
             m:SetTexture(0, 1, 0)
-            m:SetAllPoints()  -- templateless Lua region: no implicit anchor (1310)
+            m:SetAllPoints()  -- templateless Lua region: no implicit anchor
         "#,
             )
             .unwrap();
@@ -1996,7 +1996,7 @@ mod extract_gate_tests {
             plain:SetWidth(50); plain:SetHeight(50)
             marker = plain:CreateTexture(nil, "ARTWORK")
             marker:SetTexture(1, 0, 0)
-            marker:SetAllPoints()  -- templateless Lua region: no implicit anchor (1310)
+            marker:SetAllPoints()  -- templateless Lua region: no implicit anchor
         "#,
         )
     }
@@ -2205,7 +2205,7 @@ mod extract_gate_tests {
             plain:SetWidth(50); plain:SetHeight(50)
             marker = plain:CreateTexture(nil, "ARTWORK")
             marker:SetTexture(0, 0, 1)
-            marker:SetAllPoints()  -- templateless Lua region: no implicit anchor (1310)
+            marker:SetAllPoints()  -- templateless Lua region: no implicit anchor
         "#,
         );
         reference.update();
@@ -2264,7 +2264,7 @@ mod extract_gate_tests {
             plain:SetWidth(50); plain:SetHeight(50)
             marker = plain:CreateTexture(nil, "ARTWORK")
             marker:SetTexture(0, 1, 0)
-            marker:SetAllPoints()  -- templateless Lua region: no implicit anchor (1310)
+            marker:SetAllPoints()  -- templateless Lua region: no implicit anchor
         "#,
         );
         reference.update();

@@ -41,7 +41,7 @@ fn one_item_backpack() -> ContainerState {
 /// `CloseAllWindows` (`UIParent.lua:1491`) closes the bag and the loot panel, whose `OnHide`
 /// releases the loot; with no edit box focused the key is left to the binding.
 #[test]
-fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
+fn escape_closes_bag_and_panel_releases_loot_and_keeps_the_held_item() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
@@ -355,7 +355,7 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
     );
     assert!(
         !s.take_target_clear(),
-        "the same press must NOT also drop the target (the raw-key double-fire 0449 retires)"
+        "the same press must NOT also drop the target (no raw-key double-fire)"
     );
 
     // Press 2, the cast over: `CloseAllWindows` eats it.

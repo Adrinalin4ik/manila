@@ -280,10 +280,6 @@ pub(crate) struct Model {
     pub(crate) petition: petition::PetitionState,
     /// Charter calls (`BuyGuildCharter`, `SignPetition`, `TurnInGuildCharter`, …) queued.
     pub(crate) petition_requests: Vec<petition::PetitionRequest>,
-    /// Names `ChatFrame_SendTell` queued; the app opens the chat box prefilled `/w <name> `.
-    pub(crate) tell_requests: Vec<String>,
-    /// Draft lines `ChatFrame_OpenChat` queued, for the app to prefill the chat box.
-    pub(crate) open_chat_requests: Vec<String>,
     /// Per chat window from `ChatFrame1`, the tint, alpha and font size its tab menu can change.
     pub(crate) chat_window_looks: [chat_window::ChatWindowLook; chat_window::NUM_CHAT_WINDOWS],
     /// 0-based windows whose look Lua changed, the persist cue.
@@ -604,6 +600,8 @@ pub(crate) struct Model {
 
     /// The open vendor's stock, the `BuyMerchantItem` calls and whether `CloseMerchant` ran.
     pub(crate) merchant: Option<merchant::MerchantState>,
+    /// `GetRepairAllCost`'s total, which the app pushes every frame a vendor is open.
+    pub(crate) repair_all_cost: u32,
     pub(crate) merchant_buys: Vec<(u32, u32)>,
     /// The held `(bag, slot)` when `PickupMerchantItem` sells, sent as `CMSG_SELL_ITEM`.
     pub(crate) merchant_cursor_sells: Vec<(i64, u32)>,
@@ -842,6 +840,8 @@ pub(crate) struct Model {
     pub(crate) inventory_alerts: [u8; 12],
     /// `UseInventoryItem` slot ids, sent as `CMSG_USE_ITEM` on the equipped item.
     pub(crate) inventory_uses: Vec<u32>,
+    /// Equipped slot ids clicked while the merchant repair cursor is armed.
+    pub(crate) inventory_repairs: Vec<u32>,
     /// Main- and off-hand temporary enchants in `GetWeaponEnchantInfo`'s order, pushed each frame.
     pub(crate) weapon_enchants: [Option<weapon_enchant::WeaponEnchant>; 2],
 
@@ -1120,8 +1120,6 @@ impl Model {
             guild_requests: Vec::new(),
             petition: petition::PetitionState::default(),
             petition_requests: Vec::new(),
-            tell_requests: Vec::new(),
-            open_chat_requests: Vec::new(),
             // Per window, as the stock dock differs: 1 and 2 are the dock, the rest undocked.
             chat_window_looks: std::array::from_fn(chat_window::ChatWindowLook::stock),
             chat_window_changes: HashSet::new(),
@@ -1268,6 +1266,7 @@ impl Model {
             gossip_close: false,
             gossip_quest_selects: Vec::new(),
             merchant: None,
+            repair_all_cost: 0,
             merchant_buys: Vec::new(),
             merchant_cursor_sells: Vec::new(),
             merchant_slot_buys: Vec::new(),
@@ -1429,6 +1428,7 @@ impl Model {
             bank_bag_slots: Default::default(),
             inventory_alerts: [0; 12],
             inventory_uses: Vec::new(),
+            inventory_repairs: Vec::new(),
             weapon_enchants: [None; 2],
             inspect: None,
             inspect_notifies: Vec::new(),

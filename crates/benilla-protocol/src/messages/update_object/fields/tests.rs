@@ -308,7 +308,7 @@ fn player_bytes_3_byte_3_is_the_current_pvp_rank_not_the_highest() {
     assert_eq!(
         f.player_honor_rank(),
         None,
-        "the HIGHEST rank is a different field (1222) — absent means absent"
+        "the HIGHEST rank is a different field: absent means absent"
     );
     // A demoted player keeps the higher lifetime rank.
     let demoted = ObjectFields::from_pairs(&[(195, 0x03_00_00_00), (1222, 0x0B_00_00_00)]);
@@ -752,6 +752,33 @@ fn dynamicobject_fields_read_the_live_blizzard_capture() {
     assert_eq!(
         ObjectFields::from_pairs(&[(6, 26)]).dynamicobject_spell_id(),
         None
+    );
+}
+
+/// `0x605f30`: health 0 (`0x605f3b`), or `PLAYER_FLAGS & 0x10` (`0x605f59`); a released ghost has
+/// health 1, so only the flag catches it, and feign death is neither.
+#[test]
+fn dead_or_ghost_is_health_zero_or_the_ghost_flag() {
+    let unit = |pairs: &[(u16, u32)]| ObjectFields::from_pairs(pairs);
+    let alive = unit(&[(FIELD_UNIT_HEALTH, 100), (FIELD_UNIT_MAXHEALTH, 100)]);
+    let corpse = unit(&[(FIELD_UNIT_HEALTH, 0), (FIELD_UNIT_MAXHEALTH, 100)]);
+    let ghost = unit(&[
+        (FIELD_UNIT_HEALTH, 1),
+        (FIELD_UNIT_MAXHEALTH, 100),
+        (FIELD_PLAYER_FLAGS, 0x10),
+    ]);
+    let feigning = unit(&[
+        (FIELD_UNIT_HEALTH, 100),
+        (FIELD_UNIT_MAXHEALTH, 100),
+        (FIELD_UNIT_DYNAMIC_FLAGS, 0x20),
+    ]);
+    assert!(!alive.is_dead_or_ghost());
+    assert!(corpse.is_dead_or_ghost());
+    assert!(!ghost.unit_is_dead(), "a ghost has health");
+    assert!(ghost.is_dead_or_ghost(), "the ghost-flag leg");
+    assert!(
+        !feigning.is_dead_or_ghost(),
+        "feign death is 0x605f90's, not this"
     );
 }
 

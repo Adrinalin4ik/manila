@@ -76,7 +76,7 @@ fn error_message_is_the_installed_handler_and_the_host_channel_stays_sighted() {
     assert!(
         s.eval::<bool>("return geterrorhandler() == _ERRORMESSAGE")
             .unwrap(),
-        "the reference's own default handler is installed (1305)"
+        "the reference's own default handler is installed"
     );
     // An addon's pcall wrapper reports through `geterrorhandler()`, which pops the dialog.
     s.run(r#"geterrorhandler()("reported")"#).unwrap();
@@ -90,9 +90,9 @@ fn error_message_is_the_installed_handler_and_the_host_channel_stays_sighted() {
         "reported"
     );
     // An engine-caught error still lands in `errors()`; the dispatch adds the dialog on top.
-    s.run("BrokenProbe = CreateFrame('Frame') BrokenProbe:RegisterEvent('B271_PROBE') BrokenProbe:SetScript('OnEvent', function() error('fault') end)")
+    s.run("BrokenProbe = CreateFrame('Frame') BrokenProbe:RegisterEvent('ERROR_PROBE') BrokenProbe:SetScript('OnEvent', function() error('fault') end)")
         .unwrap();
-    s.fire_event("B271_PROBE", vec![]);
+    s.fire_event("ERROR_PROBE", vec![]);
     assert!(
         s.errors().iter().any(|e| e.contains("fault")),
         "engine-caught errors stay on the host channel: {:?}",

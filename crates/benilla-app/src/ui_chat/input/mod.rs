@@ -442,7 +442,7 @@ pub(super) fn drain_chat_input(
                 );
                 lines.push(format!(
                     "reaction: plate is_player {is_player} (OBJECT_FIELD_TYPE says {:?}; the two \
-                     must agree — the predicates read the field, 1674) · faction-group mask self {} \
+                     must agree — the predicates read the field) · faction-group mask self {} \
                      target {} · can_cooperate {} · can_attack(player→unit) {}",
                     target_store.and_then(|s| s.0.object_type()),
                     mask(own_store),
@@ -1353,11 +1353,13 @@ pub(super) fn drain_addon_chat_sends(
     cvars: Res<crate::cvars::Cvars>,
     // Our descriptor, for the DND arm's live `PLAYER_FLAGS & 0x4`.
     self_q: Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
+    // The joined slots a `CHANNEL` target's number names.
+    channels: Res<super::edit::ChannelState>,
 ) {
     let Some(mut script) = script else {
         return;
     };
-    for send in script.take_chat_sends() {
+    for mut send in script.take_chat_sends() {
         let Some(kind) = super::edit::SendType::from_token(&send.chat_type) else {
             warn!(
                 "chat: SendChatMessage with unknown type {:?}",
@@ -1369,6 +1371,19 @@ pub(super) fn drain_addon_chat_sends(
             ));
             continue;
         };
+        // A channel target is a slot number, sent as that slot's name; with no such slot the call
+        // ends here (`0x49f4ea`), ahead of the AFK clear and the tutorial acknowledge.
+        if kind == super::edit::SendType::Channel {
+            let name = send.target.as_deref().and_then(|t| channels.send_target(t));
+            if name.is_none() {
+                debug!(
+                    "chat: SendChatMessage names no joined channel {:?}; not sent",
+                    send.target
+                );
+                continue;
+            }
+            send.target = name;
+        }
         // `SendChatMessage`'s tutorial acknowledge (`0x49f5fc`) covers the twelve social types,
         // not say, yell or emote.
         if !matches!(
@@ -1383,11 +1398,25 @@ pub(super) fn drain_addon_chat_sends(
         }
         // ── The away commands, and the AFK clear the other sends carry ───────────────────────
         //
-        // `SendChatMessage` (`0x49f1e0`): AFK and DND each have an arm ahead of the generic send,
-        // and every type but AFK (`0x14`) first clears a standing AFK. The system lines, the
-        // default text and the mirror are `super::away`'s.
+        // `SendChatMessage` (`0x49f1e0`): every type but AFK (`0x14`) first clears a standing AFK
+        // (`0x49f4f6 jne 0x49f3c7`), `/dnd` included; then AFK and DND each have an arm ahead of
+        // the generic send. The system lines, the default text and the mirror are `super::away`'s.
         let strings = |key: &str| crate::ui_chat::combat::global_string(&script, key);
         let wire = kind.wire();
+        if !matches!(wire, crate::net::ChatKind::Afk) {
+            if let Some(line) =
+                super::away::auto_clear_line(*mirror, auto_clear_afk(&cvars), &strings)
+            {
+                super::away::push_system(&mut chat_log, line);
+                mirror.0 = 0;
+                // The empty `0x14` that tells the server, ahead of the message's own packet.
+                let _ = commands.0.send(ClientCommand::Chat {
+                    kind: crate::net::ChatKind::Afk,
+                    target: None,
+                    text: String::new(),
+                });
+            }
+        }
         let text = match wire {
             crate::net::ChatKind::Afk => {
                 let out = super::away::afk_line(&send.text, *mirror, &strings);
@@ -1400,31 +1429,14 @@ pub(super) fn drain_addon_chat_sends(
                 out.body
             }
             crate::net::ChatKind::Dnd => {
-                // DND has no mirror (`0x49f3f0`): the live descriptor bit. The reference's DND
-                // also clears a standing AFK first (`0x49f3d6`); this arm does not.
+                // DND has no mirror (`0x49f3f0`): the live descriptor bit.
                 let out = super::away::dnd_line(&send.text, is_dnd(&self_q), &strings);
                 if let Some(line) = out.line {
                     super::away::push_system(&mut chat_log, line);
                 }
                 out.body
             }
-            // Clear a standing AFK first (`0x49f3d6` skips only type `0x14`), then send the
-            // line's own packet.
-            _ => {
-                if let Some(line) =
-                    super::away::auto_clear_line(*mirror, auto_clear_afk(&cvars), &strings)
-                {
-                    super::away::push_system(&mut chat_log, line);
-                    mirror.0 = 0;
-                    // The empty `0x14` that tells the server, alongside the message's own packet.
-                    let _ = commands.0.send(ClientCommand::Chat {
-                        kind: crate::net::ChatKind::Afk,
-                        target: None,
-                        text: String::new(),
-                    });
-                }
-                send.text
-            }
+            _ => send.text,
         };
         let cmd = ClientCommand::Chat {
             kind: wire,

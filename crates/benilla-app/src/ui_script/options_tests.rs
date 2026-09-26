@@ -2159,7 +2159,7 @@ fn a_hovered_row_raises_its_1_12_description_on_the_era_seat() {
     assert_eq!(
         s.eval::<i64>("return GameTooltip:NumLines()").unwrap(),
         1,
-        "the description ALONE — the era's white name line is cut (1054)"
+        "the description ALONE — the era's white name line is cut"
     );
     // The era seat, `DefaultTooltipMixin`'s `ANCHOR_RIGHT` at x -10: BOTTOMLEFT on the label
     // region's TOPRIGHT, 10 back.
@@ -2589,7 +2589,7 @@ fn defaults_resets_the_combat_page_to_the_shipped_assignments() {
     assert_eq!(
         s.eval::<String>("return SHOW_COMBAT_TEXT").unwrap(),
         "0",
-        "the master walks back too — the reference's own value since 1804"
+        "the master walks back too — the reference's own value"
     );
     assert_eq!(
         s.eval::<String>("return COMBAT_TEXT_SHOW_AURAS").unwrap(),
@@ -3280,7 +3280,7 @@ fn the_defaults_button_is_armed_by_rows_not_by_a_category() {
             .unwrap();
         assert!(
             has_rows || key == "Keybindings",
-            "{key} opens onto nothing — every category leads somewhere since 1139"
+            "{key} opens onto nothing — every category leads somewhere"
         );
         s.run(&format!("BenillaOptionsFrameCategoryListRow{key}:Click()"))
             .unwrap();
@@ -3701,10 +3701,10 @@ fn the_max_camera_distance_slider_stores_a_factor_and_reads_out_yards() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// 1.12's dropdown writes 1/2/3 for `cameraSmoothStyle`, but the engine's tables are 0 Never,
-/// 1 Smart, 2 Always: the validator (`0x50c060`) accepts 3 while the terrain-tilt consumer
-/// (`0x50dbc0`) reads past its table. The entries carry the engine's values in the reference's
-/// order, a stray 3 still reads Never, and the plate follows the selection.
+/// 1.12's dropdown writes Smart 1, Always 2 and Never 0 for `cameraSmoothStyle`
+/// (`UIOptionsFrame.lua:525,536,547`); the validator (`0x50c060`) also accepts 3, which the
+/// terrain-tilt consumer (`0x50dbc0`) reads past its table. The entries carry those values in the
+/// reference's order, a stray 3 reads Never, and the plate follows the selection.
 #[test]
 fn the_camera_following_style_dropdown_carries_the_engine_enum_and_plate() {
     benilla_formats::wow_data_or_skip!();
@@ -3783,7 +3783,7 @@ fn the_camera_following_style_dropdown_carries_the_engine_enum_and_plate() {
         vec![("cameraSmoothStyle".to_string(), "2".to_string())]
     );
 
-    // A 1.12 client's config says "3" for Never; the nearest stop by number would be Always.
+    // A stored "3" is in range but no entry's value: it shows as Never, not the nearest, Always.
     s.set_cvar_host("cameraSmoothStyle", "3");
     s.run("BenillaOptionsFrameCategoryListRowAudio:Click(); BenillaOptionsFrameCategoryListRowControls:Click()")
         .unwrap();

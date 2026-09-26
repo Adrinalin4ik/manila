@@ -178,15 +178,16 @@ fn click_focuses_regardless_of_autofocus_and_transition_order_is_lost_then_gaine
     s.run(
         r#"
         log = {}
-        local function wire(name, y)
+        local function wire(name, y, autoFocus)
             local f = CreateFrame("EditBox", name)
+            f:SetAutoFocus(autoFocus)
             f:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 0, y)
             f:SetWidth(100); f:SetHeight(20)
             f:SetScript("OnEditFocusGained", function() table.insert(log, "gained"..name) end)
             f:SetScript("OnEditFocusLost", function() table.insert(log, "lost"..name) end)
         end
-        wire("A", 0)      -- rect bottom 0..20
-        wire("B", 100)    -- rect bottom 100..120
+        wire("A", 0, true)     -- rect bottom 0..20
+        wire("B", 100, false)  -- rect bottom 100..120: a click focuses it without autoFocus
     "#,
     )
     .unwrap();
@@ -496,7 +497,7 @@ fn alt_arrow_key_mode_is_the_flag_and_the_engine_core_no_longer_swallows_moves()
 
     assert!(
         s.eval::<bool>("return E.SetIgnoreArrows == nil").unwrap(),
-        "5875 has no SetIgnoreArrows — publishing it was decision 1189's error"
+        "5875 has no SetIgnoreArrows — an EditBox must not publish it"
     );
 
     assert_eq!(

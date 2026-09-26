@@ -141,7 +141,11 @@ impl super::UiScript {
     /// `SpellIsTargeting()` reads and `SpellStopTargeting()` gates on. Pushed each frame by the
     /// app's targeting feed (`benilla::ui_action`), before the input pass runs the ESC chain.
     pub fn set_spell_targeting(&mut self, targeting: bool) {
-        self.model_mut().spell_targeting = targeting;
+        let mut model = self.model_mut();
+        model.spell_targeting = targeting;
+        if targeting {
+            model.repair_mode = false;
+        }
     }
 
     /// Drain the `SpellStopTargeting()` trigger, the ESC chain's rung (`UIParent.lua:1490`); the

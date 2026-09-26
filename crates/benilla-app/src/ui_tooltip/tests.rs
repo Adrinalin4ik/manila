@@ -1,4 +1,4 @@
-//! The spell-view cell tests, against the real 5875 data.
+//! The spell-view cell tests, against the real 5875 data, and the feed's place in the schedule.
 
 use super::*;
 use crate::ui_action::Spells;
@@ -367,7 +367,7 @@ fn range_cell_on_real_data() {
 
 /// The required-item, chance-to-X and reagents lines on the real data.
 #[test]
-fn the_pinned_c6_lines_on_real_data() {
+fn the_required_item_chance_and_reagent_lines_on_real_data() {
     let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let spells = Spells {
@@ -504,4 +504,16 @@ fn the_locked_line_greens_when_the_lock_can_be_opened() {
         TooltipTint::LockOpen
     );
     assert_eq!(locked_line_tint(None), TooltipTint::LockOpen);
+}
+
+/// A trainer list that lands this frame is hoverable in this frame's tick: the trainer feed derives
+/// the subjects the spell feed pushes.
+#[test]
+fn the_spell_feed_runs_after_the_trainer_feed() {
+    let mut app = crate::game_plugins::schedule_tests::headless_client();
+    assert!(crate::test_support::runs_before(
+        &mut app,
+        crate::ui_trainer::feed_trainer,
+        feed_spell_tooltips
+    ));
 }

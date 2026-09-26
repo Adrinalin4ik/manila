@@ -42,8 +42,8 @@ pub(crate) struct UnitCombatFeedback {
 
 /// One `COMBAT_TEXT_UPDATE` (event `0x21E`, via `0x703f50`), fired at packet parse by every
 /// producer, melee included (`0x6255b0` → `0x629d30`); `data`/`extra` are `arg2`/`arg3`. Fired only
-/// for the player as recipient; the reference's emit shares the chat combat log's category scope,
-/// so it can fire for other participants, by a rule untraced.
+/// when the unit the line is about is the player: each emitter tests that unit's class (`0x5efea0`)
+/// for 0 before its helper (`0x629ef1`, `0x62d046`, `0x62834b`).
 #[derive(Message, Clone)]
 pub(crate) struct CombatTextEvent {
     pub(crate) message_type: &'static str,
@@ -1681,7 +1681,7 @@ mod tests {
         assert_eq!(
             team(&[(BYTES_0, human_warrior), (FACTIONTEMPLATE, GM_TEMPLATE)]),
             1,
-            "a GM keeps his race's side (report B378)"
+            "a GM keeps his race's side"
         );
         assert_eq!(
             team(&[(BYTES_0, scourge_mage), (FACTIONTEMPLATE, GM_TEMPLATE)]),
@@ -2097,7 +2097,7 @@ mod tests {
         };
         assert!(
             flag_events(step(&mut app, 0)).is_empty(),
-            "the login descriptor is a create: structurally silent (1098 §4)"
+            "the login descriptor is a create: structurally silent"
         );
 
         // `PLAYER_FLAGS_HIDE_HELM` `0x400` moves and the resting bit does not.

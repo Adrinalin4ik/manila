@@ -1154,17 +1154,20 @@ pub(crate) fn synthetic_roster(
             flags: 0,
         },
     ];
-    let lines = group.apply_list(
-        0,
-        0,
-        members,
-        0xF001,
-        Some(GroupLootInfo {
-            method: 2,
-            master: 0xF003,
-            threshold: 3,
-        }),
-    );
+    let lines = group
+        .apply_list(
+            0,
+            0,
+            members,
+            0xF001,
+            Some(GroupLootInfo {
+                method: 2,
+                master: 0xF003,
+                threshold: 3,
+            }),
+            None,
+        )
+        .lines;
     // Blip offsets from us on WoW axes (+x north, +y west), truncated to `i16` as on the wire.
     let seat = |dx: f32, dy: f32| player_xy.map(|(px, py)| ((px + dx) as i16, (py + dy) as i16));
     for (guid, hp, max, level, power_type, pos) in [
@@ -1255,17 +1258,20 @@ pub(crate) fn synthetic_raid(
     }
     // A raid we lead, so `IsRaidLeader()` is true and the leader-only controls are live.
     let leader = self_guid.unwrap_or(0);
-    let lines = group.apply_list(
-        1,
-        0, // our flags: subgroup 1 (0-based 0), no assistant bit
-        members,
-        leader,
-        Some(GroupLootInfo {
-            method: 2,
-            master: leader,
-            threshold: 3,
-        }),
-    );
+    let lines = group
+        .apply_list(
+            1,
+            0, // our flags: subgroup 1 (0-based 0), no assistant bit
+            members,
+            leader,
+            Some(GroupLootInfo {
+                method: 2,
+                master: leader,
+                threshold: 3,
+            }),
+            self_guid,
+        )
+        .lines;
     // Records for every member: fake guids never stream, so the merged view shows these.
     for (i, _) in ROSTER.iter().enumerate() {
         let guid = 0xF100 + i as u64;
@@ -1384,7 +1390,7 @@ mod tests {
         };
         let s = member_unit_state(&m, Some(&ghost), None, &GroupState::default(), None, None);
         assert!(s.ghost);
-        assert!(!s.dead, "a released ghost is not `dead` — the 0308 §1 trio");
+        assert!(!s.dead, "a released ghost is not `dead` — only a ghost");
 
         // The overlay ORs: a roster byte carrying the bit still wins over a record without it.
         let stale = GroupMemberEntry {
@@ -1493,7 +1499,7 @@ mod tests {
         test_apply_local(&mut group, &PartyRequest::Leave, me, None);
         assert!(!group.in_group && !group.test);
         synthetic_roster(&mut group, None);
-        group.apply_list(0, 0, vec![], 0x123, None);
+        group.apply_list(0, 0, vec![], 0x123, None, None);
         assert!(!group.test, "the real wire always wins");
     }
 
@@ -1607,10 +1613,10 @@ mod tests {
         }
 
         let mut names = NameCache::default();
-        names.insert_player(0x5E1F, "Sam".into(), None);
+        names.insert_player(0x5E1F, "Kel".into(), None);
         assert_eq!(
             raid_name_of(&group, me, &names, 0x5E1F).as_deref(),
-            Some("Sam")
+            Some("Kel")
         );
         assert_eq!(
             raid_name_of(&group, me, &names, 0xA11CE).as_deref(),
@@ -1622,7 +1628,7 @@ mod tests {
             raid_guid_for_name(&group, me, &names, "alice"),
             Some(0xA11CE)
         );
-        assert_eq!(raid_guid_for_name(&group, me, &names, "SAM"), Some(0x5E1F));
+        assert_eq!(raid_guid_for_name(&group, me, &names, "KEL"), Some(0x5E1F));
         assert_eq!(raid_guid_for_name(&group, me, &names, "Nobody"), None);
 
         // Outside a raid all are empty, so a raid verb in a party sends nothing.
@@ -1636,7 +1642,7 @@ mod tests {
         let mut group = GroupState::default();
         let me = Some(0x5E1Fu64);
         let mut names = NameCache::default();
-        names.insert_player(0x5E1F, "Sam".into(), None);
+        names.insert_player(0x5E1F, "Kel".into(), None);
         synthetic_raid(&mut group, &mut names, me);
         assert!(group.test, "the synthetic raid arms the sandbox");
         assert_eq!(group.group_type, GROUPTYPE_RAID);

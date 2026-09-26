@@ -1,29 +1,10 @@
-//! `$WOW_MIX_TAP=<path.wav>` — record the final mix to disk (decision 1112).
+//! `$WOW_MIX_TAP=<path.wav>`: record the final mix to disk.
 //!
-//! The crackle hunts (1026, 1109) kept hitting the same wall: every scheduling meter reads
-//! healthy while the director's ear still catches a crackle — because the meters watch the
-//! *pipeline* (deadlines, decoder liveness, stream position) and a crackle can live purely in
-//! the *waveform* (a clipped sum, a stepped parameter, a discontinuity none of our counters
-//! model). This closes the gap at the root: a [`kira::effect::Effect`] on the **main track**
-//! copies every processed frame into a lock-free ring, and a writer thread drains it to a
-//! standard WAV — so a reported crackle becomes data to scan, timestamp, and classify instead
-//! of a sound to argue about.
-//!
-//! Two properties matter:
-//! - **What is actually heard.** The tap is the main track's *last* effect, downstream of the
-//!   meter and the limiter (decision 1551), so the capture is the audible result — the waveform
-//!   to scan when a report survives everything upstream. The mix's raw, pre-limiter level is the
-//!   [`super::meter`]'s job and lands in the health report as a number; the tap no longer has to
-//!   double as the clipping detector it once was.
-//! - **Crash-safe file.** The writer patches the RIFF/data sizes on every flush, so the WAV is
-//!   valid up to the last second even if the app exits hard; there is no finalize step to miss.
-//!
-//! The audio-thread half never allocates or blocks (a fixed ring push per sample; overflow is
-//! counted, not waited on). The ring holds [`RING_SECONDS`] of stereo audio — the writer wakes
-//! every [`FLUSH_EVERY`] and would have to stall ~50× past its cadence before a sample drops.
-//!
-//! Read a capture back with `scripts/mixsum.py <path.wav>`: what the mix was doing, when, in
-//! numbers (clipping, level, silence, steps).
+//! A [`kira::effect::Effect`] last on the main track, after the meter and the limiter, copies
+//! every processed frame into a lock-free ring, and a writer thread drains it to a float WAV
+//! whose header sizes are patched on every flush, so the file is valid up to a hard exit. The
+//! audio thread never allocates or blocks: an overflow is counted, not waited on. Read a capture
+//! back with `scripts/mixsum.py <path.wav>`.
 
 use bevy::prelude::*;
 use kira::effect::{Effect, EffectBuilder};
@@ -38,10 +19,8 @@ const RING_SECONDS: usize = 8;
 /// Writer wake cadence. Also the upper bound on audio lost at a hard kill.
 const FLUSH_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Install the tap on `main_track_builder` if `$WOW_MIX_TAP` names a path. Returns the builder
-/// unchanged otherwise. `sample_rate` is the device rate the mixer negotiated — the WAV header
-/// must match what the renderer actually produces, so an unprobeable device (`None`) skips the
-/// tap rather than record on a guessed time axis.
+/// Install the tap if `$WOW_MIX_TAP` names a path. `sample_rate` is the negotiated device rate;
+/// without one the tap is skipped rather than recorded on a guessed time axis.
 pub(super) fn install(
     builder: kira::track::MainTrackBuilder,
     sample_rate: Option<u32>,
@@ -127,11 +106,10 @@ impl EffectBuilder for TapBuilder {
     }
 }
 
-/// The audio-thread half: copy each frame into the ring. Push-and-count on overflow — the one
-/// thing this must never do is block or allocate on the render path.
+/// The audio-thread half: copy each frame into the ring, counting overflow.
 struct Tap {
     producer: rtrb::Producer<f32>,
-    /// Frames pushed so far — the file's write position, published for the game thread to read.
+    /// Frames pushed so far, published for the game thread.
     frames: Arc<AtomicU64>,
     dropped: u64,
 }
@@ -148,9 +126,8 @@ impl Effect for Tap {
     }
 }
 
-/// The writer half: drain the ring to the WAV, patching the header sizes each flush so the file
-/// on disk is always valid. Ends (and logs the tally) when the producer side is dropped — i.e.
-/// when the mixer itself is torn down at app exit.
+/// The writer half: drain the ring to the WAV, patching the header sizes each flush. Ends when
+/// the producer drops with the mixer at app exit.
 fn writer(mut file: std::fs::File, mut consumer: rtrb::Consumer<f32>, sample_rate: u32) {
     if let Err(e) = file.write_all(&wav_header(sample_rate, 0)) {
         warn!("mix tap: header write failed: {e}");
@@ -170,7 +147,7 @@ fn writer(mut file: std::fs::File, mut consumer: rtrb::Consumer<f32>, sample_rat
                 return;
             }
             samples_written += (buf.len() / 4) as u64;
-            // Patch the sizes so the file is valid as-is (crash-safe: no finalize step).
+            // Patch the sizes so the file is valid as it stands.
             let header = wav_header(sample_rate, samples_written);
             if file.seek(SeekFrom::Start(0)).is_ok() {
                 let _ = file.write_all(&header);
@@ -188,8 +165,7 @@ fn writer(mut file: std::fs::File, mut consumer: rtrb::Consumer<f32>, sample_rat
     }
 }
 
-/// A 44-byte WAV header for stereo IEEE-float-32 at `sample_rate`, sized for `samples` samples
-/// (total across both channels). Rewritten in place on every flush.
+/// A 44-byte stereo float-32 WAV header for `samples` samples across both channels.
 fn wav_header(sample_rate: u32, samples: u64) -> [u8; 44] {
     let data_bytes = (samples * 4) as u32;
     let byte_rate = sample_rate * 2 * 4;
@@ -214,9 +190,7 @@ fn wav_header(sample_rate: u32, samples: u64) -> [u8; 44] {
 mod tests {
     use super::*;
 
-    /// The header is a valid stereo float-32 WAV that a strict parser accepts, and the patched
-    /// sizes match the sample count — the crash-safety of the tap rests on every flush leaving
-    /// a well-formed file.
+    /// Every flush must leave a well-formed WAV whose sizes match the sample count.
     #[test]
     fn wav_header_is_well_formed_and_patchable() {
         let h = wav_header(48_000, 96_000); // 1 s of stereo
@@ -232,8 +206,7 @@ mod tests {
         assert_eq!(u32::from_le_bytes(h[28..32].try_into().unwrap()), 384_000);
         assert_eq!(u32::from_le_bytes(h[40..44].try_into().unwrap()), 384_000);
 
-        // kira's own symphonia decoder accepts the produced file — the exact consumer a
-        // captured tap goes back through when we analyze it.
+        // kira's own decoder accepts the produced file.
         let mut file = Vec::new();
         file.extend_from_slice(&wav_header(48_000, 4));
         for s in [0.5f32, -0.5, 0.25, -0.25] {

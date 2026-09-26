@@ -91,7 +91,7 @@ fn shipped_loot_frame_drives_end_to_end() {
     assert_eq!(
         load_xml(&s, "Interface\\FrameXML\\LootFrame.xml"),
         34,
-        "the STOCK file's own shape (1751): the window, its portrait overlay and Next/Prev art, \
+        "the STOCK file's own shape: the window, its portrait overlay and Next/Prev art, \
          four LootButton rows each carrying ItemButtonTemplate's sub-frames, the two pagers, the \
          close button, and GroupLootDropDown with the dropdown template's own children. Our \
          transcription materialized 10 — a count is a fingerprint of a file, not a property of a \
@@ -221,7 +221,7 @@ fn shipped_loot_frame_drives_end_to_end() {
     assert!(!s.take_loot_close());
 
     // The looted coin row hides in place, off `LOOT_SLOT_CLEARED` alone, and the items keep their
-    // rows; `LOOT_UPDATE` is not a 1.12 event and reaches nothing.
+    // rows.
     let mut coin_looted = coin_and_two_items();
     coin_looted.rows[0] = None;
     s.set_loot(Some(coin_looted));
@@ -229,7 +229,6 @@ fn shipped_loot_frame_drives_end_to_end() {
         "LOOT_SLOT_CLEARED",
         vec![benilla_ui::script::ScriptValue::Int(1)],
     );
-    s.fire_event("LOOT_UPDATE", vec![]);
     let vis2: (bool, bool, bool) = s
         .eval(
             "return LootButton1:IsVisible(), LootButton2:IsVisible(),\n\
@@ -401,7 +400,7 @@ fn shipped_loot_frame_pages_five_items() {
     assert_eq!(pager2, (true, false), "page 2: Up shown, Down hidden");
 
     // Loot out page 1: it pages down by itself, off `LOOT_SLOT_CLEARED` alone
-    // (LootFrame.lua:38-50); `LOOT_UPDATE` is not a 1.12 event and reaches nothing.
+    // (LootFrame.lua:38-50).
     s.run("LootFrame_PageUp()").unwrap();
     let mut cleared = rows;
     cleared[0] = None;
@@ -418,7 +417,6 @@ fn shipped_loot_frame_pages_five_items() {
             vec![benilla_ui::script::ScriptValue::Int(row)],
         );
     }
-    s.fire_event("LOOT_UPDATE", vec![]);
     assert_eq!(
         s.eval::<i64>("return LootFrame.page").unwrap(),
         2,
