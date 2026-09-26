@@ -84,13 +84,14 @@ fn refresh_streamed_shadows(
 /// `prepass_fragment_shader` makes the otherwise depth-only directional-shadow pass run a fragment —
 /// the exact pair Bevy's prepass specializer requires to alpha-test in the shadow map.
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
-struct CutoutShadowCasterMaterial {
+// MONKEY (leftovers): crate-visible for the pipe_warm menagerie.
+pub(crate) struct CutoutShadowCasterMaterial {
     /// The leaf sheet, bound at material binding 0/1. Reusing the SAME image handle the forward pass
     /// draws makes the sampler inherit that image's clamp/repeat address mode, so the shadow
     /// silhouette matches the visible foliage (a cutout card's out-of-range UVs must clamp).
     #[texture(0)]
     #[sampler(1)]
-    leaf: Handle<Image>,
+    pub(crate) leaf: Handle<Image>,
 }
 
 impl Material for CutoutShadowCasterMaterial {
