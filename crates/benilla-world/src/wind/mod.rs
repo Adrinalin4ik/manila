@@ -190,7 +190,19 @@ fn update_wind(
     mut frame: ResMut<MonkeyFrame>,
     mut clock: Local<WindClock>,
     mut offset: Local<Option<f64>>,
+    mut logged_tier: Local<Option<u8>>,
 ) {
+    // MONKEY (fix-wind): name the live tier in the log (boot and every change), so a player run
+    // shows what the foliage receivers were given.
+    if *logged_tier != Some(quality.0) {
+        *logged_tier = Some(quality.0);
+        info!(
+            "MONKEY wind: foliageWind tier {} (grass {}, trees {})",
+            quality.0,
+            quality.0 >= 1,
+            quality.0 >= 2
+        );
+    }
     let offset = *offset.get_or_insert_with(capture_wind_offset);
     let seconds = time.elapsed_secs_f64() + offset;
     let storm = storm_blend(weather.sky_density);
@@ -329,6 +341,36 @@ mod tests {
             assert!((0.0..=1.0).contains(&s.gust));
             assert!(s.speed >= 0.0);
         }
+    }
+
+    /// MONKEY (fix-wind): the player path — no capture pin, the registered tier — publishes live
+    /// grass and tree rows every frame, and the travel keeps moving; tier 0 clears them.
+    #[test]
+    fn default_tier_publishes_moving_grass_and_tree_rows() {
+        use bevy::ecs::system::RunSystemOnce;
+        use std::time::Duration;
+        assert_eq!(FoliageWind::REGISTERED, 2);
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(WeatherState::default());
+        world.insert_resource(FoliageWind(FoliageWind::REGISTERED));
+        world.insert_resource(WindField::default());
+        world.insert_resource(MonkeyFrame::default());
+        let mut travel = Vec::new();
+        for _ in 0..3 {
+            world
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_millis(500));
+            world.run_system_once(update_wind).unwrap();
+            let rows = world.resource::<MonkeyFrame>().pack(0.5, 0.0);
+            assert_eq!(rows[5][1..], [1.0, 1.0, 1.0], "sway, grass, tree strength");
+            travel.push(rows[5][0]);
+        }
+        assert!(travel[0] < travel[1] && travel[1] < travel[2], "{travel:?}");
+        world.insert_resource(FoliageWind(0));
+        world.run_system_once(update_wind).unwrap();
+        let rows = world.resource::<MonkeyFrame>().pack(0.5, 0.0);
+        assert_eq!(rows[5][1..], [0.0, 0.0, 0.0]);
     }
 
     #[test]
