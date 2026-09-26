@@ -73,6 +73,14 @@ pub(crate) struct NetOffline;
 /// create or a destroy: emptying the world is a different experiment, and one already run.
 #[derive(Resource, Clone, Copy)]
 pub(crate) struct NetDebug {
+    /// **The master switch.** `/console netPackets 0` drains the inbound channel and applies
+    /// NOTHING - no creates, no destroys, no movement, not even our own. The world freezes as it
+    /// stands and the client keeps drawing it, which is the only way to price the whole wire
+    /// against a scene that is otherwise identical: the two finer gates below each leave a part
+    /// of it running, so neither can answer "what does the network cost in total".
+    ///
+    /// Not a playable state, and not meant to be one.
+    pub(crate) packets: bool,
     /// Apply chat lines. `/console netChat 0` drops them at the drain.
     pub(crate) chat: bool,
     /// Apply other units' movement, descriptor fields, casts, swings and emotes.
@@ -82,6 +90,7 @@ pub(crate) struct NetDebug {
 impl Default for NetDebug {
     fn default() -> Self {
         Self {
+            packets: true,
             chat: true,
             others: true,
         }
@@ -94,6 +103,13 @@ pub(crate) fn on_net_debug_cvar(
     ev: On<crate::cvars::CvarChanged>,
     mut gate: ResMut<NetDebug>,
 ) {
+    if ev.is("netPackets") {
+        gate.packets = ev.flag();
+        info!(
+            "net debug: ALL inbound packets {}",
+            if gate.packets { "ON" } else { "OFF (the world is frozen)" }
+        );
+    }
     if ev.is("netChat") {
         gate.chat = ev.flag();
         info!("net debug: chat {}", if gate.chat { "ON" } else { "OFF" });

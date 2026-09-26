@@ -681,6 +681,13 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // swings and emotes, ours excepted. Both are measurement switches for an A/B inside one
     // session: the draw-side player-distance slider changed nothing, because hiding an entity
     // stops pixels while every per-entity sweep goes on paying. These refuse the packet instead.
+    // The master switch - everything, ours included. Not a playable state: it exists so the whole
+    // wire can be priced against one scene, which neither finer gate can do alone.
+    ours(
+        "netPackets",
+        "1",
+        "benilla's own - 1.12 has no way to refuse a packet the client already parsed",
+    ),
     ours(
         "netChat",
         "1",

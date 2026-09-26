@@ -72,6 +72,12 @@ pub(crate) fn apply_net_updates(world: &mut World) {
     // stops pixels, not work.
     {
         let gate = *world.resource::<super::NetDebug>();
+        // The master switch: the channel is still DRAINED - leaving it to back up would measure
+        // a growing queue rather than a quiet wire - and nothing is applied.
+        if !gate.packets {
+            crate::perf::journal::note_net_dropped(0, events.len() as u32);
+            return;
+        }
         if !gate.chat || !gate.others {
             let me = world.resource::<SelfGuid>().0;
             let before = events.len();
