@@ -6,12 +6,13 @@
 //! |---|---|---|---|---|
 //! | `skyDither` | 0 Off / 1 On | 0 | 1 | `benilla_world::ffx_glow::SkyDither` |
 //! | `foliageWind` | 0 Off / 1 Grass / 2 Grass + trees | 2 | 2 | `benilla_world::wind::FoliageWind` |
+//! | `foliageWindStrength` | 0.25..3 sway gain | 1 | not governed | `benilla_world::wind::FoliageWindStrength` |
 //! | `fogModel` | 0 Classic / 1 Modern | 0 | 1 | `benilla_world::lighting::FogModelSetting` |
 //! | `rainSurfaces` | 0 Off / 1 On | 1 | 1 | `benilla_world::weather::RainSurfaces` |
 
 use benilla_world::ffx_glow::SkyDither;
 use benilla_world::lighting::FogModelSetting;
-use benilla_world::wind::FoliageWind;
+use benilla_world::wind::{FoliageWind, FoliageWindStrength};
 use bevy::prelude::*;
 use benilla_world::weather::RainSurfaces; // MONKEY (wet)
 
@@ -20,6 +21,7 @@ pub(crate) fn on_cvar(
     ev: On<crate::cvars::CvarChanged>,
     mut dither: ResMut<SkyDither>,
     mut foliage_wind: ResMut<FoliageWind>,
+    mut wind_strength: ResMut<FoliageWindStrength>, // MONKEY (fix-wind)
     // MONKEY (fog)
     mut fog_model: ResMut<FogModelSetting>,
     mut rain: ResMut<RainSurfaces>, // MONKEY (wet)
@@ -39,6 +41,13 @@ pub(crate) fn on_cvar(
             let want = requested.clamp(0.0, 2.0) as u8;
             if foliage_wind.0 != want {
                 foliage_wind.0 = want;
+            }
+        }
+        // MONKEY (fix-wind): the sway gain, live, clamped to the slider's 0.25..3.
+        "foliagewindstrength" => {
+            let want = FoliageWindStrength::from_cvar(ev.num());
+            if *wind_strength != want {
+                *wind_strength = want;
             }
         }
         // MONKEY (fog): `WOW_FOGMODEL` still wins for the session (captures).
@@ -74,6 +83,7 @@ impl Plugin for MonkeyGfxPlugin {
             .insert_resource(FoliageWind(
                 foliage_wind_pin().unwrap_or(FoliageWind::REGISTERED),
             ))
+            .init_resource::<FoliageWindStrength>() // MONKEY (fix-wind)
             .init_resource::<FogModelSetting>()
             .init_resource::<RainSurfaces>() // MONKEY (wet)
             .add_observer(on_cvar);

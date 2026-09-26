@@ -543,6 +543,7 @@
                 foliageWind = "Foliage Wind",
                 windGrass = "Grass",
                 windTrees = "Grass + Trees",
+                foliageWindStrength = "Foliage Wind Strength", -- MONKEY (fix-wind)
                 -- MONKEY (ao): localised contact-shadow row.
                 ambientOcclusion = "Ambient Occlusion",
                 -- MONKEY (lampfog)
@@ -707,6 +708,11 @@
                         "Grass bends in two travelling wind waves and parts around nearby characters. "
                         .. "Grass + Trees also gives classified tree and bush foliage a gentle sway.\n\n"
                         .. "Off makes no vertex displacement and restores the unchanged image. Tree shadows stay static.",
+                    -- MONKEY (fix-wind)
+                    FOLIAGE_WIND_STRENGTH =
+                        "How far grass and foliage swing in the wind. 100% is the standard sway; lower "
+                        .. "is calmer, higher is a blustery day. Storms swing everything harder on top. "
+                        .. "Grass still parts around characters the same way. Needs Foliage Wind on.",
                     -- MONKEY (ao): what the contact shadows touch and what they spare.
                     AMBIENT_OCCLUSION =
                         "Soft contact shadows where surfaces meet: under props and furniture, in the corners "
@@ -782,6 +788,7 @@
                 foliageWind = "Ветер листвы",
                 windGrass = "Трава",
                 windTrees = "Трава + деревья",
+                foliageWindStrength = "Сила ветра листвы", -- MONKEY (fix-wind)
                 -- MONKEY (ao): Russian contact-shadow row.
                 ambientOcclusion = "Затенение окружения",
                 -- MONKEY (lampfog)
@@ -956,6 +963,11 @@
                         "Трава гнётся двумя бегущими волнами ветра и расступается вокруг персонажей. "
                         .. "Трава + деревья также добавляет мягкое качание листвы деревьев и кустов.\n\n"
                         .. "Выключено не смещает вершины и восстанавливает исходный вид. Тени деревьев остаются неподвижными.",
+                    -- MONKEY (fix-wind)
+                    FOLIAGE_WIND_STRENGTH =
+                        "Насколько сильно трава и листва качаются на ветру. 100% — обычное качание; меньше — "
+                        .. "спокойнее, больше — ветреный день. В грозу всё качается ещё сильнее. "
+                        .. "Трава по-прежнему расступается вокруг персонажей. Работает, если включён ветер листвы.",
                     -- MONKEY (ao): Russian contact-shadow explanation.
                     AMBIENT_OCCLUSION =
                         "Мягкие контактные тени там, где поверхности соприкасаются: под предметами и мебелью, "
@@ -1049,6 +1061,8 @@
                 "RowRainSurfaces",
                 -- MONKEY (wind): appended for conflict-free lane merges.
                 "RowFoliageWind",
+                -- MONKEY (fix-wind): the sway strength, right under its tier.
+                "RowFoliageWindStrength",
                 -- MONKEY (ao): appended so the other rows keep their indices.
                 "RowAmbientOcclusion",
                 -- MONKEY (lampfog)
@@ -1574,6 +1588,9 @@
                 -- MONKEY (daylight: terrain torch casters): the ground only casts for outdoor fires.
                 OptionsRow_SetEnabled(getglobal(base .. "RowTorchTerrainShadows"),
                     GetCVar("exteriorShadows") ~= "0")
+                -- MONKEY (fix-wind): the strength only matters while some foliage sways.
+                OptionsRow_SetEnabled(getglobal(base .. "RowFoliageWindStrength"),
+                    GetCVar("foliageWind") ~= "0")
                 return
             end
             if key == "Controls" then
@@ -3260,11 +3277,24 @@
                                                 })
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <!-- MONKEY (ao): numeric tiers through the existing localised dropdown. -->
-                                        <Frame name="$parentRowAmbientOcclusion" inherits="OptionsDropdownRowTemplate">
+                                        <!-- MONKEY (fix-wind): the sway gain, 0.25..3 (100% = the shipped tuning). -->
+                                        <Frame name="$parentRowFoliageWindStrength" inherits="OptionsSliderRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowFoliageWind" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowFoliageWind" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "foliageWindStrength",
+                                                    BENILLA_ADVGFX.foliageWindStrength,
+                                                    "BENILLA_TOOLTIP_FOLIAGE_WIND_STRENGTH")
+                                                OptionsSliderRow_Setup(self, 0.25, 3, 0.25)
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- MONKEY (ao): numeric tiers through the existing localised dropdown. -->
+                                        <Frame name="$parentRowAmbientOcclusion" inherits="OptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowFoliageWindStrength" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowFoliageWindStrength" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 OptionsRow_OnLoad(self, "ambientOcclusion", BENILLA_ADVGFX.ambientOcclusion,

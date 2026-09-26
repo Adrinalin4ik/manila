@@ -964,6 +964,12 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "2",
         "benilla's own: foliage wind, 0 Off / 1 Grass / 2 Grass + trees",
     ),
+    // MONKEY (fix-wind): the sway strength slider under Foliage Wind; not on the preset ladder.
+    ours(
+        "foliageWindStrength",
+        "1",
+        "benilla's own: foliage wind strength, a gain on the sway, 0.25..3 (1 = the shipped tuning)",
+    ),
     // MONKEY (fog): the distance-fog model. 0 = the 1.12 linear fog (byte-identical), 1 = Modern
     // (exponential, sun/horizon colour, end-fog shift, fog end decoupled from farclip past 777).
     // Default 0; the Graphics preset's High sets 1.
@@ -4420,6 +4426,7 @@ mod tests {
             app.init_resource::<benilla_world::lighting::FogModelSetting>();
             // MONKEY (wind)
             app.init_resource::<benilla_world::wind::FoliageWind>();
+            app.init_resource::<benilla_world::wind::FoliageWindStrength>(); // MONKEY (fix-wind)
             app.init_resource::<benilla_world::weather::RainSurfaces>(); // MONKEY (wet)
             app.add_observer(crate::monkey_gfx::on_cvar);
         },
