@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, State};
-use axum::http::{header, HeaderName, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -261,7 +261,33 @@ fn is_missing(err: &anyhow::Error) -> bool {
     msg.contains("not in patch chain") || msg.contains("deleted from patch chain")
 }
 
-async fn file(method: Method, uri: Uri, State(state): State<DataState>) -> Response {
+/// A strong ETag for a chain file: its name and its length.
+///
+/// **Why a file served `immutable` still needs one.** `immutable` tells a browser not to ASK;
+/// it does not stop one that has decided to. A hard reload and DevTools' "Disable cache" both
+/// send `Cache-Control: no-cache` on every request - the owner's own network tab showed exactly
+/// that - and a response with no validator can only answer such a request with the whole body.
+/// With a validator it answers 304 and no body, so the workflow this project actually uses
+/// (hard-reload to pick up a new bundle) stops re-downloading the game.
+///
+/// Name plus length, not a hash of the bytes: the content behind one name in one mounted chain
+/// does not change, which is the same assumption `immutable` already makes, and hashing every
+/// file on every request would cost more than the transfer it saves.
+fn etag_for(name: &str, len: usize) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("\"{h:016x}-{len:x}\"")
+}
+
+async fn file(
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    State(state): State<DataState>,
+) -> Response {
     let raw = uri.path().strip_prefix("/data/").unwrap_or("");
     let decoded = percent_encoding::percent_decode_str(raw).decode_utf8_lossy();
     let name = decoded.replace('/', "\\");
@@ -275,6 +301,26 @@ async fn file(method: Method, uri: Uri, State(state): State<DataState>) -> Respo
     let read = tokio::task::spawn_blocking(move || chain.read(&name)).await;
     match read {
         Ok(Ok(bytes)) => {
+            let etag = etag_for(uri.path(), bytes.len());
+            // A revalidating request - a hard reload, or DevTools with caching disabled - gets
+            // 304 and no body instead of the file again.
+            if headers
+                .get(header::IF_NONE_MATCH)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.split(',').any(|t| t.trim() == etag))
+            {
+                return (
+                    StatusCode::NOT_MODIFIED,
+                    [
+                        (header::ETAG, etag.as_str()),
+                        (
+                            header::CACHE_CONTROL,
+                            "private, max-age=31536000, immutable",
+                        ),
+                    ],
+                )
+                    .into_response();
+            }
             let body = if method == Method::HEAD {
                 Vec::new()
             } else {
@@ -290,6 +336,7 @@ async fn file(method: Method, uri: Uri, State(state): State<DataState>) -> Respo
                         header::CACHE_CONTROL,
                         "private, max-age=31536000, immutable",
                     ),
+                    (header::ETAG, etag.as_str()),
                 ],
                 body,
             )
