@@ -26,6 +26,10 @@ pub const SKYBOX_FULL_DAY: u32 = 0x1;
 pub const SKYBOX_KEEP_CELESTIAL: u32 = 0x2;
 /// Flag `0x4`: an alpha cone in the final fog colour draws over the model's horizon.
 pub const SKYBOX_FOG_BLEND: u32 = 0x4;
+/// MONKEY (leftovers): flag `0x8`: sun shafts run under this sky even where they would fade.
+pub const SKYBOX_FORCE_SUN_SHAFTS: u32 = 0x8;
+/// MONKEY (leftovers): flag `0x10`: the fog's sun-colour lobe is off under this sky.
+pub const SKYBOX_NO_SUN_FOG: u32 = 0x10;
 
 /// One `LightSkybox.dbc` row.
 #[derive(Clone, Debug, PartialEq, Eq)]
