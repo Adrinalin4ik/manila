@@ -7,6 +7,23 @@ use bevy::prelude::*;
 
 use super::{Guid, NetEvents, SelfGuid, SelfPlayer};
 
+/// The session's own lifecycle - what `netPackets 0` still lets through, so a REAL disconnect is
+/// still reported while the world is frozen. Everything else about the world is refused.
+fn is_session_lifecycle(ev: &SessionEvent) -> bool {
+    use SessionEvent as E;
+    matches!(
+        ev,
+        E::Disconnected { .. }
+            | E::LoggedOut
+            | E::LogoutResponse { .. }
+            | E::LogoutCancelled
+            | E::Teleport { .. }
+            | E::Worldport { .. }
+            | E::TransferPending { .. }
+            | E::TransferAborted { .. }
+    )
+}
+
 // ── The debug gates' classifiers ─────────────────────────────────────────────────────────────────
 
 /// Is this event a CHAT line, for `/console netChat 0`? The player-visible chat surface: the
@@ -75,7 +92,21 @@ pub(crate) fn apply_net_updates(world: &mut World) {
         // The master switch: the channel is still DRAINED - leaving it to back up would measure
         // a growing queue rather than a quiet wire - and nothing is applied.
         if !gate.packets {
-            crate::perf::journal::note_net_dropped(0, events.len() as u32);
+            // **Offline, not disconnected.** The socket is untouched and `web_writer_pump` runs
+            // ahead of this in the same stage, so pings keep going out and the server never drops
+            // us - the world simply stops changing.
+            //
+            // The session's own lifecycle still gets through. Swallowing a real `Disconnected`
+            // would leave the client showing a frozen world and saying nothing, which is
+            // indistinguishable from the switch working, and that is the one confusion a debug
+            // switch must not create.
+            let before = events.len();
+            let live: Vec<SessionEvent> = events.into_iter().filter(is_session_lifecycle).collect();
+            crate::perf::journal::note_net_dropped(0, (before - live.len()) as u32);
+            if live.is_empty() {
+                return;
+            }
+            super::handlers::dispatch(world, live);
             return;
         }
         if !gate.chat || !gate.others {
