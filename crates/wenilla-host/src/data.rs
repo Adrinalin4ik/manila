@@ -36,6 +36,50 @@ pub struct DataState {
     modules: Option<Arc<PathBuf>>,
 }
 
+/// A short fingerprint of the mounted chain, for the client to key its asset cache on.
+///
+/// Hashed from the chain's own NAME LIST - the same bytes `__index` serves, so it costs one
+/// shared single-flight listing and not a second walk. Two installs whose files are named
+/// identically hash the same even if the bytes differ; that is the honest limit of doing this
+/// without reading tens of gigabytes, and it separates the case that actually bites (a different
+/// game install, with a different set of archives) from the one that does not.
+///
+/// `no-store`, alone among these routes: this is the response that tells a client its cache is
+/// stale, so it is the one that must never come from a cache itself.
+async fn chain_id(State(state): State<DataState>) -> Response {
+    let chain = Arc::clone(&state.chain);
+    let listed = state
+        .index
+        .get(move || {
+            let entries = chain.list()?;
+            let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+            Ok(serde_json::to_vec(&names)?)
+        })
+        .await;
+    match listed {
+        Ok(bytes) => {
+            // FNV-1a, written out rather than reached for: it has to be identical across host
+            // restarts or every restart invalidates every client's cache, and a hasher whose seed
+            // is randomised per process would do exactly that.
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            for b in bytes.iter() {
+                h ^= u64::from(*b);
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "text/plain"),
+                    (header::CACHE_CONTROL, "no-store"),
+                ],
+                format!("{h:016x}"),
+            )
+                .into_response()
+        }
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
 /// Single-flight initialization; transient list errors are retried on the next request.
 #[derive(Default)]
 struct IndexCache(Arc<OnceCell<Bytes>>);
@@ -83,6 +127,12 @@ pub fn router(chain: Arc<Chain>) -> Router {
 pub fn router_with_modules(chain: Arc<Chain>, modules: Option<PathBuf>) -> Router {
     let mut router = Router::new()
         .route("/data/__index", get(index))
+        // **Which chain is mounted**, so the client can key its cache on it. Every file below is
+        // served `immutable, max-age=31536000` and the URL carries nothing chain-specific, so
+        // pointing `--data` at a different install leaves a year of the PREVIOUS one in the
+        // browser under the same addresses - a client running a mix of two data folders, which is
+        // exactly what happened here when the host moved from a vanilla chain to an HD one.
+        .route("/data/__chain", get(chain_id))
         // axum's matchit picks the more specific literal route above over this wildcard on its
         // own — registration order here doesn't matter.
         .route("/data/{*name}", get(file).head(file));

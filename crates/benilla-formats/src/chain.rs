@@ -67,6 +67,8 @@ pub struct Chain {
 #[cfg(target_arch = "wasm32")]
 pub struct Chain {
     base: String,
+    /// The mounted install's fingerprint, fetched once - see [`Chain::cache_key`].
+    chain_id: std::sync::OnceLock<String>,
     /// `None` inside = the index could not be fetched/parsed; `contains` falls back to `HEAD`.
     index: std::sync::OnceLock<Option<std::collections::HashSet<String>>>,
     /// Names the INDEX does not list, and what the host said about them — one entry per distinct
@@ -106,6 +108,22 @@ pub struct Chain {
     recent: std::sync::Mutex<ReadCache>,
 }
 
+static READ_HIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static READ_MISS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static READ_KB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static READ_TOO_BIG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// `(hits, misses, kilobytes fetched, entries refused for size)` since the last call, and the reset.
+pub fn take_read_counts() -> (u32, u32, u64, u32) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        READ_HIT.swap(0, Relaxed),
+        READ_MISS.swap(0, Relaxed),
+        READ_KB.swap(0, Relaxed),
+        READ_TOO_BIG.swap(0, Relaxed),
+    )
+}
+
 /// [`Chain::recent`]'s store: bytes keyed by [`Chain::index_key`], bounded by TOTAL BYTES rather
 /// than entry count, evicted least-recently-used.
 ///
@@ -131,16 +149,30 @@ impl ReadCache {
     /// Per-entry ceiling. Anything larger is read straight through and never stored.
     const ENTRY_MAX: usize = 4 * 1024 * 1024;
 
+    /// Reads served from memory, reads that went to the host, and the bytes the latter moved -
+    /// the `rd_hit`/`rd_miss`/`rd_kb` columns.
+    ///
+    /// Added because a screenshot of the network tab cannot answer the question it raises. Truncated
+    /// names look like repeats whether or not they are, two different loaders (this one over XHR,
+    /// bevy's asset path over `fetch`) are interleaved in it, and a first load is SUPPOSED to be a
+    /// download. Counting separates "our cache is missing" from "the browser is not keeping what we
+    /// told it to keep", which need opposite fixes.
     fn get(&mut self, key: &str) -> Option<Vec<u8>> {
         self.clock += 1;
         let clock = self.clock;
-        let (bytes, used) = self.entries.get_mut(key)?;
+        let Some((bytes, used)) = self.entries.get_mut(key) else {
+            READ_MISS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return None;
+        };
+        READ_HIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         *used = clock;
         Some(bytes.clone())
     }
 
     fn put(&mut self, key: String, bytes: &[u8]) {
+        READ_KB.fetch_add((bytes.len() / 1024) as u64, std::sync::atomic::Ordering::Relaxed);
         if bytes.len() > Self::ENTRY_MAX {
+            READ_TOO_BIG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return;
         }
         self.clock += 1;
@@ -332,15 +364,48 @@ impl Chain {
     pub fn open(_path: &Path) -> Result<Self> {
         Ok(Self {
             base: crate::web::data_base(),
+            chain_id: std::sync::OnceLock::new(),
             index: std::sync::OnceLock::new(),
             verified: std::sync::Mutex::new(std::collections::HashMap::new()),
             recent: std::sync::Mutex::new(ReadCache::default()),
         })
     }
 
+    /// The mounted chain's fingerprint (`GET /data/__chain`), fetched once and remembered.
+    ///
+    /// It is the cache key, and it exists because every file below is served
+    /// `immutable, max-age=31536000` while the URL carries nothing about WHICH install is mounted.
+    /// Point the host at a different `--data` and the browser answers a year of the previous one
+    /// from disk, under the same addresses: a client running a mix of two game installs, with
+    /// nothing anywhere saying so. That happened here, moving a host from a vanilla chain to an HD
+    /// one, and it silently invalidated a round of HD testing.
+    ///
+    /// An empty string when the host has no such route (an older one, or a failure). Then the URLs
+    /// are what they always were and the behaviour is exactly today's - the fingerprint can make
+    /// the cache correct, and must never make the client refuse to run.
+    fn cache_key(&self) -> &str {
+        self.chain_id
+            .get_or_init(|| {
+                crate::web::fetch_sync(&format!("{}/__chain", self.base))
+                    .ok()
+                    .and_then(|b| String::from_utf8(b).ok())
+                    .filter(|s| !s.is_empty() && s.len() <= 32)
+                    .unwrap_or_default()
+            })
+            .as_str()
+    }
+
     /// The chain file's Data URL scheme address — the client half of the Lane A ↔ Lane H contract.
+    ///
+    /// `?v=` is the cache key, not a parameter: the host ignores the query, and the browser keys
+    /// its cache on the whole URL. So one install's files stay `immutable` for the year they
+    /// deserve, and a different install is a different address rather than a stale hit.
     fn url_for(&self, name: &str) -> String {
-        format!("{}/{}", self.base, crate::web::encode_name(name))
+        let key = self.cache_key();
+        if key.is_empty() {
+            return format!("{}/{}", self.base, crate::web::encode_name(name));
+        }
+        format!("{}/{}?v={key}", self.base, crate::web::encode_name(name))
     }
 
     /// The index's key for a name: MPQ hashing's equivalence — case-insensitive, `/` ≡ `\`.
