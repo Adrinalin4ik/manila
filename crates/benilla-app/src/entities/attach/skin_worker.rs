@@ -143,9 +143,23 @@ impl PendingSkins {
 /// blits, the fetches and the BLP decodes all happened in the Worker. It is metered into the same
 /// `skin_us` column as the synchronous composite so that column keeps meaning exactly what it
 /// meant before: microseconds of the DRAWING thread spent on skins.
+///
+/// **Replacing the image is not enough, and this is the last hop.** `bevy_render`'s
+/// `render_asset.rs:279` re-extracts a Modified *Image* and builds a NEW `GpuImage` with a new
+/// `Texture`; `bevy_pbr`'s `material.rs` declares no render-asset dependency on the images a
+/// material samples, so a material whose bind group was already prepared goes on pointing at the
+/// old texture — for ever. That is the naked-body defect: a character rendered before its atlas
+/// landed kept the base-only skin, while one whose atlas arrived before it was ever drawn came out
+/// dressed. Mixed, and deterministic by timing, which is exactly what it looked like.
+///
+/// So every material sampling a replaced atlas is touched through `get_mut`, which emits
+/// `AssetEvent::Modified` for the MATERIAL and re-prepares its bind group against the new texture.
+/// One pass over ~2,240 materials on an arrival frame only; frames with nothing to collect leave
+/// at the first line.
 pub(in crate::entities) fn drain_skin_worker(
     mut pending: ResMut<PendingSkins>,
     mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<benilla_assets::materials::WowModelMaterial>>,
     world_assets: Option<Res<WorldAssets>>,
     sections: Option<Res<SkinSections>>,
 ) {
@@ -153,6 +167,7 @@ pub(in crate::entities) fn drain_skin_worker(
         return;
     }
     let mut finished = Vec::new();
+    let mut replaced: Vec<AssetId<Image>> = Vec::new();
     for (i, p) in pending.live.iter().enumerate() {
         let Some(bytes) = collect(p.id) else { continue };
         // Timed per atlas, and only when one actually arrived: a sample taken on every frame that
@@ -171,6 +186,7 @@ pub(in crate::entities) fn drain_skin_worker(
                 p.handle.id(),
                 repeat_texture_authored(benilla_assets::for_upload(atlas), (true, true)),
             );
+            replaced.push(p.handle.id());
         }
         crate::perf::journal::note_skin_composite(started.elapsed().as_micros() as u64);
         finished.push(i);
@@ -178,5 +194,22 @@ pub(in crate::entities) fn drain_skin_worker(
     // Descending, so each `swap_remove` can only pull in an index already dealt with.
     for i in finished.into_iter().rev() {
         pending.live.swap_remove(i);
+    }
+    if !replaced.is_empty() {
+        // Gathered first, because `get_mut` needs the mutable borrow the scan is holding.
+        let stale: Vec<_> = materials
+            .iter()
+            .filter(|(_, m)| {
+                m.base
+                    .base_color_texture
+                    .as_ref()
+                    .is_some_and(|tex| replaced.contains(&tex.id()))
+            })
+            .map(|(id, _)| id)
+            .collect();
+        for id in stale {
+            // The touch IS the fix; the value needs no edit. See this function's header.
+            let _ = materials.get_mut(id);
+        }
     }
 }
