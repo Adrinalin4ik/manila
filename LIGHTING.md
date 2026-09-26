@@ -43,6 +43,8 @@ the reference 1.12 slots, so their fidelity fixes remain active in Classic: auth
 alpha tracks affect the layer, non-white M2 colours reach the mesh, deterministic captures pose at
 their pinned time, and the batch-order base reserves the lower celestial band and final fog cone.
 
+Asset-free local builder and bilingual install guide: [`Optional/sky-and-grading/`](Optional/sky-and-grading/README.md).
+
 Players reach all of it from **Options -> Advanced Graphics** (a Graphics Preset over everything, a Render Distance slider, a Lighting Quality preset Off / Low / Medium / High / Ultra plus the individual rows; Classic / Off is the original client look). The dev build has a panel for all of it: **Ctrl+Shift+D → Lighting & shadows**, with Dim / Default /
 Bright presets.
 
