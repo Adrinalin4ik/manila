@@ -68,6 +68,8 @@ at any IP or hostname, appending the auth port if yours is remapped
 (`WOW_HOST=play.example.com:5000`). Credentials go in at the login screen, or set `WOW_USER` /
 `WOW_PASS` to skip it.
 
+Optional, locally built skybox and colour-grading data: [`Optional/sky-and-grading/`](Optional/sky-and-grading/README.md).
+
 ## Contributing
 
 Issues and pull requests are open. [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) says what gets
