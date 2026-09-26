@@ -606,6 +606,8 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
         &mut ctx.skin_composites.0,
         ctx.asset_server,
         ctx.mats,
+        // The preview is one body on a still screen: composite it here and be right immediately.
+        None,
     );
 
     let shows = |p: &EntityPart| {

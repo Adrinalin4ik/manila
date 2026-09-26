@@ -234,6 +234,10 @@ pub(super) fn build_char_skin_materials(
     skin_cache: &mut benilla_assets::SpatialCache<SkinKey, Handle<Image>>,
     asset_server: &AssetServer,
     mats: &mut benilla_world::model_render::M2BatchMaterials,
+    // `Some` on the world's own dressing paths, where a body may wear its base skin for a few
+    // frames while the Worker composites; `None` on the character-select preview, which is one
+    // body on a still screen and must be right the first time it is drawn.
+    mut pending: Option<Mut<super::skin_worker::PendingSkins>>,
 ) -> CharSkinMaterials {
     let (Some(sections), true) = (sections, mats.ready()) else {
         return (None, None, None, (None, None));
@@ -291,6 +295,13 @@ pub(super) fn build_char_skin_materials(
                     // whose sections or display rows are missing costs the same reads and decode
                     // and then returns nothing, and a frame does not care that the result was
                     // dropped. Drop order runs it on every exit.
+                    //
+                    // **What it counts changed when the Worker arrived.** A deferred body now
+                    // takes TWO samples — this one (plan + base-only render + post) and the
+                    // drain's (decode + upload) — so `skins_new` is skin *events*, not bodies,
+                    // and it is not comparable with journal 43's 437. `skin_us` is unchanged in
+                    // meaning: microseconds of the drawing thread spent on skins, which is the
+                    // number this whole change exists to move.
                     struct Meter(bevy::platform::time::Instant);
                     impl Drop for Meter {
                         fn drop(&mut self) {
@@ -311,29 +322,73 @@ pub(super) fn build_char_skin_materials(
                             }
                         }
                     }
+                    let plan = sections.0.plan_body(
+                        key.race,
+                        key.sex,
+                        key.skin,
+                        key.face,
+                        key.facial_hair,
+                        key.hair_style,
+                        key.hair_color,
+                        worn,
+                        key.emblem,
+                        key.tabard_preview,
+                    )?;
                     let chain = &mut world.chain.lock_recover();
-                    let composed = sections
-                        .0
-                        .composite_body(
-                            chain,
-                            key.race,
-                            key.sex,
-                            key.skin,
-                            key.face,
-                            key.facial_hair,
-                            key.hair_style,
-                            key.hair_color,
-                            worn,
-                            key.emblem,
-                            key.tabard_preview,
-                        )
-                        .ok()??;
+                    // **The expensive half leaves, when there is somewhere for it to go.** With a
+                    // Worker we render the BASE ONLY here — one decode, no blits — cache that
+                    // handle under the real key, and let `skin_worker::drain_skin_worker` replace
+                    // the image behind the same handle when the atlas comes back. The body wears
+                    // its bare skin for those frames and is never re-dressed; see
+                    // `skin_worker`'s header for why a placeholder MATERIAL could not work.
+                    //
+                    // Without one (native, the character-select preview, a browser that would not
+                    // start a Worker) `pending` is `None` or the request is refused, and this is
+                    // the same synchronous composite it has always been.
+                    let mut base_only = None;
+                    if pending.is_some() {
+                        base_only = sections
+                            .0
+                            .render_plan(
+                                chain,
+                                &benilla_formats::BodyPlan {
+                                    base: plan.base.clone(),
+                                    steps: Vec::new(),
+                                },
+                            )
+                            .ok()
+                            .flatten();
+                    }
+                    let deferred = base_only.is_some();
+                    let composed = match base_only {
+                        Some(atlas) => atlas,
+                        None => sections.0.render_plan(chain, &plan).ok()??,
+                    };
                     // Through the upload gate like every texture: a no-op on this RGBA8
                     // composite, but it keeps the format and the bytes in agreement.
                     let handle = images.add(repeat_texture_authored(
                         benilla_assets::for_upload(composed),
                         (true, true),
                     ));
+                    // The request only after the handle exists, since the handle is where the
+                    // answer goes. A refusal here leaves the base-only atlas standing, so the
+                    // work is redone synchronously rather than left as a bare body for ever.
+                    if deferred {
+                        let posted = pending
+                            .as_deref_mut()
+                            .is_some_and(|p| p.request(&handle, plan.clone()));
+                        if !posted {
+                            if let Ok(Some(atlas)) = sections.0.render_plan(chain, &plan) {
+                                images.insert(
+                                    handle.id(),
+                                    repeat_texture_authored(
+                                        benilla_assets::for_upload(atlas),
+                                        (true, true),
+                                    ),
+                                );
+                            }
+                        }
+                    }
                     skin_cache.insert(key, handle.clone());
                     Some(handle)
                 }

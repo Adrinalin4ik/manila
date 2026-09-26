@@ -84,6 +84,7 @@ pub(in crate::entities) fn redress_player_looks(
         benilla_world::model_render::M2BatchMaterials,
         ResMut<Assets<Mesh>>,
         ResMut<MergedFormsCache>,
+        ResMut<super::skin_worker::PendingSkins>,
     ),
     // The own-material lane `spawn_part` takes; no character batch in the shipped data uses it.
     mut own_lane: (
@@ -102,6 +103,7 @@ pub(in crate::entities) fn redress_player_looks(
         mut mats,
         mut meshes,
         mut merged,
+        mut pending_skins,
     ) = skin_build;
     let now = time.elapsed_secs();
     for (entity, net, live, mut applied, children, rig, bones, mut pose, bake_center, unit_fade) in
@@ -152,6 +154,7 @@ pub(in crate::entities) fn redress_player_looks(
                 &mut skin_composites.0,
                 &asset_server,
                 &mut mats,
+                Some(pending_skins.reborrow()),
             ),
             None => (None, None, None, (None, None)),
         };

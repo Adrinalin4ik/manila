@@ -34,6 +34,8 @@ mod preview;
 pub(crate) use preview::equip_slot;
 pub(super) use preview::{build_dressup_preview, build_glue_pet, build_glue_preview};
 mod redress;
+// The composite that moved off the drawing thread; see its header for the 248 ms it cost here.
+pub(super) mod skin_worker;
 
 /// One body's drawn parts as `WOW_DRESS_CENSUS` prints them: index, merge group, blend, material.
 #[derive(bevy::ecs::system::SystemParam)]
@@ -270,6 +272,7 @@ pub(super) fn attach_entity_visuals(
         ResMut<benilla_world::doodad_anim::UvAnimMaterials>,
         ResMut<benilla_world::doodad_anim::TintAnimMaterials>,
         ResMut<benilla_world::mat_anim_table::MatAnimTable>,
+        ResMut<skin_worker::PendingSkins>,
     ),
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
     mut collider_epoch: ResMut<benilla_world::collision::ColliderEpoch>,
@@ -287,6 +290,7 @@ pub(super) fn attach_entity_visuals(
         mut uv_reg,
         mut tint_reg,
         mut anim_table,
+        mut pending_skins,
     ) = skin_build;
     let now = time.elapsed_secs();
     for (entity, net, equipment, reattached, mount_child, mount_body, anchored) in &pending {
@@ -615,6 +619,7 @@ pub(super) fn attach_entity_visuals(
                     &mut skin_composites.0,
                     &asset_server,
                     &mut mats,
+                    Some(pending_skins.reborrow()),
                 ),
                 None => (None, None, None, (None, None)),
             };

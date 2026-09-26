@@ -28,6 +28,14 @@
 // The wasm travels brotli-compressed: content-length counts .br bytes while the counted stream
 // yields decompressed ones. Dividing the two on a real build gives ~5.0; it drifts a little per
 // build and that is cosmetic — the bar is clamped at 99% until the stream actually ends.
+// **The off-thread character-skin compositor** (web/skin_worker.js). Imported here, and not from
+// the two pages, because both of them load boot.js and neither should have to remember a third
+// file — "a page feature exists only where it was added" is the invariant this dodges. The import
+// only defines `globalThis.__manila_skin_request` / `__manila_skin_take`; the Worker itself is not
+// created until the client asks for its first composite, so a session that never sees a character
+// pays nothing for it.
+import './skin_worker.js';
+
 const BR_RATIO = 5.0;
 const READY_TIMEOUT_MS = 20000;
 const PREFETCH_CONCURRENCY = 8;

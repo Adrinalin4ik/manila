@@ -575,6 +575,7 @@ impl Plugin for EntitiesPlugin {
                 .before(benilla_world::schedule::WorldStage::Input),
         )
         .init_resource::<SkinComposites>()
+        .init_resource::<attach::skin_worker::PendingSkins>()
         .init_resource::<attach::MergedFormsCache>()
         // The 16 bone-pile bodies, keyed by (race, sex): a skeleton has no display row.
         .init_resource::<corpse::BonesModels>()
@@ -635,7 +636,15 @@ impl Plugin for EntitiesPlugin {
                 (spell_fx::fire_fx_anim_events, spell_fx::advance_fx_anim),
                 // A gear change re-dresses the standing visual in place, every attachment left
                 // alone as in the reference; a new corpse arms its Dead or Drowned pose.
-                (attach::redress_player_looks, corpse::pose_corpses),
+                // Finished body atlases land behind handles the bodies already wear, so the drain
+                // needs no ordering against the dressing systems at all: it writes an `Image`,
+                // not an entity. In this tuple only because the phase is at Bevy's 21-system
+                // limit. See `attach::skin_worker`.
+                (
+                    attach::redress_player_looks,
+                    corpse::pose_corpses,
+                    attach::skin_worker::drain_skin_worker,
+                ),
                 // A mount change re-seats the rig on the mount's attachment 0 or back, as the
                 // reference re-parents the body model (`0x712f70`, `0x713020`).
                 reseat_mounts,

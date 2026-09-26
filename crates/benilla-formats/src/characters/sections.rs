@@ -293,6 +293,62 @@ pub struct BodyPlan {
     pub steps: Vec<BodyStep>,
 }
 
+/// **The finished atlas on the wire between the Worker and the client**: `[width][height][levels]`
+/// little-endian, then each level's `[len][bytes]`.
+///
+/// Flat because it crosses as a transferable `ArrayBuffer` — a transfer, not a copy, and a body
+/// atlas is megabytes. Both ends live here for the same reason `plan_to_json` does: the encoder
+/// and the decoder are one change, not two that have to be kept agreeing.
+pub fn encode_atlas(atlas: &BlpMipChain) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&atlas.width.to_le_bytes());
+    out.extend_from_slice(&atlas.height.to_le_bytes());
+    out.extend_from_slice(&(atlas.mips.len() as u32).to_le_bytes());
+    for level in &atlas.mips {
+        out.extend_from_slice(&(level.len() as u32).to_le_bytes());
+        out.extend_from_slice(level);
+    }
+    out
+}
+
+/// The other end of [`encode_atlas`]. `None` on anything malformed, which routes the plan back to
+/// the main thread rather than uploading a body made of the wrong bytes.
+pub fn decode_atlas(bytes: &[u8]) -> Option<BlpMipChain> {
+    let word = |at: usize| -> Option<u32> {
+        bytes
+            .get(at..at + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let (width, height, levels) = (word(0)?, word(4)?, word(8)? as usize);
+    let mut mips = Vec::with_capacity(levels.min(16));
+    let mut at = 12usize;
+    for _ in 0..levels {
+        let len = word(at)? as usize;
+        at += 4;
+        mips.push(bytes.get(at..at.checked_add(len)?)?.to_vec());
+        at += len;
+    }
+    // Trailing bytes mean the two sides disagree about the layout; refuse rather than guess.
+    (at == bytes.len() && !mips.is_empty()).then_some(BlpMipChain {
+        width,
+        height,
+        // What a composite produces: the atlas is blitted as RGBA8, never as blocks.
+        texels: crate::BlpTexels::Rgba8Unorm,
+        mips,
+    })
+}
+
+/// A plan as the Worker reads it (`crates/manila-skin`).
+///
+/// Here rather than at the call site so the app keeps serde_json out of its own dependency list
+/// (decision 0978) — this crate already carries it on wasm — and, more to the point, so ONE crate
+/// owns both ends of the wire. Two serializers for a texel-exact blit order is how a character
+/// ends up with the wrong face.
+#[cfg(target_arch = "wasm32")]
+pub fn plan_to_json(plan: &BodyPlan) -> Option<String> {
+    serde_json::to_string(plan).ok()
+}
+
 impl CharSections {
     /// The 256² base body skin for a skin colour (`sectionType 0`).
     pub fn skin_texture(&self, race: u8, sex: u8, skin_color: u8) -> Option<&str> {
@@ -2106,4 +2162,24 @@ mod tests {
             "boots stack over the pants' LegLower (g6)"
         );
     }
+
+    /// The Worker's atlas crosses a postMessage boundary as bare bytes, so the encoder and the
+    /// decoder are the only thing standing between a finished composite and a body textured with
+    /// garbage. One round trip over a chain shaped like a real body atlas (a 4x2 level and its
+    /// 2x1 mip) pins the layout both ends read.
+    #[test]
+    fn an_atlas_survives_the_worker_round_trip() {
+        let atlas = crate::BlpMipChain {
+            width: 4,
+            height: 2,
+            texels: crate::BlpTexels::Rgba8Unorm,
+            mips: vec![(0u8..32).collect(), (100u8..108).collect()],
+        };
+        let back = super::decode_atlas(&super::encode_atlas(&atlas))
+            .expect("a chain this crate encoded must decode");
+        assert_eq!(back.width, atlas.width);
+        assert_eq!(back.height, atlas.height);
+        assert_eq!(back.mips, atlas.mips);
+    }
+
 }

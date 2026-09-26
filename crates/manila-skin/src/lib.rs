@@ -55,8 +55,9 @@ async fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
 /// pin included. Three URL shapes for one file would be three cache entries and a prefetch that
 /// warms none of them.
 ///
-/// Returns the atlas as `[width:u32][height:u32][levels:u32]` then each level's `[len:u32][bytes]`,
-/// little-endian. A flat buffer because it crosses as a transfer, not a copy.
+/// Returns the atlas in `benilla_formats::encode_atlas`'s shape - a flat buffer, because it
+/// crosses as a transfer rather than a copy, and because the client decodes it with that module's
+/// own `decode_atlas`. One owner for both ends.
 #[wasm_bindgen]
 pub async fn render_body(plan_json: String, url_prefix: String, url_suffix: String) -> Option<Vec<u8>> {
     let plan: BodyPlan = serde_json::from_str(&plan_json).ok()?;
@@ -85,13 +86,5 @@ pub async fn render_body(plan_json: String, url_prefix: String, url_suffix: Stri
         seen.insert(path, decoded);
     }
     let atlas = render_plan_with(&plan, &mut |path: &str| seen.get(path).cloned().flatten())?;
-    let mut out = Vec::new();
-    out.extend_from_slice(&atlas.width.to_le_bytes());
-    out.extend_from_slice(&atlas.height.to_le_bytes());
-    out.extend_from_slice(&(atlas.mips.len() as u32).to_le_bytes());
-    for level in &atlas.mips {
-        out.extend_from_slice(&(level.len() as u32).to_le_bytes());
-        out.extend_from_slice(level);
-    }
-    Some(out)
+    Some(benilla_formats::encode_atlas(&atlas))
 }

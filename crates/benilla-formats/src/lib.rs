@@ -24,8 +24,10 @@ pub use install::{addon_corpus, addon_corpus_candidates, candidates, skipped, wo
 /// natively); the browser-only pieces are gated to `wasm32` inside the module itself.
 pub mod web;
 mod characters;
+#[cfg(target_arch = "wasm32")]
+pub use characters::plan_to_json;
 pub use characters::{
-    render_plan_with, set_skin_cache_mb, take_decode_counts, take_oversize_count, BodyPlan,
+    decode_atlas, encode_atlas, render_plan_with, set_skin_cache_mb, take_decode_counts, take_oversize_count, BodyPlan,
     BodyStep,
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
     scale_body_tile, BlitSource, CharCreateCatalog, CharSections, CharacterGeosets, DialRanges,

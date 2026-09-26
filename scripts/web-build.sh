@@ -37,7 +37,20 @@ strip=(--remove-name-section --remove-producers-section)
 # stays `wenilla` - renaming it would move `wenilla-host`/`wenilla-realm` and the pin bot's
 # `WENILLA_COMMIT`, which is prod's, for a filename.
 wasm-bindgen --target web --no-typescript "${strip[@]}" --out-name manila --out-dir "${DIST}" "${WASM}"
-cp web/index.html web/wasi_stubs.js web/boot.js web/platform.js web/bridge.js "${DIST}/"
+# **The character-skin compositor's own module** (`crates/manila-skin`), instantiated inside a Web
+# Worker with its own linear memory. A separate instance rather than a thread because bevy
+# hard-disables its multi-threaded executor on wasm32 and cpal's worklet host needs atomics: this
+# needs neither, and it is what takes a 248 ms median composite off the drawing thread.
+#
+# Built after the client so a failure here cannot leave a half-written main bundle behind. It is
+# optional at RUNTIME - the page falls back to compositing on the main thread when the worker does
+# not start - but not optional here: a silent miss would look exactly like the fallback working.
+cargo build --profile "${PROFILE}" --target wasm32-unknown-unknown -p manila-skin
+SKIN_WASM="target/wasm32-unknown-unknown/${PROFILE}/manila_skin.wasm"
+[ -f "${SKIN_WASM}" ] || { echo "web-build: ${SKIN_WASM} was not produced" >&2; exit 1; }
+wasm-bindgen --target web --no-typescript "${strip[@]}" --out-name manila_skin --out-dir "${DIST}" "${SKIN_WASM}"
+cp web/index.html web/wasi_stubs.js web/boot.js web/platform.js web/bridge.js \
+   web/skin_worker.js web/skin_worker_entry.js "${DIST}/"
 # The bridge examples (web/README.md § "JavaScript bridge"): a HUD, an idle loop.
 mkdir -p "${DIST}/examples" && cp web/examples/*.js "${DIST}/examples/"
 # The boot prefetch manifest (see web/boot.js) — optional so a tree that hasn't captured one
