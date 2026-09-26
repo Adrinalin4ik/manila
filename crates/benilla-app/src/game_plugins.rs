@@ -705,8 +705,9 @@ pub(crate) mod schedule_tests {
     /// (wind, wetness and fog-model writers of `MonkeyFrame`; the viewer publish before its
     /// readers; the sky clock and tier before the consume set; the grass benders). What remains:
     /// `skybox::animate_skyboxes` against the `MatAnimTable` allocators (it writes only its own
-    /// rows) and one pair each of the new systems against the two exclusive systems.
-    const UPDATE_ACTIONABLE_CEILING: usize = 5_582;
+    /// rows) and one pair each of the new systems against the two exclusive systems. Upstream
+    /// 5,463 + ours = 5,488, read off the merged tree (upstream b17be271).
+    const UPDATE_ACTIONABLE_CEILING: usize = 5_488;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
