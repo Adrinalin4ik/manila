@@ -1,13 +1,32 @@
-//! `charatlas`: composite one character's body atlas off the chain and report what painted what:
-//! the equipment blits in [`benilla_formats::equip_blits`] order with the file each resolved to
-//! (`MISSING` leaves base skin), the rows each tile repaints against the naked body, and the
-//! geosets the equipment selects. Geoset 1302, the robe skirt, samples atlas rows 112-223 across
-//! the LegUpper and LegLower tiles, so a boot's LegLower blit shows on a robe's hem.
+//! `charatlas` — composite one character's body atlas off the chain and report **what painted
+//! what**.
+//!
+//! The instrument the two "outfit texture" reports needed and nobody had. A dressed character's
+//! body uses the ten tiles of the reference 256² layout (the RF-0062 bbox table), scaled to its
+//! skin resolution. Every visible defect in that class — a garment that stops early, a boot
+//! repainting a robe's hem, a bare band below the knee — is one tile receiving the wrong contribution. Reading that off a screenshot means
+//! guessing; reading it off the atlas means measuring.
+//!
+//! Three things it prints, all derived from the composite's own law
+//! ([`benilla_formats::equip_blits`]), never a second transcription:
+//!
+//! 1. **The plan** — every equipment contribution in blit order, with the file each name actually
+//!    resolved to (or `MISSING`, which is the silent skip that reads as "the texture ends early").
+//! 2. **The per-tile diff** vs the same character composited naked, per atlas ROW. A tile whose
+//!    lower rows go unpainted is a garment that stops early; a row count that changes when one slot
+//!    is added is that slot's footprint.
+//! 3. **The geosets** the same equipment selects, with the atlas rows each one samples — so "which
+//!    tile does the robe's skirt read?" is answered next to "what is in that tile".
+//!
+//! The tile↔geoset pairing is the whole diagnosis: geoset 1302 (the robe skirt) samples atlas rows
+//! 112–223, which straddles the LegUpper **and LegLower** tiles — so a boot's LegLower contribution
+//! lands on a robe's hem even though the boot's own geometry is disabled under a robe.
 
 use anyhow::{Context, Result};
 use benilla_formats::{
-    equip_blits, equip_tile, forearm_dressed, load_item_display_catalog, BlitSource, Chain,
-    CharSections, CharacterGeosets, EmblemLayer, EquipGeosets, GuildEmblem, ItemDisplay,
+    equip_blits, equip_tile, forearm_dressed, load_item_display_catalog, scale_body_tile,
+    BlitSource, Chain, CharSections, CharacterGeosets, EmblemLayer, EquipGeosets, GuildEmblem,
+    ItemDisplay,
 };
 
 /// The body's ten fixed tiles in its 256² atlas (the reference's bbox table `0xb42450`).
@@ -88,10 +107,22 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
         }
     }
 
-    // (1) The plan, in the composite's order; worn garments and the three emblem layers share it.
+    let base_path = sections
+        .skin_texture(look.race, look.sex, look.skin)
+        .context("no base skin row for this appearance")?;
+    let (atlas_width, atlas_height, _) =
+        blp_shape(chain, base_path).context("reading base skin dimensions")?;
+
+    // (1) The plan — the composite's own order, with what each name resolved to. Worn garments and
+    // the guild tabard's three layers come through the same list, because they land in the same
+    // rows and the question ("what repainted this cell?") is the same one.
     println!("\nequipment blits (by ascending cell; later covers earlier within a tile):");
     for step in equip_blits(&equipment, look.emblem, false) {
-        let (_x, y, w, h) = equip_tile(step.layer).expect("layer < 8");
+        let (_x, y, w, h) = scale_body_tile(
+            equip_tile(step.layer).expect("layer < 8"),
+            atlas_width,
+            atlas_height,
+        );
         let candidates = step.candidates(look.sex);
         let basename = |p: &str| p.rsplit('\\').next().unwrap_or(p).to_string();
         let (who, name) = match step.source {
@@ -118,7 +149,7 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
                 let fits = if (bw, bh) == (w, h) {
                     ""
                 } else {
-                    "  SIZE≠TILE"
+                    "  RESAMPLED"
                 };
                 println!(
                     "  g{} y{:>3}..{:<3} cell {} {:6} {:34} → {} ({}x{}, alpha {alpha} {cover}){fits}",
@@ -185,6 +216,7 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
         dressed.mips.len()
     );
     for (name, x, y, tw, th) in TILES {
+        let (x, y, tw, th) = scale_body_tile((x, y, tw, th), dressed.width, dressed.height);
         let painted: Vec<u32> = (0..th)
             .map(|r| {
                 (0..tw)
@@ -218,7 +250,7 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
     // The shirt-cuff geoset's gate is the ArmLower tile's occupancy, read off the same plan.
     eq.forearm_dressed = forearm_dressed(&equipment);
     let ids = geosets.visible_geosets(look.race, look.sex, look.hair_style, look.facial_hair, &eq);
-    println!("\nvisible geosets: {ids:?}");
+    println!("\nvisible geosets: {ids:?} + all IDs above 1700");
 
     if let Some(path) = out {
         let img =

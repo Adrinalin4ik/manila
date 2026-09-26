@@ -3,19 +3,34 @@
 //! (`M2TextureType::Other(1)`) have no texture of their own, and [`CharSections::composite_body`]
 //! builds one on the 256² partition `0x475c50` and the section→cell map `0x4782e0`.
 //!
-//! DBC layouts follow the client's record readers: CharSections `0x575540`, the geoset tables
-//! `0x5753b0`/`0x575a80`.
+//! **Geosets.** A character model contains *every* hairstyle, facial-hair piece, and body-option geoset;
+//! the real client renders only the selected ones. The selection is the compositor's geoset dispatch
+//! `0x477520` (wow-re charactermodel RF-0038). For a character with **no equipment** the 8 per-item
+//! branches all no-op (their `ItemDisplayInfo` records are null), leaving only the unconditional opening
+//! block: disable geosets 0..=1700, enable geoset 0, then enable the 16 region-base entries of `cc+0x144` —
+//! entries 0–3 overwritten by the customization DBCs (the chosen hair + 3 facial-hair geosets), entries
+//! 4–15 the default group bases. Higher geoset IDs retain their default visibility;
+//! [`VisibleGeosets::contains`] handles both the explicit selections and that unmanaged range.
+//!
+//! **Skin textures.** A character body's `M2TextureType::Other(1)` (body skin) batches have no embedded
+//! texture — the client supplies a runtime composite keyed on the appearance ([`CharSections::composite_body`],
+//! decision 0044). The **base skin** (`sectionType 0`) is a single full 256² body-layout BLP per (race,
+//! sex, skinColor); the face / facial-hair / hair / underwear overlays (`sectionTypes 1–4`) are region
+//! BLPs blended on top at fixed atlas tiles (the RF-0062 partition + RF-0067/0074 section→tile map).
+//!
+//! DBC field maps byte-verified in wow-re charactermodel (RF-0073 geosets, RF-0042 CharSections); field
+//! counts + row semantics cross-checked against the build-5875 files.
 
 mod customization;
 mod geosets;
 mod sections;
 
 pub use customization::{CharCreateCatalog, DialRanges, StartOutfitItem};
-pub use geosets::{CharacterGeosets, EquipGeosets};
+pub use geosets::{CharacterGeosets, EquipGeosets, VisibleGeosets};
 pub use sections::{
     take_decode_counts,
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
-    BlitSource, CharSections, EmblemLayer, EquipBlit, GuildEmblem,
+    scale_body_tile, BlitSource, CharSections, EmblemLayer, EquipBlit, GuildEmblem,
 };
 
 // The loaders' own schemas, for the `benilla-extract dbc` CSV dump (`crate::schema_for`).
