@@ -720,6 +720,17 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "48",
         "benilla's own - 1.12 composites into a fixed slot and caches nothing",
     ),
+    // **Upstream PR 438's `> 1700` rule, switchable** - `benilla_formats::set_unmanaged_geosets_visible`.
+    // It makes every geoset above 1700 visible whatever the helm's hide-mask says. On 1.12.1 data
+    // nothing is authored up there, so it costs upstream nothing and rescues Reforged's Night Elf
+    // eye-glow cards at 1702; on an HD or custom chain that range is exactly where the extra
+    // geometry lives. A knob and not a constant for the same reason as `skinCacheMb` above:
+    // different chain, different answer, and the only way to tell is to look at this one.
+    ours(
+        "unmanagedGeosets",
+        "1",
+        "benilla's own - 1.12's selector disables 0..=1700 and never asks about the rest",
+    ),
     same(crate::char_select::CVAR_LAST_CHARACTER, "0"),
 ];
 

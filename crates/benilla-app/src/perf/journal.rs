@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -180,7 +180,26 @@ fn sched_close(start: Res<SchedStart>) {
     use std::sync::atomic::Ordering::Relaxed;
     SCHED_US.fetch_add(start.0.elapsed().as_micros() as u64, Relaxed);
     SCHED_FRAMES.fetch_add(1, Relaxed);
+    // The handoff to `rmark_open`, which is in the RENDER world and cannot see a main-world
+    // resource. See [`MAIN_END`].
+    *MAIN_END.lock().expect("MAIN_END is never poisoned: single-threaded, no panic inside") =
+        Some(Instant::now());
 }
+
+/// **When the main schedules finished**, so the render world can measure `ExtractSchedule`.
+///
+/// `ExtractSchedule` runs between `Last` and the render app's own `Render` schedule, in neither
+/// clock's reach: `PhaseClock` stops at `Last`, `RClock` starts at `Render`. It was inside
+/// `r_between` together with present and the browser's idle, and journal 47 made splitting them
+/// the whole question - 68% of a calm 50.1 ms frame is in that span while every game system this
+/// project has is 7.4 ms of it.
+///
+/// A `Mutex` and not an atomic because `Instant` is not one; on wasm32 this is single-threaded
+/// and uncontended, so it is a branch. `None` before the first frame closes.
+static MAIN_END: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+/// `ExtractSchedule` (plus any main-world tail after `Last`), per frame this second.
+static XSCHED_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Microseconds of main schedule per frame this second, and the reset. `None` when no frame ran.
 fn take_sched_frames() -> u64 {
@@ -308,6 +327,15 @@ fn rmark_open(mut clock: ResMut<RClock>) {
     use std::sync::atomic::Ordering::Relaxed;
     let now = Instant::now();
     RBETWEEN_US.fetch_add((now - clock.0).as_micros() as u64, Relaxed);
+    // ...and the part of it that is `ExtractSchedule`: `Last` finished, this is the start of the
+    // render schedule, and only extract runs in between. `present + idle` is then
+    // `r_between - (the five s_* tiles) - r_xsched`, every term named.
+    if let Some(end) = *MAIN_END
+        .lock()
+        .expect("MAIN_END is never poisoned: single-threaded, no panic inside")
+    {
+        XSCHED_US.fetch_add((now - end).as_micros() as u64, Relaxed);
+    }
     clock.0 = now;
 }
 
@@ -1215,6 +1243,7 @@ fn journal_fps(
     {
         use std::sync::atomic::Ordering::Relaxed;
         let _ = write!(line, ",{}", RBETWEEN_US.swap(0, Relaxed) / frames.max(1));
+        let _ = write!(line, ",{}", XSCHED_US.swap(0, Relaxed) / frames.max(1));
     }
     // **Every `#` line goes AFTER the last column, not before it.** Both blocks below used to sit
     // above the trailing columns, which was invisible while the systems one stayed empty and split
