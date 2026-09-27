@@ -74,7 +74,19 @@ pub(crate) fn apply(
     let (mut players, mut hidden, mut inserted) = (0u32, 0u32, 0u32);
     if let Some(eye) = eye {
         for (entity, net, guid, at, vis) in &mut units {
-            if net.kind != EntityKind::Player || Some(guid.0) == me {
+            // **A player's pet walks out with its owner.** The setting is a crowd wall, and a
+            // crowd's hunters, warlocks and mages bring a body each; leaving those standing while
+            // their owners vanish is what the owner saw with the slider at zero - an empty square
+            // full of pets. A pet is `EntityKind::Unit`, so the kind test alone never reached it,
+            // but its guid says so on its own: `HIGHGUID_PET` (`guid::is_pet`), no owner field
+            // and no second query needed.
+            //
+            // The honest limit: a minion the server spawns as a plain creature - a totem, an
+            // unowned guardian - carries `HIGHGUID_UNIT` and is indistinguishable here from a
+            // world mob, so it stays. Catching those needs the unit's summoned-by field, which
+            // this pass does not read.
+            let controlled = net.kind == EntityKind::Player || benilla_protocol::guid::is_pet(guid.0);
+            if !controlled || Some(guid.0) == me {
                 continue;
             }
             players += 1;

@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -414,6 +414,35 @@ fn count_moved(moved: Query<(), Changed<Transform>>) {
     MOVED_FRAMES.fetch_add(1, Relaxed);
 }
 
+/// Meshes that SURVIVE the cull, beside the ones that merely exist.
+///
+/// The archetype census counts what is spawned; `meshes` counts what `Assets<Mesh>` holds. Neither
+/// says how many are handed to the renderer, and that is the number a draw-call argument needs.
+/// Journal 50 stands at ~13,500 mesh entities against journal 48's ~8,000, with present+idle
+/// 34.2 ms against 13.1 - which READS as draw-bound and is not evidence of it: if the cull already
+/// throws most of them away, the two counts diverge and the argument is about the wrong quantity.
+///
+/// `ViewVisibility` is what `check_visibility` writes and what the extract then reads, so it is
+/// the last main-world hop before a mesh becomes a draw call - the honest place to count. One
+/// query pass over the mesh entities per frame, in `Last`, beside the two counters already there.
+static MESH_VIS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MESH_ALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn count_visible_meshes(
+    meshes: Query<&bevy::camera::visibility::ViewVisibility, With<Mesh3d>>,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (mut vis, mut all) = (0u64, 0u64);
+    for v in &meshes {
+        all += 1;
+        if v.get() {
+            vis += 1;
+        }
+    }
+    MESH_VIS.fetch_add(vis, Relaxed);
+    MESH_ALL.fetch_add(all, Relaxed);
+}
+
 fn take_moved() -> u64 {
     use std::sync::atomic::Ordering::Relaxed;
     let frames = MOVED_FRAMES.swap(0, Relaxed);
@@ -522,7 +551,10 @@ impl Plugin for FpsJournalPlugin {
             // the render app in it. Two `Instant` reads a frame whether the journal is on or
             // off - the same price the frame-time window already pays.
             .add_systems(bevy::app::First, sched_open)
-            .add_systems(bevy::app::Last, (count_moved, sched_close).chain())
+            .add_systems(
+                bevy::app::Last,
+                (count_moved, count_visible_meshes, sched_close).chain(),
+            )
             .init_resource::<PhaseClock>()
             .add_systems(PhaseMark(RAPP as u8), phase_mark::<RAPP>)
             .add_systems(PhaseMark(0), phase_mark::<0>)
@@ -1244,6 +1276,14 @@ fn journal_fps(
         use std::sync::atomic::Ordering::Relaxed;
         let _ = write!(line, ",{}", RBETWEEN_US.swap(0, Relaxed) / frames.max(1));
         let _ = write!(line, ",{}", XSCHED_US.swap(0, Relaxed) / frames.max(1));
+        // Per frame, like every tile: these are populations, not events.
+        let f = frames.max(1);
+        let _ = write!(
+            line,
+            ",{},{}",
+            MESH_VIS.swap(0, Relaxed) / f,
+            MESH_ALL.swap(0, Relaxed) / f
+        );
     }
     // **Every `#` line goes AFTER the last column, not before it.** Both blocks below used to sit
     // above the trailing columns, which was invisible while the systems one stayed empty and split

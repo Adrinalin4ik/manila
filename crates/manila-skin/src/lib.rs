@@ -61,17 +61,25 @@ async fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
 #[wasm_bindgen]
 pub async fn render_body(plan_json: String, url_prefix: String, url_suffix: String) -> Option<Vec<u8>> {
     let plan: BodyPlan = serde_json::from_str(&plan_json).ok()?;
-    // One decode per distinct path per plan. A step's candidates are tried in order and most miss,
-    // so the miss is remembered too - re-fetching a path that 404'd once per step would turn a
-    // wardrobe into a round trip storm.
+    // One decode per distinct path per plan, and the miss is remembered too - re-fetching a path
+    // that 404'd once per step would turn a wardrobe into a round trip storm.
+    //
+    // **Candidates stop at the first hit, exactly as `render_plan_with` will consume them.** The
+    // first cut fetched every candidate of every step up front, because the renderer is sync and
+    // `fetch` is not. That is correct and wasteful: `equip_region_candidates` orders the list
+    // `['U', <sex>]` and the universal texture almost always exists, so the gendered one was
+    // fetched, 404'd and thrown away for nearly every dressed region. The owner saw the litter in
+    // his network tab - `..._Glove_AL_F.blp` 404 while the archive holds `..._Glove_AL_U.blp` -
+    // and the picture was right the whole time because `find_map` never asked for the second one.
+    //
+    // Walking the plan in the renderer's own order costs nothing extra and asks for nothing the
+    // renderer will not consult.
     let mut seen: HashMap<String, Option<Arc<BlpMipChain>>> = HashMap::new();
-    let mut want: Vec<String> = vec![plan.base.clone()];
-    for step in &plan.steps {
-        want.extend(step.candidates.iter().cloned());
-    }
-    for path in want {
-        if seen.contains_key(&path) {
-            continue;
+    let mut fetch_once = async |path: &str,
+                                seen: &mut HashMap<String, Option<Arc<BlpMipChain>>>|
+     -> bool {
+        if let Some(hit) = seen.get(path) {
+            return hit.is_some();
         }
         let url = format!(
             "{url_prefix}{}{url_suffix}",
@@ -83,7 +91,17 @@ pub async fn render_body(plan_json: String, url_prefix: String, url_suffix: Stri
                 .map(Arc::new),
             None => None,
         };
-        seen.insert(path, decoded);
+        let ok = decoded.is_some();
+        seen.insert(path.to_string(), decoded);
+        ok
+    };
+    fetch_once(&plan.base, &mut seen).await;
+    for step in &plan.steps {
+        for path in &step.candidates {
+            if fetch_once(path, &mut seen).await {
+                break;
+            }
+        }
     }
     let atlas = render_plan_with(&plan, &mut |path: &str| seen.get(path).cloned().flatten())?;
     Some(benilla_formats::encode_atlas(&atlas))
