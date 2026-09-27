@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -359,7 +359,20 @@ static POSTCLEAN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// is exactly what is not known yet. Each still carries the usual caveat: a system in no set can
 /// float inside a bracket, so a slot is an upper bound on its set - but a far tighter one than a
 /// tile holding 116 systems.
-const NSETS: usize = 5;
+/// **The player-UI bridge**, slots 5..=7 — the three sets `Update` already has.
+///
+/// The Update dump settled where the frame goes: **733 systems**, with `phase_mark<5>` at index
+/// 278 and `<6>` at 461, so `u_net` is not the network at all — it is the FIRST 278 SYSTEMS, and
+/// `u_input` the next 182. Reading their names, indices 159-247 are almost solidly `feed_*` and
+/// 335-434 almost solidly `drain_*`: the crate defines **101 `feed_*` and 89 `drain_*`** systems,
+/// every one of them pushing game state into the Lua VM or pulling a verb back out, every frame.
+///
+/// That is the shape of everything measured today — a cost that does not care about the camera,
+/// the pixels, the draw count or the network, because none of those are what it iterates.
+///
+/// `UiFeed` (53 members), `UnitFeed` (31) and `UiInput` (2) already exist as sets, so this costs
+/// no change to 190 registrations to find out.
+const NSETS: usize = 8;
 static SET_US: [std::sync::atomic::AtomicU64; NSETS] = [ZERO; NSETS];
 
 /// Where each bracket's `open` leaves its timestamp. A resource rather than a static because it
@@ -629,6 +642,20 @@ impl Plugin for FpsJournalPlugin {
             // from the observer itself. Costs one atomic read per frame when disarmed.
             .add_systems(bevy::app::Last, crate::perf::sched_dump::dump_if_armed)
             .init_resource::<SetClocks>()
+            // The player-UI bridge, in `Update`. Separate from the PostUpdate group and never
+            // chained to it: they are different schedules, and an ordering edge across the two
+            // is meaningless to the scheduler and misleading to a reader.
+            .add_systems(
+                bevy::app::Update,
+                (
+                    set_open::<5>.before(crate::ui_script::UiFeed),
+                    set_close::<5>.after(crate::ui_script::UiFeed),
+                    set_open::<6>.before(crate::ui_unit::UnitFeed),
+                    set_close::<6>.after(crate::ui_unit::UnitFeed),
+                    set_open::<7>.before(crate::ui_script::UiInput),
+                    set_close::<7>.after(crate::ui_script::UiInput),
+                ),
+            )
             .add_systems(
                 bevy::app::PostUpdate,
                 (
