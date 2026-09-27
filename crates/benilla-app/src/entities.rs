@@ -574,6 +574,10 @@ impl Plugin for EntitiesPlugin {
                 .after(benilla_world::schedule::WorldStage::Net)
                 .before(benilla_world::schedule::WorldStage::Input),
         )
+        // `/console fxOff 1` hides every effect MODEL (glows, spell visuals); the quad lane is
+        // emptied in `benilla_world::particles`. Edge-triggered, in `Last`, so it never argues
+        // with the fade and cull authorities that own `Visibility` the rest of the time.
+        .add_systems(bevy::app::Last, spell_fx::apply_fx_off)
         .init_resource::<SkinComposites>()
         .init_resource::<attach::skin_worker::PendingSkins>()
         .init_resource::<attach::MergedFormsCache>()

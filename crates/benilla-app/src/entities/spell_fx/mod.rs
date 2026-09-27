@@ -146,6 +146,16 @@ fn fx_part_material(
     handle
 }
 
+/// **Every effect MODEL instance** - a weapon's glow, a spell's visual, a ground plant.
+///
+/// `fxOff` first emptied `EffectQuads` and the owner's screen still glowed: those are not quads.
+/// A glow or a spell visual is a real M2 instance drawn through the ordinary mesh pipeline, so no
+/// amount of clearing the effect buffer touches them. Both families are dressed by
+/// [`attach_effect_visuals`], which is where this goes - one marker, both families, no third
+/// place to forget.
+#[derive(Component)]
+pub(crate) struct EffectModel;
+
 /// Where an effect-model instance sits in the client's model graph.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct EffectHost {
@@ -196,6 +206,7 @@ pub(crate) fn attach_effect_visuals(
             }
         })
         .collect();
+    commands.entity(root).insert(EffectModel);
     let (joints, armed) = arm_effect_rig(commands, root, dm, preferred_anim, stage);
     let rig_slot = match (&dm.inverse_bindposes, joints.is_empty()) {
         (Some(ibp), false) => {
@@ -1248,5 +1259,33 @@ mod tests {
             "the instance must survive to use the rebuilt entry — a persistent one is never reaped \
              for being pending"
         );
+    }
+}
+
+
+/// Hide or restore every effect model on a flip of `/console fxOff`.
+///
+/// On the EDGE only, never every frame: the fade, cull and portal authorities all write
+/// `Visibility` on these entities, and a second writer restating a value each frame is how the
+/// first build of the crowd wall lost to the exterior cull - 84 bodies marked hidden and not one
+/// leaving the screen. Flipping off restores `Inherited` and lets those authorities re-assert.
+pub(crate) fn apply_fx_off(
+    mut fx: Query<&mut Visibility, With<EffectModel>>,
+    mut was: Local<Option<bool>>,
+) {
+    let now = benilla_world::particles::fx_off();
+    if *was == Some(now) {
+        return;
+    }
+    *was = Some(now);
+    let want = if now {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    for mut v in &mut fx {
+        if *v != want {
+            *v = want;
+        }
     }
 }
