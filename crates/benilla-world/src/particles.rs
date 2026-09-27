@@ -22,6 +22,8 @@ use emit::{emit_local, next_u32, rand01, rand_s11};
 use sim::simulate_particles;
 // The water-plane classification, shared with the ribbon sim.
 pub(crate) use sim::{far_side_of_water, model_far_side, water_height, WaterInterleave};
+/// The effects ablation switch, `/console fxOff 1`.
+pub use sim::set_fx_off;
 
 /// A camera our own pacing (`boothHalfRate`) skips on some frames while its scene poses at full
 /// rate. The reference's draw-set law (a tick only in a drawn frame, no catch-up) keys on its cull,

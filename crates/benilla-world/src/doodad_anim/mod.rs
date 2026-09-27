@@ -319,7 +319,6 @@ fn gate_doodad_anim(
     )>,
     vis: Query<&Visibility>,
     // Last frame's frustum verdict; see the meshed branch below and `cull_by_view`.
-    view_vis: Query<&bevy::camera::visibility::ViewVisibility>,
     // The rule the cached verdicts were computed under; see `verdicts_still`.
     mut last_rule: Local<Option<bool>>,
     cam: Query<
@@ -413,10 +412,29 @@ fn gate_doodad_anim(
             // verdict whenever the camera has not moved, and `changed_vis` watches only
             // `Changed<Visibility>` - it cannot watch `ViewVisibility`, which bevy rewrites every
             // frame, so a still camera and a moving object can hold a stale verdict for a frame.
-            host.meshes.iter().any(|&e| {
-                vis.get(e).is_ok_and(|v| *v != Visibility::Hidden)
-                    && (!rule || view_vis.get(e).is_ok_and(|v| v.get()))
-            })
+            let admitted = host
+                .meshes
+                .iter()
+                .any(|&e| vis.get(e).is_ok_and(|v| *v != Visibility::Hidden));
+            // **`ViewVisibility` was the wrong verdict to ask, and journal 65 says so:** with the
+            // switch on, `rigs_live` held at 778-780, exactly its value without it. That flag is
+            // OR'd across EVERY view - the portrait booths, the minimap, any other camera - so a
+            // doodad behind the world camera can still read visible and never park.
+            //
+            // The meshless branch twenty lines above never had this problem because it asks the
+            // world camera's own frustum directly. This now asks the same question the same way,
+            // against the host's fade sphere, which is the bound that branch already trusts.
+            admitted
+                && (!rule
+                    || world_cam.as_ref().is_some_and(|(_, frustum, _, _)| {
+                        frustum.intersects_sphere(
+                            &bevy::camera::primitives::Sphere {
+                                center: host.fade.center.into(),
+                                radius: host.fade.radius,
+                            },
+                            false,
+                        )
+                    }))
         };
         // The lazy-rig promote, retried every frame the host stays drawn so a full table is only
         // a delay. It needs a second drawn frame (`host.active`): on its first, a spawned part's

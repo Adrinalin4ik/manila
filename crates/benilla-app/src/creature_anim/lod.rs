@@ -29,6 +29,39 @@ use benilla_world::rig_anim::{AnimParked, RigPose};
 use crate::portrait::StageRig;
 
 /// Time out of view before a rig parks, so a camera swing does not churn; waking is instant.
+/// **The ablation switches** — `/console animParkAll 1`, `animLodOff 1`, `roomLodOff 1`.
+///
+/// The owner's method, and a better one than mine: instead of naming a suspect and measuring it,
+/// switch each subsystem OFF and read the frame. Two days of chasing one hypothesis at a time
+/// killed nine of them; a switch answers in one capture.
+///
+/// Two of these already existed as `WOW_ANIM_PARK_ALL` (the pose lane's cost FLOOR - park every
+/// rig, visible ones included) and `WOW_NO_ANIM_LOD` (its CEILING - park none). They were
+/// unreachable where the measurement lives: `std::env::var_os` is always `None` on wasm32. The
+/// env vars still work natively; these are `||`-ed beside them so neither route is lost.
+static ANIM_PARK_ALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ANIM_LOD_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ROOM_LOD_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn switch(cell: &std::sync::atomic::AtomicBool) -> bool {
+    cell.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `/console animParkAll 1`: park every rig, the pose lane's cost floor.
+pub(crate) fn set_park_all(on: bool) {
+    ANIM_PARK_ALL.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `/console animLodOff 1`: park none, the ceiling.
+pub(crate) fn set_lod_off(on: bool) {
+    ANIM_LOD_OFF.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `/console roomLodOff 1`: keep the frustum leg, drop the portal-PVS leg.
+pub(crate) fn set_room_lod_off(on: bool) {
+    ROOM_LOD_OFF.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 const PARK_AFTER_SECS: f32 = 0.5;
 
 /// The frustum sphere, `SelectionRadius × root scale × RADIUS_SCALE + RADIUS_PAD`, keeps any rig
@@ -74,11 +107,14 @@ pub(super) fn gate_rig_animation(
     mut no_room: Local<Option<bool>>,
     mut commands: Commands,
 ) {
-    let disabled = *disabled.get_or_insert_with(|| std::env::var_os("WOW_NO_ANIM_LOD").is_some());
+    let disabled = *disabled.get_or_insert_with(|| std::env::var_os("WOW_NO_ANIM_LOD").is_some())
+        || switch(&ANIM_LOD_OFF);
     // `WOW_ANIM_PARK_ALL` parks every rig, visible ones too: the pose lane's cost floor, as
     // `WOW_NO_ANIM_LOD` is its ceiling. A measuring lever only.
-    let park_all = *park_all.get_or_insert_with(|| std::env::var_os("WOW_ANIM_PARK_ALL").is_some());
-    let no_room = *no_room.get_or_insert_with(|| std::env::var_os("WOW_NO_ROOM_LOD").is_some());
+    let park_all = *park_all.get_or_insert_with(|| std::env::var_os("WOW_ANIM_PARK_ALL").is_some())
+        || switch(&ANIM_PARK_ALL);
+    let no_room = *no_room.get_or_insert_with(|| std::env::var_os("WOW_NO_ROOM_LOD").is_some())
+        || switch(&ROOM_LOD_OFF);
     // The `[rig-gate]` counters (`WOW_RIG_COST`): `room_out` counts the rigs the frustum keeps and
     // the PVS rejects, even under `WOW_NO_ROOM_LOD`.
     let cost_on = benilla_world::rig_palette::rig_cost_enabled();

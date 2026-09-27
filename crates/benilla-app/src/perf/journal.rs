@@ -109,6 +109,30 @@ pub(crate) fn on_cvar(
     // **`/console animCullView 1`** - park a doodad's rig when the frustum rejected it, not just
     // when distance or a room did. Journal 61 with the camera at the floor: 785 rigs live against
     // 36 visible meshes. Default off because the picture is the owner's to judge.
+    // **The ablation switches.** The owner's method, and a better one than naming a suspect and
+    // measuring it: turn a subsystem OFF and read the frame. Two of these already existed as env
+    // vars — `WOW_ANIM_PARK_ALL` is the pose lane's cost FLOOR and `WOW_NO_ANIM_LOD` its CEILING —
+    // and were unreachable in the browser, where `std::env::var_os` is always `None`.
+    if ev.is("animParkAll") {
+        let on = ev.flag();
+        crate::creature_anim::lod::set_park_all(on);
+        info!("every rig parked (pose-lane floor): {on}");
+    }
+    if ev.is("animLodOff") {
+        let on = ev.flag();
+        crate::creature_anim::lod::set_lod_off(on);
+        info!("animation LOD disabled (pose-lane ceiling): {on}");
+    }
+    if ev.is("roomLodOff") {
+        let on = ev.flag();
+        crate::creature_anim::lod::set_room_lod_off(on);
+        info!("portal-PVS leg of the animation LOD disabled: {on}");
+    }
+    if ev.is("fxOff") {
+        let on = ev.flag();
+        benilla_world::particles::set_fx_off(on);
+        info!("particle simulation stopped: {on}");
+    }
     if ev.is("animCullView") {
         let on = ev.flag();
         benilla_world::doodad_anim::set_cull_by_view(on);
