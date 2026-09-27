@@ -367,18 +367,6 @@ fn scene_frozen(booth: Option<(bool, bool)>, owner_frozen: bool, draining: bool)
 
 /// Per frame: emit, integrate and expand each emitter's pool into the shared stream.
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
-/// **`/console fxOff 1`**: the effects lane's cost floor - see [`simulate_particles`].
-static FX_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Set by the CVar.
-pub fn set_fx_off(on: bool) {
-    FX_OFF.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn fx_off() -> bool {
-    FX_OFF.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 pub(super) fn simulate_particles(
     time: Res<Time>,
     tuning: Res<ParticleTuning>,
@@ -454,7 +442,7 @@ pub(super) fn simulate_particles(
     //
     // A measuring lever, not a setting: it leaves live pools frozen in place rather than draining
     // them, so flipping it back resumes mid-cloud.
-    if fx_off() {
+    if super::buffer::fx_off() {
         return;
     }
     let Ok((world_cam, cam_tf, frustum, camera, projection, cam_local)) = cam.single() else {

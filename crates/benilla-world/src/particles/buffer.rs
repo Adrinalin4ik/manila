@@ -293,6 +293,35 @@ pub fn begin_effect_frame(mut quads: ResMut<EffectQuads>) {
     quads.cleared_this_frame = true;
 }
 
+/// **`/console fxOff 1`** - the effects lane's cost floor and its visual off switch.
+///
+/// The first cut only early-returned out of `simulate_particles`, and the owner found the hole in
+/// one look: a Flare's green ring was still burning on the ground. That ring is not an emitter.
+/// `EffectQuads` is the ONE buffer every effect writes into - particles, ground decals, ribbons,
+/// chain beams, weapon trails, precipitation, drift, footprints, the targeting reticle - so this
+/// is the one place that can stop all of them, and emptying it after the last writer and before
+/// extraction leaves nothing to draw whoever pushed.
+static FX_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set by the CVar.
+pub fn set_fx_off(on: bool) {
+    FX_OFF.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the effects lane is switched off this frame.
+pub fn fx_off() -> bool {
+    FX_OFF.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Empty the effect buffer in `Last` when the lane is off, before the render app extracts it.
+/// The writers still pay their CPU; what goes away is every effect on screen.
+pub fn suppress_effects(mut quads: ResMut<EffectQuads>) {
+    if fx_off() {
+        quads.verts.clear();
+        quads.draws.clear();
+    }
+}
+
 /// Reset [`EffectQuads::cleared_this_frame`] in `Last`, after extraction.
 pub fn clear_effect_frame_flag(mut quads: ResMut<EffectQuads>) {
     quads.cleared_this_frame = false;
