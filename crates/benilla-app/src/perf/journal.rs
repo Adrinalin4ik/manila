@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -316,6 +316,30 @@ impl Default for RClock {
 /// growing it would shift every column after `rapp` and break the header's append-only rule.
 static RBETWEEN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// **`RenderSystems::PostCleanup`** - the last thing the render app does, and until now the only
+/// part of the frame behind no mark at all.
+///
+/// It holds `despawn_temporary_render_entities`, and the shape of the unknown points straight at
+/// it. Journal 52, calm rows: the unnamed span grows 12.7 -> 32.5 ms as the scene grows 2k -> 34k
+/// ENTITIES, while visible meshes fall the other way (3,028 -> 536), a quarter of the pixels
+/// changes it by 0.2 ms (`renderScale 0.5`: 32.1 -> 31.9), and our own schedules sit still at
+/// ~13 ms. So it follows entity count and nothing else - and `present` is not the suspect either,
+/// because `render_system` does `queue.submit` AND `present_frames` inside `RenderSystems::Render`
+/// (`bevy_render-0.18.1/src/lib.rs:495`), which `r_render` already measures at ~2 ms.
+///
+/// A hypothesis with a number attached, not a fix: if this reads ~20 ms the search is over, and
+/// if it reads nothing the residual is the browser's own gap and the next question is a different
+/// one entirely.
+static POSTCLEAN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Close [`POSTCLEAN_US`]; the clock then runs on into [`RBETWEEN_US`] as before.
+fn rmark_postclean(mut clock: ResMut<RClock>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let now = Instant::now();
+    POSTCLEAN_US.fetch_add((now - clock.0).as_micros() as u64, Relaxed);
+    clock.0 = now;
+}
+
 /// Start the render app's chain, closing [`RBETWEEN_US`] - everything since the previous frame's
 /// `Cleanup`, which is the main schedules, ExtractSchedule, present and the browser's idle
 /// together. Subtracting the five `s_*` tiles leaves exactly the pair in question, and that is
@@ -540,7 +564,8 @@ impl Plugin for FpsJournalPlugin {
                     rmark::<3>.after(RS::PhaseSort).before(RS::Prepare),
                     rmark::<4>.after(RS::PrepareBindGroups).before(RS::Render),
                     rmark::<5>.after(RS::Render).before(RS::Cleanup),
-                    rmark::<6>.after(RS::Cleanup),
+                    rmark::<6>.after(RS::Cleanup).before(RS::PostCleanup),
+                    rmark_postclean.after(RS::PostCleanup),
                 )
                     .chain(),
             );
@@ -1284,6 +1309,7 @@ fn journal_fps(
             MESH_VIS.swap(0, Relaxed) / f,
             MESH_ALL.swap(0, Relaxed) / f
         );
+        let _ = write!(line, ",{}", POSTCLEAN_US.swap(0, Relaxed) / f);
     }
     // **Every `#` line goes AFTER the last column, not before it.** Both blocks below used to sit
     // above the trailing columns, which was invisible while the systems one stayed empty and split
