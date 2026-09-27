@@ -320,6 +320,8 @@ fn gate_doodad_anim(
     vis: Query<&Visibility>,
     // Last frame's frustum verdict; see the meshed branch below and `cull_by_view`.
     view_vis: Query<&bevy::camera::visibility::ViewVisibility>,
+    // The rule the cached verdicts were computed under; see `verdicts_still`.
+    mut last_rule: Local<Option<bool>>,
     cam: Query<
         (
             Ref<GlobalTransform>,
@@ -353,9 +355,23 @@ fn gate_doodad_anim(
     let world_cam = cam.single().ok();
     let (farclip, exterior_gate, camera_instance) =
         scene.scene(world_cam.as_ref().map(|(tf, _, proj, _)| (&**tf, &**proj)));
-    let verdicts_still = world_cam.as_ref().is_some_and(|(tf, _, proj, local)| {
-        !tf.is_changed() && !proj.is_changed() && !local.as_ref().is_some_and(|l| l.is_changed())
-    }) && !scene.changed()
+    // **The switch has to break this cache, or it does nothing at all.** While the camera holds
+    // still `verdicts_still` is true every frame and `drawn` is read straight from `host.active`,
+    // so the frustum test below is never reached - which is exactly the pose the owner tests in,
+    // camera at the floor. Journal 62 measured `rigs_live` at 781 with the switch on and 781 with
+    // it off, because the verdict was cached from whenever the camera last moved. Flipping the
+    // rule has to invalidate one frame of verdicts; after that a still camera genuinely cannot
+    // change a frustum answer, so the cache is sound again.
+    let rule = cull_by_view();
+    let rule_moved = *last_rule != Some(rule);
+    *last_rule = Some(rule);
+    let verdicts_still = !rule_moved
+        && world_cam.as_ref().is_some_and(|(tf, _, proj, local)| {
+            !tf.is_changed()
+                && !proj.is_changed()
+                && !local.as_ref().is_some_and(|l| l.is_changed())
+        })
+        && !scene.changed()
         && changed_vis.is_empty();
     for (entity, mut host, lazy, pose, has_rig, player, drive) in &mut hosts {
         // A host born this frame has no verdict to reuse (`active` starts false).
@@ -399,7 +415,7 @@ fn gate_doodad_anim(
             // frame, so a still camera and a moving object can hold a stale verdict for a frame.
             host.meshes.iter().any(|&e| {
                 vis.get(e).is_ok_and(|v| *v != Visibility::Hidden)
-                    && (!cull_by_view() || view_vis.get(e).is_ok_and(|v| v.get()))
+                    && (!rule || view_vis.get(e).is_ok_and(|v| v.get()))
             })
         };
         // The lazy-rig promote, retried every frame the host stays drawn so a full table is only
