@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,\n                              px_anim,px_asset,px_prop,px_bounds,px_check\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -332,6 +332,44 @@ static RBETWEEN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 /// one entirely.
 static POSTCLEAN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// **Named sets inside the big tiles**, bracketed on both sides rather than chained.
+///
+/// Journal 54 is the cleanest measurement this project has taken: camera at the floor, every
+/// setting at zero, the network off, **36 visible meshes** - and the frame is still 26.5 ms, of
+/// which the MAIN schedules are 19.80 ms (75%), the render schedule 4.08 and the browser 1.30. So
+/// the ceiling is per-entity CPU over 34,640 entities, 0.57 us each per frame, and it does not
+/// care what is on screen. That is why the camera, `renderScale`, the draw count and the network
+/// all failed to move it.
+///
+/// What those 19.8 ms do NOT say is WHICH systems. The five tiles that hold them are upper bounds
+/// on a slice, not measurements of a set - `u_net` reading 3.98 ms with zero packets is the proof
+/// - because a mark pinned only on one side floats, and the schedule dump showed `phase_mark<8>`
+/// and `<9>` with **116 systems between them** while their only constraint was `Propagate`.
+///
+/// So these five take a set each and bracket it: `open` before, `close` after, its own slot. No
+/// `.chain()` between them on purpose - chaining marks across sets whose real order differs from
+/// the assumed one is a scheduler CYCLE, which is a panic in the owner's build, and the ordering
+/// is exactly what is not known yet. Each still carries the usual caveat: a system in no set can
+/// float inside a bracket, so a slot is an upper bound on its set - but a far tighter one than a
+/// tile holding 116 systems.
+const NSETS: usize = 5;
+static SET_US: [std::sync::atomic::AtomicU64; NSETS] = [ZERO; NSETS];
+
+/// Where each bracket's `open` leaves its timestamp. A resource rather than a static because it
+/// is written every frame from the main world and read by its own pair only.
+#[derive(Resource, Default)]
+struct SetClocks([Option<Instant>; NSETS]);
+
+fn set_open<const N: usize>(mut c: ResMut<SetClocks>) {
+    c.0[N] = Some(Instant::now());
+}
+
+fn set_close<const N: usize>(mut c: ResMut<SetClocks>) {
+    if let Some(t) = c.0[N].take() {
+        SET_US[N].fetch_add(t.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Close [`POSTCLEAN_US`]; the clock then runs on into [`RBETWEEN_US`] as before.
 fn rmark_postclean(mut clock: ResMut<RClock>) {
     use std::sync::atomic::Ordering::Relaxed;
@@ -579,6 +617,22 @@ impl Plugin for FpsJournalPlugin {
             .add_systems(
                 bevy::app::Last,
                 (count_moved, count_visible_meshes, sched_close).chain(),
+            )
+            .init_resource::<SetClocks>()
+            .add_systems(
+                bevy::app::PostUpdate,
+                (
+                    set_open::<0>.before(bevy::app::AnimationSystems),
+                    set_close::<0>.after(bevy::app::AnimationSystems),
+                    set_open::<1>.before(bevy::asset::AssetEventSystems),
+                    set_close::<1>.after(bevy::asset::AssetEventSystems),
+                    set_open::<2>.before(bevy::transform::TransformSystems::Propagate),
+                    set_close::<2>.after(bevy::transform::TransformSystems::Propagate),
+                    set_open::<3>.before(bevy::camera::visibility::VisibilitySystems::CalculateBounds),
+                    set_close::<3>.after(bevy::camera::visibility::VisibilitySystems::CalculateBounds),
+                    set_open::<4>.before(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
+                    set_close::<4>.after(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
+                ),
             )
             .init_resource::<PhaseClock>()
             .add_systems(PhaseMark(RAPP as u8), phase_mark::<RAPP>)
@@ -1310,6 +1364,9 @@ fn journal_fps(
             MESH_ALL.swap(0, Relaxed) / f
         );
         let _ = write!(line, ",{}", POSTCLEAN_US.swap(0, Relaxed) / f);
+        for cell in &SET_US {
+            let _ = write!(line, ",{}", cell.swap(0, Relaxed) / f);
+        }
     }
     // **Every `#` line goes AFTER the last column, not before it.** Both blocks below used to sit
     // above the trailing columns, which was invisible while the systems one stayed empty and split
