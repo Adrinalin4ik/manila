@@ -731,6 +731,13 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1",
         "benilla's own - 1.12's selector disables 0..=1700 and never asks about the rest",
     ),
+    // **Which input holds a feed's change gate open** - `ui_script::gate::set_trace`. The env var
+    // it used to need is always absent on wasm32, so in the browser this was unreachable.
+    ours(
+        "feedGateTrace",
+        "0",
+        "benilla's own - 1.12 has no gated feeds to trace",
+    ),
     same(crate::char_select::CVAR_LAST_CHARACTER, "0"),
 ];
 

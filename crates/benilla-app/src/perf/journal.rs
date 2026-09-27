@@ -101,6 +101,16 @@ pub(crate) fn on_cvar(
         benilla_formats::set_unmanaged_geosets_visible(on);
         info!("geosets above 1700 bypass the selection: {on}");
     }
+    // **`/console feedGateTrace 1`** - names which input holds a feed's change gate open.
+    // `feed_units` and its 38 siblings in `UnitFeed` run behind gates that should skip a frame
+    // where nothing moved, yet the set measured 5.76 ms with the network off. A `Res::is_changed()`
+    // is true after ANY mutable access, so one system taking `ResMut` unconditionally holds every
+    // gate built on that resource open for ever - and this trace is what names it.
+    if ev.is("feedGateTrace") {
+        let on = ev.flag();
+        crate::ui_script::gate::set_trace(on);
+        info!("feed gate trace: {on}");
+    }
     if ev.is("skinCacheMb") {
         let mb = benilla_formats::set_skin_cache_mb(ev.num() as usize);
         info!("skin decode cache: {mb} MiB");

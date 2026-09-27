@@ -25,12 +25,29 @@ pub(crate) fn auditing() -> bool {
     *ON.get_or_init(|| std::env::var_os("WOW_FEED_GATE_CHECK").is_some_and(|v| v != "0"))
 }
 
-/// `WOW_FEED_GATE_TRACE=1`: at most once a second per feed, prints which inputs hold it open.
+/// Runtime switch for [`trace`], set by `/console feedGateTrace 1`.
+///
+/// **The env var alone could never work in the browser**, which is the only place the number
+/// matters: `std::env::var_os` is always `None` on wasm32, so `WOW_FEED_GATE_TRACE` gates this to
+/// permanently off there — and `eprintln!` below went to a `fd_write` stub that answers `EBADF`,
+/// so even a forced call printed nothing. An instrument that cannot be switched on where the
+/// measurement lives is not an instrument; it took `UnitFeed` reading **5.76 ms of a 29.1 ms
+/// frame with the network off** to notice.
+static TRACE_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `/console feedGateTrace 1`.
+pub(crate) fn set_trace(on: bool) {
+    TRACE_ON.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// At most once a second per feed, names which inputs hold its gate open. Armed by
+/// `/console feedGateTrace 1`, or by `WOW_FEED_GATE_TRACE=1` natively.
 pub(crate) fn trace(feed: &'static str, inputs: &[(&str, bool)]) {
     use bevy::platform::time::Instant;
     use std::sync::Mutex;
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if !*ON.get_or_init(|| std::env::var_os("WOW_FEED_GATE_TRACE").is_some_and(|v| v != "0")) {
+    static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let env_on = *ENV.get_or_init(|| std::env::var_os("WOW_FEED_GATE_TRACE").is_some_and(|v| v != "0"));
+    if !env_on && !TRACE_ON.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
     if !inputs.iter().any(|&(_, open)| open) {
@@ -51,7 +68,8 @@ pub(crate) fn trace(feed: &'static str, inputs: &[(&str, bool)]) {
         .iter()
         .filter_map(|&(name, open)| open.then_some(name))
         .collect();
-    eprintln!("[gate-trace] {feed}: open by {}", open.join("+"));
+    // `info!`, not `eprintln!`: stderr is a stub that answers `EBADF` in the browser.
+    bevy::log::info!("[gate-trace] {feed}: open by {}", open.join("+"));
 }
 
 /// Called at every push site of a gated feed: a push under a closed gate means a missing input.
