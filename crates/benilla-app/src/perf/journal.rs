@@ -106,6 +106,14 @@ pub(crate) fn on_cvar(
     // where nothing moved, yet the set measured 5.76 ms with the network off. A `Res::is_changed()`
     // is true after ANY mutable access, so one system taking `ResMut` unconditionally holds every
     // gate built on that resource open for ever - and this trace is what names it.
+    // **`/console animCullView 1`** - park a doodad's rig when the frustum rejected it, not just
+    // when distance or a room did. Journal 61 with the camera at the floor: 785 rigs live against
+    // 36 visible meshes. Default off because the picture is the owner's to judge.
+    if ev.is("animCullView") {
+        let on = ev.flag();
+        benilla_world::doodad_anim::set_cull_by_view(on);
+        info!("doodad rigs parked by frustum: {on}");
+    }
     if ev.is("feedGateTrace") {
         let on = ev.flag();
         crate::ui_script::gate::set_trace(on);

@@ -733,6 +733,12 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ),
     // **Which input holds a feed's change gate open** - `ui_script::gate::set_trace`. The env var
     // it used to need is always absent on wasm32, so in the browser this was unreachable.
+    // **Park a doodad's rig when the frustum rejected it** - `doodad_anim::set_cull_by_view`.
+    ours(
+        "animCullView",
+        "0",
+        "benilla's own - 1.12 ticks any model in the draw set, and its draw set is the frustum",
+    ),
     ours(
         "feedGateTrace",
         "0",

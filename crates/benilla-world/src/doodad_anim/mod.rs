@@ -293,6 +293,19 @@ fn reroll_doodad_variation(
 /// to the arm's shared-clock phase. Runs before [`AnimationSystems`], so the seek lands the same
 /// frame.
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
+/// **`/console animCullView 1`**: also require last frame's frustum verdict before keeping a
+/// meshed doodad's rig awake. Default off - see the meshed branch of [`gate_doodad_anim`].
+static CULL_BY_VIEW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set by the CVar.
+pub fn set_cull_by_view(on: bool) {
+    CULL_BY_VIEW.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn cull_by_view() -> bool {
+    CULL_BY_VIEW.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn gate_doodad_anim(
     time: Res<Time>,
     mut hosts: Query<(
@@ -305,6 +318,8 @@ fn gate_doodad_anim(
         Option<&mut GlobalSeqDrive>,
     )>,
     vis: Query<&Visibility>,
+    // Last frame's frustum verdict; see the meshed branch below and `cull_by_view`.
+    view_vis: Query<&bevy::camera::visibility::ViewVisibility>,
     cam: Query<
         (
             Ref<GlobalTransform>,
@@ -367,9 +382,25 @@ fn gate_doodad_anim(
                 )
             })
         } else {
-            host.meshes
-                .iter()
-                .any(|&e| vis.get(e).is_ok_and(|v| *v != Visibility::Hidden))
+            // **`Visibility` is "allowed to be seen"; `ViewVisibility` is "survived the frustum".**
+            // The meshless branch above already asks the frustum directly; this one never did, so
+            // a doodad behind the camera keeps `Visibility::Inherited`, reads as drawn, and its
+            // rig is posed every frame. Journal 61, camera at the floor: **785 rigs live against
+            // 36 visible meshes**, 22 live rigs per drawn mesh, 4,263 bone-anchor writes a frame.
+            // That is why aiming the camera at the floor changed nothing - it moves
+            // `ViewVisibility`, and this read the other one.
+            //
+            // Behind `/console animCullView 1` and default OFF, because it is a VISUAL change and
+            // the owner is the one who can see it: a rig parked while off-screen resumes on the
+            // frame the marker drops, and whether that reads as a pop is not a thing a number can
+            // answer. Stated limit: the `verdicts_still` fast path above reuses last frame's
+            // verdict whenever the camera has not moved, and `changed_vis` watches only
+            // `Changed<Visibility>` - it cannot watch `ViewVisibility`, which bevy rewrites every
+            // frame, so a still camera and a moving object can hold a stale verdict for a frame.
+            host.meshes.iter().any(|&e| {
+                vis.get(e).is_ok_and(|v| *v != Visibility::Hidden)
+                    && (!cull_by_view() || view_vis.get(e).is_ok_and(|v| v.get()))
+            })
         };
         // The lazy-rig promote, retried every frame the host stays drawn so a full table is only
         // a delay. It needs a second drawn frame (`host.active`): on its first, a spawned part's
