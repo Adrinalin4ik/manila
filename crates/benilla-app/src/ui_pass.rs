@@ -193,6 +193,29 @@ const UI_CAMERA_ORDER: isize = 1;
 #[derive(Component)]
 pub(crate) struct PlayerUiCamera;
 
+/// **The third leg of `/console uiLua 0`**: the interface stops being DRAWN.
+///
+/// Refusing the feed systems leaves the frames standing and refusing the VM tick leaves them
+/// frozen; neither removes the interface, which is what the switch is for. Deactivating its camera
+/// does, in one place, and reversibly - the frame tree is untouched, so `manilaUiLua(true)` brings
+/// it back exactly as it was.
+///
+/// Edge-triggered: `Camera::is_active` has other writers (the booths, the glue screens), and a
+/// system restating a value every frame is how this project's crowd wall lost to the exterior cull.
+pub(crate) fn gate_ui_camera(
+    mut cams: Query<&mut bevy::camera::Camera, With<PlayerUiCamera>>,
+    mut was: Local<Option<bool>>,
+) {
+    let on = crate::ui_script::ui_lua_on();
+    if *was == Some(on) {
+        return;
+    }
+    *was = Some(on);
+    for mut cam in &mut cams {
+        cam.is_active = on;
+    }
+}
+
 /// Marker on each pooled batch entity, one `Mesh2d` draw per run; the FPS probe's `ui_batches=`
 /// counts them.
 #[derive(Component)]
@@ -375,6 +398,7 @@ impl Plugin for PlayerUiPlugin {
                 Update,
                 UiQuadAppend.after(benilla_world::schedule::WorldStage::Input),
             )
+            .add_systems(bevy::app::Last, gate_ui_camera)
             .add_systems(Update, clear_ui_overlays.before(UiQuadAppend))
             .add_systems(Update, rebuild_ui_mesh.after(UiQuadAppend))
             .add_systems(Last, count_material_events);

@@ -265,6 +265,11 @@ fn unpark_boot_vm(world: &mut World) {
 static UI_LUA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Set by the CVar.
+/// Whether the player interface is switched on; see [`set_ui_lua`].
+pub(crate) fn ui_lua_on() -> bool {
+    UI_LUA.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) fn set_ui_lua(on: bool) {
     UI_LUA.store(on, std::sync::atomic::Ordering::Relaxed);
 }

@@ -434,6 +434,14 @@ pub(super) fn tick_script(
     mut ui_cost: ResMut<super::UiFrameCost>,
     mut pass: ResMut<super::UiPassState>,
 ) {
+    // **`/console uiLua 0` stops here too.** Gating `ingame_ui_up` alone refused only the FEED
+    // systems: the interface stayed on screen and its VM kept ticking, so the owner flipped the
+    // switch and saw nothing change. The switch is meant to remove the interface, not to freeze
+    // its inputs, and that needs three things stopped - the bridge, this tick, and the UI camera
+    // (`ui_pass::gate_ui_camera`).
+    if !crate::ui_script::ui_lua_on() {
+        return;
+    }
     pass.live = false;
     let Some(mut script) = script else {
         // No VM, no UI sampling a booth pane: a stranded pane would keep the paper-doll camera

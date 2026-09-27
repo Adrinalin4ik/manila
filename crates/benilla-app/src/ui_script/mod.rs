@@ -387,7 +387,7 @@ pub(crate) use lifecycle::{
 #[cfg(test)]
 pub(crate) use lifecycle::load_ingame_ui_on_world_entry;
 /// The player-interface master switch, `/console uiLua 0`.
-pub(crate) use lifecycle::set_ui_lua;
+pub(crate) use lifecycle::{set_ui_lua, ui_lua_on};
 use lifecycle::shutdown_on_exit;
 #[cfg(test)]
 pub(crate) use lifecycle::{
