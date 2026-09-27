@@ -124,6 +124,18 @@ pub fn playing_seq(player: &AnimationPlayer, anims: &ModelAnimations) -> Option<
         .or_else(|| anims.idle_seq().map(|seq| (seq, 0.0)))
 }
 
+/// **`/console matAnimOff 1`**: stop sampling material and UV animation - see [`sample_mat_anim`].
+static MAT_ANIM_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set by the CVar.
+pub fn set_mat_anim_off(on: bool) {
+    MAT_ANIM_OFF.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn mat_anim_off() -> bool {
+    MAT_ANIM_OFF.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Sample every instance: a hosted one on its host's sequence and clip clock, a pinned one on its
 /// spawn clock; frozen ones keep their t = 0 sample. Hidden instances sample too, as the reference
 /// evaluates the tracks every frame regardless of the cull (`0x707b3a`–`0x707b5c`), or a batch
@@ -133,6 +145,16 @@ pub fn sample_mat_anim(
     hosts: Query<(&AnimationPlayer, &ModelAnimations)>,
     mut q: Query<&mut MatAnim>,
 ) {
+    // **`/console matAnimOff 1`** - the third animation lane, and the one `animParkAll` cannot
+    // touch. The owner: water keeps flowing and torches keep burning with every rig parked, which
+    // is correct - neither has a rig. Their motion is material and UV animation, sampled here.
+    //
+    // The doc above says this pass is deliberate: "Hidden instances sample too, as the reference
+    // evaluates the tracks every frame regardless of the cull". That is faithful, and its price
+    // has never been measured. A lever, not a change of behaviour.
+    if mat_anim_off() {
+        return;
+    }
     let now = time.elapsed_secs();
     // The scene clock in f64: a long-uptime f32 drifts whole milliseconds.
     let shared = time.elapsed_secs_f64();

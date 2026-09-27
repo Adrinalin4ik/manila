@@ -24,7 +24,7 @@ use sim::simulate_particles;
 pub(crate) use sim::{far_side_of_water, model_far_side, water_height, WaterInterleave};
 /// The effects ablation switch, `/console fxOff 1`: stops the emitter sim AND empties the shared
 /// effect buffer, so ground decals, ribbons, beams and trails go with it.
-pub use buffer::set_fx_off;
+pub use buffer::{fx_off, set_fx_off};
 
 /// A camera our own pacing (`boothHalfRate`) skips on some frames while its scene poses at full
 /// rate. The reference's draw-set law (a tick only in a drawn frame, no catch-up) keys on its cull,

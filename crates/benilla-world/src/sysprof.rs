@@ -66,7 +66,12 @@ pub fn take_top(n: usize) -> Vec<(String, u64)> {
         // layer; a large `seen` with `timed` at 0 means they reach it and the name test rejects
         // them, which names the next fix without another build.
         if ARMED.load(Ordering::Relaxed) {
-            bevy::log::tracing::warn!("sysprof armed but empty: seen={seen} timed={timed}");
+            // Once, not once a second: the message names a fix, and repeating it buries the
+            // console the owner is reading for `[gate-trace]` and `[sched]`.
+            static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SAID.swap(true, Ordering::Relaxed) {
+                bevy::log::tracing::warn!("sysprof armed but empty: seen={seen} timed={timed}");
+            }
         }
         return Vec::new();
     };

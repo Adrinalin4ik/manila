@@ -752,6 +752,11 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "benilla's own - 1.12 elects every scene object each frame and has no such override",
     ),
     ours(
+        "matAnimOff",
+        "0",
+        "benilla's own - 1.12 evaluates every material track each frame, cull or no cull",
+    ),
+    ours(
         "fxOff",
         "0",
         "benilla's own - 1.12 has particleDensity, which scales rate and never stops a lane",

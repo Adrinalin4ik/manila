@@ -33,7 +33,12 @@
       window[name] = Patched;
     }
     const resume = () => {
-      console.log(`audio: gesture — ${contexts.length} context(s): ${contexts.map((c) => c.state).join(',') || 'none'}`);
+      // Was logged on EVERY gesture, which is every click: the owner reads this console
+      // for `[gate-trace]` and `[sched]` lines, and a per-click line buries them.
+      if (!window.__manila_audio_logged) {
+        window.__manila_audio_logged = true;
+        console.log(`audio: gesture — ${contexts.length} context(s): ${contexts.map((c) => c.state).join(',') || 'none'}`);
+      }
       for (const ctx of contexts) {
         if (ctx.state !== 'running') {
           ctx.resume().then(() => console.log(`audio: context resumed (${ctx.state})`), () => {});

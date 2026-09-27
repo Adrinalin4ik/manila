@@ -79,7 +79,7 @@ const FALLBACK_RADIUS: f32 = 6.0;
 pub(super) fn gate_rig_animation(
     time: Res<Time>,
     cam: Query<&Frustum, With<WorldCamera>>,
-    rigs: Query<
+    mut rigs: Query<
         (
             Entity,
             &GlobalTransform,
@@ -88,6 +88,11 @@ pub(super) fn gate_rig_animation(
             Has<Embodied>,
             Option<&MountBody>,
             Option<&UnitWmoRoom>,
+            // The crowd wall's verdict; see the `hidden` leg below.
+            Option<&Visibility>,
+            // Stopped outright under `animParkAll`; see the `stop_all` below for why parking the
+            // pose is not enough to freeze a model.
+            Option<&mut AnimationPlayer>,
         ),
         // Every rig, driver or not: a GameObject rig's looping player is its whole animation.
         // Doodads and booth stages are left out: their own gates own their `AnimParked`, and two
@@ -123,11 +128,25 @@ pub(super) fn gate_rig_animation(
         return;
     };
     let now = time.elapsed_secs();
-    for (entity, tf, radius, parked, is_self, mount, room) in &rigs {
+    for (entity, tf, radius, parked, is_self, mount, room, vis, player) in &mut rigs {
         let exempt =
             disabled || is_self || mount.is_some_and(|m| self_hosts.get(m.host).unwrap_or(false));
+        // **A body the crowd wall hid is still animated, and that is why `playerDistance 0` never
+        // bought anything.** This gate asks the frustum and the portal PVS; `player_distance`
+        // writes `Visibility::Hidden`, which neither leg reads, so a hidden body stays in the
+        // frustum and keeps its full pose cost. The same shape as the doodad gate's defect,
+        // approached from the other side.
+        //
+        // Journal 67 priced what this lane is worth in a real crowd: `rigs_park` 530 -> 1,030 took
+        // `px_anim` from **15.9 ms to 3.9** and the frame from 12-14 to 18-23 fps, at 46,800
+        // entities. Hiding without parking threw that away.
+        //
+        // Cheap and safe to read: if it is not drawn, its pose cannot be seen. A fade-in writes
+        // `Hidden` too, and parks for those frames - the rig wakes on the frame the marker drops,
+        // which is the behaviour every other leg here already has.
+        let hidden = vis.is_some_and(|v| *v == Visibility::Hidden);
         let visible = exempt
-            || !park_all && {
+            || !hidden && !park_all && {
                 let scale = tf.to_scale_rotation_translation().0.max_element();
                 let r = radius.map_or(FALLBACK_RADIUS, |r| r.0 * scale * RADIUS_SCALE + RADIUS_PAD);
                 let sphere_in = frustum.intersects_sphere(
@@ -150,6 +169,20 @@ pub(super) fn gate_rig_animation(
         if cost_on {
             n_rigs += 1;
             n_parked += u32::from(parked);
+        }
+        // **Parking the pose does not freeze the model, and the gryphons proved it.** This gate's
+        // own header says it "never stops the `AnimationPlayer`, whose clock the driver and the
+        // event scan still use" - but bevy's `animate_targets` writes the joint transforms
+        // straight from that player, so a parked rig keeps moving on screen. The doodad gate does
+        // `stop_all` for exactly this reason.
+        //
+        // Only under `animParkAll`, which is an ablation switch: stopping the player loses the
+        // driver's clock, so a resume snaps rather than continues. That is acceptable for a lever
+        // the owner flips to look at a number, and not acceptable as shipped behaviour.
+        if park_all && !exempt {
+            if let Some(mut p) = player {
+                p.stop_all();
+            }
         }
         if visible {
             out_since.remove(&entity);

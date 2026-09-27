@@ -113,10 +113,16 @@ pub(crate) fn on_cvar(
     // measuring it: turn a subsystem OFF and read the frame. Two of these already existed as env
     // vars — `WOW_ANIM_PARK_ALL` is the pose lane's cost FLOOR and `WOW_NO_ANIM_LOD` its CEILING —
     // and were unreachable in the browser, where `std::env::var_os` is always `None`.
+    // **One switch, every lane.** The owner asked for "stop all objects" and got creature rigs
+    // only: water, torches and portals kept moving, correctly - none of them is a creature rig.
+    // Doodads own their own gate and material/UV animation is not a rig at all, so the CVar drives
+    // all three from here rather than asking anyone to remember three names.
     if ev.is("animParkAll") {
         let on = ev.flag();
         crate::creature_anim::lod::set_park_all(on);
-        info!("every rig parked (pose-lane floor): {on}");
+        benilla_world::doodad_anim::set_park_all(on);
+        benilla_world::doodad_anim::set_mat_anim_off(on);
+        info!("all animation stopped (rigs, doodads, material/UV, global sequences): {on}");
     }
     if ev.is("animLodOff") {
         let on = ev.flag();
@@ -127,6 +133,15 @@ pub(crate) fn on_cvar(
         let on = ev.flag();
         crate::creature_anim::lod::set_room_lod_off(on);
         info!("portal-PVS leg of the animation LOD disabled: {on}");
+    }
+    // **`/console matAnimOff 1`** - the third animation lane. Water and torches keep moving with
+    // every rig parked, correctly: neither has a rig. Their motion is material and UV animation,
+    // which `sample_mat_anim` evaluates for EVERY instance each frame, hidden ones included, as
+    // the reference does. Faithful, and never priced.
+    if ev.is("matAnimOff") {
+        let on = ev.flag();
+        benilla_world::doodad_anim::set_mat_anim_off(on);
+        info!("material/UV animation sampling stopped: {on}");
     }
     if ev.is("fxOff") {
         let on = ev.flag();

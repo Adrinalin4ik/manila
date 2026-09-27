@@ -82,6 +82,11 @@ fn apply_global_sequences(
     mut joints: Query<&mut Transform>,
     mut rigs: Query<&mut super::RigPose>,
 ) {
+    // Part of the one switch: a global sequence is a clock, not a rig, so parking every rig left
+    // banners, portals and water wheels turning.
+    if crate::doodad_anim::park_all_on() {
+        return;
+    }
     let now = time.elapsed_secs_f64();
     for (host, mut drive, parked) in &mut drives {
         let scene_now = drive.clock.unwrap_or(now);

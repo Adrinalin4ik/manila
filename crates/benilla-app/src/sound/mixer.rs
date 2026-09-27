@@ -847,6 +847,12 @@ impl StreamWatch {
             }) => {
                 // No cause is named: a starved decoder, a render thread that did not run and a
                 // rebuilding device freeze the position identically.
+                // Once per run, not once per starved window. A crackling stream reports every
+                // second and the line is long; the first one says everything the rest do.
+                static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
                 warn!(
                     "audio: {} stream starved — ~{:.0} ms of injected silence over a {span:.2} s \
                      window (counted {counted:.2} s, position advanced {advanced:.2} s) — this is \

@@ -21,6 +21,8 @@ mod lazy;
 mod mat_anim;
 pub(crate) use lazy::{LazyRig, SkinnedTwin};
 use mat_anim::tick_anim_materials;
+/// The material/UV animation lever, `/console matAnimOff 1`.
+pub use mat_anim::set_mat_anim_off;
 pub use mat_anim::{
     playing_seq, register_entity_uv, register_fx_uv, register_tint, sample_mat_anim, AnimMatPart,
     MatAnim, TintAnimMaterials, TintLoop, UvAnimMaterials, UvLoops,
@@ -292,8 +294,7 @@ fn reroll_doodad_variation(
 /// The draw gate: stop a doodad's animation while it is not drawn, and on resume seek the player
 /// to the arm's shared-clock phase. Runs before [`AnimationSystems`], so the seek lands the same
 /// frame.
-#[allow(clippy::type_complexity)] // one Bevy system's full input set
-/// **`/console animCullView 1`**: also require last frame's frustum verdict before keeping a
+/// **`/console animCullView 1`**: also require the world frustum's verdict before keeping a
 /// meshed doodad's rig awake. Default off - see the meshed branch of [`gate_doodad_anim`].
 static CULL_BY_VIEW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -305,6 +306,30 @@ pub fn set_cull_by_view(on: bool) {
 fn cull_by_view() -> bool {
     CULL_BY_VIEW.load(std::sync::atomic::Ordering::Relaxed)
 }
+
+/// **`/console animParkAll 1` reaches the doodads too.**
+///
+/// The owner asked for one switch that stops everything and got three lanes that each kept
+/// moving: water, torches, portals. `animParkAll` only ever parked CREATURE rigs - doodads own
+/// their own `AnimParked` and never heard about it, and material/UV animation is not a rig at all.
+/// This is the doodad leg; `mat_anim` has the third.
+static PARK_ALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set with the same CVar that parks creature rigs.
+pub fn set_park_all(on: bool) {
+    PARK_ALL.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Readable from the sibling lanes that must stop with it.
+pub fn park_all_on() -> bool {
+    park_all()
+}
+
+fn park_all() -> bool {
+    PARK_ALL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 
 fn gate_doodad_anim(
     time: Res<Time>,
@@ -361,7 +386,7 @@ fn gate_doodad_anim(
     // it off, because the verdict was cached from whenever the camera last moved. Flipping the
     // rule has to invalidate one frame of verdicts; after that a still camera genuinely cannot
     // change a frustum answer, so the cache is sound again.
-    let rule = cull_by_view();
+    let rule = cull_by_view() || park_all();
     let rule_moved = *last_rule != Some(rule);
     *last_rule = Some(rule);
     let verdicts_still = !rule_moved
@@ -374,7 +399,9 @@ fn gate_doodad_anim(
         && changed_vis.is_empty();
     for (entity, mut host, lazy, pose, has_rig, player, drive) in &mut hosts {
         // A host born this frame has no verdict to reuse (`active` starts false).
-        let drawn = if verdicts_still && !host.is_added() {
+        let drawn = if park_all() {
+            false
+        } else if verdicts_still && !host.is_added() {
             host.active
         } else if host.meshes.is_empty() {
             // Meshless: the reference ticks any model in the draw set, and a 0-batch model is
