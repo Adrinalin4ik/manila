@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,gate_n,gate_open,px_feedunits,rigs_live,rigs_park,arch,ent_alloc,px_vmtick\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,px_feedunits,gate_n,gate_open,rigs_live,rigs_park,arch,ent_alloc,px_vmtick\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -1424,11 +1424,29 @@ fn journal_fps(
     // measurement the switch exists to take. This one lives in the page, survives it, and costs a
     // single `textContent` write a second.
     #[cfg(target_arch = "wasm32")]
-    web::fps(&format!(
-        "{:.1} fps   {:.1} ms",
-        1000.0 / mean.max(0.001),
-        mean
-    ));
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        // **The two numbers that decide the next fix, read off the screen instead of a journal.**
+        // `/console uiLua 0` is worth ~11 ms, of which the interface's DRAWING is 1.7 - so nine
+        // belong to the VM tick and the 190-system bridge together, and the switch stops both at
+        // once. Showing the tick alone says which of the two to fix, and the owner has downloaded
+        // enough journals.
+        //
+        // Peeked, not consumed: the row still takes these through its own `swap`.
+        // `v.len()` is this window's frame count - the same divisor the row uses, and the only
+        // one in scope here.
+        let n = v.len().max(1) as f32;
+        let vm = VMTICK_US.load(Relaxed) as f32 / 1000.0 / n;
+        let ui = UI_US.load(Relaxed) as f32 / 1000.0 / n;
+        web::fps(&format!(
+            "{:.1} fps   {:.1} ms
+vm {:.1}   ui {:.1}",
+            1000.0 / mean.max(0.001),
+            mean,
+            vm,
+            ui
+        ));
+    }
     let p95 = v[((v.len() - 1) as f32 * 0.95).round() as usize];
     // Raw WoW coords, so the line pastes straight into a `.go xyz` probe.
     let pos = player
@@ -1595,8 +1613,6 @@ fn journal_fps(
             MESH_ALL.swap(0, Relaxed) / f
         );
         let _ = write!(line, ",{}", POSTCLEAN_US.swap(0, Relaxed) / f);
-        // The VM tick, timed inside the system; see `note_vm_tick`.
-        let _ = write!(line, ",{}", VMTICK_US.swap(0, Relaxed) / f);
         for cell in &SET_US {
             let _ = write!(line, ",{}", cell.swap(0, Relaxed) / f);
         }
@@ -1620,6 +1636,11 @@ fn journal_fps(
             ARCH.load(Relaxed),
             ENT_ALLOC.load(Relaxed)
         );
+        // **Last, and it has to stay last.** Written before the `SET_US` loop, this
+        // line shifted every `px_*` column one place and `px_vmtick` printed
+        // `ent_alloc` - 32,768 over a thousand, the same 32.77 "ms" in two captures
+        // whose frames differed, and a power of two rather than a duration.
+        let _ = write!(line, ",{}", VMTICK_US.swap(0, Relaxed) / f);
     }
     // **Every `#` line goes AFTER the last column, not before it.** Both blocks below used to sit
     // above the trailing columns, which was invisible while the systems one stayed empty and split

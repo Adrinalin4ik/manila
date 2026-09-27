@@ -296,7 +296,12 @@ fn reroll_doodad_variation(
 /// frame.
 /// **`/console animCullView 1`**: also require the world frustum's verdict before keeping a
 /// meshed doodad's rig awake. Default off - see the meshed branch of [`gate_doodad_anim`].
-static CULL_BY_VIEW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// **Default ON since the evidence is in.** 785 doodad rigs were posed against 36 visible meshes,
+/// and the meshless branch of this very function has always asked the frustum directly. It shipped
+/// off so the owner could look at it first; he has, and the remaining risk - a rig resuming on the
+/// frame its marker drops - is the behaviour every other leg of this gate already has.
+/// `/console animCullView 0` turns it back off.
+static CULL_BY_VIEW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Set by the CVar.
 pub fn set_cull_by_view(on: bool) {

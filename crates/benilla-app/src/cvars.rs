@@ -771,7 +771,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ),
     ours(
         "animCullView",
-        "0",
+        "1",
         "benilla's own - 1.12 ticks any model in the draw set, and its draw set is the frustum",
     ),
     ours(
