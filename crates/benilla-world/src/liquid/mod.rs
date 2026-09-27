@@ -108,7 +108,9 @@ impl Plugin for LiquidPlugin {
                     .after(crate::exterior_cull::ExteriorCullSet)
                     .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate)
                     .run_if(|| std::env::var_os("WOW_NO_LIQUID").is_some()),
-            );
+            )
+            // The shader-side freeze, on the flip of `animParkAll`; see `apply_liquid_freeze`.
+            .add_systems(bevy::app::Last, apply_liquid_freeze);
         // Added only when `WOW_FORCE_SUB` names a hold: an ordinary run carries no system for it.
         if forced_submersion_frames() > 0 {
             app.add_systems(
@@ -119,5 +121,40 @@ impl Plugin for LiquidPlugin {
             );
         }
         drift::register(app);
+    }
+}
+
+/// **Freezing the water, which no CPU-side parking can do.**
+///
+/// The owner kept finding water still flowing with every rig parked, and he was right to: water
+/// does not animate on the CPU at all. `liquid.wgsl:94` is `w.anim.w * globals.time` - the scroll
+/// and the frame flip happen in the shader, off bevy's global clock, and nothing this side of the
+/// draw call is involved. The only lever is `anim.w` itself, the material's "clock enable", which
+/// the deterministic-run path already sets to 0 for exactly this reason.
+///
+/// Edge-triggered: writing every liquid material each frame would dirty them for the render world
+/// every frame, which is the opposite of what a cost lever is for.
+static FREEZE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Driven by `/console animParkAll`.
+pub fn set_freeze(on: bool) {
+    FREEZE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Apply the freeze on a flip; see [`set_freeze`].
+pub fn apply_liquid_freeze(
+    mut mats: ResMut<bevy::asset::Assets<benilla_assets::materials::LiquidMaterial>>,
+    mut was: Local<Option<bool>>,
+) {
+    let now = FREEZE.load(std::sync::atomic::Ordering::Relaxed);
+    if *was == Some(now) {
+        return;
+    }
+    *was = Some(now);
+    let ids: Vec<_> = mats.ids().collect();
+    for id in ids {
+        if let Some(m) = mats.get_mut(id) {
+            m.extension.anim.w = if now { 0.0 } else { 1.0 };
+        }
     }
 }

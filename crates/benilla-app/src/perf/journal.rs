@@ -122,7 +122,13 @@ pub(crate) fn on_cvar(
         crate::creature_anim::lod::set_park_all(on);
         benilla_world::doodad_anim::set_park_all(on);
         benilla_world::doodad_anim::set_mat_anim_off(on);
-        info!("all animation stopped (rigs, doodads, material/UV, global sequences): {on}");
+        // A torch flame and a forge fire are PARTICLES, not animation, and water scrolls in the
+        // shader (`liquid.wgsl:94`, `w.anim.w * globals.time`) where no CPU-side parking reaches
+        // it. The owner asked for one switch that stops everything, so it drives those lanes too
+        // rather than asking him to remember three names.
+        benilla_world::particles::set_fx_off(on);
+        benilla_world::liquid::set_freeze(on);
+        info!("all motion stopped (rigs, doodads, material/UV, global sequences, effects, water): {on}");
     }
     if ev.is("animLodOff") {
         let on = ev.flag();

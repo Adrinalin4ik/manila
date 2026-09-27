@@ -592,6 +592,14 @@ pub(super) fn tick_anim_materials(
         bevy::platform::collections::HashSet<AssetId<benilla_assets::materials::WowModelMaterial>>,
     >,
 ) {
+    // **The portal's swirl lives here, not in `sample_mat_anim`.** A mage portal is a GameObject
+    // whose texture scrolls through the UV/tint registries into `MatAnimTable`, which the shader
+    // samples - so gating the track SAMPLER left the table's last rows standing and the swirl
+    // turning. This is the lane that fills those rows; stopping it freezes the table, and
+    // `upload_mat_anim` then finds an unchanged generation and stops writing the buffer too.
+    if mat_anim_off() {
+        return;
+    }
     if uv_reg.0.is_empty() && tint_reg.0.is_empty() {
         // Marked parts beside an empty registry mean this lane is dead, not that nothing animates.
         if parts.iter().next().is_some() {
