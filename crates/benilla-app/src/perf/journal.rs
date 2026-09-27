@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,gate_n,gate_open,px_feedunits,rigs_live,rigs_park,arch,ent_alloc\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,gate_n,gate_open,px_feedunits,rigs_live,rigs_park,arch,ent_alloc,px_vmtick\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -444,7 +444,7 @@ static POSTCLEAN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 ///
 /// `UiFeed` (53 members), `UnitFeed` (31) and `UiInput` (2) already exist as sets, so this costs
 /// no change to 190 registrations to find out.
-const NSETS: usize = 9;
+const NSETS: usize = 10;
 static SET_US: [std::sync::atomic::AtomicU64; NSETS] = [ZERO; NSETS];
 
 /// Where each bracket's `open` leaves its timestamp. A resource rather than a static because it
@@ -810,6 +810,15 @@ impl Plugin for FpsJournalPlugin {
                     // condition could buy.
                     set_open::<8>.before(crate::ui_unit::feed_units),
                     set_close::<8>.after(crate::ui_unit::feed_units),
+                    // **The VM's own tick, alone.** `/console uiLua 0` took 10.9 ms off the MAIN
+                    // schedules (52.35 -> 41.44) while `ui_us`, the interface's DRAWING, is only
+                    // 1.70 of it - so about nine milliseconds belong to the bridge and this tick
+                    // together, and the switch cannot tell them apart because it stops both.
+                    // A bracket on one named system can: `px_feedunits` reads 0.00 for a single
+                    // feed, so if this reads most of the nine, the 190 systems are not the story
+                    // and the Lua frame tree is.
+                    set_open::<9>.before(crate::ui_script::tick_script),
+                    set_close::<9>.after(crate::ui_script::tick_script),
                 ),
             )
             .add_systems(
