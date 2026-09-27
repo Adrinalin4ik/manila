@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,gate_n,gate_open,px_feedunits,rigs_live,rigs_park\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,gate_n,gate_open,px_feedunits,rigs_live,rigs_park,arch,ent_alloc\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -546,6 +546,31 @@ static MESH_ALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::ne
 static RIGS_LIVE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static RIGS_PARK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// **Archetypes and allocated entity ids** — the `arch` and `ent_alloc` columns.
+///
+/// Journal 63 measured a real drift: standing still, **+3.08 ms per 100 s**, taking 30.1 fps to
+/// 22.2 over ten minutes, while `entities` (37,295 -> 37,269), `rigs_live` (781 -> 768), `mats`
+/// (5,746 -> 5,767) and `mesh_vis` (35) all held. Everything slowed in proportion - `px_anim`
+/// 3.19 -> 4.49 keeps its ~10% share of the frame - so it is not one system getting slower, it is
+/// the whole runtime.
+///
+/// That is not the shape of a leak of OBJECTS, whose count would grow. It is the shape of
+/// iteration getting more expensive over the same objects, and in an ECS the usual cause is
+/// archetype fragmentation: components inserted and removed every frame - `AnimParked`,
+/// `ParkedMesh`, `HiddenFrames` - move entities between archetypes, and every query walks the
+/// archetype list. The census has read 254, then 323, then 395 in one session.
+///
+/// `ent_alloc` is beside it because id churn has the same effect on the entity meta table and is
+/// invisible to the live `entities` count.
+fn count_world_shape(world: &World) {
+    use std::sync::atomic::Ordering::Relaxed;
+    ARCH.store(world.archetypes().len() as u64, Relaxed);
+    ENT_ALLOC.store(u64::from(world.entities().len()), Relaxed);
+}
+
+static ARCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ENT_ALLOC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn count_rigs(
     rigs: Query<Has<benilla_world::rig_anim::AnimParked>, With<benilla_world::rig_anim::RigPose>>,
 ) {
@@ -688,7 +713,14 @@ impl Plugin for FpsJournalPlugin {
             .add_systems(bevy::app::First, sched_open)
             .add_systems(
                 bevy::app::Last,
-                (count_moved, count_visible_meshes, count_rigs, sched_close).chain(),
+                (
+                    count_moved,
+                    count_visible_meshes,
+                    count_rigs,
+                    count_world_shape,
+                    sched_close,
+                )
+                    .chain(),
             )
             // The armed one-shot dump; see `dumpSchedule` in `on_cvar` for why it cannot run
             // from the observer itself. Costs one atomic read per frame when disarmed.
@@ -1494,6 +1526,13 @@ fn journal_fps(
             ",{},{}",
             RIGS_LIVE.swap(0, Relaxed) / f,
             RIGS_PARK.swap(0, Relaxed) / f
+        );
+        // Populations, not rates: these are the world's shape at the moment the row was written.
+        let _ = write!(
+            line,
+            ",{},{}",
+            ARCH.load(Relaxed),
+            ENT_ALLOC.load(Relaxed)
         );
     }
     // **Every `#` line goes AFTER the last column, not before it.** Both blocks below used to sit
