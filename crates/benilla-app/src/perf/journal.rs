@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,gate_n,gate_open,px_feedunits\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,gate_n,gate_open,px_feedunits,rigs_live,rigs_park\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -520,6 +520,40 @@ fn count_moved(moved: Query<(), Changed<Transform>>) {
 static MESH_VIS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static MESH_ALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// **Rigs posed against rigs parked** — the `rigs_live` and `rigs_park` columns.
+///
+/// The owner's reading of his own screen: a camera pointed at the floor should not cost 30 fps,
+/// so something works outside what the camera can see. The counts say he is right - journal 60
+/// stands at **4,210 bone-anchor writes a frame with 35 visible meshes** - and the mechanism is
+/// in `doodad_anim`'s parking rule, which asks
+///
+///     vis.get(e).is_ok_and(|v| *v != Visibility::Hidden)
+///
+/// `Visibility` is "allowed to be seen"; `ViewVisibility` is "survived this frame's frustum".
+/// A doodad behind the camera keeps `Visibility::Inherited`, reads as drawn, and its rig is posed
+/// every frame. `mesh_all` 2,093 against `mesh_vis` 35 is exactly that gap.
+///
+/// Counted before it is fixed, because a fix whose size nobody measured is how eight hypotheses
+/// died this week.
+static RIGS_LIVE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RIGS_PARK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn count_rigs(
+    rigs: Query<Has<benilla_world::rig_anim::AnimParked>, With<benilla_world::rig_anim::RigPose>>,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (mut live, mut park) = (0u64, 0u64);
+    for parked in &rigs {
+        if parked {
+            park += 1;
+        } else {
+            live += 1;
+        }
+    }
+    RIGS_LIVE.fetch_add(live, Relaxed);
+    RIGS_PARK.fetch_add(park, Relaxed);
+}
+
 fn count_visible_meshes(
     meshes: Query<&bevy::camera::visibility::ViewVisibility, With<Mesh3d>>,
 ) {
@@ -646,7 +680,7 @@ impl Plugin for FpsJournalPlugin {
             .add_systems(bevy::app::First, sched_open)
             .add_systems(
                 bevy::app::Last,
-                (count_moved, count_visible_meshes, sched_close).chain(),
+                (count_moved, count_visible_meshes, count_rigs, sched_close).chain(),
             )
             // The armed one-shot dump; see `dumpSchedule` in `on_cvar` for why it cannot run
             // from the observer itself. Costs one atomic read per frame when disarmed.
@@ -1446,6 +1480,12 @@ fn journal_fps(
             ",{},{}",
             crate::ui_script::gate::GATES.swap(0, Relaxed) / f,
             crate::ui_script::gate::GATES_OPEN.swap(0, Relaxed) / f
+        );
+        let _ = write!(
+            line,
+            ",{},{}",
+            RIGS_LIVE.swap(0, Relaxed) / f,
+            RIGS_PARK.swap(0, Relaxed) / f
         );
     }
     // **Every `#` line goes AFTER the last column, not before it.** Both blocks below used to sit
