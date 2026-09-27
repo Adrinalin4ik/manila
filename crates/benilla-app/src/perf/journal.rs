@@ -106,7 +106,14 @@ pub(crate) fn on_cvar(
         info!("skin decode cache: {mb} MiB");
     }
     if ev.is("dumpSchedule") && ev.flag() {
-        commands.run_system_cached(crate::perf::sched_dump::dump_schedule);
+        // **Armed here, run in `Last`.** Running it straight from this observer printed
+        // "Update: 0 systems" while PostUpdate printed 209, and the reason is not the dump: the
+        // console is read during `Update`, and bevy TAKES a schedule out of `Schedules` while it
+        // runs it, so `get(Update)` answers `None` from inside itself. PostUpdate was merely the
+        // one that happened not to be running. Deferring to `Last` puts both schedules back in
+        // the world - and `u_net` reading 5.13 ms with the network off is exactly the number that
+        // needs Update's list to be readable.
+        crate::perf::sched_dump::arm();
         commands.queue(|world: &mut World| {
             world
                 .resource_mut::<crate::cvars::Cvars>()
@@ -618,6 +625,9 @@ impl Plugin for FpsJournalPlugin {
                 bevy::app::Last,
                 (count_moved, count_visible_meshes, sched_close).chain(),
             )
+            // The armed one-shot dump; see `dumpSchedule` in `on_cvar` for why it cannot run
+            // from the observer itself. Costs one atomic read per frame when disarmed.
+            .add_systems(bevy::app::Last, crate::perf::sched_dump::dump_if_armed)
             .init_resource::<SetClocks>()
             .add_systems(
                 bevy::app::PostUpdate,

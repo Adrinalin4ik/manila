@@ -21,6 +21,23 @@
 use bevy::ecs::schedule::ScheduleLabel;
 use bevy::prelude::*;
 
+/// Set by `dumpSchedule`; consumed by [`dump_if_armed`] in `Last`.
+static ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Arm the one-shot dump. It cannot run from the CVar observer: that fires during `Update`, and
+/// bevy takes a schedule OUT of `Schedules` while running it, so `Update` looks empty from inside
+/// itself - which is exactly the "Update: 0 systems" the first dump printed.
+pub(crate) fn arm() {
+    ARMED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Run the dump in `Last`, where neither `Update` nor `PostUpdate` is in flight.
+pub(crate) fn dump_if_armed(world: &mut World) {
+    if ARMED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        dump_schedule(world);
+    }
+}
+
 /// Dump `Update` and `PostUpdate` in execution order. Exclusive, because the schedules live in the
 /// `World` and the order is only knowable after they are built.
 pub(crate) fn dump_schedule(world: &mut World) {
