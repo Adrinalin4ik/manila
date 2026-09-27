@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,\n                              px_anim,px_asset,px_prop,px_bounds,px_check\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -632,7 +632,18 @@ impl Plugin for FpsJournalPlugin {
                     set_close::<3>.after(bevy::camera::visibility::VisibilitySystems::CalculateBounds),
                     set_open::<4>.before(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
                     set_close::<4>.after(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
-                ),
+                )
+                    // **Chained now, and only now.** The first cut left these unordered against
+                    // each other deliberately: chaining across sets whose real order is unknown is
+                    // a scheduler cycle, which is a panic in the owner's build. Journal 55 then
+                    // showed the five summing to 106% of the MAIN tiles - overlapping, so only
+                    // their RANKING was usable - and `dumpSchedule` had meanwhile printed
+                    // PostUpdate's true order: animation at 31-43, asset events at 65-100,
+                    // transform propagation at 134-136, then the two visibility passes. Chaining
+                    // in the order the schedule itself reports adds no constraint the scheduler
+                    // does not already meet, so it cannot cycle, and it makes the brackets
+                    // disjoint instead of nested.
+                    .chain(),
             )
             .init_resource::<PhaseClock>()
             .add_systems(PhaseMark(RAPP as u8), phase_mark::<RAPP>)
