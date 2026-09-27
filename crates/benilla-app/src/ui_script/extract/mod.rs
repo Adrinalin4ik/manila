@@ -434,6 +434,18 @@ pub(crate) fn tick_script(
     mut ui_cost: ResMut<super::UiFrameCost>,
     mut pass: ResMut<super::UiPassState>,
 ) {
+    // **Timed from inside, because a bracket could not do it.** `set_open.before(tick_script)` /
+    // `set_close.after(...)` read **32.77 ms on a 34.27 ms frame** - larger than every main tile
+    // put together - because this system has no neighbour to pin the marks against, so the
+    // scheduler floated them to opposite ends of `Update`. A guard here cannot be contaminated by
+    // anything, and `Drop` runs it on the early returns below as well as the full path.
+    struct Tick(bevy::platform::time::Instant);
+    impl Drop for Tick {
+        fn drop(&mut self) {
+            crate::perf::journal::note_vm_tick(self.0.elapsed().as_micros() as u64);
+        }
+    }
+    let _tick = Tick(bevy::platform::time::Instant::now());
     // **`/console uiLua 0` stops here too.** Gating `ingame_ui_up` alone refused only the FEED
     // systems: the interface stayed on screen and its VM kept ticking, so the owner flipped the
     // switch and saw nothing change. The switch is meant to remove the interface, not to freeze

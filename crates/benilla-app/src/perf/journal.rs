@@ -444,7 +444,7 @@ static POSTCLEAN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 ///
 /// `UiFeed` (53 members), `UnitFeed` (31) and `UiInput` (2) already exist as sets, so this costs
 /// no change to 190 registrations to find out.
-const NSETS: usize = 10;
+const NSETS: usize = 9;
 static SET_US: [std::sync::atomic::AtomicU64; NSETS] = [ZERO; NSETS];
 
 /// Where each bracket's `open` leaves its timestamp. A resource rather than a static because it
@@ -566,6 +566,15 @@ fn count_moved(moved: Query<(), Changed<Transform>>) {
     use std::sync::atomic::Ordering::Relaxed;
     MOVED.fetch_add(moved.iter().count() as u64, Relaxed);
     MOVED_FRAMES.fetch_add(1, Relaxed);
+}
+
+/// Microseconds inside `ui_script::tick_script`, the Lua VM's own tick — timed from inside the
+/// system because a scheduler bracket around it measured 32.77 ms of a 34.27 ms frame.
+static VMTICK_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Called by the tick's own drop guard.
+pub(crate) fn note_vm_tick(us: u64) {
+    VMTICK_US.fetch_add(us, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Meshes that SURVIVE the cull, beside the ones that merely exist.
@@ -817,8 +826,7 @@ impl Plugin for FpsJournalPlugin {
                     // A bracket on one named system can: `px_feedunits` reads 0.00 for a single
                     // feed, so if this reads most of the nine, the 190 systems are not the story
                     // and the Lua frame tree is.
-                    set_open::<9>.before(crate::ui_script::tick_script),
-                    set_close::<9>.after(crate::ui_script::tick_script),
+
                 ),
             )
             .add_systems(
@@ -1587,6 +1595,8 @@ fn journal_fps(
             MESH_ALL.swap(0, Relaxed) / f
         );
         let _ = write!(line, ",{}", POSTCLEAN_US.swap(0, Relaxed) / f);
+        // The VM tick, timed inside the system; see `note_vm_tick`.
+        let _ = write!(line, ",{}", VMTICK_US.swap(0, Relaxed) / f);
         for cell in &SET_US {
             let _ = write!(line, ",{}", cell.swap(0, Relaxed) / f);
         }
