@@ -25,6 +25,21 @@ pub(crate) fn auditing() -> bool {
     *ON.get_or_init(|| std::env::var_os("WOW_FEED_GATE_CHECK").is_some_and(|v| v != "0"))
 }
 
+/// **How many gated feeds reached their gate, and how many it let through** — the `gate_n` and
+/// `gate_open` columns.
+///
+/// The trace printed ONE line in a whole session, so the gates are closed almost always: they
+/// work. Yet `UnitFeed` measures **4.79 ms of a 26.3 ms frame** with the network off. If the
+/// bodies are skipping, that time is spent BEFORE the gate — bevy fetches a system's parameters
+/// (here, dozens of queries and resources apiece) before the body can decide to leave, and
+/// `feed_units` calls `FieldEdges::collect` above its own gate. 190 `feed_*`/`drain_*` systems
+/// paying to enter and leave is a different defect from a gate that never closes, and it has a
+/// different cure: a run condition on the SET, so bevy skips them without building their params.
+///
+/// These two counters separate the cases with a number rather than an argument.
+pub(crate) static GATES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static GATES_OPEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Runtime switch for [`trace`], set by `/console feedGateTrace 1`.
 ///
 /// **The env var alone could never work in the browser**, which is the only place the number
@@ -91,6 +106,11 @@ pub(crate) struct Gate {
 impl Gate {
     /// Judge a gate from its OR-of-inputs verdict.
     pub(crate) fn new(open: bool) -> Self {
+        use std::sync::atomic::Ordering::Relaxed;
+        GATES.fetch_add(1, Relaxed);
+        if open {
+            GATES_OPEN.fetch_add(1, Relaxed);
+        }
         Self {
             open,
             closed_audit: !open && auditing(),

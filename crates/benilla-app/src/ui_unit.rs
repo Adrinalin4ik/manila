@@ -82,7 +82,7 @@ fn fire_leaving_world_on_worldport(
 
 /// The feed's change-tracking memory: what we last told the VM, plus one server-side log-once.
 #[derive(Resource, Default)]
-struct UnitFeedState {
+pub(crate) struct UnitFeedState {
     /// What we last told the VM, dying with it, so a `/reload` re-fires everything as a login does.
     vm: crate::ui_script::VmMemo<UnitFeedMemo>,
     /// Whether the sideless-template warning is logged; outside the VM memo, so `/reload` keeps it.
@@ -91,7 +91,7 @@ struct UnitFeedState {
 
 /// The per-VM half of [`UnitFeedState`]: the event-trigger diffs.
 #[derive(Default)]
-struct UnitFeedMemo {
+pub(crate) struct UnitFeedMemo {
     /// The lazy caches' landing counters: their per-frame `&mut` misses would trip `is_changed`.
     names_generation: gate::Watch,
     guild_generation: gate::Watch,
@@ -1095,7 +1095,7 @@ pub(crate) fn fire_transitions(
     }
 }
 
-fn feed_units(
+pub(crate) fn feed_units(
     script: Option<NonSendMut<UiScript>>,
     // Absent when the data failed to load: no class has a relic slot, the reference's bounds leg.
     classes: Option<Res<crate::chr_classes::ChrClassTable>>,

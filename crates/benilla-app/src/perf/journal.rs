@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,gate_n,gate_open,px_feedunits\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -382,7 +382,7 @@ static POSTCLEAN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 ///
 /// `UiFeed` (53 members), `UnitFeed` (31) and `UiInput` (2) already exist as sets, so this costs
 /// no change to 190 registrations to find out.
-const NSETS: usize = 8;
+const NSETS: usize = 9;
 static SET_US: [std::sync::atomic::AtomicU64; NSETS] = [ZERO; NSETS];
 
 /// Where each bracket's `open` leaves its timestamp. A resource rather than a static because it
@@ -664,6 +664,21 @@ impl Plugin for FpsJournalPlugin {
                     set_close::<6>.after(crate::ui_unit::UnitFeed),
                     set_open::<7>.before(crate::ui_script::UiInput),
                     set_close::<7>.after(crate::ui_script::UiInput),
+                    // **One system, not a set.** `px_unitfeed` read 4.79 ms against
+                    // `px_uifeed`'s 4.87 - nearly equal, for a 39-member sub-phase inside a
+                    // 53-member parent - which is the arithmetic saying the bracket is swallowing
+                    // its neighbours again, exactly as the nested PostUpdate brackets inflated
+                    // `CheckVisibility` sevenfold. 4.79 ms over 39 systems that SKIP would be
+                    // 123 us apiece, which is not believable.
+                    //
+                    // A bracket around a single named system has almost nothing to float into it,
+                    // so this is the honest per-system price of entering a gated feed and leaving
+                    // it: bevy builds the params before the body can decide, and `feed_units`
+                    // additionally calls `FieldEdges::collect` above its own gate. Multiply it by
+                    // the 190 `feed_*`/`drain_*` systems for the ceiling a set-level run
+                    // condition could buy.
+                    set_open::<8>.before(crate::ui_unit::feed_units),
+                    set_close::<8>.after(crate::ui_unit::feed_units),
                 ),
             )
             .add_systems(
@@ -1425,6 +1440,13 @@ fn journal_fps(
         for cell in &SET_US {
             let _ = write!(line, ",{}", cell.swap(0, Relaxed) / f);
         }
+        // Gated feeds reached, and those the gate let through — per frame, like the tiles.
+        let _ = write!(
+            line,
+            ",{},{}",
+            crate::ui_script::gate::GATES.swap(0, Relaxed) / f,
+            crate::ui_script::gate::GATES_OPEN.swap(0, Relaxed) / f
+        );
     }
     // **Every `#` line goes AFTER the last column, not before it.** Both blocks below used to sit
     // above the trailing columns, which was invisible while the systems one stayed empty and split
