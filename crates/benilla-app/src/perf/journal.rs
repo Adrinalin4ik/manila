@@ -1681,6 +1681,15 @@ fn journal_fps(
     // happened to be. `rig_sk` near zero means the poses genuinely differ every frame and the
     // guard buys nothing - a real possibility for a global sequence, which samples a continuous
     // curve at an advancing `t`. See `benilla_world::rig_anim::take_anchor_writes`.
+    // **The guard that shifted column earned.** A row whose width disagrees with the
+    // header is not slightly wrong: every column past the break reads its neighbour, and
+    // it reads as data. That is how `px_vmtick` reported 32.77 ms twice before it was
+    // doubted.
+    debug_assert_eq!(
+        line.matches(',').count(),
+        JOURNAL_HEADER.trim_end().matches(',').count(),
+        "journal row width does not match the header"
+    );
     line.push('\n');
     #[cfg(target_arch = "wasm32")]
     web::append(&line);
