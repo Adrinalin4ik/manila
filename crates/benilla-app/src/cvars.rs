@@ -751,6 +751,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "0",
         "benilla's own - 1.12 elects every scene object each frame and has no such override",
     ),
+    // **The player interface, off** - `ui_script::set_ui_lua`. Every `feed_*`/`drain_*` system is
+    // gated on `ingame_ui_up`, so this refuses all 190 in one place. The frame counter moves to
+    // the page, since the in-game one is drawn by what this switches off.
+    ours(
+        "uiLua",
+        "1",
+        "benilla's own - 1.12 cannot run without its interface",
+    ),
     ours(
         "matAnimOff",
         "0",

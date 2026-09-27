@@ -9,7 +9,7 @@ use super::{Guid, NetEvents, SelfGuid, SelfPlayer};
 
 /// The session's own lifecycle - what `netPackets 0` still lets through, so a REAL disconnect is
 /// still reported while the world is frozen. Everything else about the world is refused.
-fn is_session_lifecycle(ev: &SessionEvent) -> bool {
+pub(crate) fn is_session_lifecycle(ev: &SessionEvent) -> bool {
     use SessionEvent as E;
     matches!(
         ev,

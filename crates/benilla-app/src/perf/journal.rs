@@ -144,6 +144,15 @@ pub(crate) fn on_cvar(
     // every rig parked, correctly: neither has a rig. Their motion is material and UV animation,
     // which `sample_mat_anim` evaluates for EVERY instance each frame, hidden ones included, as
     // the reference does. Faithful, and never priced.
+    // **`/console uiLua 0`** - the player interface off, and with it all 190 `feed_*`/`drain_*`
+    // systems that bridge the game into its VM. They are every one gated on `ingame_ui_up`, so
+    // one refusal there refuses the lot. The frame counter moves to the page (`journal_web::fps`)
+    // because the in-game one is drawn by the interface this switches off.
+    if ev.is("uiLua") {
+        let on = ev.flag();
+        crate::ui_script::set_ui_lua(on);
+        info!("player UI (Lua) {}", if on { "ON" } else { "OFF" });
+    }
     if ev.is("matAnimOff") {
         let on = ev.flag();
         benilla_world::doodad_anim::set_mat_anim_off(on);
@@ -696,6 +705,9 @@ fn take_stream_us(frames: u64) -> [u64; 5] {
 
 impl Plugin for FpsJournalPlugin {
     fn build(&self, app: &mut App) {
+        // The page-side way back from `/console uiLua 0`; see `journal_web::install_ui_lua_hook`.
+        #[cfg(target_arch = "wasm32")]
+        web::install_ui_lua_hook();
         // bevy's per-pass render diagnostics — the source of the GPU columns, and (under the
         // `tracy` feature) the hook Tracy's GPU zones ride. Present in every build: its per-frame
         // cost is one query resolve and one buffer map on the render thread, and a player's
@@ -1390,6 +1402,16 @@ fn journal_fps(
     }
     v.sort_by(f32::total_cmp);
     let mean = v.iter().sum::<f32>() / v.len() as f32;
+    // **The frame counter outside the interface.** The in-game readout is drawn by the Lua UI, so
+    // it goes dark exactly when `/console uiLua 0` switches that off - which is the one
+    // measurement the switch exists to take. This one lives in the page, survives it, and costs a
+    // single `textContent` write a second.
+    #[cfg(target_arch = "wasm32")]
+    web::fps(&format!(
+        "{:.1} fps   {:.1} ms",
+        1000.0 / mean.max(0.001),
+        mean
+    ));
     let p95 = v[((v.len() - 1) as f32 * 0.95).round() as usize];
     // Raw WoW coords, so the line pastes straight into a `.go xyz` probe.
     let pos = player

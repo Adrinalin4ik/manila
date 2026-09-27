@@ -252,11 +252,30 @@ fn unpark_boot_vm(world: &mut World) {
 /// Two terms, because the latch trails the wire by a frame: `apply_net_updates` drains `Connected`
 /// and the login burst behind it in one pass, and the `InWorld` transition that arms the latch and
 /// parks the VM runs at the next frame's `StateTransition`; the `InWorld` term covers that frame.
+/// **`/console uiLua 0`**: the player interface, off.
+///
+/// Journal 69 put the frame at 21.7 ms with animation already out of the way, and the biggest
+/// thing left is the bridge between the game and the Lua UI: **101 `feed_*` and 89 `drain_*`
+/// systems**, every one of them every frame. One of them measured 0.00 ms on its own, so the cost
+/// is not a slow system - it is a hundred and ninety of them, and bevy builds each one's params
+/// before its body can decide to leave.
+///
+/// Every one of those systems is gated on [`ingame_ui_up`], so refusing here refuses the lot in a
+/// single place, without touching 190 registrations.
+static UI_LUA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Set by the CVar.
+pub(crate) fn set_ui_lua(on: bool) {
+    UI_LUA.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub(crate) fn ingame_ui_up(
     pending: Option<Res<PendingEntryUiLoad>>,
     state: Option<Res<State<crate::char_select::ClientState>>>,
 ) -> bool {
-    pending.is_none() && state.is_some_and(|s| *s.get() == crate::char_select::ClientState::InWorld)
+    UI_LUA.load(std::sync::atomic::Ordering::Relaxed)
+        && pending.is_none()
+        && state.is_some_and(|s| *s.get() == crate::char_select::ClientState::InWorld)
 }
 
 /// `PreUpdate`, after [`run_pending_reload`] so a reload never interleaves an armed entry load:

@@ -87,6 +87,23 @@ pub(crate) struct NetDebug {
     pub(crate) others: bool,
 }
 
+/// **The master switch, readable from the IO task.**
+///
+/// `NetDebug` is a Bevy resource and the receiver is not a system, so the drop used to happen on
+/// the APP side: every packet was decoded, crossed the channel and was then thrown away. The owner
+/// is right that this is not "off" - the receiver was still doing its whole job. This flag lets the
+/// receiving end drop them instead, so nothing past the decode is paid for.
+///
+/// The socket is still READ, deliberately. Not reading it fills the server's send buffer and ends
+/// in a disconnect, and the owner's whole requirement for this switch was that it must not
+/// disconnect: an offline mode, not a hang-up.
+static PACKETS_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Whether the receiver should forward anything but the session's own lifecycle.
+pub(crate) fn packets_on() -> bool {
+    PACKETS_ON.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl Default for NetDebug {
     fn default() -> Self {
         Self {
@@ -104,6 +121,7 @@ pub(crate) fn on_net_debug_cvar(
     mut gate: ResMut<NetDebug>,
 ) {
     if ev.is("netPackets") {
+        PACKETS_ON.store(ev.flag(), std::sync::atomic::Ordering::Relaxed);
         gate.packets = ev.flag();
         info!(
             "net debug: ALL inbound packets {}",

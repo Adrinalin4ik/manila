@@ -816,6 +816,16 @@ async fn run(
                         );
                     }
                     for ev in events {
+                        // **`netPackets 0` drops here, not on the app side.** The packet is still
+                        // read off the wire - refusing to read fills the server's buffer and ends
+                        // in the disconnect this switch exists to avoid - but nothing past the
+                        // decode is paid for: no channel send, no queue, no drain. The session's
+                        // own lifecycle still passes, so a REAL disconnect is still reported while
+                        // the world is frozen.
+                        if !crate::net::packets_on() && !crate::net::apply::is_session_lifecycle(&ev)
+                        {
+                            continue;
+                        }
                         // The pong bypass: the reference's `OnData` (`0x537b10`) hands `SMSG_PONG`
                         // to `HandlePong` (`0x537d60`) inline, not onto the game thread's queue, so
                         // it is timed and consumed here.
