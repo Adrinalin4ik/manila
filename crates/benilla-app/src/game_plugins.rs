@@ -695,7 +695,12 @@ pub(crate) mod schedule_tests {
     ///   `Player`: it reads `control_lost`, and they write only `settling` and `world_stale`;
     /// - `ui_quest::lines::feed_quest_lines` against `ui_items::feed_item_stats` and
     ///   `ui_tooltip::feed_spell_tooltips` over `Items` and the VM: it only reads templates, which
-    ///   those two do not write, and a chat line commutes with their pushes.
+    ///   those two do not write, and a chat line commutes with their pushes;
+    /// - `spell::targeting::drain_spell_target_unit` against the lone `.after(UiInput)` cast
+    ///   drains over the `CastLadder`, and the party, pet-book and chat drains over the unit-token
+    ///   resolver: the class `drop_item_on_unit` and the world click's legs already carry, as none
+    ///   of those drains orders against the target chain. A cast press and a unit-frame bind in one
+    ///   frame take either order until the cast drains share a set that does.
     ///
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
@@ -706,8 +711,9 @@ pub(crate) mod schedule_tests {
     /// readers; the sky clock and tier before the consume set; the grass benders). What remains:
     /// `skybox::animate_skyboxes` against the `MatAnimTable` allocators (it writes only its own
     /// rows) and one pair each of the new systems against the two exclusive systems. Upstream
-    /// 5,463 + ours = 5,488, read off the merged tree (upstream b17be271).
-    const UPDATE_ACTIONABLE_CEILING: usize = 5_488;
+    /// 5,481 + ours = 5,509, read off the merged tree (upstream v0.2.0 ba7fe6e2; three more of ours
+    /// pair with upstream's new v0.2.0 systems).
+    const UPDATE_ACTIONABLE_CEILING: usize = 5_509;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
