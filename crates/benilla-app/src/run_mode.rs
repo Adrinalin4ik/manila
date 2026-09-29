@@ -59,9 +59,13 @@ pub(crate) fn env_login() -> bool {
 /// Read by what acts instead of a person: [`crate::net::DisconnectedMessage::new`] (the
 /// lost-session verdict, taken once at the wire edge) and the `FATAL` exits.
 pub(crate) fn unattended() -> bool {
+    // Through `webenv`, like every other `WOW_*` this crate ships to wasm: `std::env::var_os` is
+    // ALWAYS `None` there, so read directly this was unreachable in a browser - and with it the
+    // realm auto-pick's "nobody to click Okay, take the first realm that is up" leg, which is the
+    // one a page-side rig needs. Found by the browser harness sitting at the realm list.
     ["WOW_UNATTENDED", "WOW_CAPTURE", "WOW_RIG"]
         .iter()
-        .any(|k| std::env::var_os(k).is_some())
+        .any(|k| crate::webenv::var(k).is_some())
 }
 
 /// A run stuck on a dialog: `true` (exit) only when the run is [`unattended`], logging the `FATAL`

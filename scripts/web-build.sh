@@ -76,7 +76,13 @@ if [ -n "${WASM_OPT}" ] && [ "${WEB_DEBUG:-0}" != 1 ]; then
   if [ ! -s "${DIST}/manila_bg.wasm.opt" ]; then
     echo "web-build: wasm-opt exited $opt_status and produced no output - shipping the unoptimised module" >&2
   else
+    # Say so on SUCCESS too, with the sizes. The success path was silent, so a log could not tell
+    # "wasm-opt ran" from "wasm-opt was skipped" - only the failures spoke, and a pass worth +6 %
+    # of the frame rate should not be something you infer from the absence of a warning.
+    before=$(wc -c < "${DIST}/manila_bg.wasm")
+    after=$(wc -c < "${DIST}/manila_bg.wasm.opt")
     mv "${DIST}/manila_bg.wasm.opt" "${DIST}/manila_bg.wasm"
+    echo "web-build: wasm-opt -O3 ok - $((before / 1024)) KiB -> $((after / 1024)) KiB"
   fi
 elif [ "${WEB_DEBUG:-0}" = 1 ]; then
   echo "WEB_DEBUG=1 — skipping wasm-opt to preserve debugging symbols"

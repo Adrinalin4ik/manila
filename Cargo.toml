@@ -77,6 +77,17 @@ opt-level = 1
 # The shipping build (`--profile ship`): fat LTO measures -1.0 cpu_ms (-5 %) against `release`,
 # which stays the measured profile because fat LTO's link time would tax every iteration.
 # `-Ctarget-cpu=native` is not set: it is not portable.
+# The profile `scripts/web-build.sh` ships by default. Written out rather than left to cargo's
+# defaults - which is what it was, so this changes nothing and only stops the answer moving with
+# the toolchain. Measured 2026-09-29: `lto = "thin"` grew the wasm module 81.7 -> 92.0 MB (+12.6 %)
+# and could not be shown to buy anything; `ship`'s fat LTO could not be built at all here, its
+# rustc killed by the OOM at 19 GB. The size cost was certain and the speed gain was not, so the
+# default stands and the measurement is recorded instead of repeated.
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 16
+
 [profile.ship]
 inherits = "release"
 lto = "fat"
