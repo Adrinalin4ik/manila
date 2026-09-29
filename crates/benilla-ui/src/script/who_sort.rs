@@ -6,6 +6,15 @@
 //! Sorting is local, never a server request, and the chain lives for the process (`0x5adc50`, run
 //! from `0x401666`), so it survives a logout.
 
+//! **The comparator is a total order, and on this fork that is not a nicety.** Rust's `sort_by`
+//! ABORTS the process on an intransitive comparator rather than mis-sorting, and the reference's
+//! own comparator ties a miss against every hit (`0x5adab6`), which is intransitive the moment two
+//! different names both tie with `""`. Measured here, not reasoned: a Turtle-derived realm answers
+//! `/who` with race ids 9 and 10 that our DBCs cannot name, and one such row killed the client
+//! outright on the refresh - "user-provided comparison function does not correctly implement a
+//! total order". Upstream has since fixed it the same way (misses last); this note records which
+//! realm proved it, because the stock 1.12 data never can.
+
 use std::cmp::Ordering;
 
 use super::social::WhoInfo;
@@ -151,27 +160,15 @@ fn ascii_ci_cmp(a: &str, b: &str) -> Ordering {
 }
 
 /// The class, race and zone arms (`0x5ada7b`, `0x5adadf`, `0x5adb40`): an id with no DBC row, an
-/// empty name here, ties and passes to the next key (`0x5adbb2`) rather than sorting as `""`. The
-/// empty name is the miss marker: the reference's `GetWhoInfo` (`0x5ad6e0`) shows `UNKNOWN` for
-/// it, benilla's an empty cell, and a row that carried `UNKNOWN` would sort on that word.
+/// empty name here, sorts after every resolved name, not first as `""`. Two misses tie and pass
+/// to the next key (`0x5adbb2`), as there. The empty name is the miss marker: the reference's
+/// `GetWhoInfo` (`0x5ad6e0`) shows `UNKNOWN` for it, benilla's an empty cell, and a row that
+/// carried `UNKNOWN` would sort on that word.
 fn dbc_name_cmp(a: &str, b: &str) -> Ordering {
-    // **Unresolved rows sort together at the END, they do not tie with everything.**
-    //
-    // Tying an empty string with every name is not an ordering at all: `"" == "Orc"` and
-    // `"" == "Human"` while `"Orc" > "Human"`, so equality is not transitive. The reference gets
-    // away with it because C's `qsort` never checks; Rust's sort does, and it does not degrade —
-    // it aborts the process. On a realm whose races or zones our DBCs cannot name (Turtle WoW's
-    // ids 9 and 10, its own zones) one unresolved row was enough to kill the client outright on
-    // the /who refresh: "user-provided comparison function does not correctly implement a total
-    // order".
-    //
-    // Bucketing the misses last keeps what the tie was FOR — an unresolved id must not sort as
-    // `""` and park every unknown above Ahn'Qiraj (see this function's original note) — while
-    // being a real order. The divergence from the reference is confined to where unresolved rows
-    // land among themselves, which is the one thing its own intransitive comparator left
-    // arbitrary anyway.
     match (a.is_empty(), b.is_empty()) {
         (true, true) => Ordering::Equal,
+        // Deviation: the reference ties a miss against a hit (`0x5adab6`); no total order can, and
+        // `sort_by` may panic on one that is not, so the miss goes last.
         (true, false) => Ordering::Greater,
         (false, true) => Ordering::Less,
         (false, false) => ascii_ci_cmp(a, b),
@@ -321,70 +318,101 @@ mod tests {
     }
 
     #[test]
-    fn an_unresolved_dbc_name_ties() {
-        let mut chain = WhoSortChain::default();
-        chain.promote("zone");
+    fn an_unresolved_dbc_name_sorts_after_the_resolved_ones() {
+        // Zone is the seeded front key, so the promote flips it: the default chain already ascends.
+        let chain = WhoSortChain::default();
         let known = row("Bbb", 10, "Mage", "Westfall");
         let unknown = row("Aaa", 10, "Mage", "");
+        assert_eq!(chain.compare(&known, &unknown), Ordering::Less);
+        assert_eq!(chain.compare(&unknown, &known), Ordering::Greater);
+        let other_unknown = row("Ccc", 10, "Mage", "");
         assert_eq!(
-            chain.compare(&known, &unknown),
-            Ordering::Greater,
-            "the zone key ties, so the name decides"
+            chain.compare(&unknown, &other_unknown),
+            Ordering::Less,
+            "two misses tie on zone, so the name decides"
         );
-        assert_eq!(chain.compare(&unknown, &known), Ordering::Less);
 
         // A guild is not a DBC lookup: an empty guild is a real value and sorts first.
         assert_eq!(ascii_ci_cmp("", "Legacy"), Ordering::Less);
     }
 
-    /// **The comparator must be a total order**, because Rust's sort aborts the process when it
-    /// is not — this is a crash, not a mis-sort.
-    ///
-    /// The case is real: a `/who` row whose class, race or zone id our DBCs cannot name arrives
-    /// with an empty string, and on a realm with its own races and zones that is an ordinary row.
-    /// The old `dbc_name_cmp` answered `Equal` whenever either side was empty, which makes
-    /// equality intransitive the moment two different names meet the same empty one.
+    type Setter = fn(&mut WhoInfo, &str);
+
+    /// Each DBC-backed key as a single-key comparator, with the setter for its field.
+    fn dbc_keys() -> [(&'static str, Setter); 3] {
+        [
+            ("class", |r, v| r.class = v.to_string()),
+            ("race", |r, v| r.race = v.to_string()),
+            ("zone", |r, v| r.zone = v.to_string()),
+        ]
+    }
+
+    fn mixed_rows(set: Setter, n: usize) -> Vec<WhoInfo> {
+        let values = [
+            "",
+            "Mage",
+            "Warrior",
+            "",
+            "Elwynn Forest",
+            "Durotar",
+            "Mage",
+        ];
+        (0..n)
+            .map(|i| {
+                let mut r = row(&format!("N{i:03}"), 1 + (i % 7) as u32, "Mage", "Z");
+                set(&mut r, values[(i * 5 + i / 7) % values.len()]);
+                r
+            })
+            .collect()
+    }
+
     #[test]
-    fn the_dbc_comparator_is_a_total_order_with_unresolved_rows() {
-        const NAMES: [&str; 5] = ["", "Orc", "Human", "", "Troll"];
-        for &a in &NAMES {
-            for &b in &NAMES {
-                // Antisymmetry.
-                assert_eq!(
-                    dbc_name_cmp(a, b).reverse(),
-                    dbc_name_cmp(b, a),
-                    "{a:?} vs {b:?} must be antisymmetric"
-                );
-                for &c in &NAMES {
-                    // Transitivity of equality — the law the old version broke.
-                    if dbc_name_cmp(a, b) == Ordering::Equal
-                        && dbc_name_cmp(b, c) == Ordering::Equal
-                    {
-                        assert_eq!(
-                            dbc_name_cmp(a, c),
-                            Ordering::Equal,
-                            "{a:?} == {b:?} and {b:?} == {c:?}, so {a:?} == {c:?}"
-                        );
-                    }
-                    // Transitivity of less-than.
-                    if dbc_name_cmp(a, b) == Ordering::Less && dbc_name_cmp(b, c) == Ordering::Less
-                    {
-                        assert_eq!(
-                            dbc_name_cmp(a, c),
-                            Ordering::Less,
-                            "{a:?} < {b:?} < {c:?}"
-                        );
+    fn the_dbc_arms_are_a_total_order() {
+        for (key, set) in dbc_keys() {
+            let key = WhoSortKey::from_sort_type(key);
+            let rows = mixed_rows(set, 21);
+            let le = |a: &WhoInfo, b: &WhoInfo| key.order(a, b) != Ordering::Greater;
+            for a in &rows {
+                for b in &rows {
+                    assert_eq!(key.order(a, b), key.order(b, a).reverse(), "{key:?}");
+                    for c in &rows {
+                        if le(a, b) && le(b, c) {
+                            assert!(le(a, c), "{key:?} not transitive");
+                        }
+                        if key.order(a, b) == Ordering::Equal && key.order(b, c) == Ordering::Equal
+                        {
+                            assert_eq!(key.order(a, c), Ordering::Equal, "{key:?} tie");
+                        }
                     }
                 }
             }
         }
-        // And the behaviour the tie existed to protect: unresolved rows do not head the list.
-        assert_eq!(dbc_name_cmp("", "Ahn'Qiraj"), Ordering::Greater);
-        assert_eq!(dbc_name_cmp("Ahn'Qiraj", ""), Ordering::Less);
     }
 
-    /// `"group"` is a live chain key with a dead arm: it displaces whatever was at the front, and
-    /// orders nothing itself, so the list falls straight through to the rest of the chain.
+    #[test]
+    fn sorting_a_mixed_list_puts_misses_last_without_panicking() {
+        for (key, set) in dbc_keys() {
+            let mut chain = WhoSortChain::default();
+            chain.promote("level"); // so the key below is promoted from behind, ascending
+            chain.promote(key);
+            let mut rows = mixed_rows(set, 64);
+            chain.sort(&mut rows);
+            let field = |r: &WhoInfo| match key {
+                "class" => r.class.clone(),
+                "race" => r.race.clone(),
+                _ => r.zone.clone(),
+            };
+            let first_miss = rows.iter().position(|r| field(r).is_empty()).unwrap();
+            assert!(
+                rows[first_miss..].iter().all(|r| field(r).is_empty()),
+                "{key}"
+            );
+            assert!(rows[..first_miss]
+                .windows(2)
+                .all(|w| { ascii_ci_cmp(&field(&w[0]), &field(&w[1])) != Ordering::Greater }));
+        }
+    }
+
     #[test]
     fn the_group_key_displaces_but_orders_nothing() {
         let mut chain = WhoSortChain::default();

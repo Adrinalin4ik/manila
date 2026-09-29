@@ -294,24 +294,6 @@ fn reroll_doodad_variation(
 /// The draw gate: stop a doodad's animation while it is not drawn, and on resume seek the player
 /// to the arm's shared-clock phase. Runs before [`AnimationSystems`], so the seek lands the same
 /// frame.
-/// **`/console animCullView 1`**: also require the world frustum's verdict before keeping a
-/// meshed doodad's rig awake. Default off - see the meshed branch of [`gate_doodad_anim`].
-/// **Default ON since the evidence is in.** 785 doodad rigs were posed against 36 visible meshes,
-/// and the meshless branch of this very function has always asked the frustum directly. It shipped
-/// off so the owner could look at it first; he has, and the remaining risk - a rig resuming on the
-/// frame its marker drops - is the behaviour every other leg of this gate already has.
-/// `/console animCullView 0` turns it back off.
-static CULL_BY_VIEW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-
-/// Set by the CVar.
-pub fn set_cull_by_view(on: bool) {
-    CULL_BY_VIEW.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn cull_by_view() -> bool {
-    CULL_BY_VIEW.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 /// **`/console animParkAll 1` reaches the doodads too.**
 ///
 /// The owner asked for one switch that stops everything and got three lanes that each kept
@@ -391,7 +373,10 @@ fn gate_doodad_anim(
     // it off, because the verdict was cached from whenever the camera last moved. Flipping the
     // rule has to invalidate one frame of verdicts; after that a still camera genuinely cannot
     // change a frustum answer, so the cache is sound again.
-    let rule = cull_by_view() || park_all();
+    // Once `animCullView`'s own term: upstream now applies the frustum test unconditionally in
+    // the meshed branch, so the only thing left that can change a verdict from outside is the
+    // park-everything lever, and that is what the cache has to invalidate on.
+    let rule = park_all();
     let rule_moved = *last_rule != Some(rule);
     *last_rule = Some(rule);
     let verdicts_still = !rule_moved
@@ -402,6 +387,17 @@ fn gate_doodad_anim(
         })
         && !scene.changed()
         && changed_vis.is_empty();
+    // Fixed at spawn (`EmitterFade`), so a reused verdict never sees the sphere move.
+    let in_frustum = |frustum: &bevy::camera::primitives::Frustum,
+                      fade: &crate::particles::EmitterFade| {
+        frustum.intersects_sphere(
+            &bevy::camera::primitives::Sphere {
+                center: fade.center.into(),
+                radius: fade.radius,
+            },
+            false,
+        )
+    };
     for (entity, mut host, lazy, pose, has_rig, player, drive) in &mut hosts {
         // A host born this frame has no verdict to reuse (`active` starts false).
         let drawn = if park_all() {
@@ -417,56 +413,25 @@ fn gate_doodad_anim(
                     cam_tf.translation(),
                     Vec3::from(cam_tf.forward()),
                     farclip,
-                    frustum.intersects_sphere(
-                        &bevy::camera::primitives::Sphere {
-                            center: fade.center.into(),
-                            radius: fade.radius,
-                        },
-                        false,
-                    ),
+                    in_frustum(frustum, fade),
                     fade.exterior_admitted(&exterior_gate, camera_instance),
                     scene.room_admits(fade),
                 )
             })
         } else {
-            // **`Visibility` is "allowed to be seen"; `ViewVisibility` is "survived the frustum".**
-            // The meshless branch above already asks the frustum directly; this one never did, so
-            // a doodad behind the camera keeps `Visibility::Inherited`, reads as drawn, and its
-            // rig is posed every frame. Journal 61, camera at the floor: **785 rigs live against
-            // 36 visible meshes**, 22 live rigs per drawn mesh, 4,263 bone-anchor writes a frame.
-            // That is why aiming the camera at the floor changed nothing - it moves
-            // `ViewVisibility`, and this read the other one.
-            //
-            // Behind `/console animCullView 1` and default OFF, because it is a VISUAL change and
-            // the owner is the one who can see it: a rig parked while off-screen resumes on the
-            // frame the marker drops, and whether that reads as a pop is not a thing a number can
-            // answer. Stated limit: the `verdicts_still` fast path above reuses last frame's
-            // verdict whenever the camera has not moved, and `changed_vis` watches only
-            // `Changed<Visibility>` - it cannot watch `ViewVisibility`, which bevy rewrites every
-            // frame, so a still camera and a moving object can hold a stale verdict for a frame.
-            let admitted = host
-                .meshes
+            // Ours retired here: this fix shipped as `/console animCullView`, default OFF,
+            // because parking a rig while it is off screen is a VISUAL change and only the owner
+            // could judge the pop on its return. Upstream has now made the same test the shipped
+            // behaviour, unconditionally, so the switch has nothing left to gate.
+            // Meshed: the fade and cull authorities' `Hidden` carries their verdicts, and the
+            // frustum term is the one Bevy's culling (`ViewVisibility`) never writes here; the
+            // reference animates only the worklist, which passes the 6-plane test (`0x683700`).
+            host.meshes
                 .iter()
-                .any(|&e| vis.get(e).is_ok_and(|v| *v != Visibility::Hidden));
-            // **`ViewVisibility` was the wrong verdict to ask, and journal 65 says so:** with the
-            // switch on, `rigs_live` held at 778-780, exactly its value without it. That flag is
-            // OR'd across EVERY view - the portrait booths, the minimap, any other camera - so a
-            // doodad behind the world camera can still read visible and never park.
-            //
-            // The meshless branch twenty lines above never had this problem because it asks the
-            // world camera's own frustum directly. This now asks the same question the same way,
-            // against the host's fade sphere, which is the bound that branch already trusts.
-            admitted
-                && (!rule
-                    || world_cam.as_ref().is_some_and(|(_, frustum, _, _)| {
-                        frustum.intersects_sphere(
-                            &bevy::camera::primitives::Sphere {
-                                center: host.fade.center.into(),
-                                radius: host.fade.radius,
-                            },
-                            false,
-                        )
-                    }))
+                .any(|&e| vis.get(e).is_ok_and(|v| *v != Visibility::Hidden))
+                && world_cam
+                    .as_ref()
+                    .is_none_or(|(_, frustum, _, _)| in_frustum(frustum, &host.fade))
         };
         // The lazy-rig promote, retried every frame the host stays drawn so a full table is only
         // a delay. It needs a second drawn frame (`host.active`): on its first, a spawned part's
@@ -1206,6 +1171,65 @@ mod tests {
         }
         app.update();
         assert!(active(&app), "the snap frame re-judges the host: drawn");
+    }
+
+    /// Bevy's frustum culling writes `ViewVisibility` only, so a meshed doodad off-screen keeps an
+    /// `Inherited` part; the gate judges its fade sphere against the frustum like a meshless one.
+    #[test]
+    fn a_meshed_host_outside_the_frustum_is_parked() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()));
+        app.init_resource::<crate::view::ViewDistance>();
+        app.init_resource::<crate::wmo_portal::ExteriorWindows>();
+        app.init_resource::<crate::wmo_portal::CameraInteriorClaim>();
+        app.init_resource::<crate::rig_palette::RigPalettes>();
+        app.init_asset::<SkinnedMeshInverseBindposes>();
+        app.add_systems(Update, gate_doodad_anim);
+
+        // Looking down -Z from the origin.
+        let seat =
+            Transform::from_xyz(0.0, 0.0, 0.0).looking_at(Vec3::new(0.0, 0.0, -20.0), Vec3::Y);
+        let projection = bevy::camera::Projection::from(bevy::camera::PerspectiveProjection {
+            far: 5000.0,
+            ..default()
+        });
+        let frustum = bevy::camera::primitives::Frustum::from_clip_from_world(
+            &(projection.get_clip_from_view() * GlobalTransform::from(seat).affine().inverse()),
+        );
+        app.world_mut().spawn((
+            crate::view::WorldCamera,
+            GlobalTransform::from(seat),
+            seat,
+            frustum,
+            projection,
+        ));
+        let mut meshed = |center: Vec3| {
+            let mesh = app.world_mut().spawn(Visibility::Inherited).id();
+            app.world_mut()
+                .spawn(DoodadAnimHost {
+                    meshes: vec![mesh],
+                    fade: crate::particles::EmitterFade::sphere(2.0, center),
+                    clip: Some((AnimationNodeIndex::new(1), 2.0)),
+                    armed_at: 0.0,
+                    window_hi: f32::INFINITY,
+                    anim_id: Some(0),
+                    active: true,
+                    parked_at: 0.0,
+                })
+                .id()
+        };
+        let behind = meshed(Vec3::new(0.0, 0.0, 30.0));
+        let ahead = meshed(Vec3::new(0.0, 0.0, -30.0));
+        app.update();
+        let world = app.world();
+        assert!(
+            world.entity(behind).contains::<AnimParked>(),
+            "behind the camera ⇒ outside the frustum ⇒ parked, whatever its part's Visibility"
+        );
+        assert!(
+            !world.entity(ahead).contains::<AnimParked>(),
+            "in front of the camera ⇒ drawn"
+        );
     }
 
     #[test]

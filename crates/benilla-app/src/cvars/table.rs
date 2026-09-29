@@ -815,7 +815,6 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ),
     // **Which input holds a feed's change gate open** - `ui_script::gate::set_trace`. The env var
     // it used to need is always absent on wasm32, so in the browser this was unreachable.
-    // **Park a doodad's rig when the frustum rejected it** - `doodad_anim::set_cull_by_view`.
     // **The ablation switches** (see `perf::journal::on_cvar`): each removes one lane outright so
     // the frame says what that lane was worth. Measuring levers, not settings.
     ours(
@@ -850,11 +849,6 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "fxOff",
         "0",
         "benilla's own - 1.12 has particleDensity, which scales rate and never stops a lane",
-    ),
-    ours(
-        "animCullView",
-        "1",
-        "benilla's own - 1.12 ticks any model in the draw set, and its draw set is the frustum",
     ),
     ours(
         "feedGateTrace",

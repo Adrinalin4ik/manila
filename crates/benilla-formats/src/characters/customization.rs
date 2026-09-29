@@ -49,8 +49,9 @@ const KNOWN_FILES: [(u8, &str); 8] = [
     (8, "Troll"),
 ];
 
-/// The shipped `CharBaseInfo` rows by race, the load-time guard on the 2-byte parse; not the
-/// playable set, as it holds the dead Dwarf-Mage row ([`UNUSED_COMBOS`]).
+/// The shipped `CharBaseInfo` rows by race, the load-time guard on the 2-byte parse: each must be
+/// present, and a patch may add more, as the class-list builder `0x4706b0` lists every row for the
+/// race. Not the playable set, as it holds the dead Dwarf-Mage row ([`UNUSED_COMBOS`]).
 const KNOWN_COMBOS: [(u8, &[u8]); 8] = [
     (1, &[1, 2, 4, 5, 8, 9]), // Human
     (2, &[1, 3, 4, 7, 9]),    // Orc
@@ -65,6 +66,24 @@ const KNOWN_COMBOS: [(u8, &[u8]); 8] = [
 /// `CharBaseInfo` pairs the client never offers: its class-list builder `0x4706b0` skips the
 /// literal `race == 3 && class == 8` (Dwarf-Mage), though the row and its outfit are populated.
 const UNUSED_COMBOS: [(u8, u8); 1] = [(3, 8)];
+
+/// The `CharBaseInfo` misparse guard: every shipped pair is present; a patch's extra pairs pass.
+fn shipped_combos_present(combos: &HashSet<(u8, u8)>) -> Result<()> {
+    for (race, classes) in KNOWN_COMBOS {
+        let missing: Vec<u8> = classes
+            .iter()
+            .copied()
+            .filter(|&c| !combos.contains(&(race, c)))
+            .collect();
+        if !missing.is_empty() {
+            bail!(
+                "CharBaseInfo misparse: race {race} lacks shipped classes {missing:?} \
+                 (check the 2-byte race/class layout)"
+            );
+        }
+    }
+    Ok(())
+}
 
 /// One worn item of a CharStartOutfit row: its ItemDisplayInfo id and its InventoryType.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,26 +235,15 @@ impl CharCreateCatalog {
         Ok(catalog)
     }
 
-    // `&mut self`, not upstream's `&self`: the body records the combos it repaired into
-    // `self.modified_combos` (ours), which upstream has no field for.
+    // `&mut self`, not upstream's `&self`: the containment check is theirs now (they reached the
+    // same rule - a patch may ADD combos, Turtle gives humans hunters and trolls warlocks, so
+    // equality was the wrong test while a MISSING shipped combo is still a layout defect), but the
+    // surplus is recorded into `self.modified_combos`, which upstream has no field for. That is
+    // what lets the app say which races a patch extended instead of silently trusting the DBC.
     fn self_check(&mut self) -> Result<()> {
+        shipped_combos_present(&self.combos)?;
         for (race, classes) in KNOWN_COMBOS {
-            let got = self.classes_for_race(race);
-            // **Both halves, because they answer different questions.** A modified DBC legitimately
-            // ADDS combos (Turtle gives humans hunters, trolls warlocks), so equality is the wrong
-            // test and the fork that dropped it was right about that. But a misparse of the 2-byte
-            // race/class layout shows up as combos going MISSING, and recording-without-bailing
-            // catches none of that — it would trade a loud failure on broken data for a silent one.
-            //
-            // So: containment still bails (a known combo that vanished is a layout defect, on any
-            // data), and the surplus is recorded for the app to log rather than judged here.
-            if !covers_vanilla(&got, classes) {
-                bail!(
-                    "CharBaseInfo misparse: race {race} classes {got:?} do not cover known \
-                     {classes:?} (check the 2-byte race/class layout)"
-                );
-            }
-            if got != classes {
+            if self.classes_for_race(race) != classes {
                 self.modified_combos.push(race);
             }
         }
@@ -635,6 +643,21 @@ mod tests {
         facial
             .get(&(race, sex))
             .is_some_and(|vs| vs.contains(&facial_hair))
+    }
+
+    #[test]
+    fn a_patched_combo_passes_the_guard_and_a_lost_one_does_not() {
+        let mut combos: HashSet<(u8, u8)> = KNOWN_COMBOS
+            .iter()
+            .flat_map(|&(r, cs)| cs.iter().map(move |&c| (r, c)))
+            .collect();
+        assert!(shipped_combos_present(&combos).is_ok());
+        // A patch that adds Human Hunter: 1.12.1's builder lists it, so the load must go on.
+        combos.insert((1, 3));
+        assert!(shipped_combos_present(&combos).is_ok());
+        // A misparse that drops a shipped pair still refuses.
+        combos.remove(&(2, 7));
+        assert!(shipped_combos_present(&combos).is_err());
     }
 
     #[test]
