@@ -73,7 +73,7 @@ pub(crate) struct FpsJournalSetting(pub(crate) bool);
 const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,mats,meshes,images,\
                               m2,uv,tint,pmat,emat,skin,cmat,tex,cgeo,evicted,fx,fy,fz,main_ms,\
                               gpu_ms,gpu_opaque,gpu_static,gpu_transp,gpu_glow,gpu_post,gpu_ui,\
-                              gpu_other,lua_errs,lua_err_us,msg_hashed,ui_us,col_us,emitters,fx_live,fx_kits,fx_impacts,net_pkts,net_us,pipes,\
+                              gpu_other,lua_errs,lua_err_us,msg_hashed,ui_us,col_us,emitters,fx_live,fx_models,fx_kits,fx_impacts,net_pkts,net_us,pipes,\
                               rscale,farclip,\
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
@@ -1336,6 +1336,12 @@ fn journal_fps(
     // only lever that bounds the MIDDLE of a fight, where every distance wall is looking at
     // something next to the camera - would cap this one and not that one.
     emitters: Query<&benilla_world::particles::ParticleEmitter>,
+    // **Live effect MODELS**, against `fx_kits`' "effects started this second". A spell visual is
+    // an M2 with a rig of its own - `spell_fx` calls `spawn_joints`, one entity per bone - so
+    // twenty people casting at once is not twenty entities, and this is the only column that
+    // could say so. The marker rides the root `attach_effect_visuals` builds, so this counts
+    // spell visuals, projectiles and ground effects and not their parts.
+    fx_models: Query<(), With<crate::entities::spell_fx::EffectModel>>,
     entities: Query<()>,
     residency: JournalResidency,
     gpu: JournalGpu,
@@ -1508,8 +1514,9 @@ vm {:.1}   ui {:.1}",
         .iter()
         .fold((0u32, 0u64), |(n, live), e| (n + 1, live + e.live() as u64));
     line.push_str(&format!(
-        ",{},{fx_emitters},{fx_live}",
+        ",{},{fx_emitters},{fx_live},{}",
         benilla_world::terrain_stream::take_collider_build_micros(),
+        fx_models.iter().count()
     ));
     let (kits, impacts) = take_fx_counts();
     let (pkts, net_us) = take_net_costs();
