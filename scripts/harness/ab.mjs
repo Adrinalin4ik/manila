@@ -48,6 +48,15 @@ try {
   const csv = await s.eval('window.__wenilla_fps_journal.text()');
   writeFileSync(out, csv);
   console.log(`journal -> ${out} (${csv.split('\n').length} lines)`);
+  // The console beside the journal, verbatim: an `/console` leg often reports through a log line
+  // rather than a column (the archetype census, the crowd wall's own counter), and the tally
+  // below groups by prefix and eats the numbers.
+  try {
+    const logPath = out.replace(/[.]csv$/, '') + '-console.log';
+    writeFileSync(logPath, s.console.map(line).join(String.fromCharCode(10)));
+    console.log('console -> ' + logPath);
+  } catch (e) { console.log('console dump failed:', e.message); }
+
 
   console.log('\n--- what the wall itself reported ---');
   for (const l of s.console.filter((x) => /playerDistance|staticTransforms|console/i.test(x)).slice(-12)) console.log('  ', line(l));
