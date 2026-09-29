@@ -76,6 +76,23 @@ const FALLBACK_RADIUS: f32 = 6.0;
 /// attachment 17 and it animates faded out in first person. `WOW_NO_ANIM_LOD=1` never parks and
 /// `WOW_NO_ROOM_LOD=1` drops the room leg.
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
+/// **A distance wall on this gate was built, measured and removed on 2026-09-29 — do not build it
+/// again without a scene that answers differently.**
+///
+/// The reasoning was sound and the arithmetic was not: a pose is paid for three times (sampling
+/// 1.8 ms in `px_anim`, joint propagation 2.1 ms in `p_xform`, and the re-upload of the instance
+/// data those moved transforms dirtied, 3.2 ms in `rapp` — 8 ms of a 36 ms frame, against the
+/// 1.8 the instrument reports), so freezing the far crowd looked like the cheapest 8 ms available.
+///
+/// It is not, because in the scene that matters there is no far crowd. Measured in a live city
+/// with the browser harness, a wall at 40 yd against no wall a minute apart: 39.4 ms vs 40.1 ms,
+/// inside the run's own drift, with 84 more rigs parked out of 955 streamed. The 490 players are
+/// all within forty yards of each other — that is what a city square IS — so distance has nothing
+/// to separate. `animDistance 0` (freeze everything, unshippable) recovered 5 of the 8, and
+/// adding `stop_all` to the wall did not move the 40 yd figure at all.
+///
+/// The axis was wrong, not the target. Whatever takes this on next has to cut the cost of a pose
+/// or the number of joints in one, because the rigs cannot be separated by where they are.
 pub(super) fn gate_rig_animation(
     time: Res<Time>,
     cam: Query<&Frustum, With<WorldCamera>>,
