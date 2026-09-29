@@ -79,14 +79,16 @@ pub(crate) fn arch_census(world: &mut World) {
     character_draw_census(world);
 }
 
-/// **This has never produced a number, and the reason is the arming, not the query.**
-/// `archCensus` disarms itself by mirroring its row back to `0` (`perf::journal::on_cvar`), and a
-/// mirror does not fire an observer - but the SAVED row can still hold `1`, and a CVar write that
-/// does not change the value fires nothing either. So the census runs the first time and then
-/// refuses, which reads exactly like a broken instrument. Three runs went to this on 2026-09-29:
-/// one fired, four did not, and sending `0` then `1` in the same breath did not help because both
-/// land in one frame. Whoever needs this number next should fix the arm before trusting the
-/// silence - the query below is sound and compiled, it simply has not been reached.
+/// **Arming it twice in one session needs the two writes in different FRAMES.** A CVar write
+/// that does not change the value fires no observer (`Cvars::write` answers `Unchanged`), and
+/// `archCensus` disarms itself by mirroring its row back to `0`, so a second `archCensus 1` is a
+/// change only once that mirror has landed. Sent 1.5 s apart through the chat box the pair
+/// coalesced and nothing fired — four attempts read as a broken instrument. Forty-five seconds
+/// apart it works every time. Space them, or send `0` and then `1` in separate breaths.
+///
+/// First numbers, a live city on 2026-09-29: 41,515 entities, and of the draws using the world
+/// material, **4,930 draws over 1,840 distinct meshes and 1,834 distinct materials, forming 3,122
+/// batch groups**.
 /// **What batching would have to overcome on the crowd: distinct meshes against distinct
 /// materials, among character parts alone.**
 ///
@@ -96,9 +98,13 @@ pub(crate) fn arch_census(world: &mut World) {
 /// columns cannot answer that: they count the terrain and the doodads with everything else, and
 /// say meshes outnumber materials four to one. This counts the character parts on their own.
 ///
-/// Read it as a ceiling on batching: `parts / max(meshes, mats)` is the best group size any
-/// amount of work could reach, and if the mesh count is already near the part count then a
-/// texture array is the wrong thing to build.
+/// Read it as a ceiling on batching, and the first reading settled a design question: the meshes
+/// and the materials are in a dead heat (1,840 against 1,834), so a shared texture array — one
+/// material for the whole crowd, which was the plan — would leave 1,840 groups where there are
+/// now 3,122. Forty-one per cent of the batches, off a crowd whose whole drawing cost is 5.5 ms:
+/// about 2 ms of a 40 ms frame, for layer allocation, an LRU over 256 layers and a shader change.
+/// The assumption it was built on — that characters vary by material and share meshes — is simply
+/// not true here, and one line of census said so before anything was built.
 ///
 /// Filtered on `SkinnedMesh` rather than the dressing crate's own marker, which is private: every
 /// part that skins to a rig is a character or creature part, which is the population in question.
