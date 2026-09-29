@@ -260,7 +260,14 @@ pub struct EmitterFrames {
 }
 
 impl ParticleEmitter {
-    /// Live particle count, for the perf probe ([`crate::capture`]).
+    /// Live particle count, for the perf probe ([`crate::capture`]) and the journal's `fx_live`.
+    ///
+    /// `emitters` answers how many effects are running; this answers how big they are, and they
+    /// move independently: `MAX_PARTICLES` is a backstop on ONE emitter, so three hundred
+    /// emitters in a fight carry a ceiling of three hundred thousand particles with no shared
+    /// budget between them. A cap on the TOTAL is the only lever that bounds the middle of a
+    /// fight, where every distance wall in this crate is looking at something next to the camera
+    /// - and it cannot be designed against a number nobody has been recording.
     pub fn live(&self) -> usize {
         self.particles.len()
     }

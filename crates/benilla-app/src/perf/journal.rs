@@ -73,7 +73,7 @@ pub(crate) struct FpsJournalSetting(pub(crate) bool);
 const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,mats,meshes,images,\
                               m2,uv,tint,pmat,emat,skin,cmat,tex,cgeo,evicted,fx,fy,fz,main_ms,\
                               gpu_ms,gpu_opaque,gpu_static,gpu_transp,gpu_glow,gpu_post,gpu_ui,\
-                              gpu_other,lua_errs,lua_err_us,msg_hashed,ui_us,col_us,emitters,fx_kits,fx_impacts,net_pkts,net_us,pipes,\
+                              gpu_other,lua_errs,lua_err_us,msg_hashed,ui_us,col_us,emitters,fx_live,fx_kits,fx_impacts,net_pkts,net_us,pipes,\
                               rscale,farclip,\
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
@@ -1331,7 +1331,11 @@ fn journal_fps(
     // of matched archetype rows and not a walk over their data. It is here rather than beside
     // the fx counters because it answers the other half of the question: those say how many
     // effects STARTED this second, this says how many are still running.
-    emitters: Query<(), With<benilla_world::particles::ParticleEmitter>>,
+    // `fx_live` needs the emitter itself, not a marker: `emitters` says how many effects are
+    // running and this says how big they are. The two can move opposite ways, and a budget - the
+    // only lever that bounds the MIDDLE of a fight, where every distance wall is looking at
+    // something next to the camera - would cap this one and not that one.
+    emitters: Query<&benilla_world::particles::ParticleEmitter>,
     entities: Query<()>,
     residency: JournalResidency,
     gpu: JournalGpu,
@@ -1496,10 +1500,16 @@ vm {:.1}   ui {:.1}",
         Some(us) => line.push_str(&format!(",{us}")),
         None => line.push(','),
     }
+    // One walk for both: the count of running effects and the particles they are carrying. The
+    // ceiling `MAX_PARTICLES` enforces is per EMITTER, so these two are independent - three
+    // hundred small emitters and thirty large ones are the same `emitters` and very different
+    // `fx_live`, and only the second is what a shared budget would have to bound.
+    let (fx_emitters, fx_live) = emitters
+        .iter()
+        .fold((0u32, 0u64), |(n, live), e| (n + 1, live + e.live() as u64));
     line.push_str(&format!(
-        ",{},{}",
+        ",{},{fx_emitters},{fx_live}",
         benilla_world::terrain_stream::take_collider_build_micros(),
-        emitters.iter().count()
     ));
     let (kits, impacts) = take_fx_counts();
     let (pkts, net_us) = take_net_costs();
