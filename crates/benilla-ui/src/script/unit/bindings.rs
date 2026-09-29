@@ -6,6 +6,7 @@
 use mlua::{Lua, Value};
 
 use super::super::binding_abi::flag;
+use super::super::calls::ScriptCall;
 use super::super::Model;
 use super::{
     check_unit_token, classification_word, grey_band, level_reads_unknown, pick_unit_token,
@@ -609,8 +610,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // The party frame's status predicates. `UnitIsAFK` and `UnitIsDND` do not exist in the 1.12
-    // client, which has no unit AFK or DND predicate; benilla adds them beyond the 1.12 surface.
+    // The party frame's status predicates; 1.12 has no unit AFK or DND predicate.
     g.set(
         "UnitIsConnected",
         lua.create_function(|lua, token: Value| {
@@ -620,18 +620,6 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 r#"Usage: UnitIsConnected("unit")"#,
             )?);
             unit_predicate(lua, &token, |u| u.is_connected)
-        })?,
-    )?;
-    g.set(
-        "UnitIsAFK",
-        lua.create_function(|lua, token: Option<String>| {
-            unit_predicate(lua, &token, |u| u.is_afk)
-        })?,
-    )?;
-    g.set(
-        "UnitIsDND",
-        lua.create_function(|lua, token: Option<String>| {
-            unit_predicate(lua, &token, |u| u.is_dnd)
         })?,
     )?;
     g.set(
@@ -762,6 +750,19 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             )?);
             let has = with_unit(lua, &token, false, |u| u.has_relic_slot)?;
             Ok(flag(has))
+        })?,
+    )?;
+
+    // GetDamageBonusStat() (`0x48b520`): the active player's `ChrClasses.dbc` field 2 plus one,
+    // the 1-based `UnitStat` index its melee damage scales with; 0 with no player or no class row
+    // (`0x48b58a`). No stock caller.
+    g.set(
+        "GetDamageBonusStat",
+        lua.create_function(|lua, ()| {
+            let stat = with_unit(lua, &Some("player".to_string()), None, |u| {
+                u.damage_bonus_stat
+            })?;
+            Ok(stat.map_or(0, |s| i64::from(s) + 1))
         })?,
     )?;
 
@@ -1016,7 +1017,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, token: Option<String>| {
             if let Some(token) = token {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                model.selection_requests.push(SelectionRequest::Unit(token));
+                model
+                    .script_calls
+                    .push(ScriptCall::Select(SelectionRequest::Unit(token)));
             }
             Ok(())
         })?,
@@ -1033,8 +1036,8 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             if let Some(token) = token {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 model
-                    .selection_requests
-                    .push(SelectionRequest::Assist(token));
+                    .script_calls
+                    .push(ScriptCall::Select(SelectionRequest::Assist(token)));
             }
             Ok(())
         })?,
@@ -1046,26 +1049,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "TargetLastEnemy",
         lua.create_function(|lua, ()| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.selection_requests.push(SelectionRequest::LastEnemy);
-            Ok(())
-        })?,
-    )?;
-
-    // TargetNearestFriend([reverse]) (`0x489aa0`): the Tab cycler `0x493f60` in mode 2 (enemy is
-    // 1), whose filter (`0x493eca`) wants `CanAssist` and health above 0. Argument 1 reverses
-    // (`0x6f1c10`, absent is 0); stock `Bindings.xml` says "1 (or "true")", so a number or a
-    // boolean reverses.
-    g.set(
-        "TargetNearestFriend",
-        lua.create_function(|lua, reverse: Option<Value>| {
-            let reverse = match reverse {
-                None | Some(Value::Nil) | Some(Value::Boolean(false)) => false,
-                Some(Value::Integer(n)) => n != 0,
-                Some(Value::Number(n)) => n != 0.0,
-                Some(_) => true,
-            };
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.target_nearest_friend_requests.push(reverse);
+            model
+                .script_calls
+                .push(ScriptCall::Select(SelectionRequest::LastEnemy));
             Ok(())
         })?,
     )?;
@@ -1091,7 +1077,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(_) => true,
             };
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.target_by_name_requests.push((name, exact));
+            model
+                .script_calls
+                .push(ScriptCall::TargetByName { name, exact });
             Ok(())
         })?,
     )?;
@@ -1109,24 +1097,43 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SpellTargetUnit(unit): a no-op. A unit-target spell never enters targeting mode here, and for
-    // the location, item and gameobject modes this client arms, the reference's `BindTarget`
-    // (`0x6e5b40`) rejects a unit too. Stock `PetFrame_OnClick` calls it, so it must exist.
+    // SpellTargetUnit(unit) (`0x6e6d90`): an argument that is not a string or a number raises
+    // `Usage:`; while not targeting the call is a silent no-op, before the token is read; an
+    // unknown token then raises `Unknown unit name`. The token queues for the host, which ends
+    // targeting with "Out of range." when it names no unit and otherwise runs `BindTarget`
+    // (`0x6e5b10` → `0x6e5b40`).
     g.set(
         "SpellTargetUnit",
-        lua.create_function(|_, _token: Option<String>| Ok(()))?,
+        lua.create_function(|lua, token: Value| {
+            let token = crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: SpellTargetUnit("unit")"#,
+            )?;
+            if !lua
+                .app_data_ref::<Model>()
+                .expect("model app_data")
+                .spell_targeting
+            {
+                return Ok(());
+            }
+            check_unit_token(&Some(token.clone()))?;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.script_calls.push(ScriptCall::SpellTargetUnit(token));
+            Ok(())
+        })?,
     )?;
 
-    // ClearTarget(): 1 when it cleared a target, nil when there was none, which `ToggleGameMenu`'s
-    // Escape chain needs to fall through to the menu. The app commits the deselect.
+    // ClearTarget() (`0x489ff0`): 1 when it cleared a target, nil when there was none, which
+    // `ToggleGameMenu`'s Escape chain needs to fall through to the menu. The deselect is queued
+    // either way: it reads the selection as the calls before it leave it (`0x489ff0`-`0x489fff`),
+    // so `TargetUnit("player") ClearTarget()` ends with nothing selected.
     g.set(
         "ClearTarget",
         lua.create_function(|lua, ()| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let had = model.unit("target").is_some_and(|u| u.exists);
-            if had {
-                model.target_clear = true;
-            }
+            model.script_calls.push(ScriptCall::ClearTarget);
             Ok(flag(had))
         })?,
     )?;

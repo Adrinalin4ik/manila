@@ -146,7 +146,7 @@ impl BridgeReadout<'_, '_> {
             (Some(player), Some((store, motion, mounted))) => {
                 let guid = self.self_guid.as_ref().and_then(|g| g.0).unwrap_or(0);
                 let name = self.peek_name(guid);
-                let unit = crate::ui_unit::snapshot(store, name, 0, chr);
+                let unit = crate::ui_unit::snapshot(store, guid, name, 0, chr);
                 let mut u = unit_fields(guid, EntityKind::Player, &unit, motion, None);
                 u.push(("pos".into(), pos_payload(player.pos)));
                 u.push((
@@ -270,7 +270,7 @@ impl BridgeReadout<'_, '_> {
                     }
                     _ => 0,
                 };
-                let unit = crate::ui_unit::snapshot(store, name, reaction, chr);
+                let unit = crate::ui_unit::snapshot(store, guid, name, reaction, chr);
                 unit_fields(guid, net.kind, &unit, motion, store.0.unit_target())
             }
             None => vec![

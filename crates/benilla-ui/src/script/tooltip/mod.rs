@@ -26,6 +26,21 @@ use crate::widget::{
 /// Registry key of the GameTooltip method table, a named registry root (the MAXCSTACK discipline).
 pub(super) const REG_TOOLTIP_METHODS: &str = "__benilla_tooltip_methods";
 
+impl super::UiScript {
+    /// The name of the frame that owns the GameTooltip named `tooltip`; `None` for no such
+    /// tooltip, no owner or an unnamed one. 1.12 answers only `IsOwned(frame)`, so the host's
+    /// recorders read the owner here.
+    pub fn tooltip_owner_name(&self, tooltip: &str) -> Option<String> {
+        let model = self.model_ref();
+        let h = model.arena.lookup(tooltip)?;
+        let owner = match &model.arena.frame(h)?.kind_state {
+            KindState::Tooltip(t) => t.owner?,
+            _ => return None,
+        };
+        model.arena.frame(owner)?.name.clone()
+    }
+}
+
 /// Runs `f` over a GameTooltip's state under one short write borrow.
 fn with_tip<T>(lua: &Lua, this: &Table, f: impl FnOnce(&mut TooltipState) -> T) -> mlua::Result<T> {
     let h = frame_handle_of(lua, this)?;
@@ -271,9 +286,12 @@ pub(super) fn clear_content(model: &mut Model, h: FrameHandle) {
     if let Ok(t) = tip_mut(model, h) {
         t.num_lines = 0;
         t.min_width = 0.0;
-        t.unit_token = None;
+        // Clear drops the subject and unregisters its health watcher (`0x5300ad`, `0x53007c`).
+        t.unit_guid = None;
         t.world_owned = false;
     }
+    // New content replaces a spell render still waiting on its view.
+    model.spell_tooltip_waits.remove(&h);
     // The `<name>StatusBar` health bar is unit content: it hides with the lines, and the next
     // unit render re-shows it.
     let bar = model
@@ -334,7 +352,7 @@ fn full_alpha(model: &mut Model, h: FrameHandle) {
 
 /// The engine's `GetTime` clock, which [`super::UiScript::tick`] advances.
 fn now(lua: &Lua) -> f64 {
-    lua.globals().get("__benilla_now").unwrap_or(0.0)
+    crate::script::clock::now(lua)
 }
 
 /// Shows or hides through the arena and fires the visibility events.

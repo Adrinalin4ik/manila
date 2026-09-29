@@ -9,8 +9,10 @@ fork, and forks are welcome.
 
 The [issues](https://github.com/samwhosung/benilla/issues) the maintainers file are checked
 against 1.12.1 first: each says what 1.12.1 does, what benilla does instead, and where in the
-code, and any of them is a place to start. Before you start one, look for an open pull request
-that already covers it, and say `Fixes #N` in yours.
+code, and any of them is a place to start. One labelled `in progress` is taken: someone is
+working on it or a pull request is open for it, so pick another. Once you start one, open a draft
+pull request that says `Fixes #N` as soon as you have a first commit, so the issue shows it is
+taken.
 
 ## What gets in
 
@@ -21,11 +23,12 @@ that already covers it, and say `Fixes #N` in yours.
 
 ## What does not
 
-- Features 1.12.1 does not have, and behaviour changed because it seems better. A deviation
-  from the reference is the maintainer's call and is recorded where it lives; a pull request is
-  not the place to propose one.
-- Anything from a WoW install: art, models, sounds, maps, data. The one exception is interface
-  code (FrameXML and GlueXML), and only through the migration recipe in `docs/METHOD.md`.
+- Features 1.12.1 does not have, and behaviour changed because it seems better. Such a feature
+  lives in its own crate on top of benilla, started through `benilla_app::run_with` as in
+  `crates/benilla-app/examples/extended_launcher.rs`. A deviation from the reference is the
+  maintainer's call and is recorded where it lives; a pull request is not the place to propose one.
+- Anything from a WoW install: art, models, sounds, maps, data, and interface code (FrameXML and
+  GlueXML), which runs off the player's own install (`docs/METHOD.md`).
 - Big or mixed changes. One change per pull request, small enough to read in one sitting.
 
 ## How a change is judged
@@ -71,8 +74,10 @@ out of scope is closed with the reason.
   `localhost:3724`). A scripted run has no default account: `WOW_USER`, `WOW_PASS` and
   `WOW_CHAR` name a test account on your server whose login kicks nobody, all three, either in
   the environment or in a `.probe-identity` file at the repo root (one per line, never
-  committed), and `scripts/smoke.sh` (the live login gate) refuses without them. The probes
-  drive the body with GM commands, so give that account the top GM level.
+  committed), and `scripts/smoke.sh` (the live login gate) refuses without them. `WOW_CHAR`
+  must already be on the account, since the client creates a character only when asked:
+  `WOW_PROBE_CHARCREATE=<name> WOW_PROBE_CHARCREATE_KEEP=1`, run without `WOW_CHAR`, makes it.
+  The probes drive the body with GM commands, so give that account the top GM level.
 - **Running it unattended.** The rules are `docs/METHOD.md`, "The local server"; these are the
   switches.
   - `WOW_UNATTENDED=1` reconnects instead of waiting at a dialog, and exits non-zero on a login
@@ -91,7 +96,8 @@ out of scope is closed with the reason.
     `series` and `hotspot`.
 - **The loop.** `cargo play` builds and runs the play profile. `scripts/check.sh` verifies a
   round of work; `scripts/gates.sh` is the full chain, and it opens a window for the engine boot
-  checks, so it needs a display. Work on a branch.
+  checks, so it needs a display. `WOW_STOCK_UI=1` boots a dev build on the stock interface
+  alone, without benilla's layer. Work on a branch.
 
 ## Reporting a bug
 

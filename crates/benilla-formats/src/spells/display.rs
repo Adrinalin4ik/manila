@@ -366,6 +366,12 @@ impl SpellDisplay {
         self.attributes_ex3 & ATTR_EX3_NO_CHANNEL_BAR != 0
     }
 
+    /// `AttributesEx & 0x80000`: the targeting cursor never takes the caster, neither the world
+    /// pick (`0x6e61a0` at `6e61cf`) nor `SpellCanTargetUnit`'s unit leg (`0x6e6460` at `6e6507`).
+    pub fn excludes_caster(&self) -> bool {
+        self.attributes_ex & ATTR_EX_EXCLUDE_CASTER != 0
+    }
+
     /// `AttributesEx & 0x2000_0000` (`0x6e759a`): the channel bar shows the spell's own name
     /// (`0x6e75a9`), else `CHANNELING` (`0x6e75bc`); nine channels set it, Fishing among them.
     pub fn channel_bar_own_name(&self) -> bool {
@@ -453,13 +459,20 @@ impl SpellDisplay {
         self.attributes_ex & ATTR_EX_CHANNELED != 0
     }
 
+    /// Predicate `0x6e5200`: an on-next-swing, `INITIATES_COMBAT` or `INITIATE_COMBAT_POST_CAST`
+    /// spell. TryCast runs the attack validator's target pick for it (`0x6e4edf`), so a press
+    /// with no hostile selection acquires one, as the Attack button does.
+    pub fn initiates_combat(&self) -> bool {
+        self.attributes & ATTR_ON_NEXT_SWING != 0
+            || self.attributes_ex & ATTR_EX_INITIATES_COMBAT != 0
+            || self.attributes_ex2 & ATTR_EX2_INITIATE_COMBAT_POST_CAST != 0
+    }
+
     /// Casting this starts melee auto-attack at the send unless one runs (`TryCast` tail
     /// `0x6e51b5`): predicate `0x6e5200` with `AttributesEx2` bit 20 clear, so an on-next-swing
     /// or `INITIATES_COMBAT` spell. Every cast path shares the tail; there is no macro opt-out.
     pub fn initiates_auto_attack(&self) -> bool {
-        (self.attributes & ATTR_ON_NEXT_SWING != 0
-            || self.attributes_ex & ATTR_EX_INITIATES_COMBAT != 0)
-            && self.attributes_ex2 & ATTR_EX2_INITIATE_COMBAT_POST_CAST == 0
+        self.initiates_combat() && !self.initiates_auto_attack_at_go()
     }
 
     /// This spell's own `SMSG_SPELL_GO` starts melee auto-attack (`0x6131a0`) at its first hit

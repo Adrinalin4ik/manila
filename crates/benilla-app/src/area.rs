@@ -131,7 +131,7 @@ fn elect_event(cache: &ZoneCache, next: &ZoneSignal) -> Option<&'static str> {
     None
 }
 
-/// Resolves the texts and PvP info, writes the host globals, then fires the elected zone event and,
+/// Resolves the texts and PvP info, pushes the zone caches, then fires the elected zone event and,
 /// independently, `MINIMAP_ZONE_CHANGED`.
 fn feed_zone_events(
     script: Option<NonSendMut<UiScript>>,
@@ -246,32 +246,34 @@ fn feed_zone_events(
             };
             Some((ty, f.catalog().faction_group_name(zone_mask).unwrap_or("")))
         });
-    let (pvp_type, pvp_faction) = pvp.unwrap_or(("", ""));
+    let pvp_type = pvp.map_or("", |(ty, _)| ty);
 
-    let globals = script.lua().globals();
-    let pushed = globals
-        .set("__benilla_zone_name", signal.zone_text.clone())
-        .and_then(|()| globals.set("__benilla_real_zone_name", real_zone_text.clone()))
-        .and_then(|()| globals.set("__benilla_subzone_name", signal.subzone_text.clone()))
-        .and_then(|()| globals.set("__benilla_zone_text", minimap_text.clone()))
-        .and_then(|()| globals.set("__benilla_pvp_type", pvp_type))
-        .and_then(|()| globals.set("__benilla_pvp_faction", pvp_faction))
-        .and_then(|()| globals.set("__benilla_pvp_arena", is_arena));
-    if let Err(e) = pushed {
-        warn!("area: zone host globals: {e}");
-        return;
-    }
-    // The same publish, for the host-side reader ([`ZoneInfo`]); `set_if_neq` so an unchanged
-    // re-resolve (a minimap-only change re-writes every global) is not a spurious transition.
+    script.set_zone_texts(benilla_ui::script::ZoneTexts {
+        zone: signal.zone_text.clone(),
+        real_zone: real_zone_text.clone(),
+        subzone: signal.subzone_text.clone(),
+        minimap: minimap_text.clone(),
+        pvp_type: pvp.map(|(ty, _)| ty.to_string()),
+        pvp_faction: pvp
+            .map(|(_, faction)| faction)
+            .filter(|f| !f.is_empty())
+            .map(str::to_string),
+        is_arena,
+    });
+    // Ours: the same publish for the host-side reader ([`ZoneInfo`]), which feeds the page
+    // bridge (`webbridge::snapshot::zone_payload`) and has no upstream counterpart. `set_if_neq`
+    // so an unchanged re-resolve — a minimap-only change re-writes every text — is not a
+    // spurious transition. Upstream replaced the `pvp_faction` binding this used to read with
+    // the `pvp` tuple above, so the faction is taken from there.
     info.set_if_neq(ZoneInfo {
         zone_id: signal.zone_id,
         zone_text: signal.zone_text.clone(),
-        real_zone_text,
+        real_zone_text: real_zone_text.clone(),
         subzone_text: signal.subzone_text.clone(),
         minimap_text: minimap_text.clone(),
         indoor: signal.indoor,
         pvp_type,
-        pvp_faction: pvp_faction.to_string(),
+        pvp_faction: pvp.map_or("", |(_, faction)| faction).to_string(),
         arena: is_arena,
     });
 

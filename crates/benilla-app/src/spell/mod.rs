@@ -7,7 +7,7 @@
 use bevy::prelude::*;
 
 use crate::char_select::ClientState;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_unit::UnitFeed;
 use benilla_world::schedule::WorldStage;
 
@@ -23,19 +23,29 @@ pub(crate) mod validator;
 
 // The one cast path: every caster takes [`CastLadder`] and commits through [`CastCommit`];
 // `send_spell_cast` is private to `cast_send`, so no second send path can exist.
-pub(crate) use cast_send::{CastCommit, CastLadder, TargetedBind};
+pub(crate) use cast_send::{CastCommit, CastLadder, HeldCast, HeldForPick, TargetedBind};
 pub(crate) use cast_target::AutoSelfCast;
 pub(crate) use cooldowns::Cooldowns;
 pub(crate) use inflight::{
     inflight, ActiveChannel, AutoRepeatActive, LocalMoveStart, PendingCast, QueuedMeleeSpell,
-    SPELL_INTERRUPT_MOVEMENT,
+    SelfCancel, SPELL_INTERRUPT_MOVEMENT,
 };
 pub(crate) use mods::{SpellModifiers, OP_COST};
 // `TargetingWants` is exported for the ground reticle, which draws for the location word alone.
-pub(crate) use targeting::{ground_cast_radius, SpellTargeting, TargetingWants};
+pub(crate) use targeting::{
+    ground_cast_radius, CorpsePick, PicksSelf, ScriptCursor, SpellTargeting, TargetingWants,
+};
+
+/// A script cast's inputs, the cast tail the action bar uses, for the spellbook's and the stance
+/// bar's calls ([`crate::script_calls`]).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct ScriptCast<'w, 's> {
+    pub(crate) targeting: cast_target::CastTargeting<'w, 's>,
+    pub(crate) ladder: CastLadder<'w, 's>,
+}
 
 /// The local self-cancel's set: a reader of the in-flight state orders `.after(LocalCancel)` so a
-/// cast ended by a move, jump or Esc drops its cast bar the same frame.
+/// cast ended by a move or jump drops its cast bar the same frame.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct LocalCancel;
 
@@ -52,7 +62,10 @@ impl Plugin for SpellPlugin {
             .init_resource::<SpellModifiers>()
             .init_resource::<AutoSelfCast>()
             .init_resource::<SpellTargeting>()
+            .init_resource::<HeldForPick>()
             .init_resource::<targeting::EnchantConfirmItem>()
+            .init_resource::<targeting::PicksSelf>()
+            .init_resource::<targeting::CorpsePick>()
             .add_observer(cast_target::on_cvar)
             .add_systems(
                 Update,
@@ -63,10 +76,18 @@ impl Plugin for SpellPlugin {
                     mods::track_class_family
                         .after(WorldStage::Net)
                         .before(UnitFeed),
-                    // The state push runs before the input pass's `ToggleGameMenu` and the drain
-                    // after it, so an Esc cancel lands before next frame's cursor reads the mode.
-                    targeting::feed_targeting_to_vm.in_set(UnitFeed),
-                    targeting::drain_stop_targeting.after(UiInput),
+                    // The state push runs before the input pass's `ToggleGameMenu`, whose
+                    // `SpellStopTargeting` lands with the script calls after it. After the
+                    // old-target clear, the pet bar's writer in the feed: `"pet"` resolves off
+                    // the bar.
+                    targeting::feed_targeting_to_vm
+                        .in_set(UnitFeed)
+                        .after(crate::ui_pet::pet_stop_on_old_target_clear),
+                    (
+                        targeting::publish_picks_self,
+                        targeting::publish_corpse_pick,
+                    )
+                        .in_set(UiFeed),
                     // The item-target commit (`0x495d60`): after the input pass so a bag click
                     // binds the same frame; outside the target chain, as its clicks never reach
                     // the world.

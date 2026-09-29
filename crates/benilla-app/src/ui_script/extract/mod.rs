@@ -618,6 +618,8 @@ pub(crate) fn tick_script(
             *msg_hashed_seen = hashed;
         }
     }
+    // A runtime `LoadAddOn`'s record, appended to `Logs\FrameXML.log`.
+    super::load_log::write(script.take_load_log_writes());
 
     // The UI pass's own share of the frame, for the journal's `ui_us` column. Three `u128` adds on
     // numbers this function already computed — the browser gives no CPU or GPU timings at all
@@ -1346,7 +1348,7 @@ fn convert_entry(
                     },
                     color: [1.0, 1.0, 1.0, eq.alpha],
                     // `SetPortraitTexture` cuts the inscribed circle, as the reference stamps into
-                    // its 64² bake's alpha; `BenillaSetBoothTexture` samples square.
+                    // its 64² bake's alpha.
                     circular,
                     premultiplied,
                     clip,
@@ -2162,15 +2164,15 @@ mod extract_gate_tests {
         let mut app = app_with_marker();
         app.world_mut()
             .non_send_resource_mut::<UiScript>()
-            .run("BenillaSetBoothTexture(marker, 'paperdoll')")
+            .run("SetPortraitTexture(marker, 'target')")
             .unwrap();
-        // The booth publishes a live bake for that slot; without an entry the region draws nothing.
+        // The booth publishes a live bake for that unit; without an entry the region draws nothing.
         let bake = app
             .world_mut()
             .resource_mut::<Assets<Image>>()
             .add(Image::default());
         app.world_mut().resource_mut::<PortraitImages>().0.insert(
-            "paperdoll".to_string(),
+            "target".to_string(),
             crate::portrait::PortraitSource::Live(bake.clone()),
         );
         app.update();

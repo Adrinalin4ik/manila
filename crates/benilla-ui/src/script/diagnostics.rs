@@ -1,7 +1,7 @@
-//! The script error log: this session's script errors, addon load failures and warnings, kept
-//! for the player to read. The reference has no such log: its `_ERRORMESSAGE` shows only the first
-//! message of a burst, and a load failure that never raises reaches no screen. Dispatch and
-//! `_ERRORMESSAGE` are unchanged by it.
+//! The engine's record of this session's script errors, addon load failures and warnings, for the
+//! host (the world-entry load-failure lines, the addon harness) and dev instruments; no Lua global
+//! reads it. The layer's `/errors` window keeps its own log off the Lua error handler, as a 1.12
+//! addon does. Dispatch and `_ERRORMESSAGE` are unchanged by it.
 //!
 //! A repeat bumps its row's count and keeps its place, rows are oldest first, and past
 //! [`DIAGNOSTIC_LOG_CAP`] distinct messages the oldest is evicted; `seq` is never reused, so an
@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 
-use mlua::{IntoLua, Lua, MultiValue, Value};
+use mlua::Lua;
 
 use super::Model;
 
@@ -100,19 +100,16 @@ impl DiagnosticLog {
         self.rows.iter()
     }
 
-    /// Retained rows.
+    /// Retained rows. Not test-only here, unlike upstream: our `GetDebugStats` puts both counts
+    /// on screen (`client.rs`), which is a production reader.
     pub(crate) fn len(&self) -> usize {
         self.rows.len()
     }
 
-    /// Distinct failures recorded this session, evicted and cleared rows included.
+    /// Distinct failures recorded this session, evicted rows included. Same production reader as
+    /// [`Self::len`].
     pub(crate) fn total(&self) -> u64 {
         self.seq
-    }
-
-    /// Forget the rows but not the numbering, so no `#N` ever names two failures.
-    pub(crate) fn clear(&mut self) {
-        self.rows.clear();
     }
 }
 
@@ -122,23 +119,38 @@ impl super::UiScript {
         self.model_ref().diagnostics.rows().cloned().collect()
     }
 
-    /// `(retained rows, distinct failures ever recorded)`.
-    pub fn diagnostic_counts(&self) -> (usize, u64) {
-        let m = self.model_ref();
-        (m.diagnostics.len(), m.diagnostics.total())
-    }
-
-    /// Forget the retained rows; the numbering carries on.
-    pub fn clear_diagnostics(&self) {
-        self.model_mut().diagnostics.clear();
-    }
-
     /// Retain an addon load failure that never raised (a missing file, an unparseable document, a
     /// dependency cycle or missing dependency, a broken `Bindings.xml`). It is not dispatched to
     /// `geterrorhandler()`: the reference logs such a failure and shows nothing. The caller still
     /// writes its own log line.
     pub fn report_load_failure(&self, msg: &str) {
         record_load_failure(&self.lua, msg);
+    }
+
+    /// Whether `FrameXML_Debug` is above 0, which puts every banner in the load log.
+    pub fn framexml_debug(&self) -> bool {
+        self.model_ref().framexml_debug.get() > 0
+    }
+
+    /// Merge one closed level of a UI load (the core's `.toc`, an add-on) into the load's record.
+    pub fn report_load_status(&self, status: crate::status::Status) {
+        self.model_mut().load_log.ui.merge(status);
+    }
+
+    /// The UI load is over: its record is drained (`0x490187`), after any `LoadAddOn` block it
+    /// ran.
+    pub fn finish_ui_load_log(&self) {
+        let mut model = self.model_mut();
+        let lines = model.load_log.ui.take_lines();
+        model
+            .load_log
+            .writes
+            .push(crate::status::LogWrite::Rewrite(lines));
+    }
+
+    /// The drains made since the last call, in order, for the host to write.
+    pub fn take_load_log_writes(&mut self) -> Vec<crate::status::LogWrite> {
+        std::mem::take(&mut self.model_mut().load_log.writes)
     }
 
     /// Retain a warning the host has already logged (a loader warning with its `<Addon>/<file>`
@@ -167,50 +179,6 @@ pub(crate) fn record_warning(lua: &Lua, msg: &str) {
         .expect("model app_data set")
         .diagnostics
         .record(DiagnosticKind::Warning, msg);
-}
-
-/// Register the error-log reads `BenillaScriptLogFrame` polls, `Benilla`-prefixed as they are not
-/// 1.12 API (`tests::reference_surface` enforces the prefix).
-pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
-    // BenillaGetNumScriptErrors() → retained, totalEverRecorded
-    lua.globals().set(
-        "BenillaGetNumScriptErrors",
-        lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok((model.diagnostics.len(), model.diagnostics.total()))
-        })?,
-    )?;
-    // BenillaGetScriptErrorInfo(index) → seq, kind, message, count; 1-based, oldest first, and
-    // nothing for an out-of-range index, so a row gone mid-repaint reads as gone.
-    lua.globals().set(
-        "BenillaGetScriptErrorInfo",
-        lua.create_function(|lua, index: i64| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let Some(row) = usize::try_from(index)
-                .ok()
-                .and_then(|i| i.checked_sub(1))
-                .and_then(|i| model.diagnostics.rows().nth(i))
-            else {
-                return Ok(MultiValue::new());
-            };
-            Ok(MultiValue::from_vec(vec![
-                Value::Integer(row.seq as i64),
-                lua.create_string(row.kind.tag())?.into_lua(lua)?,
-                lua.create_string(&row.message)?.into_lua(lua)?,
-                Value::Integer(i64::from(row.count)),
-            ]))
-        })?,
-    )?;
-    lua.globals().set(
-        "BenillaClearScriptErrors",
-        lua.create_function(|lua, ()| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .diagnostics
-                .clear();
-            Ok(())
-        })?,
-    )
 }
 
 #[cfg(test)]
@@ -317,20 +285,5 @@ mod tests {
             "seq is monotonic: the gap IS the honest report that rows were dropped"
         );
         assert_eq!(log.total() as usize, DIAGNOSTIC_LOG_CAP + 10);
-    }
-
-    #[test]
-    fn clear_forgets_rows_but_not_the_numbering() {
-        let mut log = DiagnosticLog::default();
-        log.record(DiagnosticKind::Error, "a");
-        log.record(DiagnosticKind::Error, "b");
-        log.clear();
-        assert_eq!(log.len(), 0);
-        log.record(DiagnosticKind::Error, "c");
-        assert_eq!(
-            log.rows().next().unwrap().seq,
-            3,
-            "a number never names two different failures"
-        );
     }
 }

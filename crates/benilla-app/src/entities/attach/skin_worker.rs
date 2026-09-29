@@ -182,11 +182,17 @@ pub(in crate::entities) fn drain_skin_worker(
             sections.0.render_plan(chain, &p.plan).ok()?
         });
         if let Some(atlas) = atlas {
-            images.insert(
+            // The return is checked, not discarded: a failed insert leaves the base-only skin
+            // behind the handle, which is the naked body this module's header describes — and
+            // `replaced` must not then claim the atlas landed, or the material touch below would
+            // re-prepare a bind group against a texture that never changed.
+            match images.insert(
                 p.handle.id(),
                 repeat_texture_authored(benilla_assets::for_upload(atlas), (true, true)),
-            );
-            replaced.push(p.handle.id());
+            ) {
+                Ok(()) => replaced.push(p.handle.id()),
+                Err(e) => warn!("skin worker: atlas insert refused, body stays bare: {e}"),
+            }
         }
         crate::perf::journal::note_skin_composite(started.elapsed().as_micros() as u64);
         finished.push(i);

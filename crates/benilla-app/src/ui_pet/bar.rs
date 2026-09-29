@@ -1,7 +1,11 @@
 //! The pet action bar's feed: the ten packed words of the last `SMSG_PET_SPELLS`, which the
 //! server owns whole, rendered as ten `PetActionView`s each frame.
 
-// `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `bevy::platform::time::Instant` — a plain alias for it everywhere else.
+// `bevy::platform::time::Instant`, not `std::time::Instant`: this flows into
+// `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy
+// feature) is `web_time::Instant` — a genuinely different type, and a plain alias for
+// `std::time::Instant` everywhere else. An earlier blanket rewrite collapsed both halves of
+// this sentence into one type and left it saying nothing.
 use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
@@ -203,6 +207,11 @@ pub(super) fn feed_pet_bar(
     // but its buttons work, so possession stays out of `usable`.
     let pickup_allowed = pet_flags.unwrap_or(0) & UNIT_FLAG_POSSESSED == 0;
     let pet_attacking = bar.attacking;
+    // `GetPetTimeRemaining`'s expiry on the VM clock, signed both ways around the anchor sample.
+    script.set_pet_expiry(bar.expires.map(|t| match t.checked_duration_since(anchor) {
+        Some(ahead) => ui_now + ahead.as_secs_f64(),
+        None => ui_now - anchor.duration_since(t).as_secs_f64(),
+    }));
 
     let fresh: Vec<PetActionView> = if has_bar {
         bar.spells

@@ -2,8 +2,7 @@
 //! `CastingBarFrame.lua:6-13` registers for, named from `Spell.dbc`, and the VM's casting flag
 //! is pushed each frame. The cast lifecycle it reads is `crate::spell`'s.
 
-// `bevy::platform::time::Instant`, not `std::time::Instant` - the sentence this carried said
-// "not `bevy::platform::time::Instant`", naming the same type twice and so forbidding nothing.
+// `bevy::platform::time::Instant`, not `std::time::Instant`.
 // std's `Instant::now` COMPILES on wasm32 and panics when called, and every `Instant` this
 // pending-cast/channel store trades with its callers eventually meets
 // `crate::ui_script::UiClock::anchor` (see that field's doc): genuinely different types on

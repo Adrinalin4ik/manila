@@ -147,9 +147,11 @@ impl Plugin for NetPlugin {
         crate::query_cache::register::<crate::names::NameCache>(app);
         crate::query_cache::register::<crate::go_templates::GameObjectTemplates>(app);
         crate::query_cache::register::<crate::items::Items>(app);
+        // Ours: the debug gates (`netPackets`/`netChat`/`netOthers`). Upstream dropped the
+        // `NetConfig::from_env` parameter from `spawn_net`, so the call takes its new shape.
         app.init_resource::<NetDebug>()
             .add_observer(on_net_debug_cvar);
-        let handles = io::spawn_net(io::NetConfig::from_env(), self.connect);
+        let handles = io::spawn_net(self.connect);
         if !self.connect {
             app.insert_resource(NetOffline);
         }
@@ -861,21 +863,60 @@ pub(crate) fn addon_wire_chat_type(distribution: benilla_ui::script::AddonDistri
 /// `HandleChatMessageOpcode`). `Whisper` and `Channel` name their target in `target`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ChatKind {
+    /// `/say`; GM dot-commands go out this way, parsed after the language gate.
     Say,
+    /// `/yell` (`CHAT_MSG_YELL`, `SharedDefines.h:1199`).
     Yell,
+    /// A custom `/emote`, shown verbatim as `"PlayerName <text>"`.
     Emote,
+    /// `/whisper`: the target's name precedes the text (`Chat.cpp:3-12`).
     Whisper,
+    /// `/p`, dropped silently when ungrouped (`ChatHandler.cpp:472-493`).
     Party,
+    /// `/ra`; needs a raid (`ChatHandler.cpp:514-536`).
     Raid,
+    /// `/rl`, leader only (`ChatHandler.cpp:538-559`).
     RaidLeader,
+    /// `/rw`, leader or assistant only (`ChatHandler.cpp:561-576`).
     RaidWarning,
+    /// `/g`; needs a guild (`ChatHandler.cpp:494-503`).
     Guild,
+    /// `/o`; needs a guild (`ChatHandler.cpp:504-513`).
     Officer,
+    /// Needs a battleground group (`ChatHandler.cpp:579-593`).
     Battleground,
+    /// Battleground leader only (`ChatHandler.cpp:595-609`).
     BattlegroundLeader,
+    /// Toggles AFK, the text the auto-reply if any; it clears DND (`ChatHandler.cpp:611-630`).
     Afk,
+    /// Toggles DND, which clears AFK (`ChatHandler.cpp:632-648`).
     Dnd,
+    /// A channel line by name, dropped unless we are on it (`ChatHandler.cpp:255-327`).
     Channel,
+}
+
+impl ChatKind {
+    /// The `CMSG_MESSAGECHAT` `type` field.
+    pub(crate) fn chat_type(self) -> u32 {
+        use benilla_protocol::messages as m;
+        match self {
+            Self::Say => m::CHAT_TYPE_SAY,
+            Self::Yell => m::CHAT_TYPE_YELL,
+            Self::Emote => m::CHAT_TYPE_EMOTE,
+            Self::Whisper => m::CHAT_TYPE_WHISPER,
+            Self::Party => m::CHAT_TYPE_PARTY,
+            Self::Raid => m::CHAT_TYPE_RAID,
+            Self::RaidLeader => m::CHAT_TYPE_RAID_LEADER,
+            Self::RaidWarning => m::CHAT_TYPE_RAID_WARNING,
+            Self::Guild => m::CHAT_TYPE_GUILD,
+            Self::Officer => m::CHAT_TYPE_OFFICER,
+            Self::Battleground => m::CHAT_TYPE_BATTLEGROUND,
+            Self::BattlegroundLeader => m::CHAT_TYPE_BATTLEGROUND_LEADER,
+            Self::Afk => m::CHAT_TYPE_AFK,
+            Self::Dnd => m::CHAT_TYPE_DND,
+            Self::Channel => m::CHAT_TYPE_CHANNEL,
+        }
+    }
 }
 
 /// `WOW_CAST_TRACE=1`: log our own cast packets and every outbound movement packet. vmangos
@@ -963,6 +1004,8 @@ pub(crate) enum ClientCommand {
         kind: ChatKind,
         target: Option<String>,
         text: String,
+        /// The `Languages.dbc` id `SendChatMessage` named; `None` speaks the character's own.
+        language: Option<u32>,
     },
     /// `SendAddonMessage`: a `CMSG_MESSAGECHAT` in `LANG_ADDON` (1.12 has no addon opcode and no
     /// whispered addon message). `text` is `prefix` TAB `message`.
@@ -1066,6 +1109,12 @@ pub(crate) enum ClientCommand {
     CastSpell {
         spell_id: u32,
         target: Option<u64>,
+    },
+    /// `CMSG_CAST_SPELL` at a corpse: its bit and packed guid, a resurrection on a released player.
+    CastSpellCorpse {
+        spell_id: u32,
+        target: benilla_protocol::messages::CorpseTarget,
+        corpse_guid: u64,
     },
     /// `CMSG_CAST_SPELL` with `TARGET_FLAG_DEST_LOCATION`; `dest` in WoW coordinates.
     CastSpellAtDest {
@@ -1538,6 +1587,8 @@ pub(crate) enum ClientCommand {
         body: String,
         /// The `Stationery.dbc` id, the sixth field.
         stationery: u32,
+        /// The `Package.dbc` id, the seventh field, 0 without an item.
+        package: u32,
         item_guid: u64,
         money: u32,
         cod: u32,
@@ -1758,6 +1809,8 @@ pub(crate) enum ClientCommand {
     },
     /// `/played` (`CMSG_PLAYED_TIME`).
     PlayedTime,
+    /// `OpeningCinematic()`: `CMSG_OPENING_CINEMATIC`, empty.
+    OpeningCinematic,
     /// `CMSG_COMPLETE_CINEMATIC`, at the end or skip, or at once for an unresolvable trigger.
     /// Unacked, vmangos keeps visibility on the cinematic camera and nearby NPCs despawn.
     CompleteCinematic,

@@ -163,14 +163,14 @@ pub(super) struct FollowInput<'w, 's> {
 impl FollowInput<'_, '_> {
     /// The press edge of any of the six movement commands; turn and strafe both cancel.
     fn move_start(&self) -> bool {
-        use crate::bindings::cmd;
+        use crate::bindings::Input;
         [
-            cmd::MOVE_FORWARD,
-            cmd::MOVE_BACKWARD,
-            cmd::TURN_LEFT,
-            cmd::TURN_RIGHT,
-            cmd::STRAFE_LEFT,
-            cmd::STRAFE_RIGHT,
+            Input::MoveForward,
+            Input::MoveBackward,
+            Input::TurnLeft,
+            Input::TurnRight,
+            Input::StrafeLeft,
+            Input::StrafeRight,
         ]
         .iter()
         .any(|&c| self.binds.just_pressed(c))
@@ -212,9 +212,7 @@ pub(super) fn steer_follow(
     // ── The cancel set ──
     // The world's buttons, not the device's: the both-button run is two bindings held, and a
     // press a UI frame captured dispatches neither.
-    let both_engaged = input.rig.world_mouse.both()
-        && (input.rig.world_mouse.down(LookButton::Left)
-            || input.rig.world_mouse.down(LookButton::Right));
+    let both_engaged = input.rig.world_mouse.both() && input.rig.world_mouse.rose();
     if follow_cancelled(
         input.move_start(),
         // The on edge: `control` toggles `autorun` after this, so the flag is the pre-toggle value.

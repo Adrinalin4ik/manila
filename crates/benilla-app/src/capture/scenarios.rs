@@ -41,8 +41,8 @@ pub(super) enum UiFixture {
     Bag,
     /// The cooldown sweep at sixteen phases in one still: each backpack slot's
     /// `GetContainerItemCooldown` sits at its own fraction of one long cooldown, in reading order
-    /// (slot 1 renders top-left, `ContainerFrame_GenerateFrame` numbering backwards). The VM clock
-    /// `__benilla_now` is parked at a large value, so the settle's seconds are ~5e-4 of a phase.
+    /// (slot 1 renders top-left, `ContainerFrame_GenerateFrame` numbering backwards). The VM's
+    /// `GetTime` clock is parked at a large value, so the settle's seconds are ~5e-4 of a phase.
     Cooldown,
     /// The cooldown filmstrip with the pet bar's autocast shine beside it: `UI-AutoCastButton.m2`
     /// is four additive emitters and no batch, sharing the tile atlas, so this asks whether its
@@ -104,8 +104,8 @@ pub(super) enum UiFixture {
     OptionsDropdownList,
     /// The Options window mid-search: "volume" lists the four volume sliders under the Audio head.
     OptionsSearch,
-    /// The Options window's Keybindings page, Movement expanded, over the 1.12 default bindings and
-    /// GlobalStrings; the command registry registers in-fixture.
+    /// The Options window's Keybindings page, Movement expanded, over the stock commands and
+    /// default bindings the load read off the install, and GlobalStrings.
     KeyBindings,
     /// An overhead name with the river behind it: a named unit 25 yd out in the Elwynn river (the
     /// `water-noon` camera). Deep water is opaque (`WATER_DEEP_ALPHA` 1.0), so a name sorted before
@@ -167,10 +167,13 @@ pub(crate) enum GlueScreen {
     /// The login screen, `UI_MainMenu` behind the account form. Its backdrop is the narrowest of
     /// the seven scenes, so a wide window (`WOW_WIN=2560x1440`) reaches its edges first.
     Login,
+    /// The realm list over the login screen, fed a list in two categories
+    /// (`super::realm_list`).
+    RealmList,
 }
 
 /// The glue scenarios: character creation as a human male warrior, the race the reference's own
-/// screenshots use, and the login screen.
+/// screenshots use, the login screen, and the realm list's category tabs over it.
 pub(super) const GLUE_SCENARIOS: &[GlueScenario] = &[
     GlueScenario {
         name: "glue-charcreate",
@@ -180,6 +183,11 @@ pub(super) const GLUE_SCENARIOS: &[GlueScenario] = &[
     GlueScenario {
         name: "glue-login",
         screen: GlueScreen::Login,
+        pick: None,
+    },
+    GlueScenario {
+        name: super::realm_list::NAME,
+        screen: GlueScreen::RealmList,
         pick: None,
     },
 ];

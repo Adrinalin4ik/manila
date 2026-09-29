@@ -4,7 +4,7 @@
 
 use mlua::Lua;
 
-use super::Model;
+use super::{Model, NearestMode, ScriptCall};
 
 /// A selection ask from Lua, queued in call order for the app to resolve and commit. The reference
 /// routes `TargetUnit`, `AssistUnit` and `TargetLastEnemy` through one helper (`0x489a40`: commit,
@@ -91,8 +91,9 @@ pub struct UnitState {
     pub charmed: bool,
     /// `UnitIsGhost`: `PLAYER_FLAGS` bit `0x10`, so players only.
     pub ghost: bool,
-    /// The reaction toward the player on `UnitReaction`'s scale, 1 hated to 8 exalted, 0 unknown
-    /// (nil). Fed for the tokens naming another unit; `"player"` and `"pet"` stay 0.
+    /// The reaction toward the player on `UnitReaction`'s scale, 1 hated to 7 revered, which
+    /// Exalted reads too (`0x606439` caps the rank), 0 unknown (nil). Fed for the tokens naming
+    /// another unit; `"player"` and `"pet"` stay 0.
     pub reaction: u8,
     /// `UnitRace`'s localized first return, from `UNIT_FIELD_BYTES_0` byte 0; `None` answers
     /// `nil, nil`.
@@ -106,6 +107,9 @@ pub struct UnitState {
     /// `UnitHasRelicSlot` (`0x519e50`): INVSLOT 17 is a relic slot, from `ChrClasses.dbc` field
     /// 16. Players only, true for Paladin, Shaman and Druid.
     pub has_relic_slot: bool,
+    /// `ChrClasses.dbc` field 2 for a player's class, 0-based (Strength 0, Agility 1), which
+    /// `GetDamageBonusStat` (`0x48b520`) reads for the active player; `None` with no class row.
+    pub damage_bonus_stat: Option<u32>,
     /// `UnitSex`'s scale, 2 male and 3 female, from `UNIT_FIELD_BYTES_0` byte 2 (0 male, 1
     /// female). The unfilled 0 answers 2, the reference's unresolved answer (`0x517f9f`).
     pub sex: u8,
@@ -154,10 +158,6 @@ pub struct UnitState {
     /// reads disconnected, which greys a stock mana bar (`UnitFrame.lua:214`), so a synthetic
     /// live unit must set it.
     pub is_connected: bool,
-    /// `UnitIsAFK`, the roster status byte's `0x40`, fed for party tokens.
-    pub is_afk: bool,
-    /// `UnitIsDND`, the roster status byte's `0x80`, fed for party tokens.
-    pub is_dnd: bool,
     /// `UnitIsPVPFreeForAll`: `PLAYER_FLAGS` bit `0x80`, or the roster status byte's `0x10`;
     /// independent of [`Self::pvp`].
     pub is_pvp_ffa: bool,
@@ -315,7 +315,7 @@ impl super::UiScript {
                 }
             }
         }
-        // A push for a tooltip's live unit token re-drives its health bar, without a line rebuild.
+        // A push of the unit a tooltip shows re-drives its health bar, without a line rebuild.
         super::tooltip_unit::on_unit_push(&self.lua, token);
     }
 
@@ -393,31 +393,51 @@ impl super::UiScript {
         model.combo_target = target;
     }
 
-    /// Drain the queued [`SelectionRequest`]s, in call order.
+    /// Take the queued [`SelectionRequest`]s out of the call stream, in call order.
     pub fn take_selection_requests(&mut self) -> Vec<SelectionRequest> {
-        std::mem::take(&mut self.model_mut().selection_requests)
+        self.take_calls_where(|c| match c {
+            ScriptCall::Select(r) => Some(r.clone()),
+            _ => None,
+        })
     }
 
-    /// Drain the `TargetNearestFriend([reverse])` calls, `true` for reverse. It names no unit: the
-    /// reference runs the TAB cycler (`0x493f60`, mode 2) straight into `SetSelection`.
-    pub fn take_target_nearest_friend_requests(&mut self) -> Vec<bool> {
-        std::mem::take(&mut self.model_mut().target_nearest_friend_requests)
+    /// Take the `TargetNearest*([reverse])` calls out of the call stream, `true` for reverse.
+    /// They name no unit: the reference runs the TAB cycler (`0x493f60`) straight into
+    /// `SetSelection`.
+    pub fn take_target_nearest_requests(&mut self) -> Vec<(NearestMode, bool)> {
+        self.take_calls_where(|c| match c {
+            ScriptCall::TargetNearest { mode, reverse } => Some((*mode, *reverse)),
+            _ => None,
+        })
     }
 
-    /// Drain the `TargetByName(name, exactMatch)` calls for the app's by-name resolver.
+    /// Take the `TargetByName(name, exactMatch)` calls out of the call stream.
     pub fn take_target_by_name_requests(&mut self) -> Vec<(String, bool)> {
-        std::mem::take(&mut self.model_mut().target_by_name_requests)
+        self.take_calls_where(|c| match c {
+            ScriptCall::TargetByName { name, exact } => Some((name.clone(), *exact)),
+            _ => None,
+        })
     }
 
-    /// Drain `ClearTarget()`: true if it fired with a live target; the app deselects (guid 0).
+    /// Take the `ClearTarget()` calls out of the call stream: whether there was one.
     pub fn take_target_clear(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().target_clear)
+        !self
+            .take_calls_where(|c| matches!(c, ScriptCall::ClearTarget).then_some(()))
+            .is_empty()
     }
 
     /// Drain `DropItemOnUnit`'s tokens; on the pet the app casts the learned Feed Pet spell at
     /// the held item (`0x48d960`).
     pub fn take_drop_item_on_unit(&mut self) -> Vec<String> {
         std::mem::take(&mut self.model_mut().drop_item_on_unit)
+    }
+
+    /// Take the `SpellTargetUnit` calls out of the call stream.
+    pub fn take_spell_target_unit(&mut self) -> Vec<String> {
+        self.take_calls_where(|c| match c {
+            ScriptCall::SpellTargetUnit(token) => Some(token.clone()),
+            _ => None,
+        })
     }
 }
 
@@ -431,33 +451,7 @@ fn pick_unit_token(a: &Option<String>, b: &Option<String>) -> Option<String> {
     }
 }
 
-/// The token prefixes the resolver (`0x515970`) tests, in its order (`partypet` before `party`).
-/// Each is a prefix test, so `"playerfoo"` is recognised; `npc`, its one full-string compare, is
-/// tested apart.
-const UNIT_TOKEN_PREFIXES: [&str; 8] = [
-    "player",
-    "pet",
-    "target",
-    "partypet",
-    "party",
-    "raidpet",
-    "raid",
-    "mouseover",
-];
-
-/// Whether the resolver recognises the token, not whether it names a unit: `"party5"` solo is
-/// recognised and answers nil, and only a token none of its nine compares match raises.
-pub(crate) fn token_recognised(token: &str) -> bool {
-    // `npc` full-string, the rest prefixes, all folded as `_strnicmp` folds: ASCII only.
-    token.eq_ignore_ascii_case("npc")
-        || UNIT_TOKEN_PREFIXES
-            .iter()
-            // Bytes, not a `str` slice, which panics mid-character on a multibyte token.
-            .any(|p| {
-                token.len() >= p.len()
-                    && token.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
-            })
-}
+use resolve::token_recognised;
 
 /// The resolver's token check: an unrecognised token raises `Unknown unit name`, as `0x515970`
 /// ends in `luaL_error`; `""`, an absent token and a recognised one naming nothing pass. Whether
@@ -502,7 +496,10 @@ fn unit_predicate(
 
 /// The `Unit*` and `GetQuestGreenRange` registrations.
 mod bindings;
+mod resolve;
 #[cfg(test)]
 mod tests;
+
+pub use resolve::UnitGuids;
 
 pub(super) use bindings::install;

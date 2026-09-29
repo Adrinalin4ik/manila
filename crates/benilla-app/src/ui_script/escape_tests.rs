@@ -45,27 +45,27 @@ fn escape_closes_bag_and_panel_releases_loot_and_keeps_the_held_item() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for file in BAG_UI {
-        load_xml(&s, file);
-    }
     // `LOOT_UI` whole: a missing `ItemButtonTemplate` is only a load warning, so it fails silently.
-    for file in super::test_ui::LOOT_UI {
-        if BAG_UI.contains(file) {
-            continue; // a file loads once; `BAG_UI` carried it
-        }
+    for file in super::test_ui::production_order(&[
+        BAG_UI,
+        super::test_ui::LOOT_UI,
+        &[
+            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+            // Stock `ContainerFrame.lua` reads `MerchantFrame:IsShown()`.
+            "Interface\\FrameXML\\MerchantFrame.xml",
+            "Interface\\FrameXML\\LootFrame.xml",
+            "ScrollTemplates.xml", // our scroll kits
+        ],
+    ]) {
         load_xml(&s, file);
     }
-    load_xml(&s, "Interface\\FrameXML\\LootFrame.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
-    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
-    // Stock `ContainerFrame.lua` reads `MerchantFrame:IsShown()`.
-    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
 
     // Open the bag and the loot window; drain their open sounds.
     s.run("MainMenuBarBackpackButton:Click()").unwrap();
     s.set_loot(Some(LootState {
+        source_unit: false,
         fishing: false,
         master_candidates: Vec::new(),
         rows: vec![Some(LootRow {
@@ -128,22 +128,26 @@ fn escape_is_consumed_by_a_focused_editbox_and_leaves_windows_open() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for file in BAG_UI {
+    for file in crate::ui_script::test_ui::production_order(&[
+        BAG_UI,
+        &[
+            "Interface\\FrameXML\\GlobalStrings.lua",
+            "Interface\\FrameXML\\BasicControls.xml",
+            r"Interface\FrameXML\LocaleProperties.lua",
+            r"Interface\FrameXML\UIParent.xml",
+            "Interface\\FrameXML\\UIMenu.xml", // the kit the chat menus build from
+            "Interface\\FrameXML\\UIDropDownMenu.xml",
+            "Interface\\FrameXML\\UIPanelTemplates.lua",
+            "Interface\\FrameXML\\UIPanelTemplates.xml",
+            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+            "Interface\\FrameXML\\ChatFrame.xml",
+            "Interface\\FrameXML\\FloatingChatFrame.xml",
+            "Interface\\FrameXML\\MerchantFrame.xml",
+            "ScrollTemplates.xml", // our scroll kits
+        ],
+    ]) {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
-    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
-    load_xml(&s, "Interface\\FrameXML\\UIMenu.xml"); // the kit the chat menus build from
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
-    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml");
-    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
-    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
-    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
-    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
-    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
 
@@ -169,22 +173,23 @@ fn escape_closes_the_options_window_before_opening_the_menu() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
-    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
-    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GameMenuFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the Keybindings page's faux-scroll kit
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
-    load_xml(&s, "GameMenuFrame.xml");
+    load_xml(&s, "GameMenuAdapters.xml");
 
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     assert!(s
@@ -221,22 +226,26 @@ fn escape_closes_an_open_stack_split_frame() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for file in BAG_UI {
+    for file in crate::ui_script::test_ui::production_order(&[
+        BAG_UI,
+        &[
+            "Interface\\FrameXML\\GlobalStrings.lua",
+            "Interface\\FrameXML\\BasicControls.xml",
+            r"Interface\FrameXML\LocaleProperties.lua",
+            r"Interface\FrameXML\UIParent.xml",
+            "Interface\\FrameXML\\UIMenu.xml",
+            "Interface\\FrameXML\\UIPanelTemplates.lua",
+            "Interface\\FrameXML\\UIPanelTemplates.xml",
+            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+            "Interface\\FrameXML\\StackSplitFrame.xml",
+            "Interface\\FrameXML\\ChatFrame.xml", // ChatFrameEditBox, for the shift fork
+            "Interface\\FrameXML\\FloatingChatFrame.xml",
+            "Interface\\FrameXML\\MerchantFrame.xml", // read by the stock bag-slot click
+            "ScrollTemplates.xml",                    // our scroll kits
+        ],
+    ]) {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
-    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml"); // read by the stock bag-slot click
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
-    load_xml(&s, "Interface\\FrameXML\\UIMenu.xml");
-    load_xml(&s, "Interface\\FrameXML\\ChatFrame.xml"); // ChatFrameEditBox, for the shift fork
-    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.lua");
-    load_xml(&s, "Interface\\FrameXML\\UIPanelTemplates.xml");
-    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
-    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
-    load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
-    load_xml(&s, "Interface\\FrameXML\\StackSplitFrame.xml");
     s.set_money(0);
 
     let mut slots = std::collections::HashMap::new();
@@ -299,14 +308,19 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for file in BAG_UI {
+    for file in crate::ui_script::test_ui::production_order(&[
+        BAG_UI,
+        &[
+            // The dropdown backdrop reads `TOOLTIP_DEFAULT_COLOR`, which `BAG_UI`'s tooltip file
+            // sets.
+            "Interface\\FrameXML\\UIDropDownMenu.xml",
+            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+            "Interface\\FrameXML\\MerchantFrame.xml",
+            "ScrollTemplates.xml", // our scroll kits
+        ],
+    ]) {
         load_xml(&s, file);
     }
-    // The dropdown backdrop reads `TOOLTIP_DEFAULT_COLOR`, which `BAG_UI`'s tooltip file sets.
-    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
-    load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
-    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
     s.run("MainMenuBarBackpackButton:Click()").unwrap();
@@ -379,12 +393,16 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
     );
 
     // Press 4, no target: `ClearTarget` answers nil; the menu it falls through to is not loaded.
+    // Its deselect queues either way and finds nothing selected when it applies.
     s.set_unit("target", None);
     s.run("ToggleGameMenu()").unwrap();
-    assert!(
-        !s.take_target_clear(),
-        "ClearTarget answers nil with no target — nothing queued"
+    assert!(s.take_target_clear(), "the bare press reaches ClearTarget");
+    assert_eq!(
+        s.eval::<Option<i64>>("return ClearTarget()").unwrap(),
+        None,
+        "ClearTarget answers nil with no target"
     );
+    let _ = s.take_target_clear();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -395,12 +413,16 @@ fn escape_ladder_targeting_rung_after_cast_before_windows() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    for file in BAG_UI {
+    for file in crate::ui_script::test_ui::production_order(&[
+        BAG_UI,
+        &[
+            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+            "Interface\\FrameXML\\MerchantFrame.xml",
+            "ScrollTemplates.xml", // our scroll kits
+        ],
+    ]) {
         load_xml(&s, file);
     }
-    load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
-    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
-    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     s.set_money(0);
     s.set_container(0, Some(one_item_backpack()));
     s.run("MainMenuBarBackpackButton:Click()").unwrap();
@@ -455,17 +477,18 @@ fn an_addon_frame_registered_in_uispecialframes_closes_on_escape() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
-    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
-    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
-    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
-    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\GameMenuFrame.xml");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "GameMenuFrame.xml");
+    load_xml(&s, "GameMenuAdapters.xml");
 
     s.run(
         r#"

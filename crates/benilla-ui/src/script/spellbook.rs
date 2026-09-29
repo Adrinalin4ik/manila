@@ -13,7 +13,7 @@ use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::flag;
 use super::cursor::{queue_cursor_update, CursorPayload, CursorSpell};
-use super::Model;
+use super::{Model, ScriptCall};
 
 const BOOKTYPE_SPELL: &str = "spell";
 const BOOKTYPE_PET: &str = "pet";
@@ -94,10 +94,13 @@ impl super::UiScript {
         self.model_mut().pet_book = state;
     }
 
-    /// Drain the pet spell ids `CastSpell(id, "pet")` queued: each is a `CMSG_PET_ACTION` with a
-    /// type-1 word (`0x4b34ce`), not a player cast.
+    /// Take the `CastSpell(id, "pet")` calls out of the call stream: each is a `CMSG_PET_ACTION`
+    /// with a type-1 word (`0x4b34ce`), not a player cast.
     pub fn take_pet_spell_casts(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().pet_spell_casts)
+        self.take_calls_where(|c| match c {
+            ScriptCall::CastPetSpell(id) => Some(*id),
+            _ => None,
+        })
     }
 
     /// Drain the spell ids `ToggleSpellAutocast` queued: `CMSG_PET_SPELL_AUTOCAST` (0x2F3, sent by
@@ -112,9 +115,12 @@ impl super::UiScript {
         self.model_mut().spellbook.clone()
     }
 
-    /// Drain the spell ids `CastSpell` and `CastSpellByName` queued.
+    /// Take the `CastSpell` and `CastSpellByName` calls out of the call stream.
     pub fn take_spell_casts(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().spell_casts)
+        self.take_calls_where(|c| match c {
+            ScriptCall::CastSpell(id) => Some(*id),
+            _ => None,
+        })
     }
 
     /// Whether `SpellStopCasting()` has something to stop: an auto-repeat or an in-flight cast,
@@ -124,17 +130,12 @@ impl super::UiScript {
         self.model_mut().casting = casting;
     }
 
-    /// Drain the `SpellStopCasting()` trigger; the app stops the auto-repeat first, else the
-    /// in-flight cast, the reference's order.
+    /// Take the `SpellStopCasting()` calls out of the call stream: whether there was one. The app
+    /// stops the auto-repeat first, else the in-flight cast, the reference's order.
     pub fn take_spell_stop(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().spell_stop)
-    }
-
-    /// Drain the `AttackTarget()` trigger: `true` if a script asked to start or stop melee since
-    /// the last call. The app spends it through the same arm the ATTACK_TARGET binding runs, so
-    /// the key and the script cannot diverge about what "attack" means.
-    pub fn take_attack_target(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().attack_target)
+        !self
+            .take_calls_where(|c| matches!(c, ScriptCall::SpellStopCasting).then_some(()))
+            .is_empty()
     }
 
     /// Push whether the app's spell-targeting cursor mode is active (decision 0792) — what
@@ -148,10 +149,12 @@ impl super::UiScript {
         }
     }
 
-    /// Drain the `SpellStopTargeting()` trigger, the ESC chain's rung (`UIParent.lua:1490`); the
-    /// app clears its targeting mode.
+    /// Take the `SpellStopTargeting()` calls, the ESC chain's rung (`UIParent.lua:1490`), out of
+    /// the call stream: whether there was one. The app clears its targeting mode.
     pub fn take_stop_targeting(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().spell_stop_targeting)
+        !self
+            .take_calls_where(|c| matches!(c, ScriptCall::SpellStopTargeting).then_some(()))
+            .is_empty()
     }
 }
 
@@ -441,7 +444,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetSpellCooldown",
         lua.create_function(|lua, (id, book_type): (Value, Value)| {
             let (id, book_type) = spell_slot_args(id, book_type, "GetSpellCooldown")?;
-            let now: f64 = lua.globals().get("__benilla_now").unwrap_or(0.0);
+            let now = crate::script::clock::now(lua);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let cooldown = book_slot(&model, id, &book_type).and_then(|s| s.cooldown);
             Ok(match cooldown {
@@ -483,11 +486,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             if let Some(slot) = book_slot(&model, id, &book_type) {
                 if !slot.passive {
                     let spell_id = slot.spell_id;
-                    if is_pet_book(&book_type) {
-                        model.pet_spell_casts.push(spell_id);
+                    model.script_calls.push(if is_pet_book(&book_type) {
+                        ScriptCall::CastPetSpell(spell_id)
                     } else {
-                        model.spell_casts.push(spell_id);
-                    }
+                        ScriptCall::CastSpell(spell_id)
+                    });
                 }
             }
             Ok(())
@@ -548,7 +551,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // CastSpellByName(name [, onSelf]) (`0x4b4ab0`) shares the dispatcher `0x4b3300` with
-    // `CastSpell`, so it queues on the same list; `SlashCmdList["CAST"]` calls it. `onSelf` is
+    // `CastSpell`, so it queues the same call; `SlashCmdList["CAST"]` calls it. `onSelf` is
     // accepted and ignored: self-cast is not built.
     g.set(
         "CastSpellByName",
@@ -556,7 +559,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             if let Some(slot) = resolve_spell_by_name(&model.spellbook, &name) {
                 let spell_id = slot.spell_id;
-                model.spell_casts.push(spell_id);
+                model.script_calls.push(ScriptCall::CastSpell(spell_id));
             }
             Ok(())
         })?,
@@ -581,7 +584,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, ()| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             if model.casting {
-                model.spell_stop = true;
+                model.script_calls.push(ScriptCall::SpellStopCasting);
                 Ok(Value::Integer(1))
             } else {
                 Ok(Value::Nil)
@@ -589,24 +592,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // AttackTarget() — 1.12's melee toggle, the Lua door onto the same `0x612df0` the
-    // ATTACK_TARGET binding (default `T`) goes through: the actor refusal first, then start the
-    // swing on the current target or acquire the nearest one. Registered here beside the other
-    // cast-lifecycle triggers because it shares their shape — a flag the app drains — and the
-    // resolution stays in the app, which is the only half that can see the target and the ladder.
-    //
-    // **Returns nothing**, and this one is not a guess: nothing in the shipped FrameXML tests its
-    // value, and the callers in the wild (`AutoAttack`'s `StopAttacking`) call it as a statement.
-    // Inventing a 1/nil would be a claim about a return we have not read.
-    g.set(
-        "AttackTarget",
-        lua.create_function(|lua, ()| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .attack_target = true;
-            Ok(())
-        })?,
-    )?;
+    // `AttackTarget()` is registered in `input_verbs.rs`, where it joins the call queue as
+    // `ScriptCall::AttackTarget` in call order with `TargetLastTarget` and the rest. This file
+    // used to register a second one that set a flag on the model; two `g.set` of one name meant
+    // whichever ran last won, so the duplicate is gone and the queue is the only door.
 
     // SpellIsTargeting() — the ref's Script::SpellIsTargeting (`0x6e6cd0`, wow-re
     // `wave-cast.md`): true while the targeting cursor is up (`flag_word != 0`), nil otherwise.
@@ -623,14 +612,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SpellCanTargetUnit("unit") (`0x6e6d00`) asks `0x6e6460`'s unit leg whether the targeting
-    // word can take the unit. The token is not read: no word benilla can arm (location, item,
-    // gameobject) takes a unit, and unit words are not built.
+    // SpellCanTargetUnit("unit") (`0x6e6d00`) asks `0x6e6460`'s unit leg whether the standing
+    // word clears against that resolved unit.
     g.set(
         "SpellCanTargetUnit",
-        lua.create_function(|lua, _unit: Option<String>| {
+        lua.create_function(|lua, unit: Option<String>| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            if model.spell_can_target_unit {
+            let can = unit.is_some_and(|unit| {
+                model
+                    .spell_targetable_units
+                    .contains(&unit.to_ascii_lowercase())
+            });
+            if can {
                 Ok(Value::Boolean(true))
             } else {
                 Ok(Value::Nil)
@@ -646,7 +639,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, ()| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             if model.spell_targeting {
-                model.spell_stop_targeting = true;
+                model.script_calls.push(ScriptCall::SpellStopTargeting);
                 Ok(Value::Integer(1))
             } else {
                 Ok(Value::Nil)
@@ -909,14 +902,14 @@ mod tests {
         s.run(r#"picked = PickupSpell(1, BOOKTYPE_SPELL)"#).unwrap();
         assert!(s.eval::<bool>("return picked").unwrap());
         assert!(s.cursor_payload().is_some());
-        let (kind, book_id, book, spell_id) = s
-            .eval::<(String, i64, String, i64)>(
-                "local k, slot, book, id = GetCursorInfo() return k, slot, book, id",
-            )
-            .unwrap();
-        assert_eq!(
-            (kind.as_str(), book_id, book.as_str(), spell_id),
-            ("spell", 1, "spell", 133)
+        assert!(
+            matches!(
+                s.cursor_payload(),
+                Some(crate::script::CursorPayload::Spell(c))
+                    if c.book_slot == 1 && c.book_type == "spell" && c.spell_id == 133
+            ),
+            "{:?}",
+            s.cursor_payload()
         );
 
         // Tick first to flush the first pickup's `CURSOR_UPDATE`, so the count below is the
@@ -939,12 +932,14 @@ mod tests {
             "refused pickup fires no CURSOR_UPDATE"
         );
         // Still holding the first pickup: a refusal never clobbers it.
-        assert_eq!(
-            s.eval::<(String, i64, String, i64)>(
-                "local k, slot, book, id = GetCursorInfo() return k, slot, book, id"
-            )
-            .unwrap(),
-            ("spell".to_string(), 1, "spell".to_string(), 133)
+        assert!(
+            matches!(
+                s.cursor_payload(),
+                Some(crate::script::CursorPayload::Spell(c))
+                    if c.book_slot == 1 && c.book_type == "spell" && c.spell_id == 133
+            ),
+            "{:?}",
+            s.cursor_payload()
         );
     }
 
@@ -963,10 +958,13 @@ mod tests {
             .eval::<bool>(r#"return PickupSpell(1, BOOKTYPE_SPELL)"#)
             .unwrap());
         // The original (action) payload survives untouched.
-        assert_eq!(
-            s.eval::<String>("local k = GetCursorInfo() return k")
-                .unwrap(),
-            "action"
+        assert!(
+            matches!(
+                s.cursor_payload(),
+                Some(crate::script::CursorPayload::Action(_))
+            ),
+            "{:?}",
+            s.cursor_payload()
         );
     }
 

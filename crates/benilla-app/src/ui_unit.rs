@@ -310,6 +310,21 @@ pub(crate) fn seed_default_language(world: &mut World, script: &mut UiScript) {
     script.set_default_language(langs.0.name(u32::from(row.race), 0).map(str::to_string));
 }
 
+/// Seed a new VM with `Languages.dbc`, the static table `SendChatMessage` resolves its language
+/// name against (`0x49f8a0`); locale column 0, as [`feed_default_language`] reads.
+pub(crate) fn seed_language_table(world: &World, script: &mut UiScript) {
+    let Some(langs) = world.get_resource::<LanguagesRes>() else {
+        return;
+    };
+    script.set_language_table(
+        langs
+            .0
+            .names(0)
+            .map(|(id, name)| (id, name.to_string()))
+            .collect(),
+    );
+}
+
 /// Push `GetDefaultLanguage()`'s string on a change of race; `None` is the reference's zero value.
 /// Locale column 0 (the client's slot is `[0xc0e080]`): only enUS is populated in the 1.12 data.
 fn feed_default_language(
@@ -569,6 +584,7 @@ pub(crate) struct UnitTokens<'w, 's> {
     index: Option<Res<'w, crate::net::GuidIndex>>,
     pet: Option<Res<'w, crate::ui_pet::PetBar>>,
     hovered: Option<Res<'w, crate::target::Hovered>>,
+    hovered_go: Option<Res<'w, crate::target::HoveredObject>>,
     group: Res<'w, crate::ui_party::GroupState>,
     pub(crate) stores: Query<'w, 's, &'static ObjectStore>,
     me: Query<'w, 's, (Entity, &'static Guid), With<SelfPlayer>>,
@@ -597,11 +613,11 @@ impl UnitTokens<'_, '_> {
                 .and_then(|s| s.0.unit_target())
                 .filter(|g| *g != 0)
                 .and_then(|g| self.held(g)),
-            // The same `Hovered` pick `ui_tooltip` pushes `"mouseover"` from.
-            "mouseover" => {
-                let h = self.hovered.as_ref()?;
-                h.target.zip(h.guid)
-            }
+            // The same pick `ui_tooltip` pushes `"mouseover"` from.
+            "mouseover" => self
+                .hovered
+                .as_ref()?
+                .mouseover(&self.hovered_go.as_deref().copied().unwrap_or_default()),
             // Off the pet bar's cached guid, as the `"pet"` snapshot reads it.
             "pet" => {
                 let guid = self.pet.as_ref()?.spells.pet_guid;
@@ -626,7 +642,7 @@ impl UnitTokens<'_, '_> {
 }
 
 /// Every token [`UnitTokens`] resolves, `"player"` included (the reference answers d² = 0).
-fn reach_tokens() -> impl Iterator<Item = &'static str> {
+pub(crate) fn reach_tokens() -> impl Iterator<Item = &'static str> {
     ["player", "target", "targettarget", "mouseover", "pet"]
         .into_iter()
         .chain(crate::ui_party::PARTY_TOKENS)
@@ -762,15 +778,24 @@ fn store_of(
     stores.get(entity).ok().cloned()
 }
 
-/// Build a unit snapshot from a streamed object's descriptor (decision 0061's `ObjectFields`) plus
-/// its cache-resolved name and its `UnitReaction` value (`1..8`, or `0` for tokens whose reaction we
-/// don't resolve — everything but `"target"`; see [`feed_units`]).
-///
-/// `classes` is `ChrClasses.dbc`, absent when the client data failed to load. Only the relic column
-/// is read off it — the class NAMES are this file's own table, because they are localized display
-/// strings rather than a DBC column we can key on.
+/// `UnitReaction(unit, "player")` (`0x5167e0`): [`ring_reaction`] plus one (`0x51683e`), so
+/// `1..=7`, Hated to Revered, and Exalted reads 7 too (`0x606439`). Stock `UnitReactionColor`
+/// has seven entries (`TargetFrame.lua:6-14`), one per value.
+pub(crate) fn unit_reaction(
+    factions: Option<&Factions>,
+    reputations: &Reputations,
+    store: &ObjectStore,
+    self_store: Option<&ObjectStore>,
+) -> u8 {
+    ring_reaction(factions, reputations, Some(store), self_store) + 1
+}
+
+/// Build a unit snapshot from a streamed descriptor, its guid, its cached name and its
+/// `UnitReaction` (`1..=7`, or `0` where none is resolved, as for `"player"`); `classes` feeds the
+/// relic column.
 pub(crate) fn snapshot(
     store: &ObjectStore,
+    guid: u64,
     name: Option<String>,
     reaction: u8,
     classes: Option<&ChrClasses>,
@@ -783,6 +808,8 @@ pub(crate) fn snapshot(
         exists: true,
         // A live descriptor is `0x468460` having succeeded, all of `UnitIsVisible` (`0x516030`).
         has_object: true,
+        // What the token resolver `0x515970` yields, and `UnitIsUnit` (`0x516070`) compares.
+        guid,
         name,
         // The UI getters: `UNIT_DYNFLAG_DEAD` (feign death) zeroes `UnitHealth` (`0x5174d0`) and
         // `UnitMana` (`0x517670`) but not the maxima, so its edge fires the reference's pair
@@ -815,6 +842,11 @@ pub(crate) fn snapshot(
         // byte against `ChrClasses.dbc` field 16; without the player test a class-2 NPC answers 1.
         has_relic_slot: matches!(store.0.object_type(), Some(ObjectType::Player))
             && class_id.is_some_and(|c| classes.is_some_and(|t| t.has_relic_slot(u32::from(c)))),
+        // `GetDamageBonusStat` (`0x48b520`): the class byte against `ChrClasses.dbc` field 2,
+        // read for the active player only (TYPEMASK_PLAYER, `0x48b538`).
+        damage_bonus_stat: matches!(store.0.object_type(), Some(ObjectType::Player))
+            .then(|| class_id.and_then(|c| classes.and_then(|t| t.damage_bonus_stat(u32::from(c)))))
+            .flatten(),
         // Gender byte 0 male, 1 female, on `UnitSex`'s scale: 2 male, 3 female, 0 unknown (nil).
         sex: match store.0.unit_gender() {
             Some(0) => 2,
@@ -1184,12 +1216,11 @@ pub(crate) fn feed_units(
         let name = names
             .resolve_unit(guid.0, Some(store), &commands)
             .map(str::to_string);
-        let mut s = snapshot(store, name, 0, chr);
+        let mut s = snapshot(store, guid.0, name, 0, chr);
         s.is_player = true;
         // Every token pushed here is streamed, so connected; real link-death rides only the group
         // roster's status byte, which the party feed reads for its own tokens.
         s.is_connected = true;
-        s.guid = guid.0;
         s.raid_target = group.raid_target_index(guid.0);
         s.faction_group = faction_group(store, factions.as_deref());
         s.faction_group_localized = faction_group_localized(store, factions.as_deref());
@@ -1217,15 +1248,13 @@ pub(crate) fn feed_units(
         let name = names
             .resolve_unit(guid, Some(store), &commands)
             .map(str::to_string);
-        // `UnitReaction` (1..8) is the selection ring's 0..7 rank plus one.
-        let reaction = ring_reaction(
+        let reaction = unit_reaction(
             factions.as_deref(),
             &reputations,
-            Some(store),
+            store,
             self_pair.map(|(s, _)| s),
-        ) + 1;
-        let mut s = snapshot(store, name, reaction, chr);
-        s.guid = guid;
+        );
+        let mut s = snapshot(store, guid, name, reaction, chr);
         s.is_connected = true;
         s.raid_target = group.raid_target_index(guid);
         s.faction_group = faction_group(store, factions.as_deref());
@@ -1275,14 +1304,13 @@ pub(crate) fn feed_units(
             let name = names
                 .resolve_unit(guid, Some(store), &commands)
                 .map(str::to_string);
-            let reaction = ring_reaction(
+            let reaction = unit_reaction(
                 factions.as_deref(),
                 &reputations,
-                Some(store),
+                store,
                 self_pair.map(|(s, _)| s),
-            ) + 1;
-            let mut s = snapshot(store, name, reaction, chr);
-            s.guid = guid;
+            );
+            let mut s = snapshot(store, guid, name, reaction, chr);
             s.is_connected = true;
             s.raid_target = group.raid_target_index(guid);
             s.faction_group = faction_group(store, factions.as_deref());
@@ -1350,14 +1378,13 @@ pub(crate) fn feed_units(
             let name = names
                 .resolve_unit(guid, Some(store), &commands)
                 .map(str::to_string);
-            let reaction = ring_reaction(
+            let reaction = unit_reaction(
                 factions.as_deref(),
                 &reputations,
-                Some(store),
+                store,
                 self_pair.map(|(s, _)| s),
-            ) + 1;
-            let mut s = snapshot(store, name, reaction, chr);
-            s.guid = guid;
+            );
+            let mut s = snapshot(store, guid, name, reaction, chr);
             s.is_connected = true;
             s.raid_target = group.raid_target_index(guid);
             s.faction_group = faction_group(store, factions.as_deref());
@@ -1654,6 +1681,41 @@ fn combo_edge(last: Option<(u8, u64)>, now: (u8, u64)) -> Option<bool> {
 mod tests {
     use super::*;
 
+    /// `"mouseover"` resolves through the pick the tooltip publishes: the hovered unit, until a
+    /// nearer GameObject wins it and the resolver rejects the GameObject's guid (`0x515bd9 je`).
+    #[test]
+    fn the_mouseover_token_resolves_nobody_behind_a_nearer_gameobject() {
+        use crate::target::{Hovered, HoveredObject};
+        use bevy::ecs::system::RunSystemOnce;
+        const WOLF: u64 = 0xF130_0000_4500_0001;
+
+        let mut app = App::new();
+        app.init_resource::<crate::ui_party::GroupState>()
+            .init_resource::<HoveredObject>();
+        let wolf = app.world_mut().spawn_empty().id();
+        app.insert_resource(Hovered {
+            target: Some(wolf),
+            guid: Some(WOLF),
+            distance: 10.0,
+            ..Default::default()
+        });
+        let resolve = |app: &mut App| {
+            app.world_mut()
+                .run_system_once(|tokens: UnitTokens| {
+                    tokens.resolve("mouseover", &Selection::default())
+                })
+                .unwrap()
+        };
+        assert_eq!(resolve(&mut app), Some((wolf, WOLF)), "the hovered unit");
+        let chest = app.world_mut().spawn_empty().id();
+        app.insert_resource(HoveredObject {
+            target: Some(chest),
+            guid: Some(0xF110_0000_0000_0004),
+            distance: 5.0,
+        });
+        assert_eq!(resolve(&mut app), None, "a nearer GameObject names nobody");
+    }
+
     /// The team digit comes off the race byte, whatever template sits beside it (a GM's 35).
     #[test]
     fn the_team_digit_comes_off_the_race_byte_not_the_faction_template() {
@@ -1667,6 +1729,7 @@ mod tests {
         let team = |fields: &[(u16, u32)]| {
             snapshot(
                 &ObjectStore(ObjectFields::from_pairs(fields)),
+                0,
                 None,
                 0,
                 None,
@@ -1695,6 +1758,42 @@ mod tests {
             -1,
             "and a template is not one"
         );
+    }
+
+    /// A new VM is seeded with the shipped `Languages.dbc`, so each race's own tongue resolves by
+    /// name to the id vmangos keys `KnowsLanguage` on (`SharedDefines.h:253-269`).
+    #[test]
+    fn a_new_vm_resolves_every_racial_language_by_name() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let mut world = World::new();
+        world.insert_resource(LanguagesRes(
+            benilla_formats::load_languages(&mut chain).expect("Languages.dbc"),
+        ));
+        let mut script = UiScript::new().expect("VM");
+        seed_language_table(&world, &mut script);
+        let want = [
+            ("Orcish", 1),
+            ("Darnassian", 2),
+            ("Taurahe", 3),
+            ("Dwarvish", 6),
+            ("Common", 7),
+            ("Gnomish", 13),
+            ("Troll", 14),
+            ("Gutterspeak", 33),
+        ];
+        for (name, _) in want {
+            script
+                .run(&format!(r#"SendChatMessage("hi", "SAY", "{name}")"#))
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+        let got: Vec<Option<u32>> = script
+            .take_chat_sends()
+            .iter()
+            .map(|c| c.language)
+            .collect();
+        let ids: Vec<Option<u32>> = want.iter().map(|&(_, id)| Some(id)).collect();
+        assert_eq!(got, ids);
     }
 
     /// [`race_pvp_team`] against the shipped DBCs, walked as `0x5efe00` walks them.
@@ -2184,6 +2283,7 @@ mod tests {
             app.insert_resource(Selection {
                 target: Some(target),
                 guid: Some(guid),
+                ..Default::default()
             });
 
             app.world_mut().run_system_once(feed_unit_reach).unwrap();
@@ -2295,6 +2395,7 @@ mod tests {
         ];
         let alive = snapshot(
             &ObjectStore(ObjectFields::from_pairs(&vitals)),
+            0,
             Some("Hunter".into()),
             0,
             None,
@@ -2307,6 +2408,7 @@ mod tests {
             &ObjectStore(ObjectFields::from_pairs(
                 &[vitals.as_slice(), &[(DYNFLAGS, 0x20)]].concat(),
             )),
+            0,
             Some("Hunter".into()),
             0,
             None,

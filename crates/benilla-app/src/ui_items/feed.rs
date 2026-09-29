@@ -523,8 +523,8 @@ fn resolve_slot(
     names: &crate::names::NameCache,
     // Mutable: reading a charter's record is what queries it.
     petitions: &mut crate::ui_petition::PetitionState,
-    // `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: this is `clock.anchor`
-    // (`crate::ui_script::UiClock`), which on wasm32 is a different type from `bevy::platform::time::Instant`
+    // `bevy::platform::time::Instant`, not `std::time::Instant`: this is `clock.anchor`
+    // (`crate::ui_script::UiClock`), which on wasm32 is a different type from `std::time::Instant`
     // (that field's own doc has the full reason).
     now: bevy::platform::time::Instant,
     ui_now: f64,

@@ -1,8 +1,8 @@
 //! Config that would be an environment variable on native and can't be one in a browser tab —
 //! wasm32 has no process environment (`std::env::var` always answers `NotPresent` there), so the
 //! web build reads the page's own query string instead. Every `WOW_*` read this crate ships to
-//! wasm goes through [`var`] (`net/io.rs`'s `NetConfig::from_env`, `char_select`'s
-//! create-if-empty pick, `login`'s env fast path) so a native `WOW_HOST=… cargo run` and a web
+//! wasm goes through [`var`] (`realmlist.rs:60`'s `WOW_HOST`, `char_select`'s `WOW_CHAR` pick,
+//! `login`'s env fast path) so a native `WOW_HOST=… cargo run` and a web
 //! `?host=…` URL are the exact same fast path from the caller's point of view — see the plan's
 //! shared interface, `benilla_app::webenv::var`.
 //!
@@ -192,7 +192,7 @@ mod tests {
     }
 }
 
-/// `WOW_HOST`'s fallback when unset — `net/io.rs`'s `NetConfig::from_env` calls this instead of
+/// `WOW_HOST`'s fallback when unset — `realmlist.rs`'s `Realmlist::default` calls this instead of
 /// hard-coding a default, so it stays a one-line swap there (`var("WOW_HOST").unwrap_or_else(…)`)
 /// no matter what the right default is per platform.
 ///

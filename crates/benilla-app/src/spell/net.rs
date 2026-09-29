@@ -5,7 +5,10 @@
 
 use std::time::Duration;
 
-// `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `bevy::platform::time::Instant` — a plain alias for it everywhere else.
+// `bevy::platform::time::Instant`, not `std::time::Instant`: this flows into
+// `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy
+// feature) is `web_time::Instant` — a genuinely different type, and a plain alias for
+// `std::time::Instant` everywhere else.
 use bevy::platform::time::Instant;
 
 use benilla_formats::LearnAnnouncement;

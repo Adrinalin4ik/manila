@@ -371,6 +371,7 @@ fn charter_probe(
                 kind: ChatKind::Say,
                 target: None,
                 text: format!(".modify money {FUND_COPPER}"),
+                language: None,
             });
             info!(
                 "PROBE_CHARTER: 0 (precheck) — funding the body with {FUND_COPPER} copper so the \
@@ -710,7 +711,7 @@ fn charter_probe(
             }
         }
         // ── Step 6: the item-use fork ───────────────────────────────────────────────────────
-        // A real bag right-click through `UseContainerItem`, so `drain_container_uses` reaches
+        // A real bag right-click through `UseContainerItem`, so `use_container_item` reaches
         // `ItemUseRoute::ShowPetition`. A FAIL is either the fork missing the charter arm or
         // `SMSG_PETITION_SHOW_SIGNATURES` never becoming `PETITION_SHOW`. No getter exposes the
         // open charter's item guid, so its identity rests on no window being up before the click.
@@ -1046,6 +1047,7 @@ fn hop(probe: &mut CharterProbe, net: &NetCommands, now: f64) {
         kind: ChatKind::Say,
         target: None,
         text: format!(".go xyz {x} {y} {z} {REGISTRAR_MAP}"),
+        language: None,
     });
     probe.phase = Phase::Settling { sent_at: now };
 }

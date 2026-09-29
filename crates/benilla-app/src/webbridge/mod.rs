@@ -53,7 +53,6 @@ use benilla_world::schedule::WorldStage;
 use benilla_world::world_map::MapChange;
 
 use crate::area::{ZoneFeed, ZoneInfo};
-use crate::bindings::commands::{Cmd, Kind, SPECS};
 use crate::bindings::{BindingSet, BindingsState};
 use crate::char_select::ClientState;
 use crate::player::Player;
@@ -145,16 +144,17 @@ pub(crate) enum BridgeCommand {
 /// so a stick still deflected after a `/reload` or a focus edge resumes on its own.
 #[derive(Resource, Default)]
 pub(crate) struct BridgeInput {
-    held: HashSet<Cmd>,
+    held: HashSet<String>,
     /// Holds the page let go of this frame — their synthetic latches go with them.
-    released: Vec<Cmd>,
-    /// Held-kind commands the page *fired*: a one-frame tap — latched this frame, released
-    /// the next (`tap_prev`), unless the page also holds them.
-    taps: Vec<Cmd>,
-    tap_prev: Vec<Cmd>,
-    fires: Vec<(Cmd, f32)>,
-    /// Edge / EdgeUpDown commands fired from the page: their Lua bodies run in the VM.
-    edges: Vec<Cmd>,
+    released: Vec<String>,
+    /// Hold-kind commands the page *fired*: a one-frame tap — latched this frame, released the
+    /// next (`tap_prev`), unless the page also holds them. Filled in `apply_synth_input`, which
+    /// is where the VM (and so the kind) is in reach.
+    taps: Vec<String>,
+    tap_prev: Vec<String>,
+    /// What the page fired, with its magnitude: a zoom notch's yards, else `1.0`. The kind is
+    /// decided at the seam, not here — see [`apply_synth_input`].
+    fires: Vec<(String, f32)>,
     look: f32,
     lua: Vec<(u32, String)>,
     chat: Vec<String>,
@@ -165,34 +165,19 @@ pub(crate) struct BridgeInput {
 impl BridgeInput {
     /// Take one parsed command in. A name that is not a registry command is reported once
     /// (an `error` event) and then ignored.
-    pub(crate) fn apply(
-        &mut self,
-        cmd: BridgeCommand,
-        memo: &mut BridgeMemo,
-        out: &mut BridgeOutbox,
-    ) {
+    pub(crate) fn apply(&mut self, cmd: BridgeCommand) {
         match cmd {
+            // The name is carried through as given and checked at the seam: the command table
+            // is the VM's now, and this drain does not hold the VM. `apply_synth_input` reports
+            // an unknown name once, as this used to.
             BridgeCommand::Hold { cmd, down } => {
-                let Some(c) = resolve(&cmd, memo, out) else {
-                    return;
-                };
                 if down {
-                    self.held.insert(c);
-                } else if self.held.remove(&c) {
-                    self.released.push(c);
+                    self.held.insert(cmd);
+                } else if self.held.remove(&cmd) {
+                    self.released.push(cmd);
                 }
             }
-            BridgeCommand::Fire { cmd, amount } => {
-                let Some(c) = resolve(&cmd, memo, out) else {
-                    return;
-                };
-                match SPECS[c.0 as usize].kind {
-                    Kind::Host => self.fires.push((c, amount)),
-                    Kind::Edge(_) | Kind::EdgeUpDown(..) => self.edges.push(c),
-                    // A one-frame hold: the page meant a tap.
-                    Kind::Held => self.taps.push(c),
-                }
-            }
+            BridgeCommand::Fire { cmd, amount } => self.fires.push((cmd, amount)),
             BridgeCommand::Look { dyaw } => self.look += dyaw,
             BridgeCommand::Lua { id, chunk } => self.lua.push((id, chunk)),
             BridgeCommand::Chat(line) => self.chat.push(line),
@@ -204,18 +189,11 @@ impl BridgeInput {
     }
 }
 
-/// A registry command by its `Bindings.xml` name.
-pub(crate) fn command_by_name(name: &str) -> Option<Cmd> {
-    SPECS
-        .iter()
-        .position(|s| s.name == name)
-        .and_then(|i| u16::try_from(i).ok())
-        .map(Cmd)
-}
-
-fn resolve(name: &str, memo: &mut BridgeMemo, out: &mut BridgeOutbox) -> Option<Cmd> {
-    let found = command_by_name(name);
-    if found.is_none() && memo.warned.insert(name.to_string()) {
+/// Is this a command the VM's table holds? A name it does not is reported once (an `error`
+/// event) and then ignored, as it was when the table was a static registry.
+fn known(name: &str, script: &UiScript, memo: &mut BridgeMemo, out: &mut BridgeOutbox) -> bool {
+    let found = script.binding_exists(name);
+    if !found && memo.warned.insert(name.to_string()) {
         out.push(
             "error",
             PlainValue::Map(vec![
@@ -299,6 +277,7 @@ impl Plugin for WebBridgePlugin {
 
 /// The inbound drain: notice the hook coming and going, read the knobs, parse the queue.
 fn drain_page_queue(
+    script: Option<NonSendMut<UiScript>>,
     mut cfg: ResMut<BridgeConfig>,
     mut input: ResMut<BridgeInput>,
     mut memo: ResMut<BridgeMemo>,
@@ -325,7 +304,7 @@ fn drain_page_queue(
     }
     if !memo.hook {
         memo.hook = true;
-        out.push("ready", ready_payload());
+        out.push("ready", ready_payload(script.as_deref()));
         wake.0 = proxy.as_deref().and_then(sink::install_wake);
     }
     sink::read_config(&mut cfg);
@@ -333,24 +312,35 @@ fn drain_page_queue(
         w.observe = true;
     }
     for cmd in sink::drain_queue(&mut out) {
-        input.apply(cmd, &mut memo, &mut out);
+        input.apply(cmd);
     }
 }
 
 /// The `ready` payload: the contract version and every command name the page may `hold`/`fire`.
-fn ready_payload() -> PlainValue {
-    let commands = SPECS
-        .iter()
-        .map(|s| {
-            let kind = match s.kind {
-                Kind::Held => "held",
-                Kind::Host => "host",
-                Kind::Edge(_) | Kind::EdgeUpDown(..) => "lua",
+///
+/// **The list can be empty here, and that is new.** It used to come from a static registry
+/// available at boot; upstream deleted that, and the commands now come off the chain's
+/// `Bindings.xml` into the VM's table — which on the login screen has none yet. `kind` keeps its
+/// three values: `held` is `runOnUp` (the body runs on both edges), the two zooms are `host`
+/// because they carry a magnitude, everything else is `lua`.
+fn ready_payload(script: Option<&UiScript>) -> PlainValue {
+    let commands = script
+        .map(UiScript::binding_commands)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, runs_on_up, category)| {
+            let kind = if runs_on_up {
+                "held"
+            } else if matches!(name.to_ascii_uppercase().as_str(), "CAMERAZOOMIN" | "CAMERAZOOMOUT")
+            {
+                "host"
+            } else {
+                "lua"
             };
             PlainValue::Map(vec![
-                ("name".into(), PlainValue::Str(s.name.into())),
+                ("name".into(), PlainValue::Str(name)),
                 ("kind".into(), PlainValue::Str(kind.into())),
-                ("category".into(), PlainValue::Str(s.category.into())),
+                ("category".into(), PlainValue::Str(category)),
             ])
         })
         .collect();
@@ -416,58 +406,81 @@ fn apply_synth_input(
     capture: Res<UiKeyboardCapture>,
     script: Option<NonSendMut<UiScript>>,
     player: Option<ResMut<Player>>,
+    mut memo: ResMut<BridgeMemo>,
     mut out: ResMut<BridgeOutbox>,
 ) {
+    let mut script = script;
+    let binds = &mut *binds;
     if input.drop_holds {
         input.drop_holds = false;
         input.released.clear();
-        binds.synth_release_all();
+        crate::bindings::synth_release_all(binds, &mut script);
         out.push(
             "input",
             PlainValue::Map(vec![("heldCleared".into(), PlainValue::Bool(true))]),
         );
     }
     for c in input.released.drain(..) {
-        binds.synth_release(c);
+        crate::bindings::synth_release(binds, &mut script, &c);
     }
     let prev_taps = std::mem::take(&mut input.tap_prev);
     for c in prev_taps {
         if !input.held.contains(&c) {
-            binds.synth_release(c);
+            crate::bindings::synth_release(binds, &mut script, &c);
         }
     }
-    if capture.typing {
-        binds.synth_release_all();
+    // With no VM there is no command table, so nothing can be pressed and nothing validated; the
+    // page's queue is dropped rather than held, exactly as the old `edges` arm did.
+    let Some(vm) = script.as_deref() else {
+        input.held.clear();
         input.taps.clear();
-    } else {
-        for &c in &input.held {
-            binds.synth_hold(c);
-        }
-        let taps = std::mem::take(&mut input.taps);
-        for &c in &taps {
-            binds.synth_hold(c);
-        }
-        input.tap_prev = taps;
-    }
+        input.fires.clear();
+        input.look = 0.0;
+        return;
+    };
+    // Classified here, not at intake: `runOnUp` is what makes a command a hold, and it lives in
+    // the VM's table. A fire of a hold is a one-frame tap (pressed now, released next frame); a
+    // fire of a one-shot is its press and its release back to back — the wheel-notch law, which
+    // is what makes an action button cast.
+    let mut taps = Vec::new();
+    let mut oneshots = Vec::new();
     for (c, amount) in input.fires.drain(..) {
-        binds.synth_fire(c, amount);
-    }
-    if !input.edges.is_empty() {
-        if let Some(script) = script.as_deref() {
-            for c in input.edges.drain(..) {
-                match SPECS[c.0 as usize].kind {
-                    Kind::Edge(body) => crate::ui_script::run_or_warn(script, body),
-                    // A page's "fire" of a button is a press AND its release, back to back —
-                    // the wheel-notch law, which is what makes an action button cast.
-                    Kind::EdgeUpDown(down, up) => {
-                        crate::ui_script::run_or_warn(script, down);
-                        crate::ui_script::run_or_warn(script, up);
-                    }
-                    Kind::Held | Kind::Host => {}
-                }
-            }
+        if !known(&c, vm, &mut memo, &mut out) {
+            continue;
+        }
+        if vm.binding_runs_on_up(&c) {
+            taps.push(c);
         } else {
-            input.edges.clear();
+            oneshots.push((c, amount));
+        }
+    }
+    let held: Vec<String> = input.held.iter().cloned().collect();
+    if capture.typing {
+        crate::bindings::synth_release_all(binds, &mut script);
+        taps.clear();
+    } else {
+        for c in held.iter().chain(taps.iter()) {
+            if known(c, script.as_deref().expect("checked above"), &mut memo, &mut out) {
+                crate::bindings::synth_press(binds, &mut script, c);
+            }
+        }
+    }
+    input.tap_prev = taps;
+    for (c, amount) in oneshots {
+        crate::bindings::synth_press(binds, &mut script, &c);
+        crate::bindings::synth_release(binds, &mut script, &c);
+        // The magnitude the body could not carry: a zoom's own Lua takes yards, and the page's
+        // notch is not always the reference's 1.0 key step. Only the two zooms have an amount,
+        // and only a non-default one is worth a second push.
+        if (amount - 1.0).abs() > f32::EPSILON {
+            let i = match c.to_ascii_uppercase().as_str() {
+                "CAMERAZOOMIN" => Some(crate::bindings::Input::CameraZoomIn),
+                "CAMERAZOOMOUT" => Some(crate::bindings::Input::CameraZoomOut),
+                _ => None,
+            };
+            if let Some(i) = i {
+                binds.synth_amount(i, amount);
+            }
         }
     }
     if input.look != 0.0 {
@@ -479,14 +492,18 @@ fn apply_synth_input(
 }
 
 /// Drop every synthetic assertion and everything queued for one, on both edges of the world.
-fn release_synth_input(mut binds: ResMut<BindingsState>, mut input: ResMut<BridgeInput>) {
-    binds.synth_release_all();
+fn release_synth_input(
+    mut binds: ResMut<BindingsState>,
+    mut input: ResMut<BridgeInput>,
+    script: Option<NonSendMut<UiScript>>,
+) {
+    let mut script = script;
+    crate::bindings::synth_release_all(&mut binds, &mut script);
     input.held.clear();
     input.released.clear();
     input.taps.clear();
     input.tap_prev.clear();
     input.fires.clear();
-    input.edges.clear();
     input.look = 0.0;
     // The pending "clear everything" flag goes too: it is consumed by `apply_synth_input`, which
     // does not run out of world, so a hook that vanished at the character screen would otherwise
@@ -590,96 +607,42 @@ fn publish_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bindings::cmd;
 
+    /// The intake keeps what the page sent, by name: a hold goes on the list and its release
+    /// takes it off. The kind that used to be sorted here is decided at the seam now, where the
+    /// VM's command table is in reach (`apply_synth_input`), so it is no longer this test's.
     #[test]
-    fn commands_resolve_by_their_bindings_xml_name() {
-        assert_eq!(command_by_name("MOVEFORWARD"), Some(cmd::MOVE_FORWARD));
-        assert_eq!(command_by_name("JUMP"), Some(cmd::JUMP));
-        assert_eq!(command_by_name("nope"), None);
-    }
-
-    #[test]
-    fn the_input_sorts_commands_by_kind_and_reports_unknown_names_once() {
+    fn a_hold_goes_on_the_list_by_name_and_its_release_takes_it_off() {
         let mut input = BridgeInput::default();
-        let mut memo = BridgeMemo::default();
-        let mut out = BridgeOutbox::default();
-        input.apply(
-            BridgeCommand::Hold {
-                cmd: "MOVEFORWARD".into(),
-                down: true,
-            },
-            &mut memo,
-            &mut out,
-        );
-        input.apply(
-            BridgeCommand::Fire {
-                cmd: "JUMP".into(),
-                amount: 1.0,
-            },
-            &mut memo,
-            &mut out,
-        );
-        input.apply(
-            BridgeCommand::Fire {
-                cmd: "ACTIONBUTTON1".into(),
-                amount: 1.0,
-            },
-            &mut memo,
-            &mut out,
-        );
-        input.apply(
-            BridgeCommand::Fire {
-                cmd: "STRAFELEFT".into(),
-                amount: 1.0,
-            },
-            &mut memo,
-            &mut out,
-        );
-        assert!(input.held.contains(&cmd::MOVE_FORWARD));
-        assert_eq!(input.fires, vec![(cmd::JUMP, 1.0)]);
-        assert_eq!(input.edges, vec![command_by_name("ACTIONBUTTON1").unwrap()]);
-        assert_eq!(
-            input.taps,
-            vec![cmd::STRAFE_LEFT],
-            "a fired hold is a one-frame tap"
-        );
-        assert!(!input.held.contains(&cmd::STRAFE_LEFT));
-        assert!(out.0.is_empty());
+        input.apply(BridgeCommand::Hold {
+            cmd: "MOVEFORWARD".into(),
+            down: true,
+        });
+        input.apply(BridgeCommand::Fire {
+            cmd: "JUMP".into(),
+            amount: 1.0,
+        });
+        assert!(input.held.contains("MOVEFORWARD"));
+        assert_eq!(input.fires, vec![("JUMP".to_string(), 1.0)]);
 
-        for _ in 0..2 {
-            input.apply(
-                BridgeCommand::Hold {
-                    cmd: "NOPE".into(),
-                    down: true,
-                },
-                &mut memo,
-                &mut out,
-            );
-        }
-        assert_eq!(out.0.len(), 1, "one error per unknown name");
-        assert_eq!(out.0[0].0, "error");
-
-        input.apply(
-            BridgeCommand::Hold {
-                cmd: "MOVEFORWARD".into(),
-                down: false,
-            },
-            &mut memo,
-            &mut out,
-        );
-        assert!(!input.held.contains(&cmd::MOVE_FORWARD));
-        assert!(input.released.contains(&cmd::MOVE_FORWARD));
+        input.apply(BridgeCommand::Hold {
+            cmd: "MOVEFORWARD".into(),
+            down: false,
+        });
+        assert!(!input.held.contains("MOVEFORWARD"));
+        assert_eq!(input.released, vec!["MOVEFORWARD".to_string()]);
     }
 
+    /// With no VM there is no command table, so the page is told the contract version and an
+    /// empty list rather than a stale one.
     #[test]
-    fn the_ready_payload_lists_every_registry_command() {
-        let PlainValue::Map(m) = ready_payload() else {
+    fn the_ready_payload_lists_nothing_before_a_vm_has_a_command_table() {
+        let PlainValue::Map(m) = ready_payload(None) else {
             panic!()
         };
         let PlainValue::List(cmds) = &m[1].1 else {
             panic!()
         };
-        assert_eq!(cmds.len(), SPECS.len());
+        assert!(cmds.is_empty());
     }
 }

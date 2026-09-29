@@ -17,31 +17,25 @@ const REGION_BASES: [u16; 16] = [
     1, 101, 201, 301, 401, 501, 601, 702, 801, 901, 1001, 1101, 1201, 1301, 1401, 1501,
 ];
 
-/// Character geoset visibility: the selected variants plus the model's unmanaged geosets.
-///
-/// The 1.12.1 selector (`0x477520`) first disables only **0..=1700** (`0x6a4`), then enables
-/// the body, customization and equipment variants. Model submeshes start enabled, so IDs above
-/// that inclusive bound stay visible. Reforged uses 1702 for Night Elf eye-glow cards; treating
-/// the explicit selections as a closed set hid those cards in both previews and the world.
+/// The geosets a character shows: the selector's picks, plus every ID above 1700. `0x477520` first
+/// disables only 0..=1700 (`0x6a4`, through `0x7110d0`) and then enables its picks, and a model's
+/// submeshes start visible (`0x70ebd0` fills their flags with 1), so a higher ID stays shown.
 #[derive(Debug)]
 pub struct VisibleGeosets {
     selected: Vec<u16>,
-    /// The `> 1700` rule as it stood when this body was dressed. Snapshotted rather than read
-    /// per submesh so one body cannot be half-dressed under two policies — and so the test costs
-    /// a bool, not an atomic load, on a path that runs once per submesh per dress.
+    /// The `> 1700` rule as it stood when this body was dressed. Snapshotted rather than read per
+    /// submesh so one body cannot be half-dressed under two policies, and so the test costs a
+    /// bool rather than an atomic load on a path that runs once per submesh per dress.
     unmanaged_visible: bool,
 }
 
-/// **The `> 1700` rule, switchable — `/console unmanagedGeosets 0`.**
+/// **The `> 1700` rule, switchable - `/console unmanagedGeosets 0`.**
 ///
-/// The rule above is right for the data upstream runs: 1.12.1 authors nothing above 1700, so
-/// letting those IDs through changes nothing there and rescues Reforged's eye-glow cards at 1702.
-/// On an HD or custom data set that range is exactly where the extra geometry lives, and ALL of it
-/// is then forced visible whatever the helm's hide-mask says.
-///
-/// This exists to answer that question with a look instead of a rebuild, because the owner's data
-/// is the only place the two policies differ and only he can see the difference. Default `true`,
-/// which is upstream's behaviour unchanged.
+/// Upstream's rule above is right for the data upstream runs: 1.12.1 authors nothing over 1700,
+/// so letting those IDs through costs it nothing and rescues an asset pack's eye-glow cards at
+/// 1702. On the owner's HD chain that range is exactly where the extra geometry lives, and all of
+/// it is then forced visible whatever a helm's hide-mask says. Default `true`, which is upstream's
+/// behaviour unchanged.
 static UNMANAGED_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Set whether geosets above 1700 bypass the selection. Takes effect on the next dress, so a
@@ -86,16 +80,9 @@ pub struct EquipGeosets {
 }
 
 impl CharacterGeosets {
-    /// The geoset IDs a character of this appearance renders — RF-0038's opening block (the naked
-    /// set) plus **all eight** equipment branches B1–B8 of `0x477520` (decisions 0074, 1864 —
-    /// implemented from the transcription's *arithmetic*; its prose labels were mislabels wow-re
-    /// corrected in RF-0088/RF-0089, and the branch comments below name each one at its address).
-    /// Use [`VisibleGeosets::contains`] to test a submesh: IDs above 1700 remain visible. Most
-    /// branches gate on an ItemDisplayInfo `geosetGroup` field being non-zero ("section present");
-    /// B3 and B6 do not, and read [`EquipGeosets::forearm_dressed`] / [`EquipGeosets::tabard_preview`].
-    ///
-    /// Explicit selections are **sorted and deduplicated**: the client toggles a per-submesh flag.
-    /// Several branches re-enable a base the opening loop already set, so normalise the list once.
+    /// The geosets (`skinSectionId`s) this appearance draws, sorted and deduplicated: the naked
+    /// set, then the eight equipment branches B1–B8 of `0x477520`. Use
+    /// [`VisibleGeosets::contains`] to retain unmanaged IDs above 1700.
     pub fn visible_geosets(
         &self,
         race: u8,
@@ -104,6 +91,7 @@ impl CharacterGeosets {
         facial_hair: u8,
         equip: &EquipGeosets,
     ) -> VisibleGeosets {
+        // The naked set: the region bases and geoset 0, the body.
         let mut set = REGION_BASES.to_vec();
         set.push(0);
         // Hair: `0x478540` returns `max(1, geosetId)`, so a bald style shows geoset 1, the scalp.
@@ -367,9 +355,8 @@ mod tests {
         );
     }
 
-    /// Run with either stock or Reforged WOW_DATA. Both Night Elf sexes carry two glow cards;
-    /// stock uses geoset 0, while Reforged uses 1702. Exercise the same selection as preview,
-    /// world spawn, and equipment changes, without depending on a renderer or a server.
+    /// Both Night Elf sexes carry two eye-glow cards (on geoset 0 in the stock data; an asset pack
+    /// may put them above 1700), and both survive the selection, bare and robed.
     #[test]
     fn geoset_visibility_keeps_night_elf_eye_glow() {
         let data = crate::wow_data_or_skip!();
@@ -403,8 +390,7 @@ mod tests {
         }
     }
 
-    /// The equipment geoset branches (decisions 0074/1864, from the RF-0038 arithmetic):
-    /// gloves/boots/robe/cloak **replace** their groups, and a robe suppresses the tabard branch.
+    /// Gloves, boots, a robe and a cloak replace their groups; a robe hides the tabard flap.
     #[test]
     fn equipment_geoset_branches() {
         let cg = CharacterGeosets {

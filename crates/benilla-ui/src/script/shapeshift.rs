@@ -50,10 +50,13 @@ impl super::UiScript {
             .collect();
     }
 
-    /// Drain the form spells `CastShapeshiftForm` queued; the app casts each, or cancels it when it
-    /// is the active form.
+    /// Take the `CastShapeshiftForm` calls out of the call stream, as form spells; the app casts
+    /// each, or cancels it when it is the active form.
     pub fn take_shapeshift_casts(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().shapeshift_casts)
+        self.take_calls_where(|c| match c {
+            super::ScriptCall::CastShapeshiftForm(id) => Some(*id),
+            _ => None,
+        })
     }
 }
 
@@ -101,7 +104,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetShapeshiftFormCooldown",
         lua.create_function(|lua, i: u32| {
-            let now: f64 = lua.globals().get("__benilla_now").unwrap_or(0.0);
+            let now = crate::script::clock::now(lua);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(match form_at(&model, i).and_then(|f| f.cooldown) {
                 Some((start, duration, enabled)) if start + duration > now || !enabled => {
@@ -117,7 +120,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, i: u32| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             if let Some(spell_id) = form_at(&model, i).map(|f| f.view.spell_id) {
-                model.shapeshift_casts.push(spell_id);
+                model
+                    .script_calls
+                    .push(super::ScriptCall::CastShapeshiftForm(spell_id));
             }
             Ok(())
         })?,

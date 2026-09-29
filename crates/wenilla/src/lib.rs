@@ -27,9 +27,17 @@ pub fn start() {
     // AppExit` (where the return value IS the process exit code) has no wasm32 equivalent: a
     // browser tab has no exit code for a page to report.
     benilla_app::run(BuildId {
+        version: env!("CARGO_PKG_VERSION"),
+        describe: env!("BENILLA_GIT_DESCRIBE"),
         sha: env!("BENILLA_GIT_SHA"),
         short: env!("BENILLA_GIT_SHORT"),
         date: env!("BENILLA_GIT_DATE"),
         profile: env!("BENILLA_PROFILE"),
+        // Left empty, unlike the native shims': `project_dir` is where a dev build keeps its
+        // `WoW` link and `benilla-config/`, and a browser tab has no such folder to name. The
+        // entry point hands it to `benilla_formats::set_project_folder`, which treats empty as
+        // "no project folder" — the page reads its data over HTTP instead.
+        project_dir: "",
+        ..Default::default()
     });
 }

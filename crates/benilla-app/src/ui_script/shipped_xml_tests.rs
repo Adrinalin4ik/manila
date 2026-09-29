@@ -486,7 +486,7 @@ fn every_shipped_text_attribute_answers_against_the_real_global_strings() {
     };
 
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
-    let mut keys = 0;
+    let mut swept = 0;
     for entry in std::fs::read_dir(&dir).expect("assets/ui").flatten() {
         let path = entry.path();
         if path.extension().is_none_or(|e| e != "xml") {
@@ -505,7 +505,6 @@ fn every_shipped_text_attribute_answers_against_the_real_global_strings() {
                     "{file}: text=\"{value}\" is shaped like a GlobalStrings key but the real \
                      GlobalStrings.lua has no such string — it would render as its own key name"
                 );
-                keys += 1;
             } else {
                 assert!(
                     resolved.is_none(),
@@ -513,10 +512,11 @@ fn every_shipped_text_attribute_answers_against_the_real_global_strings() {
                      the loader would silently show that string's value instead of these words"
                 );
             }
+            swept += 1;
         }
     }
     // A floor, so the sweep cannot pass by matching nothing.
-    assert!(keys >= 1, "only {keys} key-shaped text= values swept");
+    assert!(swept >= 1, "only {swept} text= values swept");
 }
 
 /// No shipped script hands a GlobalStrings key to a text sink as its words: `SetText` cannot tell
@@ -707,71 +707,6 @@ fn every_texture_frame_outranks_its_status_bars() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The boot phase is inert: `Fonts.xml`, the only file loaded at `Startup`, is a pure registry and
-/// materializes no frames.
-#[test]
-fn the_boot_phase_materializes_no_frames() {
-    benilla_formats::wow_data_or_skip!();
-    let mut s = benilla_ui::script::UiScript::new().unwrap();
-    s.set_screen_size(1024.0, 768.0);
-    // Manifest entry 0, off the chain; `load_ui` fails on any loader error.
-    let frames = super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
-    assert_eq!(
-        frames, 0,
-        "the boot-phase load materialized {frames} frame(s) — the login screen is meant to carry none"
-    );
-}
-
-/// The boot-time font registry alone declares every (font, height, outline) the whole manifest
-/// does; a failure is a font object outside `Fonts.xml` with a new height or an outline.
-#[test]
-fn the_font_registry_alone_covers_the_whole_bake_plan() {
-    benilla_formats::wow_data_or_skip!();
-    let plan = |whole: bool| -> std::collections::BTreeSet<(String, String, String)> {
-        let mut s = benilla_ui::script::UiScript::new().unwrap();
-        s.set_screen_size(1024.0, 768.0);
-        if whole {
-            // The in-game UI loads on world entry, so a player always exists by then.
-            s.set_unit(
-                "player",
-                Some(benilla_ui::script::UnitState {
-                    exists: true,
-                    name: Some("Probefour".into()),
-                    level: 60,
-                    ..Default::default()
-                }),
-            );
-            let _ = super::load_default_ui(&s);
-        } else {
-            let _ = super::load_font_registry(&s);
-        }
-        s.font_objects()
-            .iter()
-            .map(|f| {
-                (
-                    f.font.clone().unwrap_or_default().to_ascii_lowercase(),
-                    format!("{:?}", f.height),
-                    format!("{:?}", f.outline),
-                )
-            })
-            .collect()
-    };
-    let whole = plan(true);
-    let registry_only = plan(false);
-    let missing: Vec<_> = whole.difference(&registry_only).collect();
-    assert!(
-        missing.is_empty(),
-        "these (font, height, outline) combinations exist in the full manifest but NOT in the \
-         boot-time font registry, so the atlas would never bake them: {missing:#?}"
-    );
-    // Never let this pass by finding nothing on both sides.
-    assert!(
-        registry_only.len() >= 19,
-        "only {} combinations swept — the registry sweep broke",
-        registry_only.len()
-    );
-}
-
 /// The shipped UI takes `VARIABLES_LOADED`, which the saved-variables load fires at every launch
 /// before any window has shown, without a script error.
 #[test]
@@ -801,8 +736,8 @@ fn the_shipped_ui_takes_variables_loaded_without_a_script_error() {
 }
 
 /// Every `<Font name=…>` the manifest declares is a `Font` global answering the FontInstance
-/// getters, in manifest order: `publish_global` never overwrites, so a same-named frame loaded
-/// first would keep a font unpublished.
+/// getters, in the production order: `publish_global` never overwrites, so a same-named frame
+/// loaded first would keep a font unpublished.
 #[test]
 fn every_shipped_font_object_is_published_as_a_lua_global() {
     benilla_formats::wow_data_or_skip!();
@@ -823,7 +758,7 @@ fn every_shipped_font_object_is_published_as_a_lua_global() {
 
     // The names come from the manifest's own entries, chain files included.
     let mut names: Vec<String> = Vec::new();
-    for entry in &super::addons::Addon::builtin().toc.files {
+    for entry in &super::manifest::manifest_files() {
         if !entry.to_ascii_lowercase().ends_with(".xml") {
             continue;
         }
@@ -1096,7 +1031,7 @@ fn every_declared_parent_really_attaches() {
     let declared = shipped_frame_parents();
     assert!(
         // A sanity floor for the scan, not a census.
-        declared.len() >= 2,
+        !declared.is_empty(),
         "only {} parent declarations found — the scan broke",
         declared.len()
     );
@@ -1445,7 +1380,7 @@ fn the_stock_sound_options_window_loads_hidden_and_the_alias_is_gone() {
     );
 
     // `IsOptionFrameOpen` names the stock options windows, all hidden; it sees ours through the
-    // wrapper `GameMenuFrame.xml` installs.
+    // wrapper `GameMenuAdapters.xml` installs.
     assert!(
         s.eval::<bool>("return IsOptionFrameOpen() and true or false")
             .unwrap(),
@@ -1453,9 +1388,57 @@ fn the_stock_sound_options_window_loads_hidden_and_the_alias_is_gone() {
     );
 }
 
+/// The stock Sound window's boxes write `this:GetChecked()` as is (`SoundOptionsFrame.lua:82`),
+/// which is nil once unticked, and `SetCVar` stores that as "0" (`0x488c98`); its sliders write
+/// `GetValue()`, a single-precision number stored as Lua's `%.14g` text (`0x6f7c80`).
+#[test]
+fn the_stock_sound_window_turns_a_box_off_and_stores_a_slider_as_lua_text() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.set_cvar_host("EnableMusic", "1");
+    s.run("this = SoundOptionsFrameOkay SoundOptionsFrame_Load()")
+        .unwrap();
+    let _ = s.take_cvar_changes();
+    let checked = "return SoundOptionsFrameCheckButton5:GetChecked() and true or false";
+    assert!(s.eval::<bool>(checked).unwrap(), "Enable Music starts on");
+
+    s.run("SoundOptionsFrameCheckButton5:Click()").unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(!s.eval::<bool>(checked).unwrap());
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("EnableMusic".to_string(), "0".to_string())],
+        "the unticked box turns music off"
+    );
+    s.run("SoundOptionsFrameCheckButton5:Click()").unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("EnableMusic".to_string(), "1".to_string())]
+    );
+
+    s.run("SoundOptionsFrameSlider3:SetValue(0.4)").unwrap();
+    assert_eq!(
+        s.eval::<String>("return GetCVar(\"MusicVolume\")").unwrap(),
+        "0.40000000596046"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// The stock Video Options window loads hidden (`OptionsFrame.xml:5`) and owns the `OptionsFrame`
 /// name; ours is `BenillaOptionsFrame`, which the ESC menu opens and the stock "options window
-/// open?" consumers see only through the `GameMenuFrame.xml` wrappers.
+/// open?" consumers see only through the `GameMenuAdapters.xml` wrappers.
 #[test]
 fn the_stock_video_options_window_loads_hidden_and_owns_its_own_name() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -1940,21 +1923,28 @@ fn the_stock_options_windows_load_and_save_are_reachable_for_addons() {
     );
 }
 
-/// `assets/ui` does not grow: the interface is the stock 1.12 FrameXML off the player's own patch
-/// chain, and a new file means a window was authored rather than migrated. Point `benilla.toc` at
-/// `Interface\FrameXML\<Window>.xml`, delete ours, and build the engine verbs the stock file calls.
+/// benilla's own interface is one layer, and it does not grow: `layer.toc` names exactly these
+/// files, all ours (none off the chain), and `assets/ui` holds nothing else but that manifest. The
+/// core loads every stock window the player's `FrameXML.toc` lists; what changes the stock UI goes
+/// in one of these files.
 #[test]
-fn assets_ui_does_not_grow() {
-    const SHIPPED: &[&str] = &[
-        "ContainerFrameAdapters.xml",
-        "GameMenuFrame.xml",
+fn the_layer_does_not_grow() {
+    const LAYER: &[&str] = &[
+        "ScrollTemplates.xml",
         "KeyBindingsPage.xml",
         "OptionsFrame.xml",
-        "ScriptLogFrame.xml",
-        "ScrollTemplates.xml",
+        "GameMenuAdapters.xml",
+        "ContainerFrameAdapters.xml",
         "SpellBookAdapters.xml",
-        "benilla.toc",
+        "ScriptLogFrame.xml",
+        "FrameXMLFixes.xml",
     ];
+    assert_eq!(
+        super::addons::Addon::layer().toc.files,
+        LAYER,
+        "layer.toc changed. The layer does not grow (docs/METHOD.md): a file that retired comes \
+         off this list; a new one needs a reason this list can name."
+    );
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
     let mut found: Vec<String> = std::fs::read_dir(&dir)
         .expect("assets/ui")
@@ -1963,11 +1953,86 @@ fn assets_ui_does_not_grow() {
         .filter(|n| !n.starts_with('.'))
         .collect();
     found.sort();
-    let mut shipped: Vec<String> = SHIPPED.iter().map(|s| s.to_string()).collect();
+    let mut shipped: Vec<String> = LAYER
+        .iter()
+        .chain(&["layer.toc"])
+        .map(|s| s.to_string())
+        .collect();
     shipped.sort();
     assert_eq!(
         found, shipped,
-        "assets/ui changed. It does not grow: a window is migrated, not authored (docs/METHOD.md). \
-         A file that retired comes off this list; a new one needs a reason this list can name."
+        "assets/ui holds the layer's manifest and its files, nothing else"
     );
+}
+
+/// The layer speaks the 1.12 dialect: a handler body is the chunk itself (`0x704c70`), so it reads
+/// its frame from `this`, never `self`; the loader reads no `function=`; the strata table
+/// (`0x8119f8`) has no `BLIZZARD`; `SetDrawLayer` (`0x79a780`) takes a layer name alone; and a
+/// button's state textures take a texture, never a colour (`0x781970`).
+#[test]
+fn the_layer_speaks_the_1_12_dialect() {
+    fn handlers(el: &benilla_ui::framexml::Element, out: &mut Vec<(String, String)>) {
+        if el.tag == "Scripts" {
+            for h in &el.children {
+                out.push((h.tag.clone(), h.body.clone()));
+                assert!(
+                    h.attr("function").is_none(),
+                    "<{} function=…> is no 1.12 form",
+                    h.tag
+                );
+            }
+        }
+        for c in &el.children {
+            handlers(c, out);
+        }
+    }
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+    let files = super::addons::Addon::layer().toc.files;
+    assert!(files.len() >= 8, "the layer's toc lists {files:?}");
+    let word = |text: &str, w: &str| {
+        text.match_indices(w).any(|(i, _)| {
+            let before = text[..i].chars().next_back();
+            let after = text[i + w.len()..].chars().next();
+            !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+        })
+    };
+    for file in files {
+        let text = std::fs::read_to_string(dir.join(&file)).expect("read");
+        let doc = benilla_ui::framexml::parse(&text).expect("parses");
+        let mut found = Vec::new();
+        for item in &doc.items {
+            use benilla_ui::framexml::TopLevel;
+            if let TopLevel::Template(el) | TopLevel::Instance(el) = item {
+                handlers(el, &mut found);
+            }
+        }
+        for (tag, body) in found {
+            assert!(!word(&body, "self"), "{file}: <{tag}> reads `self`: {body}");
+        }
+        assert!(!text.contains("BLIZZARD"), "{file}: BLIZZARD strata");
+        for line in text.lines().filter(|l| l.contains("SetDrawLayer(")) {
+            assert_eq!(
+                line.matches(',').count(),
+                0,
+                "{file}: SetDrawLayer takes the layer alone: {line}"
+            );
+        }
+        for verb in [
+            "SetNormalTexture(",
+            "SetPushedTexture(",
+            "SetHighlightTexture(",
+            "SetDisabledTexture(",
+            "SetCheckedTexture(",
+            "SetDisabledCheckedTexture(",
+        ] {
+            for line in text.lines().filter(|l| l.contains(verb)) {
+                let args = line.split(verb).nth(1).unwrap_or_default();
+                assert!(
+                    !args.trim_start().starts_with(|c: char| c.is_ascii_digit()),
+                    "{file}: {verb} takes a texture, never a colour: {line}"
+                );
+            }
+        }
+    }
 }

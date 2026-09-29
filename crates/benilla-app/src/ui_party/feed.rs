@@ -318,9 +318,8 @@ pub(super) fn feed_party(
             if Some(*guid) == self_guid {
                 let (_, _, store) = self_pair?;
                 let name = names.peek(*guid).map(str::to_string);
-                let mut s = crate::ui_unit::snapshot(store, name, 0, chr);
+                let mut s = crate::ui_unit::snapshot(store, *guid, name, 0, chr);
                 s.is_player = true;
-                s.guid = *guid;
                 s.raid_target = group.raid_target_index(*guid);
                 s.faction_group = own_group.clone();
                 // A same-faction friendly player, as in `member_unit_state`.
@@ -644,13 +643,14 @@ fn member_unit_state(
     classes: Option<&benilla_formats::ChrClasses>,
 ) -> UnitState {
     let mut s = match store {
-        Some(store) => crate::ui_unit::snapshot(store, Some(m.name.clone()), 0, classes),
+        Some(store) => crate::ui_unit::snapshot(store, m.guid, Some(m.name.clone()), 0, classes),
         // Unstreamed: the roster record, snapshotted from the descriptor at despawn (`0x5f0880`),
         // seated at 1/1 for a member never seen (`0x4e82d0`) and patched by the wire. The
         // reference's getters read the descriptor, then the party record (`0x496400`), then the
         // pet record (`0x496420`); a `partyN` token is never a pet, so the pet leg cannot arise.
         None => UnitState {
             exists: true,
+            guid: m.guid,
             name: Some(m.name.clone()),
             health: stats.and_then(|s| s.cur_hp).map_or(0, u32::from),
             max_health: stats.and_then(|s| s.max_hp).map_or(0, u32::from),
@@ -663,7 +663,7 @@ fn member_unit_state(
             // `+0x08 & 4`) and `UnitIsGhost` (`0x517c32`, `& 8`) read it: fresher than the roster
             // byte, which only `SMSG_GROUP_LIST` moves. Connected stays the roster's, though the
             // reference reads the record's bit 0 (`0x517dd3`); its no-object PvP and FFA reads are
-            // untraced, and `UnitIsAFK`/`UnitIsDND` are not 1.12 bindings.
+            // untraced, and 1.12 has no AFK or DND predicate to feed.
             dead: stats.is_some_and(|s| s.status.unwrap_or(0) & member_status::DEAD != 0),
             ghost: stats.is_some_and(|s| s.status.unwrap_or(0) & member_status::GHOST != 0),
             ..Default::default()
@@ -672,14 +672,11 @@ fn member_unit_state(
     s.is_player = true;
     // A party member is always a same-faction friendly player: the popup's `UnitCanCooperate`
     // gate reads the reaction, which neither leg resolves for a party token.
-    s.guid = m.guid;
     s.raid_target = group.raid_target_index(m.guid);
     s.reaction = 5;
     s.faction_group = own_group;
     // The roster status byte overlays both legs.
     s.is_connected = m.status & member_status::ONLINE != 0;
-    s.is_afk = m.status & member_status::AFK != 0;
-    s.is_dnd = m.status & member_status::DND != 0;
     s.is_pvp_ffa = m.status & member_status::PVP_FFA != 0;
     s.pvp = s.pvp || m.status & member_status::PVP != 0;
     s.ghost = s.ghost || m.status & member_status::GHOST != 0;

@@ -379,13 +379,17 @@ pub(super) fn build_char_skin_materials(
                             .is_some_and(|p| p.request(&handle, plan.clone()));
                         if !posted {
                             if let Ok(Some(atlas)) = sections.0.render_plan(chain, &plan) {
-                                images.insert(
+                                // Checked, not discarded: a refused insert leaves the handle
+                                // empty and the character bare, with nothing on screen to say so.
+                                if let Err(e) = images.insert(
                                     handle.id(),
                                     repeat_texture_authored(
                                         benilla_assets::for_upload(atlas),
                                         (true, true),
                                     ),
-                                );
+                                ) {
+                                    warn!("char skin: atlas insert refused: {e}");
+                                }
                             }
                         }
                     }

@@ -94,6 +94,7 @@ mod realmlist;
 mod run_mode;
 mod screen_fade;
 mod screenshot;
+mod script_calls;
 mod shaders;
 
 mod game_tip;
@@ -138,7 +139,6 @@ mod ui_gamma;
 mod ui_gm_ticket;
 mod ui_gossip;
 mod ui_guild;
-mod ui_hide;
 mod ui_honor;
 mod ui_inspect;
 mod ui_instance;
@@ -200,8 +200,8 @@ mod world_state_ui;
 
 use bevy::prelude::*;
 
-// The `benilla` launcher shim stamps the build id at compile time and hands it to [`run`];
-// re-exported so the shim needs no bevy dependency of its own.
+// A launcher stamps the build id at compile time and hands it to [`run`] or [`run_with`];
+// re-exported so the `benilla` shim needs no bevy dependency of its own.
 pub use benilla_world::build_id::BuildId;
 /// The world viewer's entry point, the engine with no game attached, called by the
 /// `benilla-worldview` shim.
@@ -211,6 +211,21 @@ pub use bevy::app::AppExit;
 /// Builds and runs the client app. `build` is the launcher's compile-time git stamp, passed in as
 /// data so the sha lives in the shim's fingerprint and a commit does not recompile this crate.
 pub fn run(build: BuildId) -> AppExit {
+    launch(build, None)
+}
+
+/// [`run`], plus `extend` adding a crate's own plugins: how a feature 1.12.1 lacks is built on top
+/// of benilla (`examples/extended_launcher.rs`), the build marked `extended` wherever it is named.
+/// `extend` gets the client fully built and runs before the probe fleet, which sees what it adds.
+pub fn run_with(build: BuildId, extend: impl FnOnce(&mut App)) -> AppExit {
+    launch(build, Some(Box::new(extend)))
+}
+
+/// What a crate on top of benilla adds to the built app ([`run_with`]).
+type Extension<'a> = Box<dyn FnOnce(&mut App) + 'a>;
+
+/// The one body behind [`run`] and [`run_with`], not generic, so a launcher compiles none of it.
+fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // `WOW_HOVER_LOG_REPORT=<csv>` and `WOW_CAPTURE=list` print and exit before any setup.
     if let Ok(path) = std::env::var("WOW_HOVER_LOG_REPORT") {
         dev::report_recorded_hover_log(&path);
@@ -225,6 +240,16 @@ pub fn run(build: BuildId) -> AppExit {
         dev::print_probe_vars();
         return AppExit::Success;
     }
+
+    // Every line that names the build says whether a crate on top extended it.
+    let build = BuildId {
+        extended: extend.is_some(),
+        ..build
+    };
+
+    // A dev build's install, state folder and probe identity resolve from the launcher's folder,
+    // so a crate on top of benilla keeps them in its own and not in cargo's checkout of benilla.
+    benilla_formats::set_project_folder(build.project_dir);
 
     // From here on a panic leaves `benilla-config/Diagnostics/crash-<unix>.txt` behind (decision
     // 2266 §B2) — armed before the `App` exists, so a panic while plugins build is a report too.
@@ -247,7 +272,7 @@ pub fn run(build: BuildId) -> AppExit {
     // which for a condition the reference client handles by doing nothing is the right posture.
     // A site whose failure is expected still gets `queue_silenced`, so the log stays readable.
     app.set_error_handler(bevy::ecs::error::warn);
-    // The panel footer and the preflight banner read the stamp back.
+    // The panel footer and the build banner read the stamp back.
     app.insert_resource(build);
     // Static-scene transform tracking pinned on: the default threshold re-decides every frame with
     // two full scans of the rows the tracking exists to skip, and this scene is static-heavy. It
@@ -436,6 +461,11 @@ pub fn run(build: BuildId) -> AppExit {
     // PostStartup runs at the tail of the same long first-update task the catalogs block in, so
     // this is the earliest signal the page can actually paint on.
     app.add_systems(PostStartup, webprogress::signal_startup);
+
+    // A crate on top of benilla adds its plugins here ([`run_with`]).
+    if let Some(extend) = extend {
+        extend(&mut app);
+    }
 
     // **The probe fleet** — the capture harness and every scripted live probe, each armed by its
     // own environment variable and inert without it. Added last so they observe the fully-built

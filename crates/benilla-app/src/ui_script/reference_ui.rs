@@ -2,9 +2,10 @@
 //! [`super::addons::Source`]; the parse, `<Include>` and `<Script file=>` resolution and chunk
 //! naming are [`super::addons::Addon`]'s.
 //!
-//! `assets/ui/benilla.toc` is the one load order. An entry with a path separator comes off the
-//! chain, a bare filename is a file we ship ([`is_chain_entry`]), and a name defined by both goes
-//! to the later line. Without client data the chain files are absent, and the log says so once.
+//! The core is the chain's own `FrameXML.toc` ([`core`]), its rows in its order, as `UI_Init`
+//! walks it; benilla's layer (`assets/ui/layer.toc`) follows it. An entry with a path separator
+//! comes off the chain, a bare filename is a file we ship ([`is_chain_entry`]). Without client
+//! data the chain files are absent, and the log says so once.
 
 use std::sync::OnceLock;
 
@@ -19,10 +20,41 @@ use super::addons::{Addon, Source};
 /// does, so an addon's `\AddOns\` debugstack pattern never matches a FrameXML frame.
 pub(super) const NAME: &str = "FrameXML";
 
-/// Whether a manifest entry comes off the player's chain: it has a path separator. Decidable
+/// Whether a test kit's entry comes off the player's chain: it has a path separator. Decidable
 /// because `assets/ui` is flat, which `manifest::tests` pins.
+#[cfg(test)]
 pub(super) fn is_chain_entry(entry: &str) -> bool {
     entry.contains('\\') || entry.contains('/')
+}
+
+/// The stock interface's table of contents, which `UI_Init` (`0x48fbf0`) hands to the `.toc`
+/// runner (`0x6edb90`) at `0x48ffed`, once per UI build, `ReloadUI` included.
+pub(super) const TOC: &str = r"Interface\FrameXML\FrameXML.toc";
+
+/// The stock key-binding commands, which `UI_Init` loads after the [`TOC`] walk (`0x490018`).
+pub(super) const BINDINGS: &str = r"Interface\FrameXML\Bindings.xml";
+
+/// The default key set, which `UI_Init` reads through `0x4b62b0` (`0x4900c7`).
+pub(super) const DEFAULT_BINDINGS: &str = r"WTF\DefaultBindings.wtf";
+
+/// The core interface: the chain's own [`TOC`], patched or not, as an [`Addon`] over the chain, or
+/// `None` when the chain has no such file.
+pub(super) fn core() -> Option<Addon> {
+    read(TOC).map(|bytes| core_from(&benilla_ui::source::decode(&bytes)))
+}
+
+/// The core over `toc`'s text: each file line prefixed with the toc's own directory, in the toc's
+/// order, as the runner builds its paths (`0x6edbe5`, `0x6edcf4`, `0x6edd0c`) and dispatches each
+/// in turn (`0x6edd51`).
+pub(super) fn core_from(toc: &str) -> Addon {
+    let dir = TOC.rsplit_once('\\').map_or("", |(d, _)| d);
+    addon(
+        Toc::parse(toc)
+            .files
+            .iter()
+            .map(|f| format!("{dir}\\{f}"))
+            .collect(),
+    )
 }
 
 /// The stock interface as an [`Addon`] over the chain; `files` are full chain paths.
@@ -40,6 +72,10 @@ pub(super) fn addon(files: Vec<String>) -> Addon {
 /// One file's bytes off the player's patch chain, by internal path. Bytes, not a string: Lua
 /// takes a chunk as stored, and a cp1252 file is not valid UTF-8.
 pub(super) fn read(req: &str) -> Option<Vec<u8>> {
+    #[cfg(test)]
+    if let Some(overlaid) = fixture::read(req) {
+        return overlaid;
+    }
     let chain = chain()?;
     match chain.read(req) {
         Ok(bytes) => Some(bytes),
@@ -59,9 +95,9 @@ fn chain() -> Option<&'static Chain> {
         .get_or_init(|| {
             let Some(data) = benilla_formats::wow_data() else {
                 warn!(
-                    "ui_script: no client data — every interface file this client SOURCES off the \
-                     player's install (benilla.toc's `Interface\\…` entries) is absent, so the \
-                     windows they build do not exist and addons that call their globals will raise"
+                    "ui_script: no client data — the stock interface, `FrameXML.toc` and every \
+                     file it lists, is absent off the player's install, so its windows do not \
+                     exist and addons that call their globals will raise"
                 );
                 return None;
             };
@@ -74,6 +110,48 @@ fn chain() -> Option<&'static Chain> {
             }
         })
         .as_ref()
+}
+
+/// Files a test lays over the chain, per test thread: an entry with bytes reads as a chain file,
+/// one with `None` as a file the chain lacks, and any other path falls through to the chain.
+#[cfg(test)]
+pub(super) mod fixture {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static OVERLAY: RefCell<HashMap<String, Option<Vec<u8>>>> = RefCell::new(HashMap::new());
+    }
+
+    fn key(path: &str) -> String {
+        path.replace('/', "\\").to_ascii_lowercase()
+    }
+
+    /// Lays `files` over the chain until the guard drops.
+    pub(in crate::ui_script) fn lay(files: &[(&str, Option<&[u8]>)]) -> Guard {
+        OVERLAY.with(|o| {
+            let mut o = o.borrow_mut();
+            o.clear();
+            for (path, bytes) in files {
+                o.insert(key(path), bytes.map(<[u8]>::to_vec));
+            }
+        });
+        Guard
+    }
+
+    /// The overlay's answer for `path`, `None` when it has no entry.
+    pub(super) fn read(path: &str) -> Option<Option<Vec<u8>>> {
+        OVERLAY.with(|o| o.borrow().get(&key(path)).cloned())
+    }
+
+    /// Clears the overlay on drop.
+    pub(in crate::ui_script) struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            OVERLAY.with(|o| o.borrow_mut().clear());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -349,7 +427,8 @@ mod tests {
             .map(str::to_string)
             .collect();
 
-        let migrated: Vec<String> = super::super::addons::Addon::builtin()
+        let migrated: Vec<String> = super::core()
+            .expect("the player's FrameXML.toc")
             .toc
             .files
             .iter()
@@ -554,7 +633,8 @@ mod tests {
             "the method probe is not working — it answered {got:?} for {control:?}"
         );
 
-        let migrated: std::collections::HashSet<String> = super::super::addons::Addon::builtin()
+        let migrated: std::collections::HashSet<String> = super::core()
+            .expect("the player's FrameXML.toc")
             .toc
             .files
             .iter()
@@ -870,7 +950,7 @@ mod tests {
         };
 
         // Every function each chain entry and its same-name `.lua` define.
-        let toc = &super::super::addons::Addon::builtin().toc.files;
+        let toc = &super::super::manifest::manifest_files();
         // Load order: each manifest entry at its line, ours included (`ours_wins` reads both
         // sides), then each reached addon's files after everything.
         let chain = gated_chain_entries();
@@ -1108,14 +1188,6 @@ mod tests {
         // refuses an entry whose gap has closed.
         const KNOWN: &[(&str, &str, &str)] = &[
             (
-                "ContainerFrame.xml",
-                "KeyRingButtonIDToInvSlotID",
-                "an engine binding (`1.12-globals.tsv`). `ContainerFrame.lua:617` hovers a KEYRING \
-                 slot with it, so the raise needs the keyring open and a key hovered. Ours drives \
-                 keyring tooltips through `ContainerFrameAdapters.xml`'s wrapper, which is \
-                 why nothing has hit it — the wrapper answers first for our own rows.",
-            ),
-            (
                 "SkillFrame.xml",
                 "BuySkillTier",
                 "a 5875 binding (`0x4d3e50`: marshals and delegates to a C++ \
@@ -1141,13 +1213,6 @@ mod tests {
                  that button shows only while `UnitCharacterPoints`'s second value or a row's \
                  step/rank cost is non-zero — which no 1.12 server sends. Unreachable until the \
                  skill-point wire exists; not built.",
-            ),
-            (
-                "DurabilityFrame.xml",
-                "UpdateInventoryAlertStatus",
-                "an engine binding. `DurabilityFrame.lua:81` calls it from the armor guy's own \
-                 update; our `inventory_alerts` snapshot is recomputed on every inventory push \
-                 instead, so the recompute exists and only the Lua verb that forces one does not.",
             ),
             (
                 "Blizzard_GMSurveyUI.xml",
@@ -1321,7 +1386,7 @@ mod tests {
     #[test]
     fn every_chain_xml_brings_its_own_lua() {
         let _data = benilla_formats::wow_data_or_skip!();
-        let toc = &super::super::addons::Addon::builtin().toc.files;
+        let toc = &super::super::manifest::manifest_files();
         let listed: std::collections::HashSet<&str> = toc
             .iter()
             .map(|f| f.rsplit(['\\', '/']).next().unwrap_or(f))
@@ -1463,7 +1528,7 @@ mod tests {
     #[test]
     fn nothing_we_ship_is_shadowed_by_a_later_chain_entry() {
         let _data = benilla_formats::wow_data_or_skip!();
-        let toc = &super::super::addons::Addon::builtin().toc.files;
+        let toc = &super::super::manifest::manifest_files();
         let mut ours: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut shadowed: Vec<String> = Vec::new();
         for entry in toc.iter() {
@@ -1493,7 +1558,7 @@ mod tests {
     #[test]
     fn every_template_the_manifest_inherits_is_declared_by_the_manifest() {
         let _data = benilla_formats::wow_data_or_skip!();
-        let toc = &super::super::addons::Addon::builtin().toc.files;
+        let toc = &super::super::manifest::manifest_files();
 
         let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut wanted: Vec<(String, String)> = Vec::new();
@@ -1566,7 +1631,7 @@ mod tests {
     fn reached_addons() -> Vec<String> {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
         let mut out: Vec<String> = Vec::new();
-        for entry in &super::super::addons::Addon::builtin().toc.files {
+        for entry in &super::super::manifest::manifest_files() {
             let texts = if super::is_chain_entry(entry) {
                 entry_sources(entry)
             } else {
@@ -1594,7 +1659,8 @@ mod tests {
     /// Every chain file the shipped interface loads, in load order: the manifest's chain entries,
     /// then each reached addon's files in its own toc order.
     fn gated_chain_entries() -> Vec<String> {
-        let mut out: Vec<String> = super::super::addons::Addon::builtin()
+        let mut out: Vec<String> = super::core()
+            .expect("the player's FrameXML.toc")
             .toc
             .files
             .iter()

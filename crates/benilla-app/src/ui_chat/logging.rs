@@ -71,9 +71,12 @@ impl ChatLogFiles {
     }
 }
 
-/// `M/D HH:MM:SS.mmm` of now, UTC.
-fn stamp() -> String {
-    // `web_time`, not `std`: a browser has no `SystemTime` behind that name and panics on it.
+/// `M/D HH:MM:SS.mmm` of now, UTC: the reference's log-line stamp (`"%u/%u %02u:%02u:%02u.%03u  "`,
+/// `0x866aa0`, from `GetLocalTime` at `0x65a871`), which `crate::ui_script::load_log` shares.
+///
+/// `web_time`, not `std`: a browser has no `SystemTime` behind that name and PANICS on it. That is
+/// this fork's carry; upstream's signature and doc are taken as they are.
+pub(crate) fn stamp() -> String {
     let now = web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
         .unwrap_or_default();

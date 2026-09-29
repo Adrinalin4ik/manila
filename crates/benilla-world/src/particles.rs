@@ -36,7 +36,9 @@ pub struct ViewThrottled;
 /// A backstop cap on one emitter's live particles; a campfire's steady state is about 30 + 24.
 const MAX_PARTICLES: usize = 1024;
 
-/// Particle settings: the reference's `particleDensity` CVar, set from the debug panel.
+/// The emission scalar `[0x87d5fc]`, which the `particleDensity` handler (`0x688fb0`) and the
+/// `spellEffectLevel` handler (`0x689510`) both write through `0x7adfb0`, the last write winning.
+/// benilla registers only `spellEffectLevel`.
 #[derive(Resource)]
 pub struct ParticleTuning {
     /// The vanilla `particleDensity` CVar (byte-verified: handler `0x688fb0` clamps to
@@ -80,6 +82,17 @@ impl Default for ParticleTuning {
             density: 1.0,
             max_distance: *EFFECTS_DISTANCE_RANGE.end(),
         }
+    }
+}
+
+impl ParticleTuning {
+    /// `0x7adfb0`: clamp to [0.0, 1.0] and store.
+    pub fn set_density(&mut self, density: f32) {
+        self.density = density.clamp(0.0, 1.0);
+    }
+
+    pub fn density(&self) -> f32 {
+        self.density
     }
 }
 

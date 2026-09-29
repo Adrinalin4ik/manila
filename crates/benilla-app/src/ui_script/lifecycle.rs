@@ -10,7 +10,7 @@ use benilla_ui::script::UiScript;
 
 use super::manifest::silenced_ui_load;
 use super::{
-    load_font_registry, load_ingame_ui, CursorPayloadHeld, PlayerUiHover, UiClock,
+    load_ingame_ui, CursorPayloadHeld, PlayerUiHover, UiClock,
     UiKeyboardCapture,
 };
 use crate::ui_script::addons;
@@ -27,23 +27,29 @@ pub(crate) fn setup_script(world: &mut World) {
 /// re-loads `Fonts.xml` per rebuild too, as a font object dies with its session (the native
 /// `CSimpleFont` with the frame-script owner `0x7839c0`, torn down at `0x490c97`).
 fn install_boot_vm(world: &mut World) {
+    let Some(script) = new_vm(world) else {
+        return;
+    };
+    load_global_strings(world, &script);
+    load_emote_tokens(world, &script);
+    world.insert_non_send_resource(script);
+}
+
+/// A fresh VM on the process clock with the addon asset probes wired, or `None` (the world's VM
+/// removed) when the VM cannot start.
+fn new_vm(world: &mut World) -> Option<UiScript> {
     let mut script = match UiScript::new() {
         Ok(s) => s,
         Err(e) => {
             error!("ui_script: VM init failed: {e}");
             world.remove_non_send_resource::<UiScript>();
-            return;
+            return None;
         }
     };
     seed_vm_clock(world, &mut script);
     install_addon_asset_resolvers(world, &mut script);
-    load_global_strings(world, &script);
-    load_emote_tokens(world, &script);
-    if ui_wanted(world) {
-        // Errors are logged per file as they happen; the returned list is for the tests.
-        let _ = load_font_registry(&script);
-    }
-    world.insert_non_send_resource(script);
+    info!("ui_script: new VM, session {}", script.session());
+    Some(script)
 }
 
 /// Start the new VM's `GetTime()` where the process already is and re-anchor [`UiClock`] to it,
@@ -171,8 +177,13 @@ pub(crate) struct PendingEntryUiLoad {
     /// to carry the node set across the frames it is sliced over.
     roster: Vec<String>,
     version_check: bool,
-    /// The builtin manifest's file list, resolved once at the first step.
-    files: Vec<String>,
+    /// The chain core and its file list, and benilla's layer and its own, both resolved once at
+    /// the first step: upstream's `load_core`/`load_layer` each walk their list in one burst, and
+    /// this path walks the same lists a file at a time.
+    core: Option<(super::addons::Addon, Vec<String>)>,
+    layer: Option<(super::addons::Addon, Vec<String>)>,
+    /// The core walk's accumulating record, closed under the toc banner at [`EntryStage::Layer`].
+    toc: benilla_ui::status::Status,
 }
 
 impl PendingEntryUiLoad {
@@ -194,9 +205,12 @@ enum EntryStage {
     /// Waiting for the cover, or about to take the first step.
     #[default]
     Armed,
-    /// The builtin manifest's files after the font registry (index 0 loaded at boot), one per
-    /// step.
-    Builtin { next: usize },
+    /// The chain's `FrameXML.toc`, one file per step; the last step closes the banner and runs
+    /// `Bindings.xml`.
+    Core { next: usize },
+    /// benilla's layer ([`super::manifest::LAYER_MANIFEST`]), one file per step, after the whole
+    /// core — upstream's own order.
+    Layer { next: usize },
     /// `UIParent_ManageFramePositions()`.
     Positions,
     /// Every third-party addon (one step: the walk is dependency-ordered and fires
@@ -232,7 +246,9 @@ pub(crate) fn arm_entry_ui_load(world: &mut World) {
 /// [`super::VmMemo`], which is meant to reset here.
 fn mint_entry_vm(world: &mut World) {
     crate::cvars::fold_dying_vm_cvars(world);
-    install_boot_vm(world);
+    if let Some(script) = new_vm(world) {
+        world.insert_non_send_resource(script);
+    }
 }
 
 /// Put the parked boot VM back into the world, if one is parked.
@@ -351,34 +367,74 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 // can span it. Same two calls in the same order, opened here and closed in
                 // `entry_finish` — which only this path calls.
                 script.push_sound_suppression();
-                let files = Addon::builtin().toc.files;
+                let core = super::manifest::open_core(&script);
+                let layer = super::manifest::layer_enabled().then(super::manifest::open_layer);
+                let core_steps = core.as_ref().map_or(0, |(_, f)| f.len());
+                let layer_steps = layer.as_ref().map_or(0, |(_, f)| f.len());
                 let mut pending = world.resource_mut::<PendingEntryUiLoad>();
                 pending.identity = identity;
                 pending.roster = roster;
                 pending.version_check = version_check;
                 pending.covering = covering;
                 pending.started = Some(frame_start);
-                // manifest entries after index 0 (the font registry, loaded at boot) + positions
-                // + addons + finish. The reference's own files are manifest entries too (1751),
-                // so they slice like ours.
-                pending.total = files.len().saturating_sub(1) + 3;
+                // Every core file, then every layer file, then positions + addons + finish.
+                pending.total = core_steps + layer_steps + 3;
                 pending.done = 0;
-                pending.files = files;
-                pending.stage = EntryStage::Builtin { next: 1 };
+                pending.core = core;
+                pending.layer = layer;
+                pending.toc = Default::default();
+                pending.stage = EntryStage::Core { next: 0 };
             }
-            EntryStage::Builtin { next } => {
-                let pending = world.resource::<PendingEntryUiLoad>();
-                if next < pending.files.len() {
-                    let file = &pending.files[next..next + 1];
+            EntryStage::Core { next } => {
+                let mut pending = world.resource_mut::<PendingEntryUiLoad>();
+                let more = match &pending.core {
+                    Some((_, files)) => next < files.len(),
+                    None => false,
+                };
+                if more {
+                    // Split so the record can be written while the core is borrowed to read from.
+                    let PendingEntryUiLoad { core, toc, .. } = &mut *pending;
+                    let (core, files) = core.as_ref().expect("checked just above");
                     // Errors are logged by the loader itself and retained for `/errors`; the
                     // one-shot path discards them too.
-                    let _ = super::manifest::load_manifest(&script, file);
-                    let mut pending = world.resource_mut::<PendingEntryUiLoad>();
+                    let _ = super::manifest::load_core_file(&script, core, &files[next], toc);
                     pending.done += 1;
-                    pending.stage = EntryStage::Builtin { next: next + 1 };
+                    pending.stage = EntryStage::Core { next: next + 1 };
                 } else {
-                    world.resource_mut::<PendingEntryUiLoad>().stage = EntryStage::Positions;
+                    // The banner over the whole walk, then `Bindings.xml` — `load_core`'s own
+                    // tail, taken once the last file is in. With no core at all there is no walk
+                    // to put a banner over (`open_core` has already reported the miss), and
+                    // `load_core`'s miss arm goes straight on to the bindings; so does this.
+                    let had_core = pending.core.is_some();
+                    let toc = std::mem::take(&mut pending.toc);
+                    drop(pending);
+                    let _ = if had_core {
+                        super::manifest::close_core(&script, toc)
+                    } else {
+                        super::manifest::load_core_bindings(&script)
+                    };
+                    world.resource_mut::<PendingEntryUiLoad>().stage = EntryStage::Layer { next: 0 };
                     continue; // free transition
+                }
+            }
+            EntryStage::Layer { next } => {
+                let pending = world.resource::<PendingEntryUiLoad>();
+                let file = pending
+                    .layer
+                    .as_ref()
+                    .and_then(|(_, files)| files.get(next).cloned());
+                match file {
+                    Some(file) => {
+                        let layer = pending.layer.as_ref().map(|(a, _)| a).expect("just read");
+                        let _ = super::manifest::load_layer_file(&script, layer, &file);
+                        let mut pending = world.resource_mut::<PendingEntryUiLoad>();
+                        pending.done += 1;
+                        pending.stage = EntryStage::Layer { next: next + 1 };
+                    }
+                    None => {
+                        world.resource_mut::<PendingEntryUiLoad>().stage = EntryStage::Positions;
+                        continue; // free transition
+                    }
                 }
             }
             EntryStage::Positions => {
@@ -486,6 +542,13 @@ fn entry_prepare(
         .and_then(|r| r.realm.as_ref().map(|r| r.name.clone()))
         .unwrap_or_default();
     script.set_realm_name(&realm);
+    // `CGGameUI::InitializeGame` flags these read-only before `UI_Init` loads anything
+    // (`0x48f566`-`0x48f584`), so an in-game `SetCVar` of one raises, logout handlers included;
+    // `ShutdownGame` clears them (`0x491240`), and here the flags die with this VM. The host's
+    // own realm writes are engine writes, which the flag does not stop.
+    for name in benilla_ui::script::IN_WORLD_READ_ONLY_CVARS {
+        script.set_cvar_read_only(name, true);
+    }
     // The player too, before the addon walk. The record first: the reference's
     // `UnitName`/`UnitRace`/`UnitClass`/`UnitSex` read only a copy of the char-enum row made at the
     // Enter World commit (`0x5abd9e`) and never cleared, and each rebuilt VM is told once. The
@@ -521,6 +584,7 @@ fn entry_prepare(
     crate::ui_chat::seed_zone_channel_catalog(world, script);
     crate::bindings::seed_bindings_for_vm(world, script);
     crate::ui_unit::seed_default_language(world, script);
+    crate::ui_unit::seed_language_table(world, script);
     // **The world map's catalog, before the first addon file runs** (decision 2240). The continent
     // and zone lists behind `GetMapContinents`/`GetMapZones` are static DBC data, and the corpus
     // reads them at file scope: Astrolabe — the positioning library under Questie and Cartographer
@@ -561,13 +625,20 @@ fn entry_finish(world: &mut World, script: &mut UiScript, identity: Option<(Stri
     // The same edge as the one-shot path's, with the same two seats (decisions 2125 and 2132):
     // the host settings between the saved-variables chunk and `VARIABLES_LOADED`, the chat-cache
     // restore between `VARIABLES_LOADED` and `PLAYER_LOGIN`. Its comment there has the why.
-    let plates = world
-        .get_resource::<crate::vplates::VPlateMode>()
-        .copied()
-        .unwrap_or_default();
+    // A plate setting `config.toml` still holds, carried into FrameXML's saved variables once.
+    // Only by a load with the layer, which registers `FRIENDNAMEPLATES_ON` for save; a stock-UI
+    // load leaves it for the next layered one.
+    let legacy_plates = if super::manifest::layer_enabled() {
+        world
+            .get_resource_mut::<crate::cvars::Cvars>()
+            .map(|mut cvars| crate::vplates::take_legacy_settings(&mut cvars))
+            .unwrap_or_default()
+    } else {
+        Default::default()
+    };
     finish_ui_load_with(
         script,
-        |script| crate::vplates::push_plate_globals(script, plates),
+        |script| crate::vplates::seat_legacy_settings(script, &legacy_plates),
         |script| {
             crate::ui_chat::restore_chat_looks(world, script);
         },
@@ -707,13 +778,21 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     // The plate pair is read out of the world FIRST: the second closure borrows `world` for the
     // chat-cache restore, and a `Copy` of two bools costs nothing next to fighting that borrow.
     // Absent in a bare test world, where "both off" is also the resource's own default.
-    let plates = world
-        .get_resource::<crate::vplates::VPlateMode>()
-        .copied()
-        .unwrap_or_default();
+    // A plate setting `config.toml` still holds, carried into FrameXML's saved variables once.
+    // Only by a load with the layer, which registers `FRIENDNAMEPLATES_ON` for save; a stock-UI
+    // load leaves it for the next layered one.
+    let legacy_plates = if super::manifest::layer_enabled() {
+        world
+            .get_resource_mut::<crate::cvars::Cvars>()
+            .map(|mut cvars| crate::vplates::take_legacy_settings(&mut cvars))
+            .unwrap_or_default()
+    } else {
+        Default::default()
+    };
     // No sound during the load edge, as in the reference's `UI_Init` (`0x48fbfa` → `0x49016d`).
     silenced_ui_load(&mut script, |script| {
         let _ = load_ingame_ui(script, identity.as_ref(), &roster, version_check);
+        crate::ui_chat::commands::register_dev_commands(script, crate::run_mode::dev_affordances());
         // The new Minimap's zoom indices from the persisted CVars, as the reference's minimap reset
         // copies each CVar into its live index; `Minimap:SetZoom` owns them from here.
         script.set_minimap_zoom(zoom.0, zoom.1);
@@ -726,7 +805,7 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
             script,
             // `NAMEPLATES_ON`/`FRIENDNAMEPLATES_ON` before `VARIABLES_LOADED`, whose
             // `UIParent_OnEvent` arm runs the first `UpdateNameplates()` (`UIParent.lua:231-234`).
-            |script| crate::vplates::push_plate_globals(script, plates),
+            |script| crate::vplates::seat_legacy_settings(script, &legacy_plates),
             |script| {
                 crate::ui_chat::restore_chat_looks(world, script);
             },

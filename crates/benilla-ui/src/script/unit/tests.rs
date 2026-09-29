@@ -23,6 +23,56 @@ fn player() -> UnitState {
     }
 }
 
+/// `0x6e6d90`'s order: the `Usage:` check, the not-targeting no-op, the token check, the queue.
+#[test]
+fn spell_target_unit_checks_in_the_references_order() {
+    let mut s = UiScript::new().unwrap();
+    let usage = |s: &mut UiScript, call: &str| {
+        let err = s.run(call).expect_err(call).to_string();
+        assert!(
+            err.contains(r#"Usage: SpellTargetUnit("unit")"#),
+            "{call}: {err}"
+        );
+    };
+
+    // Not targeting: the argument is still type-checked, then nothing, not even the token check.
+    usage(&mut s, "SpellTargetUnit({})");
+    usage(&mut s, "SpellTargetUnit()");
+    s.run(r#"SpellTargetUnit("not-a-unit") SpellTargetUnit("player")"#)
+        .expect("a bad token is no error while not targeting");
+    assert!(s.take_spell_target_unit().is_empty(), "and nothing queues");
+
+    // Targeting: an unknown token raises, a known one queues, resolved or not.
+    s.set_spell_targeting(true);
+    usage(&mut s, "SpellTargetUnit(nil)");
+    let err = s
+        .run(r#"SpellTargetUnit("not-a-unit")"#)
+        .expect_err("an unknown token while targeting")
+        .to_string();
+    assert!(err.contains("Unknown unit name: not-a-unit"), "{err}");
+    s.run(r#"SpellTargetUnit("player") SpellTargetUnit("party1")"#)
+        .unwrap();
+    assert_eq!(
+        s.take_spell_target_unit(),
+        vec!["player".to_string(), "party1".to_string()]
+    );
+}
+
+#[test]
+fn spell_can_target_unit_answers_per_validated_token() {
+    let mut s = UiScript::new().unwrap();
+    s.set_spell_targetable_units(["player", "party1"]);
+    assert!(s
+        .eval::<bool>(r#"return SpellCanTargetUnit("player") == true"#)
+        .unwrap());
+    assert!(s
+        .eval::<bool>(r#"return SpellCanTargetUnit("PARTY1") == true"#)
+        .unwrap());
+    assert!(s
+        .eval::<bool>(r#"return SpellCanTargetUnit("target") == nil"#)
+        .unwrap());
+}
+
 #[test]
 fn unit_reaction_reports_the_scale_value_or_nil() {
     let mut s = UiScript::new().unwrap();
@@ -299,22 +349,37 @@ fn the_selection_queue_carries_all_three_verbs_in_call_order() {
     assert!(s.take_selection_requests().is_empty());
 }
 
-/// The reverse flag as `0x6f1c10` reads it: absent, nil and 0 are forward, 1 and `true` reverse
-/// (`Bindings.xml:458`).
+/// The reverse flag as `0x6f1c10` reads it (default 0): absent, nil, 0 and `"0"` are forward, 1,
+/// `true` and `"1"` reverse (`Bindings.xml:458`). The four shims differ only in the mode.
 #[test]
-fn target_nearest_friend_queues_its_reverse_flag() {
+fn target_nearest_queues_its_mode_and_reverse_flag() {
+    use crate::script::NearestMode::{Enemy, Friend, PartyMember, RaidMember};
     let mut s = UiScript::new().unwrap();
-    assert!(s.take_target_nearest_friend_requests().is_empty());
+    assert!(s.take_target_nearest_requests().is_empty());
     s.eval::<()>("TargetNearestFriend()").unwrap();
     s.eval::<()>("TargetNearestFriend(1)").unwrap();
     s.eval::<()>("TargetNearestFriend(true)").unwrap();
     s.eval::<()>("TargetNearestFriend(0)").unwrap();
     s.eval::<()>("TargetNearestFriend(nil)").unwrap();
+    s.eval::<()>(r#"TargetNearestFriend("0")"#).unwrap();
+    s.eval::<()>(r#"TargetNearestEnemy("1")"#).unwrap();
+    s.eval::<()>("TargetNearestPartyMember()").unwrap();
+    s.eval::<()>("TargetNearestRaidMember(1)").unwrap();
     assert_eq!(
-        s.take_target_nearest_friend_requests(),
-        vec![false, true, true, false, false]
+        s.take_target_nearest_requests(),
+        vec![
+            (Friend, false),
+            (Friend, true),
+            (Friend, true),
+            (Friend, false),
+            (Friend, false),
+            (Friend, false),
+            (Enemy, true),
+            (PartyMember, false),
+            (RaidMember, true),
+        ]
     );
-    assert!(s.take_target_nearest_friend_requests().is_empty());
+    assert!(s.take_target_nearest_requests().is_empty());
 }
 
 #[test]
@@ -521,8 +586,6 @@ fn party_frame_predicates_report_1_or_nil() {
         Some(UnitState {
             exists: true,
             is_connected: true,
-            is_afk: true,
-            is_dnd: false,
             pvp: true,
             is_pvp_ffa: false,
             ..Default::default()
@@ -533,10 +596,6 @@ fn party_frame_predicates_report_1_or_nil() {
             .unwrap(),
         1
     );
-    assert_eq!(s.eval::<i64>(r#"return UnitIsAFK("party1")"#).unwrap(), 1);
-    assert!(s
-        .eval::<bool>(r#"return UnitIsDND("party1") == nil"#)
-        .unwrap());
     assert_eq!(s.eval::<i64>(r#"return UnitIsPVP("party1")"#).unwrap(), 1);
     assert!(s
         .eval::<bool>(r#"return UnitIsPVPFreeForAll("party1") == nil"#)
@@ -547,8 +606,6 @@ fn party_frame_predicates_report_1_or_nil() {
         Some(UnitState {
             exists: true,
             is_connected: false,
-            is_afk: false,
-            is_dnd: true,
             pvp: false,
             is_pvp_ffa: true,
             ..Default::default()
@@ -557,10 +614,6 @@ fn party_frame_predicates_report_1_or_nil() {
     assert!(s
         .eval::<bool>(r#"return UnitIsConnected("party1") == nil"#)
         .unwrap());
-    assert!(s
-        .eval::<bool>(r#"return UnitIsAFK("party1") == nil"#)
-        .unwrap());
-    assert_eq!(s.eval::<i64>(r#"return UnitIsDND("party1")"#).unwrap(), 1);
     assert!(s
         .eval::<bool>(r#"return UnitIsPVP("party1") == nil"#)
         .unwrap());
@@ -1326,6 +1379,35 @@ fn unit_is_party_leader_ors_two_legs_and_answers_one_when_solo() {
     assert!(s.run(r#"UnitIsPartyLeader("notatoken")"#).is_err());
 }
 
+/// `GetDamageBonusStat()` (`0x48b520`) is the player's class row's field 2 plus one, 0 with no
+/// player or no row; it takes no unit, so another unit's class never answers.
+#[test]
+fn damage_bonus_stat_is_the_player_class_stat_one_based() {
+    let mut s = UiScript::new().unwrap();
+    assert_eq!(s.eval::<i64>("return GetDamageBonusStat()").unwrap(), 0);
+
+    let mut rogue = player();
+    rogue.damage_bonus_stat = Some(1);
+    s.set_unit("target", Some(rogue.clone()));
+    assert_eq!(
+        s.eval::<i64>("return GetDamageBonusStat()").unwrap(),
+        0,
+        "the target is not the player"
+    );
+    s.set_unit("player", Some(rogue));
+    assert_eq!(s.eval::<i64>("return GetDamageBonusStat()").unwrap(), 2);
+
+    let mut warrior = player();
+    warrior.damage_bonus_stat = Some(0);
+    s.set_unit("player", Some(warrior));
+    assert_eq!(s.eval::<i64>("return GetDamageBonusStat()").unwrap(), 1);
+
+    let mut rowless = player();
+    rowless.damage_bonus_stat = None;
+    s.set_unit("player", Some(rowless));
+    assert_eq!(s.eval::<i64>("return GetDamageBonusStat()").unwrap(), 0);
+}
+
 /// Stock calls it unconditionally (`PaperDollFrame.lua:429`, `PaperDollFrame.lua:580`), so the
 /// global must exist for every class.
 #[test]
@@ -1550,24 +1632,6 @@ fn every_unit_predicate_is_one_or_nil_and_never_a_boolean() {
             UnitState {
                 exists: true,
                 is_connected: true,
-                ..Default::default()
-            },
-        ),
-        (
-            "UnitIsAFK",
-            r#"UnitIsAFK("target")"#,
-            UnitState {
-                exists: true,
-                is_afk: true,
-                ..Default::default()
-            },
-        ),
-        (
-            "UnitIsDND",
-            r#"UnitIsDND("target")"#,
-            UnitState {
-                exists: true,
-                is_dnd: true,
                 ..Default::default()
             },
         ),
@@ -1808,11 +1872,9 @@ fn can_assist_and_attack_target_bindings() {
         .eval::<bool>(r#"return UnitCanAttack("player", "target") == nil"#)
         .unwrap());
 
-    // AttackTarget(): nothing queued until it is called, then exactly one request, drained.
-    assert!(!s.take_attack_target());
+    // `AttackTarget()` no longer leaves a flag on the model: upstream routes it as
+    // `ScriptCall::AttackTarget` down the call stream, which `script_calls.rs` spends.
     s.run("AttackTarget()").unwrap();
-    assert!(s.take_attack_target(), "the call must leave a request");
-    assert!(!s.take_attack_target(), "and the drain must spend it");
 }
 
 /// **The four `"player"` verbs read the seeded record, and nothing can blank it** (2261/2263).

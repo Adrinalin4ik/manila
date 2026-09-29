@@ -18,8 +18,11 @@ mod tga;
 pub use tga::tga_to_rgba;
 /// Where the WoW install is; [`Chain`] opens it.
 mod install;
-pub use install::{addon_corpus, addon_corpus_candidates, candidates, skipped, wow_data};
-/// Web-target chain plumbing (HTTP in place of a filesystem) — see the module header for the Data
+pub use install::{
+    addon_corpus, addon_corpus_candidates, candidates, project_folder, set_project_folder, skipped,
+    wow_data,
+};
+/// Web-target chain plumbing (HTTP in place of a filesystem) - see the module header for the Data
 /// URL scheme it implements against. Always compiled (`encode_name` is plain Rust and tested
 /// natively); the browser-only pieces are gated to `wasm32` inside the module itself.
 pub mod web;
@@ -55,6 +58,10 @@ mod gm_ticket_category;
 pub use gm_ticket_category::{
     load_gm_ticket_categories, GmTicketCategory, GmTicketCategoryCatalog,
 };
+mod cfg_categories;
+pub use cfg_categories::{load_realm_categories, RealmCategory};
+mod wow_ini;
+pub use wow_ini::client_region;
 mod itembagfamily;
 pub use itembagfamily::{load_item_bag_families, ItemBagFamilyCatalog};
 mod itemclass;
@@ -97,6 +104,8 @@ mod stable_slot_prices;
 pub use stable_slot_prices::{load_stable_slot_prices, StableSlotPrices};
 mod page_text_material;
 pub use page_text_material::{load_page_text_material_catalog, PageTextMaterialCatalog};
+mod packages;
+pub use packages::{load_packages, PackageRow};
 mod stationery;
 pub use stationery::{
     load_stationery_catalog, StationeryCatalog, StationeryRow, STATIONERY_DEFAULT,

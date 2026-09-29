@@ -126,6 +126,7 @@ fn finish(net: &NetCommands, entry: u32, now: f64) -> Phase {
         kind: ChatKind::Say,
         target: None,
         text: format!(".additem {entry} -1"),
+        language: None,
     });
     Phase::Cleanup { since: now }
 }
@@ -197,6 +198,7 @@ fn clam_probe(
                 kind: ChatKind::Say,
                 target: None,
                 text: format!(".additem {entry}"),
+                language: None,
             });
             probe.phase = Phase::Stocking { sent_at: now };
         }
@@ -321,7 +323,7 @@ fn clam_probe(
 }
 
 /// Right-click the clam through the live VM's `UseContainerItem`, so the real dispatcher
-/// (`ui_items::drain::drain_container_uses`) picks the packet.
+/// (`ui_items::ScriptItemUse::use_container_item`) picks the packet.
 fn click(script: &mut UiScript, probe: &mut ClamProbe, round: u8) {
     let slot = probe.slot;
     info!("PROBE_CLAM: round {round} — UseContainerItem(0, {slot}) through the live VM");

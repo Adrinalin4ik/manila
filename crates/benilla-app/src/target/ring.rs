@@ -13,7 +13,7 @@ use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::decal::{DecalFrame, WorldDecal};
 use benilla_world::particles::buffer::EffectVertex;
 
-use super::click::clear;
+use super::click::{clear, deselect};
 use super::{CombatFlash, Selection, SelectionRadius};
 use crate::creature_anim::Engaged;
 use benilla_world::view::WorldCamera;
@@ -118,11 +118,12 @@ impl RingVariant {
     }
 }
 
-/// The selector's branch (`0x605960`) on the raw reaction rank `0..=7`. A player never grays: rank
-/// 0-1 reads red, standing in for the reference's attackability matrix, else green when PvP-flagged
-/// and blue when not, paler for a party member; self is not in the party table. An NPC reads gray
-/// when dead, else the rank palette. The reference takes the player branch on `UNIT_FIELD_FLAGS`
-/// bit 3 (`0x605baa`), which a player's pet carries too; callers pass the object type.
+/// The selector's branch (`0x605960`) on [`ring_reaction`]'s rank `0..=6`. A player never grays:
+/// rank 0-1 reads red, standing in for the reference's attackability matrix, else green when
+/// PvP-flagged and blue when not, paler for a party member; self is not in the party table. An NPC
+/// reads gray when dead, else the rank palette. The reference takes the player branch on
+/// `UNIT_FIELD_FLAGS` bit 3 (`0x605baa`), which a player's pet carries too; callers pass the object
+/// type.
 pub(crate) fn ring_variant(
     rank: u8,
     is_player: bool,
@@ -276,7 +277,8 @@ pub(super) fn update_ring(
                         .is_some_and(|g| *last_vitals == Some((g, false)));
                 *last_vitals = selection.guid.map(|g| (g, is_dead));
                 if died {
-                    clear(&mut selection, &mut seam, !engaged.is_empty());
+                    // `SetSelection(0,0)` at `0x605901`, so the dead target becomes the last one.
+                    deselect(&mut selection, &mut seam, !engaged.is_empty());
                     *last_vitals = None;
                     state.shown = false;
                     state.verts.clear();
@@ -400,13 +402,14 @@ pub(super) fn push_ring(
     batch.tris();
 }
 
-/// The target's reaction toward our player as a raw rank `0..=7`, the direction every NPC colour
+/// The target's reaction toward our player as a rank `0..=6`, the direction every NPC colour
 /// uses (`0x605960` and `0x7cbaa0` ask `UnitReaction 0x6061e0` with the unit as `this`). When
 /// both carry `UNIT_FIELD_FLAGS` bit 3, a duel (`0x606296`) or mutual FFA decides first. Then
 /// `0x606530`: a faction with a reputation slot (`0x605fc0`) answers with our reputation rank
 /// (`0x4d63a0`), even in GM mode; any other goes to the template comparator (`0x606640`). Neutral
-/// when anything is missing. Not applied: the party rung (`0x6062b0`), the contested guard,
-/// forced reactions and the summon tail.
+/// when anything is missing. `0x606439` caps that answer at 6, so Revered and Exalted both read 6.
+/// Not applied: the party rung (`0x6062b0`), the contested guard, forced reactions and the summon
+/// tail.
 pub(crate) fn ring_reaction(
     factions: Option<&Factions>,
     reputations: &Reputations,
@@ -439,8 +442,12 @@ pub(crate) fn ring_reaction(
         let self_tpl = catalog.template(self_store.0.unit_faction_template()?)?;
         Some(target_tpl.reaction_toward(self_tpl) as u8)
     })();
-    resolved.unwrap_or(Reaction::Neutral as u8)
+    // `0x606439` (`cmp esi,6` / `jl` / `mov esi,6`) caps `0x606530`'s answer: Exalted's 7 reads 6.
+    resolved.map_or(Reaction::Neutral as u8, |rank| rank.min(REACTION_CAP))
 }
+
+/// Revered, the highest rank `UnitReaction`'s generic leg answers (`0x606439`).
+const REACTION_CAP: u8 = 6;
 
 /// `UNIT_FIELD_FLAGS` bit 3, player-controlled in behaviour: players and their pets carry it, wild
 /// creatures do not. `UnitReaction` needs it on both sides before any player-vs-player rung
@@ -858,6 +865,49 @@ mod tests {
         assert_eq!(rank(&unit(12), &quiet), 4);
     }
 
+    /// The reputation leg walks the ladder up to Revered and stops: `0x606439` caps the rank at 6,
+    /// so a Stormwind unit reads the same to a Revered and an Exalted human, while the ladder
+    /// itself, which the reputation pane reads, still reaches 7.
+    #[test]
+    fn the_reputation_rank_is_capped_at_revered() {
+        use crate::net::ObjectStore;
+        use crate::target::{stormwind_fixture, HUMAN_WARRIOR};
+        use benilla_protocol::field::FIELD_UNIT_FACTIONTEMPLATE;
+        use benilla_protocol::ObjectFields;
+
+        /// `UNIT_FIELD_BYTES_0`, absolute descriptor index.
+        const BYTES_0: u16 = 36;
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let me = ObjectStore(ObjectFields::from_pairs(&[(BYTES_0, HUMAN_WARRIOR)]));
+        // Both sides of the Honored, Revered and Exalted thresholds, and the wire's own ceiling.
+        for (total, want) in [
+            (8_999, 4),
+            (9_000, 5),
+            (20_999, 5),
+            (21_000, 6),
+            (41_999, 6),
+            (42_000, 6),
+            (42_999, 6),
+        ] {
+            let (factions, template, reps) = stormwind_fixture(&mut chain, total);
+            let unit = ObjectStore(ObjectFields::from_pairs(&[(
+                FIELD_UNIT_FACTIONTEMPLATE,
+                template,
+            )]));
+            assert_eq!(
+                ring_reaction(Some(&factions), &reps, Some(&unit), Some(&me)),
+                want,
+                "standing {total}"
+            );
+        }
+        assert_eq!(
+            benilla_formats::reputation_rank(42_000),
+            7,
+            "the ladder is not capped"
+        );
+    }
+
     /// Cenarion Circle, faction 609 with reputation slot 36: not at war, its NPCs are neither
     /// attackable nor, without a service bit, interactable, while the rank stays neutral.
     #[test]
@@ -1054,7 +1104,7 @@ mod tests {
         use crossbeam_channel::Receiver;
 
         use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
-        use crate::target::{attack_order_target, Selection, TargetScan};
+        use crate::target::{AttackPick, Selection};
         use benilla_world::model_fade::DespawnFade;
 
         const ME: u64 = 0x0000_0000_0000_0007;
@@ -1073,7 +1123,10 @@ mod tests {
                 transport_progress: None,
                 transport: None,
                 spline: None,
+                // `OBJECT_FIELD_TYPE` (2) 0x9, object and unit, as a creature's create carries it:
+                // `SetSelection`'s `IsSelectable` refuses any other type.
                 fields: ObjectFields::from_pairs(&[
+                    (2, 0x9),
                     (FIELD_UNIT_HEALTH, 100),
                     (FIELD_UNIT_MAXHEALTH, 100),
                     (FIELD_UNIT_LEVEL, 9),
@@ -1112,6 +1165,7 @@ mod tests {
             *world.resource_mut::<Selection>() = Selection {
                 target: Some(mob),
                 guid: Some(MOB),
+                ..Default::default()
             };
             // Control: a live target keeps its selection through a ring pass.
             world
@@ -1172,11 +1226,11 @@ mod tests {
                 *world.resource_mut::<Selection>() = Selection::default();
                 world
                     .run_system_once(
-                        |scan: TargetScan,
+                        |mut pick: AttackPick,
                          mut sel: ResMut<Selection>,
                          mut seam: crate::creature_anim::AttackSeam,
                          mut errors: ResMut<crate::ui_action::UiErrorKeys>| {
-                            attack_order_target(&scan, &mut sel, &mut seam, &mut errors)
+                            pick.target(None, &mut sel, &mut seam, &mut errors)
                         },
                     )
                     .expect("the scan runs on the built client")

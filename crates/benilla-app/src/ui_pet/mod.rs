@@ -3,6 +3,12 @@
 //! data (vmangos `CharmInfo::InitPetActionBar`), not a layout: a possessed or charmed unit fills
 //! the same ten words differently, so nothing here assumes them.
 
+// `bevy::platform::time::Instant`, not `std::time::Instant`: this field meets
+// `crate::ui_script::UiClock`'s anchor in `bar.rs`, and on wasm32 (the default `web` Bevy
+// feature) the two are genuinely different types — `web_time::Instant` there, a plain alias
+// everywhere else. `std::time::Instant::now()` also panics on wasm32 outright.
+use bevy::platform::time::Instant;
+
 use bevy::prelude::*;
 
 use benilla_protocol::messages::PetSpells;
@@ -19,7 +25,10 @@ mod net;
 mod unit;
 
 use bar::feed_pet_bar;
-use drain::{drain_pet_actions, pet_stop_on_old_target_clear};
+use drain::drain_pet_actions;
+// A pet bar press, applied in call order by `crate::script_calls`.
+pub(crate) use drain::pet_stop_on_old_target_clear;
+pub(crate) use drain::PetPress;
 use menu::{drain_pet_menu, feed_pet_menu};
 use unit::feed_pet_unit;
 
@@ -44,6 +53,9 @@ pub(crate) struct PetBar {
     /// `0x4bc960`), and `OnClick`'s `SetChecked(0)` needs that repaint to relight a press on the
     /// current mode, so the count is in the feed's dedup key. Wrapping: only a change is read.
     pub(crate) bar_signals: u32,
+    /// `[0xb714a8]`: the charm or possess expiry, the packet's duration past its arrival; `None`
+    /// when the duration is 0, as for a hunter's or warlock's own pet.
+    pub(crate) expires: Option<Instant>,
 }
 
 impl PetBar {
@@ -62,7 +74,8 @@ impl Plugin for UiPetPlugin {
             Update,
             (
                 // Feeds ride the unit feed, before the VM ticks; drains run after the input pass so
-                // a click is sent that frame. The old-target clear precedes the bar feed so Attack
+                // a click is sent that frame (a press is a script call, `PetPress`). The old-target
+                // clear precedes the bar feed so Attack
                 // goes dark the frame the selection moves.
                 pet_stop_on_old_target_clear
                     .in_set(UnitFeed)
@@ -76,7 +89,11 @@ impl Plugin for UiPetPlugin {
                     .in_set(UnitFeed)
                     .after(crate::ui_pet_stats::PetSnapshot),
                 feed_pet_menu.in_set(UnitFeed),
-                drain_pet_actions.after(UiInput),
+                // After this frame's presses, as the one drain before it ran them ahead of the
+                // toggles, stops and writes.
+                drain_pet_actions
+                    .after(UiInput)
+                    .after(crate::script_calls::apply_script_calls),
                 drain_pet_menu.after(UiInput),
             ),
         );

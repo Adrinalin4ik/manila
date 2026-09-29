@@ -23,7 +23,7 @@ use std::time::Duration;
 // .now()` in a page.
 use bevy::platform::time::Instant;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use benilla_assets::LockRecover;
 use benilla_protocol::{
     host_port, messages, AuthReject, CharAction, LoginStage, Poll, SessionEnd, SessionEvent,
@@ -31,7 +31,7 @@ use benilla_protocol::{
 };
 use crossbeam_channel::{Receiver, Sender};
 
-use super::{CharRequest, ChatKind, ClientCommand, RealmRequest};
+use super::{CharRequest, ClientCommand, RealmRequest};
 
 /// The inbound census: every packet off the world socket, and the unix ms of the latest, which
 /// tell a silent server from a dead socket for the runaway watch ([`crate::net::motion`]).
@@ -163,21 +163,6 @@ impl PingClock {
 /// during an outage can't flood the log. Reset when a fresh writer arrives.
 pub(super) const SEND_WARN_CAP: u32 = 8;
 
-/// The per-process connection parameters. Credentials and address ride each [`LoginRequest`];
-/// `$WOW_HOST` is read by `Realmlist::default()`.
-pub(super) struct NetConfig {
-    /// `WOW_CHAR`: here only the name of the starter character on an empty account.
-    character: Option<String>,
-}
-
-impl NetConfig {
-    pub(super) fn from_env() -> Self {
-        NetConfig {
-            character: crate::webenv::var("WOW_CHAR"),
-        }
-    }
-}
-
 /// What one wake-up at the character park asked for, so every jump out is made outside `select!`.
 enum Parked {
     /// `CMSG_PLAYER_LOGIN` with this guid.
@@ -231,7 +216,7 @@ pub(super) struct NetHandles {
 }
 
 /// Spawns the read thread with its park and cycle loop, and the one long-lived write thread.
-pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
+pub(super) fn spawn_net(connect: bool) -> NetHandles {
     let (events_tx, events_rx) = crossbeam_channel::unbounded();
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
     let (pick_tx, pick_rx) = async_channel::unbounded::<CharRequest>();
@@ -274,7 +259,7 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
                     // every await inside it is a blocking socket read, so this is the old loop with
                     // an `.await` written where the call used to be.
                     futures_lite::future::block_on(sequencer(
-                        cfg, events_tx, writer_tx, parks, abandon, read_clock,
+                        events_tx, writer_tx, parks, abandon, read_clock,
                     ));
                 })
                 .expect("spawn wow-net thread");
@@ -286,7 +271,7 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
             let abandon = Arc::clone(&login_abandon);
             let read_clock = Arc::clone(&ping_clock);
             wasm_bindgen_futures::spawn_local(sequencer(
-                cfg, events_tx, writer_tx, parks, abandon, read_clock,
+                events_tx, writer_tx, parks, abandon, read_clock,
             ));
         }
     }
@@ -311,7 +296,6 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
 /// both spawns — a thread under `block_on` natively, a `spawn_local` task on the web — so the two
 /// targets cannot drift on what a lost connection or a clean logout means.
 async fn sequencer(
-    cfg: NetConfig,
     events_tx: Sender<SessionEvent>,
     writer_tx: Sender<WorldWriter>,
     parks: Parks,
@@ -328,7 +312,6 @@ async fn sequencer(
         // stale writer.)
         ping_clock.lock_recover().clear();
         match run(
-            &cfg,
             &events_tx,
             &writer_tx,
             &parks,
@@ -386,7 +369,6 @@ async fn sequencer(
 /// end ([`Cycle::Exit`]). Every pre-roster failure emits [`SessionEvent::LoginFailed`] and
 /// re-parks ([`Cycle::Repark`]) — never a retry loop; resubmission is the app's policy.
 async fn run(
-    cfg: &NetConfig,
     events_tx: &Sender<SessionEvent>,
     writer_tx: &Sender<WorldWriter>,
     parks: &Parks,
@@ -576,34 +558,10 @@ async fn run(
             return Ok(Cycle::Repark);
         }
 
-        // The roster (creating a starter character on a fresh account so PLAYER_LOGIN has a target).
-        // Failures here are still pre-roster: surface as LoginFailed, re-park. (An immediately-
-        // awaited block, so the `?`-shaped sequence borrows `session` only for its own duration.)
-        let roster = async {
-            let mut characters = session.char_enum_async().await?;
-            if characters.is_empty() {
-                let name = cfg.character.as_deref().unwrap_or("One");
-                let starter = messages::CharCreateReq {
-                    name: name.to_string(),
-                    race: messages::RACE_HUMAN,
-                    class: messages::CLASS_WARRIOR,
-                    gender: messages::GENDER_MALE,
-                    skin: 0,
-                    face: 0,
-                    hair_style: 0,
-                    hair_color: 0,
-                    facial_hair: 0,
-                };
-                match session.create_character_async(&starter).await? {
-                    messages::CHAR_CREATE_SUCCESS | messages::CHAR_CREATE_NAME_IN_USE => {}
-                    other => bail!("character creation failed: result {other:#x}"),
-                }
-                characters = session.char_enum_async().await?;
-            }
-            Ok::<Vec<benilla_protocol::Character>, anyhow::Error>(characters)
-        }
-        .await;
-        let mut characters = match roster {
+        // The roster as the account holds it, an empty one included: the reference builds
+        // `CMSG_CHAR_CREATE` in one place (`0x5aac50`), reached only from the create screen.
+        // Failures here are still pre-roster.
+        let mut characters = match session.char_enum_async().await {
             Ok(c) => c,
             Err(e) => {
                 if canceled() {
@@ -1002,8 +960,7 @@ fn writer_loop(
                     }
                     continue;
                 };
-                        let result = dispatch(w, cmd);
-                        // **What actually reached the socket** (tag `wire`, decision 0621). The controller's
+                let result = dispatch(w, cmd);
                 // **What actually reached the socket** (tag `wire`, decision 0621). The controller's
                 // `snd` line is written before the command is even queued, so it records a decision,
                 // not a transmission — a client whose session died goes on producing `snd` lines into
@@ -1099,23 +1056,14 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::CancelAutoRepeat => w.cancel_auto_repeat(),
         ClientCommand::CancelCast { spell_id } => w.cancel_cast(spell_id),
         ClientCommand::CancelChannelling { spell_id } => w.cancel_channelling(spell_id),
-        ClientCommand::Chat { kind, target, text } => match kind {
-            ChatKind::Say => w.send_chat(&text),
-            ChatKind::Yell => w.send_yell(&text),
-            ChatKind::Emote => w.send_emote_chat(&text),
-            ChatKind::Whisper => w.send_whisper(target.as_deref().unwrap_or_default(), &text),
-            ChatKind::Party => w.send_party(&text),
-            ChatKind::Raid => w.send_raid(&text),
-            ChatKind::RaidLeader => w.send_raid_leader(&text),
-            ChatKind::RaidWarning => w.send_raid_warning(&text),
-            ChatKind::Guild => w.send_guild(&text),
-            ChatKind::Officer => w.send_officer(&text),
-            ChatKind::Battleground => w.send_battleground(&text),
-            ChatKind::BattlegroundLeader => w.send_battleground_leader(&text),
-            ChatKind::Afk => w.send_afk(&text),
-            ChatKind::Dnd => w.send_dnd(&text),
-            ChatKind::Channel => w.send_channel(target.as_deref().unwrap_or_default(), &text),
-        },
+        // One send, not sixteen: the chat type and the language both ride the packet, so the
+        // kind maps to its wire type and `send_message_chat` writes it (upstream c6767d6a).
+        ClientCommand::Chat {
+            kind,
+            target,
+            text,
+            language,
+        } => w.send_message_chat(kind.chat_type(), language, target.as_deref(), &text),
         // The addon lane (decision 1235). The distribution arrived as an enum and the
         // map is TOTAL — no "unknown, guess SAY" arm exists, which is what the enum
         // seam is for — so the whole arm is one call.
@@ -1184,6 +1132,11 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             count,
         } => w.destroy_item(bag_index, slot, count),
         ClientCommand::CastSpell { spell_id, target } => w.cast_spell(spell_id, target),
+        ClientCommand::CastSpellCorpse {
+            spell_id,
+            target,
+            corpse_guid,
+        } => w.cast_spell_corpse(spell_id, target, corpse_guid),
         ClientCommand::CastSpellAtDest { spell_id, dest } => w.cast_spell_at_dest(spell_id, dest),
         ClientCommand::CastSpellAtSource { spell_id, src } => w.cast_spell_at_source(spell_id, src),
         ClientCommand::CancelAura { spell_id } => w.cancel_aura(spell_id),
@@ -1351,15 +1304,17 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             subject,
             body,
             stationery,
+            package,
             item_guid,
             money,
             cod,
         } => w.send_mail(
             mailbox, &receiver, &subject, &body,
-            // The stationery the player selected (1970) and package 0 — vmangos
-            // discards both and stores MAIL_STATIONERY_DEFAULT (41, decision 0544),
-            // but the wire carries what the client chose, as the reference's does.
-            stationery, 0, item_guid, money, cod,
+            // The stationery the player selected (1970) and the package id — vmangos
+            // discards both, storing MAIL_STATIONERY_DEFAULT (41, decision 0544) and reading
+            // the package unused (`Packets/Mail.cpp:10`), but the wire carries what the
+            // client chose, as the reference's does.
+            stationery, package, item_guid, money, cod,
         ),
         ClientCommand::MailTakeMoney { mailbox, mail_id } => w.mail_take_money(mailbox, mail_id),
         ClientCommand::MailTakeItem { mailbox, mail_id } => w.mail_take_item(mailbox, mail_id),
@@ -1447,6 +1402,7 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::ClearTradeItem { trade_slot } => w.clear_trade_item(trade_slot),
         ClientCommand::Logout => w.logout_request(),
         ClientCommand::LogoutCancel => w.logout_cancel(),
+        ClientCommand::OpeningCinematic => w.opening_cinematic(),
         ClientCommand::CompleteCinematic => w.complete_cinematic(),
         ClientCommand::NextCinematicCamera => w.next_cinematic_camera(),
         ClientCommand::MoveModeAck {
@@ -1562,6 +1518,9 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         } => w.activate_taxi_express(guid, total_cost, &nodes),
     }
 }
+
+#[cfg(test)]
+mod cycle_tests;
 
 #[cfg(test)]
 mod rtt_tests {

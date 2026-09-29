@@ -14,18 +14,18 @@ fn load_pet_frame() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
-    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
-    load_xml(&s, "Interface\\FrameXML\\UnitPopup.xml");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
     load_xml(&s, "Interface\\FrameXML\\BuffFrame.xml");
-    load_xml(&s, "Interface\\FrameXML\\UnitFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\CombatFeedback.xml");
+    load_xml(&s, "Interface\\FrameXML\\UnitPopup.xml");
+    load_xml(&s, "Interface\\FrameXML\\UnitFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\PlayerFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\PartyFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\TargetFrame.xml");
@@ -260,8 +260,15 @@ fn the_debuff_row_fills_from_the_pets_own_auras() {
     s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 0)));
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
 
-    s.set_auras(
-        "pet",
+    // `"pet"` resolves to the pet's guid, whose list the row reads.
+    const PET: u64 = 0xF140_0000_0000_0077;
+    s.set_unit_guids(&benilla_ui::script::UnitGuids {
+        player: 1,
+        pet: PET,
+        ..Default::default()
+    });
+    s.set_unit_auras(
+        PET,
         Some(vec![pet_buff(1000, "Rend", 1), pet_buff(1001, "Sunder", 3)]),
     );
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("pet".into())]);
@@ -289,7 +296,7 @@ fn the_debuff_row_fills_from_the_pets_own_auras() {
     );
     assert!(draws(&mut s, "Interface\\Icons\\Spell_1001"));
 
-    s.set_auras("pet", Some(vec![]));
+    s.set_unit_auras(PET, Some(vec![]));
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("pet".into())]);
     assert!(!s
         .eval::<bool>("return PetFrameDebuff1:IsVisible()")

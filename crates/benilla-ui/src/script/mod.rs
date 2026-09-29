@@ -30,6 +30,7 @@ mod tutorial;
 mod worldmap_arrow;
 // `camera_view`: the five camera views and `FlipCameraYaw`, the reference's `UIUtil\Camera.cpp`.
 mod button;
+mod calls;
 mod camera_view;
 mod channel;
 mod char_stats;
@@ -48,8 +49,10 @@ mod editbox;
 pub mod instance;
 pub(crate) use editbox::{adopt_text_region, editbox_text_region_wrapper};
 pub(crate) mod addon;
+mod addon_enable;
 pub mod addon_gate;
 mod client;
+mod clock;
 mod cvars;
 mod dressup;
 mod duel;
@@ -58,6 +61,7 @@ mod extract;
 mod follow;
 pub(crate) mod font;
 mod font_block;
+mod frame_enum;
 mod gm_ticket;
 mod gossip;
 mod guild;
@@ -68,7 +72,9 @@ pub use handler_prof::HandlerRow;
 
 mod surface;
 pub use surface::widget_method_census;
+mod input_verbs;
 mod inspect;
+mod inventory_verbs;
 mod item_stats;
 mod item_text;
 pub mod keybind;
@@ -85,7 +91,7 @@ mod merchant;
 mod messageframe;
 mod minimap;
 pub mod nameplate;
-pub use nameplate::{PlateGeometry, PlateState};
+pub use nameplate::{PlateBitWrites, PlateGeometry, PlateState, PLATE_BIT_ENEMY, PLATE_BIT_FRIEND};
 mod model;
 mod modelframe;
 mod net_stats;
@@ -131,17 +137,20 @@ mod tradeskill;
 mod trainer;
 mod types;
 mod unit;
+mod video_pairs;
 mod weapon_enchant;
 mod who_sort;
 mod worldmap;
 mod worldstate;
 mod worn_display;
+mod zone_text;
 
 pub use action::{ActionSlot, ActionState, ActionUse};
 pub use addon::AddOnInfo;
+pub use addon_enable::EnableHash;
 pub use addon_message::{AddonDistribution, AddonSend};
 pub use auction::{
-    AuctionBid, AuctionCategory, AuctionItemRow, AuctionListState, AuctionQuery,
+    AuctionBid, AuctionCategory, AuctionHighBidder, AuctionItemRow, AuctionListState, AuctionQuery,
     AuctionStartRequest, AuctionState, AuctionSubCategory, BIDDER, LIST, OWNER, SORT_KEYS,
 };
 pub use aura::{AuraState, TrackingState};
@@ -151,6 +160,7 @@ pub use battlefield_positions::{BattlefieldFlagView, BattlefieldPositionView};
 pub use battlefield_queue::{BattlefieldListView, BattlefieldMapInfo, BattlefieldQueueSlot};
 pub use battlefield_score::{BattlefieldScoreRow, BattlefieldScores, BattlefieldStatColumn};
 pub use bind_confirm::PendingEquipAnswer;
+pub use calls::{NearestMode, ScriptCall};
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
 pub use channel::{ChannelCommand, ZoneChannelRow};
 pub use char_stats::{
@@ -171,9 +181,10 @@ pub use cursor::{
     CursorAction, CursorItem, CursorMacro, CursorMerchantItem, CursorMoney, CursorPayload,
     CursorPetAction, CursorSpell, CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
 };
+pub use cvars::{small_cull_text, sstr_to_int};
 pub use cvars::{
     MultisampleFormat, ScreenResolution, SeededCvar, VideoCaps, CVAR_FRILL_DENSITY, CVAR_GAMMA,
-    CVAR_NAMEPLATE_ENEMIES, CVAR_NAMEPLATE_FRIENDS, CVAR_WORLD_DETAIL, VIDEO_DEFAULT_CVARS,
+    CVAR_SMALL_CULL, CVAR_WORLD_DETAIL, IN_WORLD_READ_ONLY_CVARS, VIDEO_DEFAULT_CVARS,
     WORLD_DETAIL_STOPS,
 };
 pub use death::{DeathAction, DeathUiState};
@@ -186,6 +197,7 @@ pub use guild::{
     GuildMemberInfo, GuildRankEdit, GuildRankInfo, GuildRequest, GuildState, LastOnline, UnitGuild,
     MAX_RANKS, MIN_RANKS, RANK_RIGHT_BITS,
 };
+pub use input_verbs::{BindingInput, FiredInput, HeldInput};
 pub use modelframe::ModelPaneFrame;
 pub use petition::{
     validate_guild_name, PetitionRecordView, PetitionRequest, PetitionState, PETITION_TYPE_CHARTER,
@@ -195,6 +207,7 @@ pub use tabard::{
     emblem_mask_path, TabardHost, TabardIntent, EMBLEM_MASK_TOKEN, TABARD_COUNTS,
     TABARD_CREATION_COST,
 };
+pub use video_pairs::VIDEO_PAIR_CVARS;
 pub use worldmap_arrow::ARROW_MODEL;
 
 pub(crate) use button::{set_label_font_justify_h_lua, LabelFont};
@@ -202,15 +215,17 @@ pub use inspect::{InspectView, UnitReach};
 pub use item_stats::{item_usable, ItemSetView, ItemTemplateView, PlayerReqState};
 pub use item_text::ItemTextState;
 pub use layout_cache::{FrameLayout, LayoutPoint};
-pub use loot::{LootRow, LootState};
+pub use loot::{LootRow, LootState, LOOT_PORTRAIT_UNIT};
 pub use loot_roll::{LootRollEntry, LootRollsState};
-pub use macros::{MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME};
-pub use mail::{MailInboxRow, MailInvoice, MailSendRequest, MailState, StationeryView};
+pub use macros::{MacroBinding, MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME};
+pub use mail::{
+    MailInboxRow, MailInvoice, MailSendRequest, MailState, PackageView, StationeryView,
+};
 pub use measure::TextMeasure;
-pub use merchant::{ItemStatsHead, MerchantItem, MerchantState};
+pub use merchant::{ItemStatsHead, MerchantItem, MerchantState, RepairCosts};
 pub(crate) use minimap::apply_model_attrs as apply_minimap_model_attrs;
 pub(crate) use model::Model;
-pub use model::{FontProbe, TextureProbe, TextureSizeProbe};
+pub use model::{FontProbe, TextureProbe, TextureSizeProbe, WorldLocProjector};
 pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo};
 pub use pet::{PetActionView, PetStats};
 pub use pvp::{HonorState, InspectHonorData};
@@ -251,7 +266,7 @@ pub use types::{
 pub(crate) use types::{FontExplicit, MeasuredText, RegionData};
 pub use unit::{
     grey_band, level_reads_unknown, power_token, unit_is_grey, PlayerRecord, SelectionRequest,
-    UnitState,
+    UnitGuids, UnitState,
 };
 pub use weapon_enchant::WeaponEnchant;
 pub use who_sort::{WhoSortChain, WhoSortKey};
@@ -261,6 +276,7 @@ pub use worldmap::{
 };
 pub use worldstate::WorldStateUiView;
 pub use worn_display::WornDisplay;
+pub use zone_text::ZoneTexts;
 
 use mlua::Lua;
 
@@ -283,9 +299,9 @@ const REG_TEXTURE_METHODS: &str = "__benilla_texture_methods";
 const REG_TEXTURE_META: &str = "__benilla_texture_meta";
 const REG_FONTSTRING_METHODS: &str = "__benilla_fontstring_methods";
 const REG_FONTSTRING_META: &str = "__benilla_fontstring_meta";
-/// The stdlib's default error handler, kept by identity for
-/// [`UiScript::dispatch_script_errors_to_handler`] to skip; stored at [`stdlib::install`].
-const REG_DEFAULT_ERRORHANDLER: &str = "__benilla_default_errorhandler";
+/// The error handler `seterrorhandler` holds, the reference's registry reference `[0x8722cc]`;
+/// unset until one is given, as the reference's starts at -1.
+const REG_ERRORHANDLER: &str = "__benilla_errorhandler";
 
 /// Names on both region leaves, each leaf registering its own copy (Texture's `SetAlpha`
 /// `0x79b580`, FontString's `0x79cb70`), so they are not on the Region map and must not be hoisted
@@ -525,6 +541,7 @@ impl UiScript {
         lua50::install(&lua)?;
         stdlib::install(&lua)?;
         object::install(&lua)?;
+        frame_enum::install(&lua)?;
         // After `object`, whose `publish_global` it reuses, and before any FrameXML loads:
         // `Loader::do_font` publishes into the tables this builds.
         font::install(&lua)?;
@@ -541,12 +558,14 @@ impl UiScript {
         duel::install(&lua)?;
         follow::install(&lua)?;
         camera_view::install(&lua)?;
+        input_verbs::install(&lua)?;
         session::install(&lua)?;
         pvp::install(&lua)?;
         worn_display::install(&lua)?;
         death::install(&lua)?;
         aura::install(&lua)?;
         cvars::install(&lua)?;
+        nameplate::install_verbs(&lua)?;
         saved::install(&lua)?;
         keybind::install(&lua)?;
         sound::install(&lua)?;
@@ -586,6 +605,7 @@ impl UiScript {
         skills::install(&lua)?;
         item_stats::install(&lua)?;
         char_stats::install(&lua)?;
+        inventory_verbs::install(&lua)?;
         weapon_enchant::install(&lua)?;
         loot::install(&lua)?;
         loot_roll::install(&lua)?;
@@ -602,7 +622,6 @@ impl UiScript {
         worldmap::install(&lua)?;
         worldstate::install(&lua)?;
         net_stats::install(&lua)?;
-        diagnostics::install(&lua)?;
 
         let s = UiScript {
             lua,
@@ -851,7 +870,8 @@ impl UiScript {
         true
     }
 
-    /// Drain the chat lines `SubmitChatInput` queued since the last call, for the app to parse.
+    /// Drain the chat lines queued since the last call (a probe's, a host `SlashCmdList` row's), for
+    /// the app to parse.
     pub fn take_chat_input(&mut self) -> Vec<String> {
         std::mem::take(&mut self.model_mut().chat_input)
     }
@@ -859,11 +879,6 @@ impl UiScript {
     /// Queue a line as if typed into the chat EditBox and submitted, for probes (`WOW_PROBE_CHAT`).
     pub fn push_chat_input(&mut self, line: String) {
         self.model_mut().chat_input.push(line);
-    }
-
-    /// Whether Tab was pressed in the chat edit box since the last call: the whisper cycle's cue.
-    pub fn take_chat_tab(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().chat_tab)
     }
 
     /// Replace the hyperlink spans `(frame, y-up rect, link, markup)` the app rasterized this
@@ -1230,31 +1245,20 @@ impl UiScript {
             .push(msg.to_string());
     }
 
-    /// Hand each queued script error to the Lua error handler, as the reference invokes the one
-    /// `seterrorhandler`/`geterrorhandler` (`0x702900`/`0x702950`) hold on a caught error;
-    /// FrameXML installs `_ERRORMESSAGE`, the ScriptErrors dialog (`BasicControls.xml:16`). The
-    /// stdlib default is skipped, as it already reported into [`UiScript::errors`]; a handler that
-    /// raises is recorded on the host channel only and stops the batch, so the path cannot recurse.
+    /// Hand each queued script error to the Lua error handler, as the reference's catch closure
+    /// (`0x703b40`) calls the one `seterrorhandler` (`0x702900`) holds, read from its slot and not
+    /// through the `geterrorhandler` global; FrameXML installs `_ERRORMESSAGE`, the ScriptErrors
+    /// dialog (`BasicControls.xml:16`). With none installed the error stays on the host channel,
+    /// [`UiScript::errors`], alone; a handler that raises is recorded there only and stops the
+    /// batch, so the path cannot recurse.
     pub fn dispatch_script_errors_to_handler(&mut self) {
         let pending = std::mem::take(&mut self.model_mut().pending_error_dispatch);
         if pending.is_empty() {
             return;
         }
-        let handler: Option<mlua::Function> = self
-            .lua
-            .globals()
-            .get::<mlua::Function>("geterrorhandler")
-            .ok()
-            .and_then(|g| g.call::<mlua::Function>(()).ok());
-        let Some(handler) = handler else { return };
-        if let Ok(default) = self
-            .lua
-            .named_registry_value::<mlua::Function>(REG_DEFAULT_ERRORHANDLER)
-        {
-            if handler == default {
-                return;
-            }
-        }
+        let Some(handler) = stdlib::error_handler(&self.lua) else {
+            return;
+        };
         for msg in pending {
             if let Err(e) = handler.call::<()>(msg) {
                 self.model_mut()
@@ -1278,16 +1282,6 @@ impl UiScript {
     /// A registered [`FontObject`] by name: its resolved paint.
     pub fn font_object(&self, name: &str) -> Option<FontObject> {
         self.model_ref().font_object(name).cloned()
-    }
-
-    /// Every registered [`FontObject`]: the glyph atlas bakes outlined cells for the distinct
-    /// `(font, height, outline)` triples here.
-    pub fn font_objects(&self) -> Vec<FontObject> {
-        self.model_ref()
-            .font_objects_by_lower
-            .values()
-            .cloned()
-            .collect()
     }
 
     // ── internals ────────────────────────────────────────────────────────────────────────────
