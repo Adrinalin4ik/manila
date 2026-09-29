@@ -14,8 +14,35 @@
     <Script><![CDATA[
         -- ══ The frame: the era layout, 28+144+28 wide, 32 top, 28 bottom, 7 rungs of 21 and
         -- three gaps of 20 ═══════════════════════════════════════════════════════════════════════
+        -- ══ What THIS chain's menu actually holds ══════════════════════════════════════
+        --
+        -- Ours: upstream reshapes vanilla 1.12's button set by name, and a server's own
+        -- `GameMenuFrame.xml` is not that set. Turtle WoW's adds `GameMenuButtonShop`
+        -- ("Donation Rewards") as the top rung, ships `GameMenuButtonOptions` `hidden="true"`
+        -- with `GameMenuButtonUIOptions` laid over it as the visible one, and has no
+        -- `GameMenuButtonSoundOptions` at all.
+        --
+        -- Read by name and unguarded, that is two defects in one: the Options rung was moved onto
+        -- the frame's top where the shop button already sat (the reported overlap), and the fold
+        -- loop then indexed a nil button and raised — so every line after it, the Key Bindings
+        -- hide and the Edit Mode and Support rungs included, never ran.
+        --
+        -- So the rungs are discovered, not assumed: the chain's own top button stays where the
+        -- chain put it and the era rungs hang below it, and the Options rung is whichever of the
+        -- two the chain actually shows.
+        local shopRung = GameMenuButtonShop
+        if shopRung and not shopRung:IsShown() then
+            shopRung = nil
+        end
+        local optionsRung = GameMenuButtonOptions
+        if not optionsRung or not optionsRung:IsShown() then
+            optionsRung = GameMenuButtonUIOptions or optionsRung
+        end
+
         GameMenuFrame:SetWidth(200)
-        GameMenuFrame:SetHeight(267)
+        -- 32 top + 7 rungs of 21 + three gaps of 20 + 28 bottom, and one rung more when the
+        -- chain put a button of its own above them.
+        GameMenuFrame:SetHeight(267 + (shopRung and 21 or 0))
 
         -- The stock title (`GameMenuFrame.xml:36`) has no name: found as addons find it.
         for _, region in ipairs({ GameMenuFrame:GetRegions() }) do
@@ -39,23 +66,33 @@
         -- space: a width or height of 0 is no size in 1.12's layout, not a flat rect.
 
         -- Literal: 1.12 has no GAMEMENU_OPTIONS; its OPTIONS_MENU is "Options Menu".
-        GameMenuButtonOptions:SetText("Options")
-        GameMenuButtonOptions:ClearAllPoints()
-        GameMenuButtonOptions:SetPoint("TOP", GameMenuFrame, "TOP", 0, -32)
-        GameMenuButtonOptions:SetScript("OnClick", function()
+        optionsRung:SetText("Options")
+        optionsRung:ClearAllPoints()
+        if shopRung then
+            -- Under the chain's own rung, flush, as the rungs of one group stack.
+            optionsRung:SetPoint("TOP", shopRung, "BOTTOM", 0, 0)
+        else
+            optionsRung:SetPoint("TOP", GameMenuFrame, "TOP", 0, -32)
+        end
+        optionsRung:SetScript("OnClick", function()
             PlaySound("igMainMenuOption")
             HideUIPanel(GameMenuFrame)
             ShowUIPanel(BenillaOptionsFrame)
         end)
 
-        for _, fold in ipairs({
-            { GameMenuButtonSoundOptions, GameMenuButtonOptions },
-            { GameMenuButtonUIOptions, GameMenuButtonSoundOptions },
-        }) do
-            local button, above = fold[1], fold[2]
-            button:Hide()
-            button:ClearAllPoints()
-            button:SetPoint("TOP", above, "BOTTOM", 0, button:GetHeight())
+        -- The era menu has one Options rung, so every other stock one folds onto the rung above
+        -- it and takes no space (a width or height of 0 is no size in 1.12's layout, not a flat
+        -- rect). Skipped where the chain has no such button, and skipped for the rung we just
+        -- made the Options one.
+        local above = optionsRung
+        for _, button in ipairs({ GameMenuButtonOptions, GameMenuButtonSoundOptions,
+                                  GameMenuButtonUIOptions }) do
+            if button and button ~= optionsRung then
+                button:Hide()
+                button:ClearAllPoints()
+                button:SetPoint("TOP", above, "BOTTOM", 0, button:GetHeight())
+                above = button
+            end
         end
         -- Key Bindings keeps its stock anchor, 1 under UI Options: the era rungs hang from its
         -- top, so an addon that inserts a button above it and re-anchors it under that button

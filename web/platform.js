@@ -62,6 +62,39 @@ const LOCK_KEYS = ['Escape', 'Tab', 'KeyW'];
 //
 // `focusTarget` (the canvas) gets focus back after every toggle: the click leaves focus on the
 // button, and a focused button eats Space and Enter before winit's canvas listeners see them.
+// Hold the mouse's back and forward buttons for the game, not for the browser's history.
+//
+// Chrome and Edge navigate history on mouse buttons 3 and 4 (`MouseEvent.button`: 3 back,
+// 4 forward), and the client binds one of them: 1.12's own `DefaultBindings.wtf` binds
+// `BUTTON4 TOGGLEAUTORUN`, and this fork binds `BUTTON5` to it too. Without this the player
+// reaches for autorun and leaves the page instead, which ends the session outright — a whole
+// world load lost to one click, and no way to say sorry afterwards.
+//
+// `preventDefault()` alone, and deliberately NOT `stopPropagation()`: the navigation is the
+// browser's default action, while the event itself must still reach the canvas, where winit
+// turns it into `MouseButton::Back`/`Forward` for the binding dispatch. Swallowing propagation
+// here would stop the browser AND the game, leaving the buttons dead.
+//
+// Four event names because the version that navigates is not the same across browsers:
+// `mousedown` is where Chrome decides, and `mouseup`/`auxclick`/`click` are covered so a browser
+// that acts on the release cannot slip through. All in the capture phase, so the decision is
+// made before anything downstream can act on it, and none passive (the default for these), since
+// a passive listener may not call `preventDefault`.
+//
+// Best-effort like everything here: both pages import this module dynamically, so a click in the
+// first moments of the boot could still navigate. In practice the import resolves long before
+// there is a world to click in.
+export function holdMouseNavigationButtons(target = window) {
+  const swallow = (e) => {
+    if (e.button === 3 || e.button === 4) {
+      e.preventDefault();
+    }
+  };
+  for (const name of ['mousedown', 'mouseup', 'auxclick', 'click']) {
+    target.addEventListener(name, swallow, { capture: true });
+  }
+}
+
 export function installFullscreenToggle(button, { target = document.documentElement, focusTarget = null } = {}) {
   const supported = !!(target.requestFullscreen && document.exitFullscreen);
   if (!supported) {

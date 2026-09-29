@@ -296,7 +296,11 @@ pub(super) fn load_core_bindings(script: &UiScript) -> Vec<String> {
 pub(crate) fn default_bindings() -> Vec<benilla_ui::script::keybind::KeyBinding> {
     match reference_ui::read(reference_ui::DEFAULT_BINDINGS) {
         Some(bytes) => {
-            benilla_ui::script::keybind::parse_bindings_wtf(&String::from_utf8_lossy(&bytes))
+            let mut binds = benilla_ui::script::keybind::parse_bindings_wtf(
+                &String::from_utf8_lossy(&bytes),
+            );
+            with_back_button_autorun(&mut binds);
+            binds
         }
         None => {
             warn!(
@@ -306,6 +310,24 @@ pub(crate) fn default_bindings() -> Vec<benilla_ui::script::keybind::KeyBinding>
             Vec::new()
         }
     }
+}
+
+/// **Ours: the mouse's BACK button toggles autorun too.**
+///
+/// 1.12 binds only `BUTTON4 TOGGLEAUTORUN` (`WTF\DefaultBindings.wtf` line 17), which is winit's
+/// `Forward` (`bindings::chord`), and leaves `BUTTON5` — `Back` — unbound. In a browser both of
+/// those buttons are the history buttons, so a player who reaches for either gets the page moving
+/// instead of the character; the page holds them now (`web/platform.js`), and a held button that
+/// then does nothing is worse than one that navigates. So the pair does the one thing the era
+/// already gives its twin.
+///
+/// A default, not a forced bind: it goes into set 0, so "Restore Defaults" restores it and a
+/// player who rebinds `BUTTON5` keeps their own choice. Skipped when the chain already binds it.
+fn with_back_button_autorun(binds: &mut Vec<benilla_ui::script::keybind::KeyBinding>) {
+    if binds.iter().any(|(key, _)| key.eq_ignore_ascii_case("BUTTON5")) {
+        return;
+    }
+    binds.push(("BUTTON5".to_owned(), "TOGGLEAUTORUN".to_owned()));
 }
 
 /// The chain's `Bindings.xml` text, for the tests that hold benilla against it.

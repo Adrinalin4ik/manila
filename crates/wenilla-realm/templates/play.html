@@ -53,7 +53,9 @@
   // costing the credential fetch and the boot. Both calls sit after the WebGPU gate so a
   // browser that cannot run the client is never asked for storage nor shown a dead button.
   import('./platform.js')
-    .then(({ installFullscreenToggle, requestPersistentStorage }) => {
+    .then(({ holdMouseNavigationButtons, installFullscreenToggle, requestPersistentStorage }) => {
+      // First: the mouse's back/forward buttons are autorun here, not the browser's history.
+      holdMouseNavigationButtons();
       requestPersistentStorage();
       installFullscreenToggle(document.getElementById('fs'), {
         focusTarget: document.getElementById('benilla'),

@@ -96,7 +96,9 @@
   // see web/platform.js. The dev page has no WebGPU gate to sit behind, so on a browser that
   // prompts for persistent storage (Firefox) this is where the player would see it.
   import('./platform.js')
-    .then(({ installFullscreenToggle, requestPersistentStorage }) => {
+    .then(({ holdMouseNavigationButtons, installFullscreenToggle, requestPersistentStorage }) => {
+      // First: the mouse's back/forward buttons are autorun here, not the browser's history.
+      holdMouseNavigationButtons();
       requestPersistentStorage();
       installFullscreenToggle(document.getElementById('fs'), {
         focusTarget: document.getElementById('benilla'),
