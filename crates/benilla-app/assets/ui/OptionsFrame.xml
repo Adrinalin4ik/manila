@@ -510,6 +510,10 @@
                 ambientOcclusion = "Ambient Occlusion",
                 -- MONKEY (lampfog)
                 lampFog = "Lamp Fog",
+                -- GFX (volumetric light) / (moonlight)
+                volumetricLight = "Volumetric Light",
+                volumetricLightStrength = "Volumetric Light Strength",
+                moonLight = "Moonlight",
                 -- MONKEY (integration): the daylight lane's district window split.
                 daylightWindowSplit = "City Window Daylight",
                 yards = "%d yd",
@@ -518,8 +522,8 @@
                     GRAPHICS_QUALITY =
                         "Sets every graphics setting at once: Lighting Quality and everything it sets, "
                         .. "Render Distance, Sky Quality, Sky Dithering, Modern Fog, Wet Surfaces in Rain, "
-                        .. "Terrain Blocks Torchlight, the daylight through city windows, Ambient Occlusion, Lamp Fog "
-                        .. "and Zone Skyboxes.\n\n"
+                        .. "Terrain Blocks Torchlight, the daylight through city windows, Ambient Occlusion, Lamp Fog, "
+                        .. "Zone Skyboxes, Volumetric Light and Moonlight.\n\n"
                         .. "Classic is the original client: every enhancement off and the original 350 yd "
                         .. "view distance. Low and Medium add the enhancements that cost almost nothing; High "
                         .. "is the recommended look; Ultra raises every quality to its maximum and the view "
@@ -694,6 +698,21 @@
                         .. "nearest 16 lights; High uses 32. Rain and fog strengthen the halos. "
                         .. "The effect is unshadowed, but stops at visible scene depth.\n\n"
                         .. "Off is unchanged, and daylight is unchanged at every setting.",
+                    -- GFX (volumetric light)
+                    VOLUMETRIC_LIGHT =
+                        "Sunlight and moonlight shine through the air as visible shafts: rays through "
+                        .. "tree canopies, between buildings and past your character, following the "
+                        .. "real shadows. Thicker at dawn, in fog and in rain. Needs World Shadows or "
+                        .. "Real Character Shadows; not drawn indoors.\n\n"
+                        .. "Medium uses fewer samples; High is smoother. Off is unchanged.",
+                    VOLUMETRIC_LIGHT_STRENGTH =
+                        "How bright the volumetric light shafts are. 100% is the default; 0 hides them.",
+                    -- GFX (moonlight)
+                    MOONLIGHT =
+                        "The moon lights the world at night: a cool, dim light from where the moon "
+                        .. "really stands in the sky, added on top of the original night colours, with "
+                        .. "moon shadows when Moon Shadows is above 0.\n\n"
+                        .. "At 0 the night looks exactly as the original client drew it. Costs nothing by day.",
                 },
             },
             ruRU = {
@@ -755,6 +774,10 @@
                 ambientOcclusion = "Затенение окружения",
                 -- MONKEY (lampfog)
                 lampFog = "Свечение фонарей в тумане",
+                -- GFX (volumetric light) / (moonlight)
+                volumetricLight = "Объёмный свет",
+                volumetricLightStrength = "Сила объёмного света",
+                moonLight = "Лунный свет",
                 -- MONKEY (integration): the daylight lane's district window split.
                 daylightWindowSplit = "Дневной свет через окна города",
                 yards = "%d ярд.",
@@ -764,7 +787,7 @@
                         "Задаёт все настройки графики сразу: качество освещения и всё, что оно задаёт, "
                         .. "дальность прорисовки, качество неба, дизеринг неба, современный туман, мокрые "
                         .. "поверхности в дождь, заслонение огней рельефом, дневной свет в окнах городов, "
-                        .. "затенение окружения, свечение фонарей в тумане и небосводы зон.\n\n"
+                        .. "затенение окружения, свечение фонарей в тумане, небосводы зон, объёмный свет и лунный свет.\n\n"
                         .. "«Классика» — оригинальный клиент: все улучшения выключены, дальность обзора "
                         .. "прежние 350 ярдов. «Низкое» и «Среднее» добавляют почти бесплатные улучшения; "
                         .. "«Высокое» — рекомендуемый вид; «Ультра» поднимает всё качество до максимума, а "
@@ -949,6 +972,22 @@
                         .. "качество использует 16 ближайших источников, высокое — 32. Дождь и туман усиливают ореолы. "
                         .. "Эффект не рассчитывает тени, но обрывается на видимой глубине.\n\n"
                         .. "Выключено — без изменений; днём изображение не меняется при любом значении.",
+                    -- GFX (volumetric light)
+                    VOLUMETRIC_LIGHT =
+                        "Солнечный и лунный свет виден в воздухе лучами: сквозь кроны деревьев, между "
+                        .. "зданиями и рядом с персонажем, по настоящим теням. Гуще на рассвете, в тумане "
+                        .. "и под дождём. Нужны тени мира или реальные тени персонажей; в помещениях не "
+                        .. "рисуется.\n\n"
+                        .. "«Среднее» использует меньше выборок, «Высокое» — более плавное. Выключено — "
+                        .. "без изменений.",
+                    VOLUMETRIC_LIGHT_STRENGTH =
+                        "Яркость лучей объёмного света. 100% — по умолчанию; 0 скрывает их.",
+                    -- GFX (moonlight)
+                    MOONLIGHT =
+                        "Луна освещает мир ночью: холодный тусклый свет с того места, где луна "
+                        .. "действительно стоит на небе, поверх исходных ночных цветов, с лунными тенями, "
+                        .. "если «Лунные тени» больше 0.\n\n"
+                        .. "При 0 ночь выглядит точно так же, как в оригинальном клиенте. Днём не стоит ничего.",
                 },
             },
         }
@@ -1030,6 +1069,8 @@
                 "RowDaylightWindowSplit",
                 -- MONKEY (integration): the skybox lane's row (the lane left it out of this list).
                 "RowZoneSkyboxes",
+                -- GFX (volumetric light) / (moonlight): appended so the other rows keep their indices.
+                "RowVolumetricLight", "RowVolumetricLightStrength", "RowMoonLight",
             },
             -- Guild Names is a child of Player Names (UIOptionsFrame.lua:703-709).
             Nameplates = {
@@ -3208,6 +3249,47 @@
                                                 OptionsRow_OnLoad(self, "zoneSkyboxes",
                                                     BENILLA_ADVGFX.zoneSkyboxes,
                                                     "BENILLA_TOOLTIP_ZONE_SKYBOXES")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- GFX (volumetric light): the shaft tiers, 0 Off / 1 Medium / 2 High. -->
+                                        <Frame name="$parentRowVolumetricLight" inherits="OptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowZoneSkyboxes" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowZoneSkyboxes" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "volumetricLight", BENILLA_ADVGFX.volumetricLight,
+                                                    "BENILLA_TOOLTIP_VOLUMETRIC_LIGHT")
+                                                OptionsDropdownRow_Setup(self, {
+                                                    { text = BENILLA_ADVGFX.fogOff, value = "0" },
+                                                    { text = BENILLA_ADVGFX.qMedium, value = "1" },
+                                                    { text = BENILLA_ADVGFX.qHigh, value = "2" },
+                                                })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- GFX (volumetric light): the shafts' brightness, 0..2 (1 = shipped). -->
+                                        <Frame name="$parentRowVolumetricLightStrength" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowVolumetricLight" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowVolumetricLight" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "volumetricLightStrength",
+                                                    BENILLA_ADVGFX.volumetricLightStrength,
+                                                    "BENILLA_TOOLTIP_VOLUMETRIC_LIGHT_STRENGTH")
+                                                OptionsSliderRow_Setup(self, 0, 2, 0.25)
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- GFX (moonlight): the additive moon term, 0..2 (0 = the reference night). -->
+                                        <Frame name="$parentRowMoonLight" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowVolumetricLightStrength" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowVolumetricLightStrength" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "moonLight", BENILLA_ADVGFX.moonLight,
+                                                    "BENILLA_TOOLTIP_MOONLIGHT")
+                                                OptionsSliderRow_Setup(self, 0, 2, 0.25)
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>

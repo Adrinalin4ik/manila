@@ -22,6 +22,8 @@
 }
 // MONKEY (shadow hook): the realtime directional-shadow term (fetch + edge/night fade) lives here.
 #import benilla::shadow_hook
+// GFX (moonlight): the additive moon term.
+#import benilla::moonlight_hook
 // MONKEY (p0 MonkeyFrame): the programme block's struct, mirrored after the point table.
 #import benilla::monkey_frame
 // MONKEY (wet): rain on surfaces (wet_hook.wgsl).
@@ -1499,6 +1501,8 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // and in the sun-down/moon-not-yet-up window. See `shadow_hook::realtime_shadow_terms`.
     var player_shadow = 1.0;
     var player_moon = 1.0;
+    // GFX (moonlight): the moonlight's own visibility (`realtime_shadow_moonlit` `.z`).
+    var player_moon_lit = 1.0;
     let view_z = (view.view_from_world * in.world_position).z;
     let shadow_cam_dist = distance(in.world_position.xyz, view.world_position.xyz);
     let sun_lane_w = shadow_hook::sun_shadow_w(wow_light.fog_params.z);
@@ -1515,7 +1519,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
             wow_light.rig_origin[(fade_tag >> 19u) & 0x7ffu].xyz - 2.5 * sun_ray,
             1.0,
         );
-        let terms_rig = shadow_hook::realtime_shadow_terms(
+        let terms_rig = shadow_hook::realtime_shadow_moonlit(
             anchor,
             vec3<f32>(0.0, 1.0, 0.0),
             view_z,
@@ -1523,12 +1527,14 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
             wow_light.wmo_fog_params.z,
             sun_lane_w,
             moon_lane_w,
+            wow_light.monkey.misc.w,
         );
         player_shadow = terms_rig.x;
         player_moon = terms_rig.y;
+        player_moon_lit = terms_rig.z;
     }
 #else
-    let terms_frag = shadow_hook::realtime_shadow_terms(
+    let terms_frag = shadow_hook::realtime_shadow_moonlit(
         in.world_position,
         wow_normalize(in.world_normal),
         view_z,
@@ -1536,9 +1542,11 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         wow_light.wmo_fog_params.z,
         sun_lane_w,
         moon_lane_w,
+        wow_light.monkey.misc.w,
     );
     player_shadow = terms_frag.x;
     player_moon = terms_frag.y;
+    player_moon_lit = terms_frag.z;
 #endif
     // The realtime map blocks only the directional sun. Preserve the authored ambient/probe
     // contribution instead of multiplying the whole lighting result; the latter makes interiors,
@@ -1567,6 +1575,11 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         let sky = select(wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * ndotl,
             sun_lobe, use_doodad_shade);
         lit_with_shadow = sky * player_moon;
+    }
+    // GFX (moonlight): ADD the moon onto the exterior night (never interiors or the glue booth).
+    // `moon.w` is exactly 0 by day and with `moonLight 0`: the branch is not entered.
+    if (wow_light.monkey.moon.w > 0.0 && !is_interior && !is_rig) {
+        lit_with_shadow += moonlight_hook::moon_light(n_lit, wow_light.monkey.moon) * player_moon_lit;
     }
 
     // Gamma-space albedo: lighting runs on the authored byte values. `m.tint` plus its mat-anim

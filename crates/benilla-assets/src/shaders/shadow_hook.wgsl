@@ -120,6 +120,38 @@ fn realtime_shadow_terms(
     );
 }
 
+// GFX (moonlight): `realtime_shadow_terms` plus `.z` = the MOONLIGHT visibility — how much of the
+// additive moon term (`benilla::moonlight_hook`) reaches this fragment. Unlike `.y` (which darkens
+// the stock night SKY by `moonShadowStrength`), `.z` shadows the moon's OWN light fully, faded by
+// the rig's hand-over ramp `moon_conf` (MonkeyFrame `misc.w`) and the cascade edge. `.z` is 1.0
+// whenever the map does not hold the moon (`moon <= 0` or `moon_conf <= 0`): an unshadowed moon
+// term rather than the sun's map applied to the moon. `.x`/`.y` are exactly `realtime_shadow_terms`.
+fn realtime_shadow_moonlit(
+    sample_pos: vec4<f32>,
+    normal: vec3<f32>,
+    view_z: f32,
+    cam_dist: f32,
+    shadow_range: f32,
+    night: f32,
+    moon: f32,
+    moon_conf: f32,
+) -> vec3<f32> {
+    if (night <= 0.0 && moon <= 0.0) {
+        return vec3<f32>(1.0);
+    }
+    let shadow = shadow_fetch(sample_pos, normal, view_z);
+    let edge_fade = smoothstep(shadow_range - SHADOW_EDGE_BAND, shadow_range, cam_dist);
+    var lit = 1.0;
+    if (moon > 0.0 && moon_conf > 0.0) {
+        lit = 1.0 - (1.0 - shadow) * clamp(moon_conf, 0.0, 1.0) * (1.0 - edge_fade);
+    }
+    return vec3<f32>(
+        1.0 - (1.0 - shadow) * night * (1.0 - edge_fade),
+        1.0 - (1.0 - shadow) * moon * (1.0 - edge_fade),
+        lit,
+    );
+}
+
 // MONKEY (torch shadows Phase 1): the point/cluster-based torch shadow is DEAD. benilla's world
 // camera sets `ClusterConfig::None`, which starves `clusterable_objects` AND the point-shadow prep,
 // so `fetch_point_shadow`/the clusterable scan can never fire. The replacement is a from-scratch

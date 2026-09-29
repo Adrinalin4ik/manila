@@ -67,7 +67,8 @@ struct LightStd430 {
     rows: [[f32; 4]; LIGHT_HEADER_ROWS],
     points: [[f32; 4]; 2 * MAX_POINT_LIGHTS],
     // MONKEY (p0 MonkeyFrame): the programme block, appended AFTER the point table so no earlier
-    // offset moves (the per-frame prefix is now 8784 B); packed by [`pack_monkey_frame`].
+    // offset moves (the per-frame prefix is now 8800 B — GFX (moonlight) added row 16); packed by
+    // [`pack_monkey_frame`].
     monkey: [[f32; 4]; super::monkey_frame::MONKEY_FRAME_ROWS],
 }
 
@@ -668,6 +669,8 @@ pub(super) fn register(app: &mut App) {
         // MONKEY (moon shadows): the night directional-shadow strength dial (0 = today's render).
         .init_resource::<MoonShadowStrength>()
         .init_resource::<ShadowHandover>()
+        // GFX (moonlight): the additive moon term's dial (0 = today's night, bit for bit).
+        .init_resource::<super::moonlight::MoonLight>()
         // MONKEY (sun shadow perf): the live PCF choice, extracted for `static_gx`'s hand-rolled
         // pipeline (every Bevy-material receiver keys off the view component instead).
         .init_resource::<ShadowFilterGaussian>()
@@ -695,7 +698,8 @@ pub(super) fn register(app: &mut App) {
             // through `Commands`, so a NEWLY spawned light is still packed on the fail-safe
             // fallback for one frame — see that fallback's note in `build_light_data`.
             // MONKEY (p0 MonkeyFrame): the programme block is packed right after the table.
-            (classify_light_lanes, build_light_data, pack_monkey_frame)
+            // GFX (moonlight): the moon row is written into the frame just before it is packed.
+            (classify_light_lanes, build_light_data, super::moonlight::update_moonlight, pack_monkey_frame)
                 .chain()
                 .after(bevy::transform::TransformSystems::Propagate)
                 .after(super::update_time_lighting),
@@ -862,6 +866,20 @@ impl ShadowHandover {
             Some(ShadowBody::Moon) => pack_shadow_lane(0.0, moon * strength.clamp(0.0, 1.0) * self.ramp),
             None => 0.0,
         };
+    }
+
+    /// GFX (moonlight): how far the hand-over to the MOON has ramped, `0..1` — 0 whenever the map
+    /// does not (yet) hold the moon. The additive moonlight term shadows by this much, so a moon
+    /// shadow fades in with the rig instead of popping on the frame the basis lands.
+    pub fn moon_ramp(&self) -> f32 {
+        if self.wanted == Some(ShadowBody::Moon)
+            && self.aimed == Some(ShadowBody::Moon)
+            && self.weight < 0.0
+        {
+            self.ramp
+        } else {
+            0.0
+        }
     }
 
     /// Only the rig may acknowledge; choosing a body without writing a transform is not ready.
@@ -2718,7 +2736,8 @@ mod tests {
         assert_eq!(MAX_LIVE_POINT_LIGHTS, MAX_POINT_LIGHTS - 1);
         // 21 header rows + 2 x 256 point rows, 16 B each.
         // MONKEY (p0 MonkeyFrame): the fixed rows plus the 256-byte programme block.
-        assert_eq!(per_frame_blob_bytes(), 8784, "the mirrored blob must not change size");
+        // GFX (moonlight): + the moonlight row (17 programme rows, 272 B).
+        assert_eq!(per_frame_blob_bytes(), 8800, "the mirrored blob must not change size");
     }
 
     /// MONKEY (reviewfix): the shader mirrors use literal storage-array lengths and water reads

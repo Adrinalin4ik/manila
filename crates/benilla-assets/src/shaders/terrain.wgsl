@@ -18,6 +18,8 @@
 }
 // MONKEY (shadow hook): the realtime directional-shadow term (fetch + edge/night fade) lives here.
 #import benilla::shadow_hook
+// GFX (moonlight): the additive moon term.
+#import benilla::moonlight_hook
 // MONKEY (p0 MonkeyFrame): the programme block's struct, mirrored after the point table.
 #import benilla::monkey_frame
 // MONKEY (p0 fog hook): the one distance-fog law every receiver calls.
@@ -670,7 +672,8 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     // Hoisted out of the `realtime_shadow` call (same expression, same bits) because the torch lane
     // below needs the same normal for its normal-offset sample.
     let n_lit = normalize(in.world_normal);
-    let shadow_terms = shadow_hook::realtime_shadow_terms(
+    // GFX (moonlight): the same fetch, plus `.z` = the moonlight's own visibility.
+    let shadow_terms = shadow_hook::realtime_shadow_moonlit(
         in.world_position,
         n_lit,
         view_z,
@@ -678,6 +681,7 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
         wow_light._wmo_fog[1].z,
         sun_shadow_strength,
         moon_shadow_strength,
+        wow_light.monkey.misc.w,
     );
     let world_shadow = shadow_terms.x;
     // MONKEY (outdoor torch shadows: terrain): the exterior point term, CAST-SHADOWED at night.
@@ -720,6 +724,15 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
                 point_light_eval_shadowed(in.ext_sel, in.world_position.xyz, n_lit), ext_night_w);
         }
         primary = clamp(in.base_lit * shadow_terms.y + points, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    // GFX (moonlight): ADD the moon (cool, N·L, shadowed by the moon's own map) onto the stock
+    // night. `moon.w` is exactly 0 by day and with `moonLight 0`, so the branch is not entered.
+    if (wow_light.monkey.moon.w > 0.0) {
+        primary = clamp(
+            primary + moonlight_hook::moon_light(n_lit, wow_light.monkey.moon) * shadow_terms.z,
+            vec3<f32>(0.0),
+            vec3<f32>(1.0),
+        );
     }
 
     // MCSH baked shadow. With `pixelShaders` and `specular` on, terrain is one pass through

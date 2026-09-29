@@ -139,6 +139,13 @@ pub(crate) struct VideoConfig {
     pub(crate) ambient_occlusion: u8,
     // MONKEY (lampfog): point-light fog tier: 0 Off, 1 nearest 16, 2 nearest 32.
     pub(crate) lamp_fog: u8,
+    // GFX (volumetric light): shadow-mapped sun/moon light shafts, 0 Off / 1 Medium / 2 High.
+    pub(crate) volumetric_light: u8,
+    // GFX (volumetric light): the shafts' brightness multiplier, 0..2 (1 = the shipped tuning).
+    pub(crate) volumetric_light_strength: f32,
+    // GFX (moonlight): the additive moon term's multiplier, 0..2 (0 = the stock night exactly).
+    // Bridged to `benilla_world::lighting::MoonLight` by `dynamic_interior::bridge`.
+    pub(crate) moon_light: f32,
     /// Brightness of lava lighting its surroundings, 0..4; 0 disables the glow.
     /// Published to `benilla_world::lighting::LavaLightGain` by `dynamic_interior::bridge`.
     pub(crate) lava_light_gain: f32,
@@ -406,6 +413,10 @@ impl Default for VideoConfig {
             ambient_occlusion: 0,
             // MONKEY (lampfog): opt-in; zero is exactly the pre-lane render.
             lamp_fog: 0,
+            // GFX (volumetric light) / (moonlight): opt-in; the Graphics Preset turns them on.
+            volumetric_light: 0,
+            volumetric_light_strength: 1.0,
+            moon_light: 0.0,
             lava_light_gain: 1.0,
             fire_flicker: 1.0,
             display: if windowed_env() {
@@ -486,6 +497,11 @@ pub(crate) fn on_cvar(
         "ambientocclusion" => cfg.ambient_occlusion = v.clamp(0.0, 2.0) as u8,
         // MONKEY (lampfog): 0 Off / 1 nearest 16 / 2 nearest 32.
         "lampfog" => cfg.lamp_fog = v.clamp(0.0, 2.0) as u8,
+        // GFX (volumetric light): 0 Off / 1 Medium / 2 High, and its 0..2 strength.
+        "volumetriclight" => cfg.volumetric_light = v.clamp(0.0, 2.0) as u8,
+        "volumetriclightstrength" => cfg.volumetric_light_strength = v.clamp(0.0, 2.0),
+        // GFX (moonlight): 0 is meaningful (the stock night, bit for bit).
+        "moonlight" => cfg.moon_light = v.clamp(0.0, 2.0),
         "lavalightgain" => cfg.lava_light_gain = v.clamp(0.0, 4.0),
         "worldshadows" => cfg.world_shadows = ev.flag(),
         "charactershadows" => cfg.character_shadows = ev.flag(),

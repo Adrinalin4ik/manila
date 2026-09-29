@@ -1528,8 +1528,53 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         minute: 1200,
         ui: None,
     },
+    // GFX (volumetric light) / (moonlight): the Goldshire lake-bank forest, facing the fixed 45°
+    // bearing the sun and the moon share. Afternoon shafts through the canopy; the same spot at
+    // midnight (moonlight + moon shadows + faint moon shafts) and across the dusk hand-over.
+    Scenario {
+        name: "vol-shafts-day",
+        map: Some(MAP_AZEROTH),
+        eye: VOL_FOREST_EYE,
+        look: [-9488.5, -258.5, 80.5], // face 45°, pitch 12°
+        minute: 1000,
+        ui: None,
+    },
+    Scenario {
+        name: "vol-moon-forest",
+        map: Some(MAP_AZEROTH),
+        eye: VOL_FOREST_EYE,
+        look: [-9489.0, -259.0, 83.5], // face 45°, pitch 15°
+        minute: 0,
+        ui: None,
+    },
+    Scenario {
+        name: "vol-dusk-2000",
+        map: Some(MAP_AZEROTH),
+        eye: VOL_FOREST_EYE,
+        look: [-9488.5, -258.5, 72.0],
+        minute: 1200,
+        ui: None,
+    },
+    Scenario {
+        name: "vol-dusk-2130",
+        map: Some(MAP_AZEROTH),
+        eye: VOL_FOREST_EYE,
+        look: [-9488.5, -258.5, 72.0],
+        minute: 1290,
+        ui: None,
+    },
+    Scenario {
+        name: "vol-moonrise-2300",
+        map: Some(MAP_AZEROTH),
+        eye: VOL_FOREST_EYE,
+        look: [-9488.5, -258.5, 72.0],
+        minute: 1380,
+        ui: None,
+    },
 ];
 
+/// GFX (volumetric light): the Goldshire lake bank among the trees (eye 2 yd over the feet).
+pub(super) const VOL_FOREST_EYE: [f32; 3] = [-9530.0, -300.0, 68.0];
 /// MONKEY (p0 baseline): the Elwynn programme view, above the canopy east of Goldshire looking
 /// south-west over the forest to the river and the hills (framed with the `vista` instrument).
 pub(super) const GFX_ELWYNN_EYE: [f32; 3] = [-9400.0, -100.0, 122.0];

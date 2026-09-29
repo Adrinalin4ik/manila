@@ -176,6 +176,8 @@ impl PluginGroup for GamePlugins {
             .add(crate::dynamic_interior::DynamicInteriorPlugin)
             // MONKEY (volumetric fog): bridge the live setting to Bevy.
             .add(crate::volumetric_fog::VolumetricFogPlugin)
+            // GFX (volumetric light): after the fog plugin, whose graph node it follows.
+            .add(crate::volumetric_light::VolumetricLightPlugin)
             // MONKEY (p0 graphics programme): the programme's cvar bridges (skyDither, ...).
             .add(crate::monkey_gfx::MonkeyGfxPlugin)
             // MONKEY (post): world-only HDR effects, before the legacy FFX clamp/UI composite.

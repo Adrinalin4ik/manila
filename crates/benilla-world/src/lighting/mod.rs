@@ -16,6 +16,8 @@ pub use monkey_frame::{FogModel, MonkeyFrame, MAX_BENDERS, MONKEY_FRAME_ROWS};
 pub mod fog_model; // MONKEY (fog): the Modern fog model's CPU half (MonkeyFrame fog rows)
 pub use fog_model::FogModelSetting;
 mod lava_light; // MONKEY (lava light): magma surface fixtures and their independent gain
+mod moonlight; // GFX (moonlight): the moon as an additive night light (MonkeyFrame row 16)
+pub use moonlight::{moon_light_intensity, MoonLight, MOON_LIGHT_BASE};
 pub use lava_light::{LavaLight, LavaLightGain};
 mod prop_probes; // the per-instance interior-prop SH probe table (slot ↔ MeshTag payload)
 mod resolve; // the per-frame time-of-day sample into WowLighting + the WMO interior-fog crossfade
@@ -155,6 +157,17 @@ impl WowLighting {
     /// sun (with an elevation clamp) rather than the near-fixed lighting `sun_dir`.
     pub fn celestial_dir(&self) -> Vec3 {
         self.celestial_dir
+    }
+
+    /// GFX (volumetric light): the scene fog end (yd) the zone's light resolved to, so a post pass
+    /// can scale its density with how foggy the zone is authored to be.
+    pub fn fog_end(&self) -> f32 {
+        self.fog_end
+    }
+
+    /// GFX (volumetric light): the storm blend `0..1` (see the field), for the shafts' dimming.
+    pub fn storm(&self) -> f32 {
+        self.storm_bcc
     }
 
     /// MONKEY (moon shadows): the visible **white moon** direction (camera→moon, Bevy space) — the
@@ -423,6 +436,11 @@ mod ordering_tests {
             (
                 "lighting/daylight.rs",
                 "update_daylight_fixtures + update_bleed_fixtures: PostUpdate",
+            ),
+            // GFX (moonlight): chained in PostUpdate between build_light_data and the packer.
+            (
+                "lighting/moonlight.rs",
+                "update_moonlight: PostUpdate, chained before pack_monkey_frame",
             ),
             (
                 "clouds/layer.rs",

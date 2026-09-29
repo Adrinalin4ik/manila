@@ -1,6 +1,6 @@
 #define_import_path benilla::monkey_frame
 
-// MONKEY (p0 MonkeyFrame): the graphics programme's per-frame block, 16 rows (256 B) appended to
+// MONKEY (p0 MonkeyFrame): the graphics programme's per-frame block, 17 rows (272 B) appended to
 // the shared light buffer right after the point-light table (`lighting::global_light`, packed from
 // the `MonkeyFrame` resource in `lighting/monkey_frame.rs`). Every receiver's `WowLight` mirror
 // declares it as `monkey: monkey_frame::MonkeyFrame` after `points`, so the offsets of everything
@@ -18,6 +18,8 @@ struct MonkeyFrame {
     wind_a: vec4<f32>, // dir_x, dir_y (unit, world XZ: .x = world x, .y = world z), base_heading (rad, fixed profile heading), gust 0..1
     wind_b: vec4<f32>, // travel (yd, integrated speed, wrapped at 4096), sway_strength, grass_strength, tree_strength
     wet_a: vec4<f32>,  // rain_rate 0..1, wetness 0..1, ripple_time_s, snow 0..1
-    misc: vec4<f32>,  // bender_count, time_of_day 0..1 (packer), night 0..1 (packer), 0
+    misc: vec4<f32>,  // bender_count, time_of_day 0..1 (packer), night 0..1 (packer), moon shadow confidence 0..1
     benders: array<vec4<f32>, 8>, // world xyz (Bevy space) + radius (yd); the first bender_count are live
+    // GFX (moonlight): unit direction toward the moon (Bevy space) + intensity (gamma; 0 = off).
+    moon: vec4<f32>,
 }

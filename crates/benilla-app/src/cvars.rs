@@ -544,6 +544,23 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "0",
         "benilla's own: lamps scattering through night fog, 0 Off / 1 Low (16 lamps) / 2 High (32 lamps)",
     ),
+    // GFX (volumetric light): shadow-mapped light shafts for the sun and the moon.
+    ours(
+        "volumetricLight",
+        "0",
+        "benilla's own: sun and moon light shafts marched through the shadow map, 0 Off / 1 Medium / 2 High",
+    ),
+    ours(
+        "volumetricLightStrength",
+        "1",
+        "benilla's own: brightness of the volumetric light shafts, 0..2 (1 = default)",
+    ),
+    // GFX (moonlight): the moon as a light on top of the stock night.
+    ours(
+        "moonLight",
+        "0",
+        "benilla's own: moonlight on top of the stock night, 0..2 (0 = the reference night)",
+    ),
     // MONKEY (p0 skyDither): the FFXGlow combine's deband dither (was env WOW_DITHER only).
     // Default 0 = the reference look; the Graphics preset's High sets 1.
     ours(
@@ -1865,6 +1882,10 @@ pub(crate) const GRAPHICS_PRESETS: &[(&str, [&str; 5])] = &[
     ("ambientOcclusion",     ["0",    "0",   "1",      "2",    "2"]),
     ("zoneSkyboxes",         ["0",    "0",   "1",      "1",    "1"]),
     ("lampFog",              ["0",    "0",   "1",      "2",    "2"]),
+    // GFX (volumetric light) / (moonlight): the shafts are a GPU pass (Medium = the cheap tier);
+    // moonlight is a few ALU per fragment, so every rung past Classic takes it.
+    ("volumetricLight",      ["0",    "0",   "1",      "2",    "2"]),
+    ("moonLight",            ["0",    "1",   "1",      "1",    "1"]),
 ];
 
 /// The column of a rung, matched case-insensitively; `None` for `Custom` or anything else.
@@ -2536,7 +2557,11 @@ mod tests {
         let shadows = VideoConfig::default();
         let flag = |b: bool| if b { 1.0 } else { 0.0 };
         // MONKEY (volumetric fog): include the atmospheric tier in this fixed-size default table.
-        let lighting: [(&str, f32); 38] = [
+        let lighting: [(&str, f32); 41] = [
+            // GFX (volumetric light) / (moonlight): the three new rows.
+            ("volumetricLight", shadows.volumetric_light as f32),
+            ("volumetricLightStrength", shadows.volumetric_light_strength),
+            ("moonLight", shadows.moon_light),
             ("waterQuality", shadows.water_quality as f32),
             // MONKEY (volumetric fog): weld registry and renderer defaults.
             ("volumetricFog", shadows.volumetric_fog as f32),
@@ -2604,7 +2629,7 @@ mod tests {
         // VideoConfig rows, 38 welds (MONKEY lampfog: + lampFog). MONKEY (wind): `foliageWind` is a world resource bridge.
         let welded: std::collections::BTreeSet<&str> = lighting.iter().map(|(n, _)| *n).collect();
         // MONKEY (volumetric fog): the atmospheric tier joins the default-consumer weld.
-        assert_eq!(welded.len(), 38, "the lighting lane welds 38 distinct rows");
+        assert_eq!(welded.len(), 41, "the lighting lane welds 41 distinct rows");
         for name in &welded {
             assert!(
                 REGISTERED.iter().any(|r| r.name == *name),
@@ -2758,7 +2783,7 @@ mod tests {
     /// disjointness that lets both labels be right at once.
     #[test]
     fn graphics_rows_are_registered_and_disjoint_from_the_lighting_ladder() {
-        assert_eq!(GRAPHICS_PRESETS.len(), 11, "add the row count with the row");
+        assert_eq!(GRAPHICS_PRESETS.len(), 13, "add the row count with the row");
         let cvars = fresh_registry();
         for (k, values) in GRAPHICS_PRESETS {
             assert!(cvars.get(k).is_some(), "{k}: not registered");
@@ -3063,6 +3088,9 @@ mod tests {
                     "ambientOcclusion" => video.ambient_occlusion as f32,
                     "zoneSkyboxes" => flag(res::<benilla_world::skybox::ZoneSkyboxes>(&app).0),
                     "lampFog" => video.lamp_fog as f32,
+                    // GFX (volumetric light) / (moonlight)
+                    "volumetricLight" => video.volumetric_light as f32,
+                    "moonLight" => video.moon_light,
                     _ => panic!("add the observer readback for {k}"),
                 };
                 assert_eq!(applied, value.parse::<f32>().unwrap(), "{name}/{k}");

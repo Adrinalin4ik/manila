@@ -160,7 +160,7 @@ const SEA_PLANE_REACH: f32 = 400.0;
 /// MONKEY (visualfix): the eye must be this far above sea level (yd) for the plane to apply.
 const SEA_LEVEL_MIN_EYE: f32 = 0.25;
 
-fn density(minute: f32, weather: f32, indoors: bool) -> f32 {
+pub(crate) fn density(minute: f32, weather: f32, indoors: bool) -> f32 {
     let dawn = (1.0 - ((minute - 390.0) / 90.0).abs()).clamp(0.0, 1.0);
     let dawn = dawn * dawn * (3.0 - 2.0 * dawn);
     0.004 * (1.0 + dawn * 1.5 + weather.clamp(0.0, 1.0) * 2.0) * if indoors { 0.18 } else { 1.0 }
@@ -258,8 +258,11 @@ fn update_fog(
     suns: Query<(Entity, &DirectionalLight), With<ShadowSun>>,
     // MONKEY (visualfix): ocean surfaces, for the haze's sea-level plane.
     water: Query<&benilla_world::liquid::WaterChunkInfo>,
+    // GFX (volumetric light): while that lane is live it owns the shafts; the haze keeps its own.
+    vol_light: Option<Res<crate::volumetric_light::VolLightOverride>>,
 ) {
     let tier = override_value.fog.unwrap_or(video.volumetric_fog).min(2);
+    let shafts_retired = vol_light.is_some_and(|v| v.tier(&video) > 0);
     let lamp_tier = override_value.lamp.unwrap_or(video.lamp_fog).min(2);
     let enabled = (tier != 0 || lamp_tier != 0)
         && cameras.iter().any(|(_, camera, _, _, _)| camera.is_active);
@@ -324,7 +327,7 @@ fn update_fog(
             if over && tier != 0 { 1.0 } else { 0.0 }
         });
         // MONKEY (fog): rows 1-3 as packed for the light buffer.
-        let rows = monkey.as_ref().map_or([[0.0; 4]; 16], |m| m.pack(0.0, 0.0));
+        let rows = monkey.as_ref().map_or([[0.0; 4]; benilla_world::lighting::MONKEY_FRAME_ROWS], |m| m.pack(0.0, 0.0));
         commands.entity(entity).insert(FogView {
             mf_fog1: Vec4::from_array(rows[1]),
             mf_fog2: Vec4::from_array(rows[2]),
@@ -348,7 +351,7 @@ fn update_fog(
             ),
             sun_strength: Vec3::from_array(lighting.diffuse)
                 .lerp(Vec3::ONE, 0.5)
-                .extend(if tier == 0 {
+                .extend(if tier == 0 || shafts_retired {
                     0.0
                 } else {
                     override_value.shaft_gain * daylight
@@ -395,7 +398,7 @@ struct FogPipeline {
 #[derive(Component)]
 struct ViewFogPipeline(CachedRenderPipelineId);
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct FogLabel;
+pub(crate) struct FogLabel;
 
 fn init_pipeline(
     mut commands: Commands,

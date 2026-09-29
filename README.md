@@ -12,6 +12,7 @@ pull request.
 
 **Lighting and shadows**
 - Realtime sun shadows for characters and the world, including foliage; moon shadows at night
+- Moonlight: at night the moon lights the world (cool, dim, from the moon's place in the sky) on top of the original night colours
 - Dynamic building interiors lit by their own fixtures
 - Torches, braziers and lamps emit flickering light and cast cube-map shadows; terrain blocks torch light
 - Daylight through doors and windows (including Stormwind's rooms and cathedral windows)
@@ -26,7 +27,8 @@ pull request.
 
 **Fog and atmosphere**
 - Modern fog model: the world fades into the horizon, sun-coloured toward the sun
-- Volumetric fog with sun and moon light shafts
+- Volumetric fog (distance haze)
+- Volumetric light: sun and moon shafts marched through the shadow map (god rays through canopies and between buildings, faint moon shafts at night)
 - Lamps glowing through fog at night
 - Screen-space sun shafts
 - Render distance up to 1497 yards

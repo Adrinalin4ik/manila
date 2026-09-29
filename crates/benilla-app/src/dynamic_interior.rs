@@ -64,7 +64,14 @@ fn bridge(
     mut lava: ResMut<LavaLightGain>,
     // MONKEY (post): bloom also arms the HDR source hooks through the shared light blob.
     mut emissive: ResMut<EmissiveTier>,
+    // GFX (moonlight): the additive moon term's dial (Option: absent in headless tests).
+    moon_light: Option<ResMut<benilla_world::lighting::MoonLight>>,
 ) {
+    if let Some(mut moon_light) = moon_light {
+        if moon_light.0 != video.moon_light {
+            moon_light.0 = video.moon_light;
+        }
+    }
     if water.0 != video.water_quality {
         water.0 = video.water_quality;
     }

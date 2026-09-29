@@ -65,12 +65,14 @@ fn water_monkey() -> monkey_frame::MonkeyFrame {
     m.wet_a = water_light[MONKEY_ROW + 6u];
     m.misc = water_light[MONKEY_ROW + 7u];
     for (var i = 0u; i < 8u; i++) { m.benders[i] = water_light[MONKEY_ROW + 8u + i]; }
+    // GFX (moonlight): row 16.
+    m.moon = water_light[MONKEY_ROW + 16u];
     return m;
 }
 
 // MONKEY (rainshelter): the rain-occlusion grid right after the MonkeyFrame block
 // (`weather/shelter.rs`): two header rows, then the packed cell words, four to a row.
-const SHELTER_ROW: u32 = 549u;
+const SHELTER_ROW: u32 = 550u;
 fn water_shelter_word(i: u32) -> u32 {
     return bitcast<u32>(water_light[SHELTER_ROW + 2u + i / 4u][i % 4u]);
 }

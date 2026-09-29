@@ -2804,6 +2804,10 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
             ("BENILLA_TOOLTIP_DAYLIGHT_WINDOW_SPLIT", "AdvancedGraphicsRowDaylightWindowSplit"),
             // MONKEY (skybox): the zone skybox row.
             ("BENILLA_TOOLTIP_ZONE_SKYBOXES", "AdvancedGraphicsRowZoneSkyboxes"),
+            // GFX (volumetric light) / (moonlight)
+            ("BENILLA_TOOLTIP_VOLUMETRIC_LIGHT", "AdvancedGraphicsRowVolumetricLight"),
+            ("BENILLA_TOOLTIP_VOLUMETRIC_LIGHT_STRENGTH", "AdvancedGraphicsRowVolumetricLightStrength"),
+            ("BENILLA_TOOLTIP_MOONLIGHT", "AdvancedGraphicsRowMoonLight"),
             ("BENILLA_TOOLTIP_WATER_QUALITY", "AdvancedGraphicsRowWaterQuality"),
             ("BENILLA_TOOLTIP_LAVA_GLOW", "AdvancedGraphicsRowLavaGlow"),
             ("BENILLA_TOOLTIP_RENDER_SCALE", "GraphicsRowRenderScale"),

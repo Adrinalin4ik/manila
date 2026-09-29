@@ -10,6 +10,8 @@
 }
 // MONKEY (shadow hook): the realtime directional-shadow term (fetch + edge/night fade) lives here.
 #import benilla::shadow_hook
+// GFX (moonlight): the additive moon term.
+#import benilla::moonlight_hook
 // MONKEY (p0 MonkeyFrame): the programme block's struct, mirrored after the point table.
 #import benilla::monkey_frame
 // MONKEY (p0 fog hook): the one distance-fog law every receiver calls.
@@ -1440,10 +1442,12 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // untouched at both ends of the clock: a sealed room has no sky, so it has no moon either.
     var world_shadow = 1.0;
     var world_moon = 1.0;
+    // GFX (moonlight): the moon term for EXTERIOR surfaces (zero indoors, by day and when off).
+    var moon_add = vec3<f32>(0.0);
     if ((in.word & WORD_INTERIOR) == 0u) {
         let view_z = (view.view_from_world * in.world_position).z;
         let cam_dist = distance(in.world_position.xyz, view.world_position.xyz);
-        let terms = shadow_hook::realtime_shadow_terms(
+        let terms = shadow_hook::realtime_shadow_moonlit(
             in.world_position,
             n_lit,
             view_z,
@@ -1451,9 +1455,13 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             wow_light.wmo_fog_params.z,
             shadow_hook::sun_shadow_w(wow_light.fog_params.z),
             shadow_hook::moon_shadow_w(wow_light.fog_params.z),
+            wow_light.monkey.misc.w,
         );
         world_shadow = terms.x;
         world_moon = terms.y;
+        if (wow_light.monkey.moon.w > 0.0) {
+            moon_add = moonlight_hook::moon_light(n_lit, wow_light.monkey.moon) * terms.z;
+        }
     } else {
         world_shadow = shadow_hook::torch_shadow(in.world_position, n_lit);
     }
@@ -1478,6 +1486,10 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     if (world_moon < 1.0) {
         lit_nl_shadowed = (wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * ndotl)
             * world_moon;
+    }
+    // GFX (moonlight): the moon adds onto the exterior night; `moon_add` is exactly zero otherwise.
+    if (wow_light.monkey.moon.w > 0.0) {
+        lit_nl_shadowed += moon_add;
     }
 
     // The order-2 SH basis products over the fragment normal — shared by the exterior
@@ -1985,6 +1997,10 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         // branch, not lit_nl_shadowed. Shadow the whole sky lobe before points/clamp here too.
         if (world_moon < 1.0) {
             lit_doodad = sun_lobe * world_moon;
+        }
+        // GFX (moonlight): and the retained doodads take the moon term too.
+        if (wow_light.monkey.moon.w > 0.0) {
+            lit_doodad += moon_add;
         }
         // Sun disabled (light_sun.w) falls back to the FFP matte, like the entity path.
         let lit = select(lit_nl_shadowed, lit_doodad, wow_light.light_sun.w > 0.5);

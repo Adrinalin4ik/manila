@@ -10,7 +10,7 @@
 //! All zero (the default) is "every feature off": nothing reads a zero field as a change, so the
 //! image is the same as before the block existed.
 //!
-//! Layout (16 × `vec4<f32>`, 256 B):
+//! Layout (17 × `vec4<f32>`, 272 B):
 //!
 //! | row | xyz / x,y,z | w |
 //! |---|---|---|
@@ -21,8 +21,12 @@
 //! | 4 `wind_a` | dir_x, dir_y, base_heading (rad) | gust |
 //! | 5 `wind_b` | travel (yd, wrapped), sway_strength, grass_strength | tree_strength |
 //! | 6 `wet_a` | rain_rate, wetness, ripple_time_s | snow |
-//! | 7 `misc` | bender_count, time_of_day 0..1, night 0..1 | 0 |
+//! | 7 `misc` | bender_count, time_of_day 0..1, night 0..1 | moon shadow confidence 0..1 |
 //! | 8-15 `benders` | world x, y, z | radius |
+//! | 16 `moon` | moonlight direction (toward the moon, unit) | moonlight intensity (gamma, 0 = off) |
+//!
+//! GFX (moonlight): row 16 and `misc.w` belong to `lighting::moonlight`; the confidence is how far
+//! the shadow rig's hand-over to the moon has ramped (0 = the map does not hold the moon).
 //!
 //! Coordinates are Bevy world space (Y up, 1 unit = 1 yd), the space the receivers'
 //! `world_position` is in: WoW `(x, y, z)` → Bevy `(-y, z, -x)` ([`benilla_assets::coords`]).
@@ -33,7 +37,7 @@
 use bevy::prelude::*;
 
 /// Rows in the appended block.
-pub const MONKEY_FRAME_ROWS: usize = 16;
+pub const MONKEY_FRAME_ROWS: usize = 17;
 
 /// How many benders (grass/foliage pushers: the player and nearby units) the block carries.
 pub const MAX_BENDERS: usize = 8;
@@ -95,6 +99,13 @@ pub struct MonkeyFrame {
     /// Bevy world space.
     pub benders: [[f32; 4]; MAX_BENDERS],
     pub bender_count: u32,
+    // ── GFX (moonlight): row 16 + `misc.w` ──
+    /// Unit direction toward the moon (Bevy space).
+    pub moon_light_dir: [f32; 3],
+    /// Moonlight intensity in gamma units at N·L = 1; 0 is exactly the pre-feature render.
+    pub moon_light: f32,
+    /// How far the shadow rig's hand-over to the moon has ramped (0..1).
+    pub moon_shadow_confidence: f32,
 }
 
 impl MonkeyFrame {
@@ -121,8 +132,10 @@ impl MonkeyFrame {
         rows[5] = [self.wind_travel, self.sway_strength, self.grass_strength, self.tree_strength];
         rows[6] = [self.rain_rate, self.wetness, self.ripple_time_s, self.snow];
         let n = (self.bender_count as usize).min(MAX_BENDERS);
-        rows[7] = [n as f32, time_of_day, night, 0.0];
+        rows[7] = [n as f32, time_of_day, night, self.moon_shadow_confidence];
         rows[8..8 + n].copy_from_slice(&self.benders[..n]);
+        let m = self.moon_light_dir;
+        rows[16] = [m[0], m[1], m[2], self.moon_light];
         rows
     }
 }
@@ -167,6 +180,9 @@ mod tests {
             snow: 25.0,
             benders: [[26.0, 27.0, 28.0, 29.0]; MAX_BENDERS],
             bender_count: 20, // clamped to MAX_BENDERS
+            moon_light_dir: [30.0, 31.0, 32.0],
+            moon_light: 33.0,
+            moon_shadow_confidence: 34.0,
         };
         let r = f.pack(0.25, 0.75);
         assert_eq!(r[0], [1.0, 2.0, 3.0, 4.0]);
@@ -176,14 +192,15 @@ mod tests {
         assert_eq!(r[4], [14.0, 15.0, 16.0, 17.0]);
         assert_eq!(r[5], [18.0, 19.0, 20.0, 21.0]);
         assert_eq!(r[6], [22.0, 23.0, 24.0, 25.0]);
-        assert_eq!(r[7], [8.0, 0.25, 0.75, 0.0]);
+        assert_eq!(r[7], [8.0, 0.25, 0.75, 34.0]);
         assert_eq!(r[15], [26.0, 27.0, 28.0, 29.0]);
+        assert_eq!(r[16], [30.0, 31.0, 32.0, 33.0]);
     }
 
-    /// The WGSL mirror declares the same 16 rows; a member added on one side only would shift
+    /// The WGSL mirror declares the same rows; a member added on one side only would shift
     /// every bender.
     #[test]
-    fn the_wgsl_mirror_has_sixteen_rows() {
+    fn the_wgsl_mirror_has_the_same_rows() {
         let src = include_str!("../../../benilla-assets/src/shaders/monkey_frame.wgsl");
         let body = src.split_once("struct MonkeyFrame {").unwrap().1;
         let body = body.split_once("\n}").unwrap().0;

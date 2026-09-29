@@ -846,6 +846,8 @@ mod tests {
         //   `prepare_pipelines` specialises every such key for EVERY `Camera3d` view on every
         //   frame, whether its cvar is on or not, so the variants compile behind the entry cover
         //   and a player enabling the row later hits the cache, not a live compile.
+        // - GFX (volumetric light) VolLightPipeline (`volumetric_light`): the same contract, its
+        //   march/blur/composite keys warmed for every 3-D view every frame.
         let exempt = ["UiGammaPipeline"];
         let own_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let warm_src = std::fs::read_to_string(own_src.join("pipe_warm/mod.rs")).unwrap()

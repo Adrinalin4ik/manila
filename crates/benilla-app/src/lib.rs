@@ -55,6 +55,8 @@ mod doodad_events;
 mod dynamic_interior;
 // MONKEY (volumetric fog): optional near-field atmosphere plugin.
 mod volumetric_fog;
+// GFX (volumetric light): shadow-mapped sun/moon light shafts.
+mod volumetric_light;
 // MONKEY (p0 graphics programme): the programme's cvar bridges (skyDither, ...).
 mod monkey_gfx;
 // MONKEY (post): optional world-only HDR post-processing.
