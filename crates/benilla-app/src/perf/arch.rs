@@ -76,4 +76,53 @@ pub(crate) fn arch_census(world: &mut World) {
         "[census] {listed} of {total} entities listed above ({} archetypes not shown)",
         rows.len().saturating_sub(60)
     );
+    character_draw_census(world);
+}
+
+/// **This has never produced a number, and the reason is the arming, not the query.**
+/// `archCensus` disarms itself by mirroring its row back to `0` (`perf::journal::on_cvar`), and a
+/// mirror does not fire an observer - but the SAVED row can still hold `1`, and a CVar write that
+/// does not change the value fires nothing either. So the census runs the first time and then
+/// refuses, which reads exactly like a broken instrument. Three runs went to this on 2026-09-29:
+/// one fired, four did not, and sending `0` then `1` in the same breath did not help because both
+/// land in one frame. Whoever needs this number next should fix the arm before trusting the
+/// silence - the query below is sound and compiled, it simply has not been reached.
+/// **What batching would have to overcome on the crowd: distinct meshes against distinct
+/// materials, among character parts alone.**
+///
+/// bevy batches two draws only when `(MaterialBindGroupIndex, AssetId<Mesh>, Lightmap)` match
+/// (`bevy_pbr`'s `GetBatchData::CompareData`), so a shared texture array - one material for every
+/// character - buys nothing unless the MESH is shared too. The world-wide `mats` and `meshes`
+/// columns cannot answer that: they count the terrain and the doodads with everything else, and
+/// say meshes outnumber materials four to one. This counts the character parts on their own.
+///
+/// Read it as a ceiling on batching: `parts / max(meshes, mats)` is the best group size any
+/// amount of work could reach, and if the mesh count is already near the part count then a
+/// texture array is the wrong thing to build.
+///
+/// Filtered on `SkinnedMesh` rather than the dressing crate's own marker, which is private: every
+/// part that skins to a rig is a character or creature part, which is the population in question.
+fn character_draw_census(world: &mut World) {
+    use bevy::prelude::*;
+    use std::collections::HashSet;
+    // Every draw that uses the world material, unfiltered. `SkinnedMesh` was the first filter
+    // and it counted ZERO: this client skins through its own `rig_palette`, not bevy's component,
+    // so that marker names nothing here. Unfiltered is the honest question anyway - "how much
+    // batching headroom is there at all" - and the pair count answers it directly.
+    let mut q =
+        world.query::<(&Mesh3d, &MeshMaterial3d<benilla_assets::materials::WowModelMaterial>)>();
+    let (mut meshes, mut mats, mut pairs) = (HashSet::new(), HashSet::new(), HashSet::new());
+    let mut parts = 0u32;
+    for (mesh, mat) in q.iter(world) {
+        parts += 1;
+        meshes.insert(mesh.0.id());
+        mats.insert(mat.0.id());
+        pairs.insert((mesh.0.id(), mat.0.id()));
+    }
+    info!(
+        "[census] world-material draws {parts}: {} distinct meshes, {} distinct materials,          {} distinct (mesh, material) pairs - the batch groups bevy can actually form",
+        meshes.len(),
+        mats.len(),
+        pairs.len()
+    );
 }
