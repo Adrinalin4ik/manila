@@ -578,6 +578,15 @@ impl Plugin for EntitiesPlugin {
         // emptied in `benilla_world::particles`. Edge-triggered, in `Last`, so it never argues
         // with the fade and cull authorities that own `Visibility` the rest of the time.
         .add_systems(bevy::app::Last, spell_fx::apply_fx_off)
+        .add_systems(
+            bevy::app::PostUpdate,
+            // Beside the crowd wall and for its reasons: after the frame's transforms are final
+            // and the cull has had its say, before visibility propagates, so an effect that
+            // crossed the wall this frame is right on this frame rather than the next.
+            spell_fx::apply_effect_distance
+                .after(benilla_world::exterior_cull::ExteriorCullSet)
+                .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate),
+        )
         .init_resource::<SkinComposites>()
         .init_resource::<attach::skin_worker::PendingSkins>()
         .init_resource::<attach::MergedFormsCache>()

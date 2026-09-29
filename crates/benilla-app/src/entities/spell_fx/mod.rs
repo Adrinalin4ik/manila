@@ -1263,6 +1263,54 @@ mod tests {
 }
 
 
+/// **`effectsDistance` reaching the effect MODELS, which it never did.**
+///
+/// The slider says "Effects Distance" and until now it moved one thing: the particle simulation's
+/// own wall (`particles::sim`). A cast's visual, a projectile and a beam are not particles - they
+/// are M2 models with rigs of their own - so `effectsDistance` and `effectsQuality` knew nothing
+/// about them, and a player who slid both to the floor still had every distant cast in the fight
+/// drawn and posed at full cost. The owner saw that before any instrument did.
+///
+/// The same wall, the same knob, measured from the PLAYER for the reason `player_distance`'s
+/// header gives: a wall the camera carries slides things in and out as the view swings, which is
+/// not what a draw-distance setting means anywhere else in this client.
+///
+/// **What it does not reach: chain beams.** A beam is not a model — it is a strand written into
+/// the effect-quad stream by `chain_beam::simulate_chain_beams`, with no `Visibility` to hide and
+/// a simulation tied to the camera and the caster's attach point. Gating it means a test inside
+/// that walk rather than a marker, which is a change of a different size; a beam is also the one
+/// of the three the owner did not name. Left out deliberately rather than half-done.
+///
+/// **Hides only, never shows.** The fade, cull and portal authorities all write `Visibility` on
+/// these entities every frame; two writers restating one component with no order between them is
+/// how the first build of the crowd wall lost - 84 bodies marked hidden and not one leaving the
+/// screen. Writing one direction composes: a wall slid back out restores itself on the next frame
+/// because those authorities restate what they can see. That is also why this cannot simply share
+/// [`apply_fx_off`], which restores on its edge.
+pub(crate) fn apply_effect_distance(
+    tuning: Option<Res<benilla_world::particles::ParticleTuning>>,
+    player: Option<Res<crate::player::Player>>,
+    mut fx: Query<(&GlobalTransform, &mut Visibility), With<EffectModel>>,
+) {
+    let Some(tuning) = tuning else { return };
+    let wall = tuning.max_distance;
+    // At the top of the range there is no wall at all, which is the default: skip the walk rather
+    // than compare every effect against a number that can never reject one.
+    if wall >= *benilla_world::particles::EFFECTS_DISTANCE_RANGE.end() {
+        return;
+    }
+    let Some(eye) = player.as_deref().filter(|p| p.active).map(|p| p.pos) else {
+        return;
+    };
+    // Squared, so the per-effect test is a subtract and a dot rather than a square root.
+    let limit = wall * wall;
+    for (at, mut vis) in &mut fx {
+        if at.translation().distance_squared(eye) > limit && *vis != Visibility::Hidden {
+            *vis = Visibility::Hidden;
+        }
+    }
+}
+
 /// Hide or restore every effect model on a flip of `/console fxOff`.
 ///
 /// On the EDGE only, never every frame: the fade, cull and portal authorities all write
