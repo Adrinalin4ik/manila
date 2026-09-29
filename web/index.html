@@ -98,7 +98,9 @@
   import('./platform.js')
     .then(({ holdMouseNavigationButtons, installFullscreenToggle, requestPersistentStorage }) => {
       // First: the mouse's back/forward buttons are autorun here, not the browser's history.
-      holdMouseNavigationButtons();
+      // Optional-called: an older cached platform.js has no such export, and a throw here
+      // would take the storage call and the fullscreen button down with it.
+      holdMouseNavigationButtons?.();
       requestPersistentStorage();
       installFullscreenToggle(document.getElementById('fs'), {
         focusTarget: document.getElementById('benilla'),

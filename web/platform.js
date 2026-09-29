@@ -65,33 +65,47 @@ const LOCK_KEYS = ['Escape', 'Tab', 'KeyW'];
 // Hold the mouse's back and forward buttons for the game, not for the browser's history.
 //
 // Chrome and Edge navigate history on mouse buttons 3 and 4 (`MouseEvent.button`: 3 back,
-// 4 forward), and the client binds one of them: 1.12's own `DefaultBindings.wtf` binds
-// `BUTTON4 TOGGLEAUTORUN`, and this fork binds `BUTTON5` to it too. Without this the player
-// reaches for autorun and leaves the page instead, which ends the session outright — a whole
-// world load lost to one click, and no way to say sorry afterwards.
+// 4 forward), and the client binds both: 1.12's own `DefaultBindings.wtf` binds
+// `BUTTON4 TOGGLEAUTORUN`, and this fork binds `BUTTON5` to it too. A player reaching for autorun
+// must not leave the page instead — that ends the session outright, a whole world load lost to
+// one click, with no way to say sorry afterwards.
 //
-// `preventDefault()` alone, and deliberately NOT `stopPropagation()`: the navigation is the
-// browser's default action, while the event itself must still reach the canvas, where winit
-// turns it into `MouseButton::Back`/`Forward` for the binding dispatch. Swallowing propagation
-// here would stop the browser AND the game, leaving the buttons dead.
+// **`preventDefault()` alone does not do it, and that was the first attempt.** On Windows Chrome
+// treats the side buttons as browser-level navigation, decided before the page gets a say, so
+// cancelling the mouse event changes nothing — measured, not assumed: the buttons still navigated
+// on every screen with the listeners in place and the module confirmed served (`no-cache`).
 //
-// Four event names because the version that navigates is not the same across browsers:
-// `mousedown` is where Chrome decides, and `mouseup`/`auxclick`/`click` are covered so a browser
-// that acts on the release cannot slip through. All in the capture phase, so the decision is
-// made before anything downstream can act on it, and none passive (the default for these), since
-// a passive listener may not call `preventDefault`.
+// So the history is pinned instead: one state pushed, and put back whenever it is popped. Back
+// and forward then move inside this same document, which never unloads, and the session lives
+// through the click. The mouse events still reach the canvas either way, where winit turns them
+// into `MouseButton::Back`/`Forward` for the binding dispatch — which is why the listeners below
+// deliberately do NOT `stopPropagation()`: stopping the browser AND the game would leave the
+// buttons dead.
 //
-// Best-effort like everything here: both pages import this module dynamically, so a click in the
-// first moments of the boot could still navigate. In practice the import resolves long before
-// there is a world to click in.
+// **This also holds the browser's own Back button**, which is the point rather than a side
+// effect: for a page that is a game client, leaving by accident is the failure being prevented.
+// The tab's close button, a typed URL and a bookmark are all unaffected.
 export function holdMouseNavigationButtons(target = window) {
   const swallow = (e) => {
     if (e.button === 3 || e.button === 4) {
       e.preventDefault();
     }
   };
+  // Kept for the browsers where it IS enough, and harmless where it is not. Capture phase, so the
+  // decision is made before anything downstream; none passive (the default for these), since a
+  // passive listener may not call `preventDefault`.
   for (const name of ['mousedown', 'mouseup', 'auxclick', 'click']) {
     target.addEventListener(name, swallow, { capture: true });
+  }
+  // The part that actually holds Chrome. Wrapped: `pushState` throws on an opaque origin, and
+  // none of this is load-bearing for booting the client.
+  try {
+    history.pushState(null, '', location.href);
+    window.addEventListener('popstate', () => {
+      history.pushState(null, '', location.href);
+    });
+  } catch (e) {
+    console.warn('platform.js: history pin unavailable:', e);
   }
 }
 
