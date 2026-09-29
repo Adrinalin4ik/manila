@@ -1275,11 +1275,19 @@ mod tests {
 /// header gives: a wall the camera carries slides things in and out as the view swings, which is
 /// not what a draw-distance setting means anywhere else in this client.
 ///
-/// **What it does not reach: chain beams.** A beam is not a model — it is a strand written into
-/// the effect-quad stream by `chain_beam::simulate_chain_beams`, with no `Visibility` to hide and
-/// a simulation tied to the camera and the caster's attach point. Gating it means a test inside
-/// that walk rather than a marker, which is a change of a different size; a beam is also the one
-/// of the three the owner did not name. Left out deliberately rather than half-done.
+/// **Marking a root is not enough for everything a spell draws, and the owner found the hole in
+/// an hour.** Two kinds of part are skipped by the child walk that puts the meshes under this
+/// root and are spawned elsewhere: a following card, and a projected ground decal. A decal has no
+/// `Visibility` at all - it is a quad written straight into the effect stream - so hiding the root
+/// left every distant consecration and ground aura drawing, which is exactly what he saw with
+/// both sliders at the floor. That one is closed in `ground_fx::update_ground_fx_decals`, against
+/// the camera, matching the particle wall it shares the knob with.
+///
+/// **Still not reached: chain beams.** A beam is a strand written into the same stream by
+/// `chain_beam::simulate_chain_beams`, with a simulation tied to the camera and the caster's
+/// attach point, so gating it is a test inside that walk rather than a marker. Left out
+/// deliberately rather than half-done - and now with one demonstration that a quad-stream effect
+/// is exactly where this wall leaks.
 ///
 /// **Hides only, never shows.** The fade, cull and portal authorities all write `Visibility` on
 /// these entities every frame; two writers restating one component with no order between them is

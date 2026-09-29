@@ -132,6 +132,14 @@ pub(crate) fn update_ground_fx_decals(
     cam: Query<Entity, With<WorldCamera>>,
     surfaces: Query<&Collider, With<GroundDecalSurface>>,
     joints: Query<&GlobalTransform, Without<GroundFxDecal>>,
+    // **The effects wall, reaching the ground decals.** `effectsDistance` moved the particle
+    // simulation's draw set (`particles::sim`) and the effect MODELS (`spell_fx`), and a ground
+    // decal is neither: it is a projected quad written straight into the effect stream, with no
+    // `Visibility` to hide. So a player with both effects sliders at the floor still had every
+    // distant consecration, every rune and every ground aura in a fight projected and emitted at
+    // full cost - which is what the owner reported seeing, twice, while the instruments said the
+    // effects lane was cheap.
+    tuning: Res<crate::particles::ParticleTuning>,
     mut quads: ResMut<EffectQuads>,
     mut decals: Query<(
         Entity,
@@ -141,12 +149,25 @@ pub(crate) fn update_ground_fx_decals(
 ) {
     let Ok(cam) = cam.single() else { return };
     let now = time.elapsed_secs();
+    // From the CAMERA, as `SceneGates` measures the particle wall it shares this knob with: two
+    // halves of one spell must not vanish at two different distances. Squared, so the per-decal
+    // test is a subtract and a dot. `None` at the top of the range, which is the default, and then
+    // nothing is compared at all.
+    let wall = (tuning.max_distance < *crate::particles::EFFECTS_DISTANCE_RANGE.end())
+        .then(|| joints.get(cam).ok().map(|t| t.translation()))
+        .flatten()
+        .map(|eye| (eye, tuning.max_distance * tuning.max_distance));
     let mut surface_count = usize::MAX;
     for (entity, mut decal, mat_anim) in &mut decals {
         let Ok(joint) = joints.get(decal.joint) else {
             commands.entity(entity).despawn();
             continue;
         };
+        // Past the wall: no projection, no quads, and the cache left as it is so a decal that
+        // comes back into range redraws from what it had rather than rebuilding.
+        if wall.is_some_and(|(eye, limit)| joint.translation().distance_squared(eye) > limit) {
+            continue;
+        }
         if surface_count == usize::MAX {
             surface_count = surfaces.iter().count();
         }
