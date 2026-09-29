@@ -47,7 +47,7 @@ pub use window::StreamWindow;
 // The WMO prop-light items, for the interior classifier and the app's WMO props.
 pub use spawn::prop_light::{fold_interior_probe, hex_word, interior_light_up, PropLobeLight};
 // The placed-model assembler and off-thread collider build, shared with WMO gameobject props.
-pub use collider::{build_collider_task, placement_collider_data, PendingCollider};
+pub use collider::{build_collider_task, placement_collider_data, split_collider_data, PendingCollider};
 pub use spawn::{m2_anim_bound, m2_fade, point_light, spawn_model_entities, SpawnedModel};
 // The position queries and the area authority.
 use queries::update_current_area;
@@ -847,15 +847,37 @@ fn stream_terrain(
         // `furnish_tile_cells` spawns them a few per frame; the root keeps the visibility chain.
         let mut tile_ent = commands.spawn((Transform::IDENTITY, Visibility::default()));
         tile_ent.vis_chain_only();
-        if let Some((verts, tris)) = collider_data {
-            // Terrain takes the selection ring and clamps the pick (the reference's world trace).
-            tile_ent.insert((
-                PendingCollider::new(build_collider_task(verts, tris), None, true),
-                GroundDecalSurface,
-                PickOccluder,
-            ));
+        // **One tile is several colliders now, and the consumers were already ready for it.** A
+        // tile is 256 MCNK chunks of 256 triangles - 65,536 exactly, which is the cluster the
+        // harness measured at 40-65 ms a build. A build cannot be interrupted once started, so the
+        // only way that stops being a stall is to be several short builds; `split_collider_data`
+        // has the measurement. Both readers of these colliders (`decal::project_decal`,
+        // `ground_fx::update_ground_fx_decals`) already iterate a QUERY over every marked surface
+        // rather than one component, and the casts go through avian's spatial tree, so more
+        // entities is a number to them and nothing else.
+        //
+        // The pieces are children of the root, which is where `tile.wall` - a second collider
+        // entity per tile - has always sat, so the despawn path is the one that already exists.
+        // Identity transforms under an identity root, because these vertices are world-space.
+        let pieces: Vec<_> = collider_data
+            .map(|(verts, tris)| split_collider_data(verts, tris))
+            .unwrap_or_default();
+        let tile_id = tile_ent.id();
+        for (verts, tris) in pieces {
+            commands
+                .spawn((
+                    Transform::IDENTITY,
+                    Visibility::default(),
+                    // Terrain takes the selection ring and clamps the pick (the reference's
+                    // world trace).
+                    PendingCollider::new(build_collider_task(verts, tris), None, true),
+                    GroundDecalSurface,
+                    PickOccluder,
+                    ChildOf(tile_id),
+                ))
+                .vis_chain_only();
         }
-        tile.entity = Some(tile_ent.id());
+        tile.entity = Some(tile_id);
         tile.wall = wall_data.map(|(verts, tris)| {
             commands
                 .spawn(PendingCollider::new(

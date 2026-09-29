@@ -52,6 +52,7 @@ fn asset_failed(asset_server: &AssetServer, id: impl Into<bevy::asset::UntypedAs
 
 use super::collider::{
     build_collider_task, doodad_bodies_disabled, doodad_hulls_bare, placement_collider_data,
+    split_collider_data,
     PendingCollider,
 };
 use super::merge::{MergeSite, StaticMerge};
@@ -542,8 +543,18 @@ pub(super) fn spawn_loaded_placements(
                     }
                     // Two colliders, each on its layer: the reference gathers different faces for
                     // the body (drops DETAIL) and the camera (drops NOCAMCOLLIDE, keeps DETAIL).
-                    if let Some((verts, tris)) =
-                        placement_collider_data(m.collision.as_ref(), &p.transform)
+                    // **Split, because a building's walk bake is where the freezes were.** The
+                    // harness measured one at 768,095 triangles taking 570 ms in a single frame -
+                    // fourteen dropped frames in a row - and a second at 317,000 taking 250; the
+                    // two of them were two thirds of all the collider stall in a 120 s session. A
+                    // build cannot be interrupted once begun, so several short ones is the only
+                    // shape that is not a stall. `split_collider_data` carries the numbers.
+                    //
+                    // Free for everything smaller: under the budget it returns the one piece it
+                    // was given, so a shed pays nothing for a cathedral's problem.
+                    for (verts, tris) in placement_collider_data(m.collision.as_ref(), &p.transform)
+                        .map(|(v, t)| split_collider_data(v, t))
+                        .unwrap_or_default()
                     {
                         ents.push(
                             commands
@@ -562,8 +573,12 @@ pub(super) fn spawn_loaded_placements(
                                 .id(),
                         );
                     }
-                    if let Some((verts, tris)) =
+                    // Split for the same reason as the walk bake above; the camera bake keeps
+                    // DETAIL faces and so is the larger of the two on most buildings.
+                    for (verts, tris) in
                         placement_collider_data(m.collision_camera.as_ref(), &p.transform)
+                            .map(|(v, t)| split_collider_data(v, t))
+                            .unwrap_or_default()
                     {
                         ents.push(
                             commands

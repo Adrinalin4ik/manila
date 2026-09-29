@@ -183,6 +183,66 @@ pub(crate) fn doodad_hulls_bare() -> bool {
 
 /// A model's collision hull in world space as `(vertices, triangles)`: `wow_to_bevy`, then the
 /// placement [`Transform`].
+/// **The triangle budget one collider build may hold.** A build is indivisible once started - the
+/// budget queue in `web_budget` decides WHEN one runs, never how long it takes - so the only way a
+/// long build stops being a long freeze is to be several short ones.
+///
+/// Measured in a live city on 2026-09-29 with the browser harness: fifteen builds over 8 ms in a
+/// 120 s session, 1,233 ms of frozen frames between them, and the cost dead linear at **0.7 us per
+/// triangle** across four orders of magnitude (0.59 to 1.09 us/tri from 21k to 768k triangles).
+/// The two worst were a 768,095-triangle building at **570 ms** - fourteen dropped frames in a row
+/// at the 40 ms frame this client runs at - and a 316,970-triangle one at 250 ms. The rest cluster
+/// at 65,536, which is one terrain tile exactly: 256 MCNK chunks of 256 triangles.
+///
+/// 10,000 triangles is about 7 ms at that rate, under `web_budget`'s own 8 ms complaint. It is a
+/// bound on the STALL, not on the work: the total stays what it was and the queue spreads it.
+const MAX_COLLIDER_TRIS: usize = 10_000;
+
+/// Cut `(verts, tris)` into pieces of at most [`MAX_COLLIDER_TRIS`] triangles, each carrying only
+/// the vertices its own triangles name.
+///
+/// The remap is the whole cost here and it is linear; against a BVH build of the same geometry it
+/// does not register. One piece in, one piece out when the input already fits, so a small collider
+/// pays nothing for this existing at all.
+pub fn split_collider_data(
+    verts: Vec<Vec3>,
+    tris: Vec<[u32; 3]>,
+) -> Vec<(Vec<Vec3>, Vec<[u32; 3]>)> {
+    if tris.len() <= MAX_COLLIDER_TRIS {
+        return vec![(verts, tris)];
+    }
+    let mut out = Vec::with_capacity(tris.len().div_ceil(MAX_COLLIDER_TRIS));
+    // `u32::MAX` as "not in this piece": a real index can never be it, and the map is cleared per
+    // piece rather than reallocated.
+    let mut map = vec![u32::MAX; verts.len()];
+    for chunk in tris.chunks(MAX_COLLIDER_TRIS) {
+        let mut pv: Vec<Vec3> = Vec::new();
+        let mut pt: Vec<[u32; 3]> = Vec::with_capacity(chunk.len());
+        for tri in chunk {
+            let mut mapped = [0u32; 3];
+            for (k, &i) in tri.iter().enumerate() {
+                let Some(slot) = map.get_mut(i as usize) else {
+                    // An index past the vertex list is bad geometry, not a shape to build.
+                    return Vec::new();
+                };
+                if *slot == u32::MAX {
+                    *slot = pv.len() as u32;
+                    pv.push(verts[i as usize]);
+                }
+                mapped[k] = *slot;
+            }
+            pt.push(mapped);
+        }
+        for tri in chunk {
+            for &i in tri {
+                map[i as usize] = u32::MAX;
+            }
+        }
+        out.push((pv, pt));
+    }
+    out
+}
+
 pub fn placement_collider_data(
     hull: Option<&CollisionMesh>,
     transform: &Transform,

@@ -74,6 +74,15 @@ try {
     }
   }
 
+  // The whole console, verbatim, beside the journal: the tally below groups by prefix and so
+  // eats the numbers, and the numbers are usually the point (a collider build's milliseconds, a
+  // triangle count). Written next to the CSV under the same name.
+  try {
+    const logPath = out.replace(/[.]csv$/, '') + '-console.log';
+    writeFileSync(logPath, s.console.map(line).join(String.fromCharCode(10)));
+    console.log('console -> ' + logPath + ' (' + s.console.length + ' lines)');
+  } catch (e) { console.log('console dump failed:', e.message); }
+
   console.log('\n--- client warnings and errors ---');
   const bad = s.console.filter((l) => /ERROR|WARN|panic/.test(l)).map(line);
   const tally = new Map();
