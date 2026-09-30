@@ -19,10 +19,9 @@ pub use geosets::{
 #[cfg(target_arch = "wasm32")]
 pub use sections::plan_to_json;
 pub use sections::{
-    decode_atlas, encode_atlas, render_plan_with, set_skin_cache_mb, take_decode_counts, take_oversize_count, BodyPlan,
-    BodyStep,
+    decode_atlas, encode_atlas, set_skin_cache_mb, take_decode_counts, take_oversize_count,
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
-    scale_body_tile, BlitSource, CharSections, EmblemLayer, EquipBlit, GuildEmblem,
+    scale_body_tile, BlitSource, CharSections, CompositePlan, EmblemLayer, EquipBlit, GuildEmblem,
 };
 
 // The loaders' own schemas, for the `benilla-extract dbc` CSV dump (`crate::schema_for`).

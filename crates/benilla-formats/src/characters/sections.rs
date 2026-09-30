@@ -21,7 +21,7 @@ const HAIR_SUBSTITUTE_VARIATION: u8 = 1;
 
 /// An atlas rect `(x, y, w, h)` in the reference 256² layout.
 /// `(x, y, w, h)` in the 256-wide authored space - `scale_body_tile` maps it onto the real atlas.
-/// Public because a [`BodyStep`] carries one across a worker boundary.
+/// Public because a [`CompositePlan`] carries one across a worker boundary.
 pub type Tile = (u32, u32, u32, u32);
 
 /// The head strip of the 256² partition `0x475c50` writes: g8 the upper band, g9 the lower.
@@ -251,48 +251,6 @@ impl DecodeCache {
     }
 }
 
-/// **Execute a [`BodyPlan`] against any source of decoded textures.**
-///
-/// The one implementation of the blit stack, written against a reader rather than a chain so the
-/// same code runs on the main thread (where the reader is this catalog's decode cache) and in a
-/// worker (where it is an HTTP fetch and there is no catalog at all). Two copies of this would be
-/// two copies of a texel-exact layering order, which is precisely the kind of thing that drifts
-/// silently and shows up as a character with the wrong face.
-///
-/// `None` only when the BASE skin cannot be read: an overlay that is missing is normal - most
-/// looks do not use most steps - and is skipped, which is what a step's candidate LIST already
-/// says.
-pub fn render_plan_with(
-    plan: &BodyPlan,
-    read: &mut dyn FnMut(&str) -> Option<std::sync::Arc<BlpMipChain>>,
-) -> Option<BlpMipChain> {
-    // The atlas is mutated by every blit below, so this one is a COPY of the cached decode.
-    // Copying ~700 KB costs a fraction of a millisecond against the tens the decode costs.
-    let mut atlas = read(&plan.base)?.as_ref().clone();
-    for step in &plan.steps {
-        if let Some(overlay) = step.candidates.iter().find_map(|path| read(path)) {
-            blit_over(&mut atlas, &overlay, step.tile);
-        }
-    }
-    Some(atlas)
-}
-
-/// One overlay of a [`BodyPlan`]: the paths to try, in order, and where the first that decodes
-/// lands. A LIST because only a read can say which candidate an item actually ships.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct BodyStep {
-    pub candidates: Vec<String>,
-    pub tile: Tile,
-}
-
-/// A body atlas as pure DATA - no catalog, no chain, nothing that cannot cross a `postMessage`.
-/// That is the point: the rendering half has to be able to run where this catalog does not exist.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct BodyPlan {
-    pub base: String,
-    pub steps: Vec<BodyStep>,
-}
-
 /// **The finished atlas on the wire between the Worker and the client**: `[width][height][levels]`
 /// little-endian, then each level's `[len][bytes]`.
 ///
@@ -345,7 +303,7 @@ pub fn decode_atlas(bytes: &[u8]) -> Option<BlpMipChain> {
 /// owns both ends of the wire. Two serializers for a texel-exact blit order is how a character
 /// ends up with the wrong face.
 #[cfg(target_arch = "wasm32")]
-pub fn plan_to_json(plan: &BodyPlan) -> Option<String> {
+pub fn plan_to_json(plan: &CompositePlan) -> Option<String> {
     serde_json::to_string(plan).ok()
 }
 
@@ -432,90 +390,8 @@ impl CharSections {
         Some(decoded)
     }
 
-    /// **What a body atlas is made of, without reading a byte** - the base skin and every overlay
-    /// in blit order, each as the candidate paths to try and the tile to land in.
-    ///
-    /// Split out of [`Self::composite_body`] so the expensive half can leave the main thread. The
-    /// planning is pure lookups in this catalog; the rendering is ~20 texture decodes and a stack
-    /// of blits onto an atlas that is four times the area on an HD chain. Journal 43 priced the
-    /// latter: **202.8 ms per composite even in the seconds with FEW decodes**, 320.7 ms with
-    /// many, and cost tracks decode count at r = +0.735. So the decodes are worth caching and the
-    /// blit underneath them is a floor no cache can reach - it has to move, and it can only move
-    /// somewhere that has no catalog, which is why the plan has to be data.
-    pub fn plan_body(
-        &self,
-        race: u8,
-        sex: u8,
-        skin: u8,
-        face: u8,
-        facial_hair: u8,
-        hair_style: u8,
-        hair_color: u8,
-        equipment: [Option<&ItemDisplay>; 8],
-        emblem: Option<GuildEmblem>,
-        tabard_preview: bool,
-    ) -> Option<BodyPlan> {
-        let base = self.skin_texture(race, sex, skin)?.to_string();
-        let mut steps: Vec<BodyStep> = Vec::new();
-        // The head overlays: (sectionType, variation, color, texColumn, destTile) - the verified
-        // fan-out (RF-0067 §"section → cell core" + RF-0074 head map). Within a tile, order matters
-        // (later overwrites/blends over earlier): base skin (already the canvas) → face → facial
-        // hair → hair. The columns differ by section: face/facial-hair use TextureName[0]/[1]
-        // (lower/upper), hair uses [1]/[2]. Hair is blank for e.g. Human male, so those reads
-        // no-op there; included so the path is correct for races whose hairline does composite.
-        let overlays: [(u8, u8, u8, usize, Tile); 6] = [
-            (SECTION_FACE, face, skin, 0, TILE_G9),
-            (SECTION_FACE, face, skin, 1, TILE_G8),
-            (SECTION_FACIAL_HAIR, facial_hair, hair_color, 0, TILE_G9),
-            (SECTION_FACIAL_HAIR, facial_hair, hair_color, 1, TILE_G8),
-            (SECTION_HAIR, hair_style, hair_color, 1, TILE_G9),
-            (SECTION_HAIR, hair_style, hair_color, 2, TILE_G8),
-        ];
-        for (ty, var, color, col, tile) in overlays {
-            if let Some(path) = self.tex(race, sex, ty, var, color, col) {
-                steps.push(BodyStep {
-                    candidates: vec![path.to_string()],
-                    tile,
-                });
-            }
-        }
-        // One plan gates the underwear and drives the equipment blits.
-        let plan = equip_blits(&equipment, emblem, tabard_preview);
-        // The underwear, skipped when a tested cell is taken (`UNDERWEAR_TILES`); drawn first, so
-        // the untested cells (belt, tabard) stack on top.
-        for (col, layer, tested) in UNDERWEAR_TILES {
-            if plan.iter().any(|s| s.layer == layer && s.column < tested) {
-                continue;
-            }
-            if let Some(path) = self.tex(race, sex, SECTION_UNDERWEAR, 0, skin, col) {
-                steps.push(BodyStep {
-                    candidates: vec![path.to_string()],
-                    tile: EQUIP_TILES[layer],
-                });
-            }
-        }
-        // The equipment and emblem layers in plan order, each from its first decodable candidate -
-        // which is why a step carries a LIST: only a read can say which of them exists.
-        for step in &plan {
-            steps.push(BodyStep {
-                candidates: step.candidates(sex),
-                tile: EQUIP_TILES[step.layer],
-            });
-        }
-        Some(BodyPlan { base, steps })
-    }
-
-    /// Execute a [`BodyPlan`] against this catalog's decode cache and the patch chain - the
-    /// main-thread form. The work itself is [`render_plan_with`]; this only supplies the reader.
-    pub fn render_plan(&self, chain: &mut Chain, plan: &BodyPlan) -> Result<Option<BlpMipChain>> {
-        let mut read = |path: &str| self.decoded_texture(chain, path);
-        render_plan_with(plan, &mut read)
-            .with_context(|| format!("reading base skin '{}'", plan.base))
-            .map(Some)
-    }
-
-    /// Plan, then render. The one-call form every caller on the main thread still uses.
-    #[allow(clippy::too_many_arguments, reason = "a character's whole look")]
+    /// The body-skin atlas as one mip pyramid, read off `chain` on this thread:
+    /// [`Self::composite_plan`] run by [`CompositePlan::run`]; `Ok(None)` without a base skin row.
     pub fn composite_body(
         &self,
         chain: &mut Chain,
@@ -530,7 +406,7 @@ impl CharSections {
         emblem: Option<GuildEmblem>,
         tabard_preview: bool,
     ) -> Result<Option<BlpMipChain>> {
-        let Some(plan) = self.plan_body(
+        let Some(plan) = self.composite_plan(
             race,
             sex,
             skin,
@@ -544,7 +420,62 @@ impl CharSections {
         ) else {
             return Ok(None);
         };
-        self.render_plan(chain, &plan)
+        // Through the decode cache, not a bare read: see `run`'s note.
+        plan.run(|path| self.decoded_texture(chain, path))
+            .map(Some)
+    }
+
+    /// What a body composite reads and where each file lands, from the tables alone: the 256²
+    /// base skin, the head overlays, the underwear, the equipment by bodyslot − 2 and the guild
+    /// emblem ([`equip_blits`]), in blit order; `None` without a base skin row. It owns its paths,
+    /// so [`CompositePlan::run`] can read and blit on any thread.
+    pub fn composite_plan(
+        &self,
+        race: u8,
+        sex: u8,
+        skin: u8,
+        face: u8,
+        facial_hair: u8,
+        hair_style: u8,
+        hair_color: u8,
+        equipment: [Option<&ItemDisplay>; 8],
+        emblem: Option<GuildEmblem>,
+        tabard_preview: bool,
+    ) -> Option<CompositePlan> {
+        let base = self.skin_texture(race, sex, skin)?.to_owned();
+        let mut layers = Vec::new();
+        // The head overlays `(sectionType, variation, color, column, tile)` of `0x4782e0`, in order
+        // face, facial hair, hair; face and facial hair use columns 0/1, hair 1/2.
+        let overlays: [(u8, u8, u8, usize, Tile); 6] = [
+            (SECTION_FACE, face, skin, 0, TILE_G9),
+            (SECTION_FACE, face, skin, 1, TILE_G8),
+            (SECTION_FACIAL_HAIR, facial_hair, hair_color, 0, TILE_G9),
+            (SECTION_FACIAL_HAIR, facial_hair, hair_color, 1, TILE_G8),
+            (SECTION_HAIR, hair_style, hair_color, 1, TILE_G9),
+            (SECTION_HAIR, hair_style, hair_color, 2, TILE_G8),
+        ];
+        for (ty, var, color, col, tile) in overlays {
+            if let Some(path) = self.tex(race, sex, ty, var, color, col) {
+                layers.push((vec![path.to_owned()], tile));
+            }
+        }
+        // One plan gates the underwear and drives the equipment blits.
+        let plan = equip_blits(&equipment, emblem, tabard_preview);
+        // The underwear, skipped when a tested cell is taken (`UNDERWEAR_TILES`); drawn first, so
+        // the untested cells (belt, tabard) stack on top.
+        for (col, layer, tested) in UNDERWEAR_TILES {
+            if plan.iter().any(|s| s.layer == layer && s.column < tested) {
+                continue;
+            }
+            if let Some(path) = self.tex(race, sex, SECTION_UNDERWEAR, 0, skin, col) {
+                layers.push((vec![path.to_owned()], EQUIP_TILES[layer]));
+            }
+        }
+        // The equipment and emblem layers in plan order, each from its first decodable candidate.
+        for step in &plan {
+            layers.push((step.candidates(sex), EQUIP_TILES[step.layer]));
+        }
+        Some(CompositePlan { base, layers })
     }
 
     /// Load CharSections.dbc from the patch chain.
@@ -583,6 +514,47 @@ impl CharSections {
             sections,
             decoded: std::sync::Mutex::new(DecodeCache::default()),
         })
+    }
+}
+
+/// One body composite's reads in blit order ([`CharSections::composite_plan`]): the base skin, then
+/// each overlay's candidate paths, the first that decodes winning, with its atlas tile.
+///
+/// **Serde and public fields are a fork carry.** wasm32 has no threads, so "off the main thread"
+/// here means a Web Worker, and a worker shares nothing: the plan travels as JSON through
+/// `postMessage` to `manila-skin`, which owns no catalog and no chain. Pure data was already the
+/// point of splitting the plan from the render - this only makes it crossable.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CompositePlan {
+    pub base: String,
+    pub layers: Vec<(Vec<String>, Tile)>,
+}
+
+impl CompositePlan {
+    /// Read, decode and blit: each overlay at its tile per authored mip level (`0x475c50`,
+    /// `0x4770f0`). An overlay that reads nowhere is skipped; a base skin that does not read fails.
+    ///
+    /// Deviation: blends in 8-bit RGBA, not the client's RGB565 with 2-bit coverage, because that
+    /// format only saves texture memory and loses precision.
+    /// **The reader hands back a SHARED decode, which is a fork carry of one line.** This crate's
+    /// own reader is a decode cache ([`CharSections::decoded_texture`], the `tex_hit`/`tex_dec`
+    /// journal columns), and a cache that must hand out owned copies is a memcpy per overlay -
+    /// about twenty of them per composite. Only the base is copied, because it is the canvas every
+    /// blit mutates. A caller with no cache wraps its read in `Arc::new` and pays nothing.
+    pub fn run(
+        &self,
+        mut read: impl FnMut(&str) -> Option<std::sync::Arc<BlpMipChain>>,
+    ) -> Result<BlpMipChain> {
+        let mut atlas = read(&self.base)
+            .with_context(|| format!("reading base skin '{}'", self.base))?
+            .as_ref()
+            .clone();
+        for (candidates, tile) in &self.layers {
+            if let Some(overlay) = candidates.iter().find_map(|path| read(path)) {
+                blit_over(&mut atlas, &overlay, *tile);
+            }
+        }
+        Ok(atlas)
     }
 }
 

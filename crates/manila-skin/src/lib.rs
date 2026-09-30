@@ -12,12 +12,12 @@
 //! 239 -> 233 ms - and the blit floor underneath has to move somewhere else entirely.
 //!
 //! **No threads, no atomics.** A separate wasm instance in a Worker has its own linear memory, so
-//! nothing is shared and nothing needs `SharedArrayBuffer`: a `BodyPlan` goes in as JSON, the
+//! nothing is shared and nothing needs `SharedArrayBuffer`: a `CompositePlan` goes in as JSON, the
 //! finished atlas comes back as a transferable buffer. That matters because the alternatives are
 //! closed - bevy hard-disables its multi-threaded executor on wasm32 in its own `cfg`, so threads
 //! would not buy the ECS anything even if we had them.
 //!
-//! The layering itself is NOT reimplemented here. `benilla_formats::characters::render_plan_with`
+//! The layering itself is NOT reimplemented here. `benilla_formats::CompositePlan::run`
 //! is the single implementation, written against a reader; this module supplies one that fetches
 //! and decodes, exactly as the main thread supplies one that reads its cache. Two copies of a
 //! texel-exact order is how a character ends up with the wrong face.
@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use benilla_formats::{render_plan_with, BodyPlan};
+use benilla_formats::CompositePlan;
 use benilla_formats::BlpMipChain;
 use wasm_bindgen::prelude::*;
 
@@ -50,7 +50,7 @@ async fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
 
 /// Render one body atlas from a plan.
 ///
-/// `plan_json` is a serialized [`BodyPlan`]; `data_url_for` is the page's own URL builder, passed
+/// `plan_json` is a serialized [`CompositePlan`]; `data_url_for` is the page's own URL builder, passed
 /// in rather than rebuilt here so the worker asks for the SAME addresses the client does - version
 /// pin included. Three URL shapes for one file would be three cache entries and a prefetch that
 /// warms none of them.
@@ -60,11 +60,11 @@ async fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
 /// own `decode_atlas`. One owner for both ends.
 #[wasm_bindgen]
 pub async fn render_body(plan_json: String, url_prefix: String, url_suffix: String) -> Option<Vec<u8>> {
-    let plan: BodyPlan = serde_json::from_str(&plan_json).ok()?;
+    let plan: CompositePlan = serde_json::from_str(&plan_json).ok()?;
     // One decode per distinct path per plan, and the miss is remembered too - re-fetching a path
     // that 404'd once per step would turn a wardrobe into a round trip storm.
     //
-    // **Candidates stop at the first hit, exactly as `render_plan_with` will consume them.** The
+    // **Candidates stop at the first hit, exactly as `CompositePlan::run` will consume them.** The
     // first cut fetched every candidate of every step up front, because the renderer is sync and
     // `fetch` is not. That is correct and wasteful: `equip_region_candidates` orders the list
     // `['U', <sex>]` and the universal texture almost always exists, so the gendered one was
@@ -96,13 +96,17 @@ pub async fn render_body(plan_json: String, url_prefix: String, url_suffix: Stri
         ok
     };
     fetch_once(&plan.base, &mut seen).await;
-    for step in &plan.steps {
-        for path in &step.candidates {
+    for (candidates, _tile) in &plan.layers {
+        for path in candidates {
             if fetch_once(path, &mut seen).await {
                 break;
             }
         }
     }
-    let atlas = render_plan_with(&plan, &mut |path: &str| seen.get(path).cloned().flatten())?;
+    // The blit stack is upstream's `CompositePlan::run`, the same one the main thread uses. Two
+    // copies of a texel-exact layering order is how a character ends up with the wrong face.
+    let atlas = plan
+        .run(|path: &str| seen.get(path).cloned().flatten())
+        .ok()?;
     Some(benilla_formats::encode_atlas(&atlas))
 }
