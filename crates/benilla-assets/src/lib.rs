@@ -117,7 +117,15 @@ impl AssetReader for MpqAssetReader {
         // The SAME builder the chain's sync reads and the page's boot prefetch use: three URL
         // shapes for one file would mean three cache entries, and a prefetch that warms none of
         // the addresses actually read.
-        let url = benilla_formats::web::data_url(internal);
+        // **An addon's own art is not in the patch chain**, so `/data` can only ever 404 it.
+        // `read_chain_or_loose` already says this and answers it by reading the install tree; wasm
+        // has no filesystem, so the host's `/addons` route is that tree here. Without this branch
+        // every `.tga` and `.blp` an addon ships is silently missing in the browser while the same
+        // build shows it on the desktop.
+        let url = match benilla_formats::web::addons_rel(internal) {
+            Some(rel) => benilla_formats::web::addons_url(rel),
+            None => benilla_formats::web::data_url(internal),
+        };
         let bytes = wasm_fetch(&url).await.map_err(|e| match e {
             WasmFetchError::NotFound => AssetReaderError::NotFound(path.to_path_buf()),
             WasmFetchError::Other(msg) => AssetReaderError::Io(Arc::new(std::io::Error::other(msg))),

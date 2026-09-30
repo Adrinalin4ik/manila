@@ -27,6 +27,25 @@ pub fn encode_name(name: &str) -> String {
     out
 }
 
+/// `name` with its `Interface\AddOns\` prefix stripped, or `None` when it carries none.
+///
+/// An addon's own art, fonts and audio are NOT in the patch chain — `read_chain_or_loose`'s doc
+/// says so, and the desktop reference reads them off the install tree. That tree is a filesystem,
+/// which wasm does not have, so in the browser these belong to the host's `/addons` route and
+/// asking `/data` for them can only ever 404.
+///
+/// Case-insensitive, and both separators: the reference is a Windows client, and a sprite path
+/// reaches the asset reader lowercased with backslashes while a `.toc` may write either.
+pub fn addons_rel(name: &str) -> Option<&str> {
+    const PREFIXES: [&str; 2] = ["interface\\addons\\", "interface/addons/"];
+    PREFIXES.iter().find_map(|prefix| {
+        let head = name.get(..prefix.len())?;
+        head.eq_ignore_ascii_case(prefix)
+            .then(|| name.get(prefix.len()..))
+            .flatten()
+    })
+}
+
 #[cfg(target_arch = "wasm32")]
 mod wasm {
     use wasm_bindgen::JsValue;
@@ -79,6 +98,26 @@ mod wasm {
             return format!("{}/{}", data_base(), super::encode_name(name));
         }
         format!("{}/{}?v={pin}", data_base(), super::encode_name(name))
+    }
+
+    /// `{origin}/addons/<rel>` — [`data_url`]'s sibling for a path
+    /// [`super::addons_rel`] claimed, each component percent-encoded so an addon folder with a
+    /// space in its name (`Attack bar`) addresses correctly.
+    ///
+    /// **No `?v=` pin, deliberately.** That pin is the mounted ARCHIVE's fingerprint, and an addon
+    /// folder is not in the archive: pinning its files to it would key a year-long cache on
+    /// something that does not describe them. The route answers `private, max-age=3600` on its
+    /// own terms, which is the operator editing his own files and wanting to see it.
+    pub fn addons_url(rel: &str) -> String {
+        let base = data_base();
+        let root = base.strip_suffix("/data").unwrap_or(&base);
+        let path = rel
+            .replace('\\', "/")
+            .split('/')
+            .map(super::encode_name)
+            .collect::<Vec<_>>()
+            .join("/");
+        format!("{root}/addons/{path}")
     }
 
     /// Append `name` to the page's boot-read trace, if the page armed one — the input to
@@ -182,4 +221,24 @@ mod wasm {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use wasm::{cache_pin, data_base, data_url, exists_sync, fetch_sync, log_index_misses, trace};
+pub use wasm::{
+    addons_url, cache_pin, data_base, data_url, exists_sync, fetch_sync, log_index_misses, trace,
+};
+
+#[cfg(test)]
+mod tests {
+    use super::addons_rel;
+
+    /// The prefix is matched however the path spells it, and nothing else is claimed.
+    #[test]
+    fn addon_paths_are_claimed_whatever_their_case_or_separator() {
+        assert_eq!(addons_rel("interface\\addons\\shagudps\\img\\announce.tga"), Some("shagudps\\img\\announce.tga"));
+        assert_eq!(
+            addons_rel("Interface/AddOns/pfQuest/img/init/simple.tga"),
+            Some("pfQuest/img/init/simple.tga")
+        );
+        // A chain path that merely starts with the interface folder stays the chain's.
+        assert_eq!(addons_rel("Interface\\Icons\\INV_Misc_Bag_08.blp"), None);
+        assert_eq!(addons_rel("interface"), None);
+    }
+}

@@ -321,21 +321,9 @@ pub(crate) fn read_addon_file(_root: &Path, req: &str) -> Option<Vec<u8>> {
         .or_else(|| super::reference_ui::read(&req.replace('/', "\\")))
 }
 
-/// `{origin}/addons/<rel>` — the sibling of the `/data` route the chain already fetches against.
-///
-/// Derived from [`benilla_formats::web::data_base`] rather than read from `location` again, so
-/// both routes are anchored to one place: whatever origin the chain is talking to, addons come
-/// from the same host.
-#[cfg(target_arch = "wasm32")]
-fn addons_base() -> String {
-    let data = benilla_formats::web::data_base();
-    format!("{}/addons", data.strip_suffix("/data").unwrap_or(&data))
-}
-
 #[cfg(target_arch = "wasm32")]
 fn fetch_addon_file(rel: &str) -> Option<Vec<u8>> {
-    let url = format!("{}/{}", addons_base(), rel.replace('\\', "/"));
-    benilla_formats::web::fetch_sync(&url).ok()
+    benilla_formats::web::fetch_sync(&benilla_formats::web::addons_url(rel)).ok()
 }
 
 /// `req` with the `Interface/AddOns/` prefix stripped, or `None` if it does not carry one.
@@ -466,7 +454,7 @@ fn discover_folder() -> Vec<Addon> {
     let Some(root) = root() else {
         return Vec::new();
     };
-    let Ok(bytes) = benilla_formats::web::fetch_sync(&format!("{}/__index", addons_base())) else {
+    let Ok(bytes) = benilla_formats::web::fetch_sync(&benilla_formats::web::addons_url("__index")) else {
         return Vec::new(); // no addon route (or no folder) is the normal case, not an error
     };
     // One path per line — see the host route's module note for why this is not JSON.
