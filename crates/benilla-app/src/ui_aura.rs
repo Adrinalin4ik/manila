@@ -102,10 +102,21 @@ impl Plugin for UiAuraPlugin {
 
 /// `PlayerAuras_Update`'s passes: drop a record whose slot lost its spell, closing the gap
 /// (`0x4e421b`), then append new slots in ascending order (`0x4e424e`-`0x4e4374`).
-fn reconcile(cache: &mut Vec<CachedAura>, live: &[UnitAuraSlot], now: f64) {
+///
+/// **Returns the slots that lost their occupant**, which is the only honest signal that a
+/// duration stamp has gone stale - see [`join_duration`]. A discarded return here would put the
+/// caller back on guessing it from a clock, which is the defect this reports out of.
+#[must_use]
+fn reconcile(cache: &mut Vec<CachedAura>, live: &[UnitAuraSlot], now: f64) -> Vec<u8> {
+    let mut vacated = Vec::new();
     cache.retain(|c| {
-        live.iter()
-            .any(|a| a.slot == c.slot && a.spell_id == c.spell_id)
+        let kept = live
+            .iter()
+            .any(|a| a.slot == c.slot && a.spell_id == c.spell_id);
+        if !kept {
+            vacated.push(c.slot);
+        }
+        kept
     });
     for a in live {
         if let Some(c) = cache.iter_mut().find(|c| c.slot == a.slot) {
@@ -129,6 +140,7 @@ fn reconcile(cache: &mut Vec<CachedAura>, live: &[UnitAuraSlot], now: f64) {
             });
         }
     }
+    vacated
 }
 
 /// What a frame repaints on; not the countdown, which the button polls.
@@ -416,8 +428,9 @@ fn feed_auras(
     // The `UnitBuff` gate's inputs, the same reaction the selection ring and nameplates use.
     factions: Option<Res<Factions>>,
     reputations: Res<Reputations>,
-    // Read-only: the net path writes the stamps and only the session's end drops them.
-    durations: Res<AuraDurations>,
+    // Mutable since the vacate sweep below: the net path writes the stamps, and a slot losing its
+    // occupant is what retires one.
+    mut durations: ResMut<AuraDurations>,
     mut cache: ResMut<PlayerAuraCache>,
     time: Res<Time<Real>>,
     mut mem: ResMut<AuraFeedMemory>,
@@ -443,7 +456,22 @@ fn feed_auras(
         .filter(|a| shown_in_aura_ui(catalog, a.spell_id))
         .copied()
         .collect();
-    reconcile(&mut cache.auras, &live, bevy_now);
+    // **The vacate sweep, and the whole reason [`reconcile`] returns anything.** A stamp belongs
+    // to whatever held the slot when it landed, so the moment that aura leaves, the stamp is spent.
+    //
+    // `received_at < bevy_now` is not caution, it is the one case this must not eat: a slot can be
+    // vacated and refilled in the SAME frame, and the replacement's own packet may already have
+    // landed in it. Both clocks are `Time<Real>::elapsed_secs_f64`, fixed per frame, so a stamp
+    // from this frame is the newcomer's and is kept.
+    for slot in reconcile(&mut cache.auras, &live, bevy_now) {
+        if durations
+            .by_slot
+            .get(&slot)
+            .is_some_and(|d| d.received_at < bevy_now)
+        {
+            durations.by_slot.remove(&slot);
+        }
+    }
 
     // No stamp is pruned for an empty slot: the packet arrives before its slot fills.
 
@@ -606,14 +634,21 @@ fn feed_auras(
     }
 }
 
-/// How long before its aura a duration packet may arrive and still join it. The measured lead is
-/// one frame, about 50 ms, on a fresh apply; a recycled slot's stale stamp is seconds older.
-const DURATION_SLACK: f64 = 1.0;
-
 /// Joins a slot's stamp to the aura in that slot as `(duration, expirationTime)` on the script
-/// clock, `(0, 0)` for none; only this rejects a stamp. A stamp older than the aura by more than
-/// [`DURATION_SLACK`] is dropped as an earlier occupant's, where the reference's reader
-/// (`0x4e4450`) has no freshness test.
+/// clock, `(0, 0)` for none. The reference's reader (`0x4e4450`) has no freshness test and neither
+/// has this any more.
+///
+/// **There used to be an age gate here and it was wrong.** It dropped a stamp more than a second
+/// older than its aura, to keep a recycled slot's leftover off a new occupant. On a fresh apply
+/// the packet leads its aura by about a frame, so that held - and at login it destroyed the very
+/// case it was supposed to serve. Measured in the owner's browser: the server sent the duration at
+/// t=15.49, the loading screen ran, the avatar streamed in and the aura appeared at t=36.44, and
+/// the stamp was thrown away for being 20.94 s old. Every buff read "0 seconds remaining" after
+/// every reload, which is what he had been seeing from the start.
+///
+/// Age was never the signal. A stamp is an earlier occupant's exactly when the slot HAS an earlier
+/// occupant that left, and [`reconcile`] is the one place that knows: it drops the stamps of the
+/// slots it vacates, so nothing stale can reach here and a stamp of any age is this aura's.
 fn join_duration(
     stamp: Option<&DurationStamp>,
     appeared_at: f64,
@@ -624,21 +659,18 @@ fn join_duration(
     // are the same `(0, 0)` to everything downstream and need opposite fixes.
     if trace_period().is_some() {
         match stamp {
-            None => info!("aura trace: join - no stamp for an aura that appeared @ {appeared_at:.2}"),
-            Some(d) if d.received_at < appeared_at - DURATION_SLACK => info!(
-                "aura trace: join REJECTED - stamp received @ {:.2} is {:.2}s older than the aura                  @ {appeared_at:.2}, slack {DURATION_SLACK:.2}s",
-                d.received_at,
-                appeared_at - d.received_at
+            None => info!(
+                "aura trace: join - no stamp for the aura that appeared @ {appeared_at:.2}"
             ),
             Some(d) => info!(
-                "aura trace: join ok - {:.1}s total, {:.1}s left",
+                "aura trace: join ok - {:.1}s total, {:.1}s left (stamp @ {:.2})",
                 d.total,
-                d.expires_at - bevy_now
+                d.expires_at - bevy_now,
+                d.received_at
             ),
         }
     }
     stamp
-        .filter(|d| d.received_at >= appeared_at - DURATION_SLACK)
         .map(|d| (d.total, script_now + (d.expires_at - bevy_now)))
         .unwrap_or((0.0, 0.0))
 }
@@ -833,10 +865,10 @@ mod tests {
     fn a_new_low_slot_aura_appends_at_the_end_not_sorted_by_slot() {
         let mut cache = Vec::new();
         // X lands in slot 5 first.
-        reconcile(&mut cache, &[slot(5, 100)], 1.0);
+        let _vacated = reconcile(&mut cache, &[slot(5, 100)], 1.0);
         assert_eq!(order(&cache), [(5, 100)]);
         // Y lands in slot 2 later: the descriptor reads [2, 5], but Y is newer.
-        reconcile(&mut cache, &[slot(2, 200), slot(5, 100)], 2.0);
+        let _vacated = reconcile(&mut cache, &[slot(2, 200), slot(5, 100)], 2.0);
         assert_eq!(
             order(&cache),
             [(5, 100), (2, 200)],
@@ -848,15 +880,15 @@ mod tests {
     #[test]
     fn a_dropped_aura_repacks_and_a_recycled_slot_appends_fresh() {
         let mut cache = Vec::new();
-        reconcile(&mut cache, &[slot(0, 10), slot(1, 20), slot(2, 30)], 1.0);
+        let _vacated = reconcile(&mut cache, &[slot(0, 10), slot(1, 20), slot(2, 30)], 1.0);
         assert_eq!(order(&cache), [(0, 10), (1, 20), (2, 30)]);
 
         // The middle aura (slot 1) drops.
-        reconcile(&mut cache, &[slot(0, 10), slot(2, 30)], 2.0);
+        let _vacated = reconcile(&mut cache, &[slot(0, 10), slot(2, 30)], 2.0);
         assert_eq!(order(&cache), [(0, 10), (2, 30)], "the gap closes");
 
         // A new spell takes slot 1: it appends, not back into the old middle.
-        reconcile(&mut cache, &[slot(0, 10), slot(1, 99), slot(2, 30)], 3.0);
+        let _vacated = reconcile(&mut cache, &[slot(0, 10), slot(1, 99), slot(2, 30)], 3.0);
         assert_eq!(
             order(&cache),
             [(0, 10), (2, 30), (1, 99)],
@@ -867,40 +899,41 @@ mod tests {
     #[test]
     fn a_surviving_aura_refreshes_in_place() {
         let mut cache = Vec::new();
-        reconcile(&mut cache, &[slot(0, 10), slot(1, 20)], 1.0);
+        let _vacated = reconcile(&mut cache, &[slot(0, 10), slot(1, 20)], 1.0);
         let mut restacked = slot(1, 20);
         restacked.stacks = 5;
-        reconcile(&mut cache, &[slot(0, 10), restacked], 2.0);
+        let _vacated = reconcile(&mut cache, &[slot(0, 10), restacked], 2.0);
         assert_eq!(order(&cache), [(0, 10), (1, 20)], "position unchanged");
         assert_eq!(cache[1].stacks, 5, "stack count refreshed");
         assert_eq!(cache[0].appeared_at, 1.0, "appeared_at is not disturbed");
     }
 
+    /// The owner's bug, as a test: at login the duration lands long before the aura, because a
+    /// loading screen sits between them. Measured in his browser at 20.94 s apart.
     #[test]
-    fn a_duration_is_joined_only_when_it_is_no_older_than_the_aura() {
-        // Received at t=100 for an aura that appeared at t=200: a previous occupant's.
-        let stale = DurationStamp {
-            total: 30.0,
-            expires_at: 130.0,
-            received_at: 100.0,
+    fn a_duration_that_predates_its_aura_by_a_loading_screen_still_joins() {
+        let at_login = DurationStamp {
+            total: 300.0,
+            expires_at: 315.49,
+            received_at: 15.49,
         };
-        assert_eq!(
-            join_duration(Some(&stale), 200.0, 200.0, 5000.0),
-            (0.0, 0.0),
-            "a stamp seconds older than the aura is rejected — no timer, not a wrong one"
-        );
-        // Received just before the aura: joined, and rebased onto the script clock.
-        let fresh = DurationStamp {
-            total: 30.0,
-            expires_at: 230.0,
-            received_at: 199.9,
-        };
-        assert_eq!(
-            join_duration(Some(&fresh), 200.0, 200.0, 5000.0),
-            (30.0, 5030.0)
-        );
-        // No stamp: a permanent aura, which gets no packet.
+        let (total, expiry) = join_duration(Some(&at_login), 36.44, 36.44, 5000.0);
+        assert_eq!(total, 300.0, "the stamp is this aura's whatever its age");
+        // What is LEFT is what counts down from the packet, not from the aura: 20.95 s of it went
+        // on the loading screen and the server sent a remainder, not a fresh duration.
+        assert!((expiry - 5279.05).abs() < 1e-9, "got {expiry}");
+        // No stamp is still no timer: a permanent aura gets no packet.
         assert_eq!(join_duration(None, 200.0, 200.0, 5000.0), (0.0, 0.0));
+    }
+
+    /// The case the old age gate existed for, now answered by occupancy: the slot a departing
+    /// aura leaves is reported, and its stamp retires with it.
+    #[test]
+    fn a_slot_that_loses_its_aura_reports_itself_so_its_stamp_can_retire() {
+        let mut cache = Vec::new();
+        assert!(reconcile(&mut cache, &[slot(2, 100)], 1.0).is_empty());
+        // Slot 2 is taken over by a different spell: the previous occupant is named.
+        assert_eq!(reconcile(&mut cache, &[slot(2, 200)], 2.0), vec![2]);
     }
 
     /// The duration packet arrives about a frame before the delta that fills its slot.
@@ -912,7 +945,7 @@ mod tests {
         let mut cache = Vec::new();
         assert!(cache.is_empty());
         // t = 15.15: the next frame's descriptor delta fills slot 0.
-        reconcile(&mut cache, &[slot(0, 1126)], 15.15);
+        let _vacated = reconcile(&mut cache, &[slot(0, 1126)], 15.15);
 
         let (total, expiry) = join_duration(
             durations.by_slot.get(&0),

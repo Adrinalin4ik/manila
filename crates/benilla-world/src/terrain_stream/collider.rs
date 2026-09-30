@@ -18,8 +18,19 @@ mod web_budget;
 
 /// Microseconds spent building trimesh colliders since the last read — re-exported for the FPS
 /// journal, which is in another crate and has no business reaching into this module's internals.
+#[cfg(any(target_arch = "wasm32", test))]
 pub fn take_build_micros() -> u64 {
     web_budget::take_build_micros()
+}
+
+/// **Zero natively, because the counter lives in the budget queue and that queue is the browser's.**
+/// `web_budget` is `#[cfg(any(wasm32, test))]` while this function was not, so a native build of
+/// this crate as a DEPENDENCY - which is every `cargo test` of `benilla-app` - failed to compile
+/// on an unresolved module. It has been so since the column was added (`d2fb3b0f`, 2026-09-18),
+/// which is why the native suite has not run here since.
+#[cfg(not(any(target_arch = "wasm32", test)))]
+pub fn take_build_micros() -> u64 {
+    0
 }
 
 /// Wall-clock spent per frame *attaching* finished colliders before deferring the rest to a later
