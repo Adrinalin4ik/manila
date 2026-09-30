@@ -624,6 +624,11 @@ fn load_config(world: &mut World) {
         // `gxApi` is the render backend, a fact about the machine that `sync_cvars` pushes live, so
         // it is never persisted.
         cvars.own_for_session("gxApi", None);
+        // The ablation switches and traces: instruments, never saved settings. See
+        // [`table::SESSION_ONLY`] for the defect that put this here.
+        for name in table::SESSION_ONLY {
+            cvars.own_for_session(name, None);
+        }
         // URL settings are session-owned before loading the saved file.
         #[cfg(target_arch = "wasm32")]
         for row in REGISTERED {

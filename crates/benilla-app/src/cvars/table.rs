@@ -104,6 +104,35 @@ const fn ours(name: &'static str, default: &'static str, why: &'static str) -> R
     }
 }
 
+/// **The measuring levers, which must never outlive the session that set them.**
+///
+/// These are the ablation switches and traces (`perf::journal::on_cvar`): each one removes a whole
+/// lane so the frame says what that lane was worth. They are instruments, not settings — and the
+/// registry saves every row that sits off its default, so before this they were written into
+/// `config.toml` and restored on the next launch.
+///
+/// That is not theoretical. `fxOff 1` is the first line of the effects-ablation protocol; it was
+/// typed for one measurement, saved, and came back on the next boot with the whole effect buffer
+/// emptied in `Last` — so the selection ring, the blob shadows, the footprints and every ground
+/// effect were gone at once, with every graphics slider at maximum and nothing on screen saying
+/// why. A lane switched off for a measurement looks exactly like a bug, which is the reason a
+/// measuring lever has no business being a saved setting.
+///
+/// Marked session-owned at load, so the file's entry is left as found and ignored rather than
+/// rewritten: an existing `fxOff = "1"` stops biting immediately without touching the player's
+/// file. Each still works for the session that types it.
+pub(crate) const SESSION_ONLY: &[&str] = &[
+    "animParkAll",
+    "animLodOff",
+    "roomLodOff",
+    "matAnimOff",
+    "fxOff",
+    "uiLua",
+    "feedGateTrace",
+    "dumpSchedule",
+    "archCensus",
+];
+
 /// The table as the script VM's registrar wants it: `(name, default)` pairs in table order.
 pub(crate) fn registered_pairs() -> impl Iterator<Item = (&'static str, &'static str)> {
     REGISTERED.iter().map(|r| (r.name, r.default))

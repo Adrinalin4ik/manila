@@ -17,7 +17,6 @@ use benilla_world::world_map::CurrentMap;
 
 use crate::area::ZoneInfo;
 use crate::char_select::ClientState;
-use crate::chr_classes::ChrClassTable;
 use crate::creature_anim::select::{move_flags, MovementState};
 use crate::entities::mount::MountChild;
 use crate::names::NameCache;
