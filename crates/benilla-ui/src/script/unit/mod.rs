@@ -137,7 +137,10 @@ pub struct UnitState {
     pub guild: Option<super::guild::UnitGuild>,
     /// The creature template's subname ("Stable Master"), the tooltip's second line.
     pub subtitle: Option<String>,
-    /// The creature type word ("Beast") from `CreatureType.dbc`, the level line's class slot.
+    /// The word ("Beast") from `CreatureType.dbc` for the type the reference's resolver `0x605570`
+    /// returns for any unit: the shapeshift form's, else the creature template's, else the
+    /// race's. `UnitCreatureType` answers it, and a creature's level line takes it as its class
+    /// slot; a player's reads race and class instead. `None` for type 0 or no descriptor.
     pub creature_type_name: Option<String>,
     /// Creature rank 0..=4 as the reference's getter (`0x605620`) answers it, so already gated:
     /// 0 without a cached creature template or with a pet number. The tooltip's rank word,
@@ -154,9 +157,10 @@ pub struct UnitState {
     /// The faction name ("Stormwind"), the tooltip line after the level line, from `Faction.dbc`
     /// through the faction template with its hiding gates applied; `None` shows no line.
     pub faction_name: Option<String>,
-    /// `UnitIsConnected`; party tokens take the roster status byte's `0x01`. The default `false`
-    /// reads disconnected, which greys a stock mana bar (`UnitFrame.lua:214`), so a synthetic
-    /// live unit must set it.
+    /// `UnitIsConnected`: any unit the object manager holds answers 1 (`0x517daf`); a party token
+    /// with no object takes the roster status byte's `0x01`. The default `false` reads
+    /// disconnected, which greys a stock mana bar (`UnitFrame.lua:214`), so a hand-built live
+    /// unit must set it; the app's `snapshot` does for every held one.
     pub is_connected: bool,
     /// `UnitIsPVPFreeForAll`: `PLAYER_FLAGS` bit `0x80`, or the roster status byte's `0x10`;
     /// independent of [`Self::pvp`].
@@ -500,6 +504,6 @@ mod resolve;
 #[cfg(test)]
 mod tests;
 
-pub use resolve::UnitGuids;
+pub use resolve::{parse_unit_token, UnitBase, UnitGuids, UnitTokenParse};
 
 pub(super) use bindings::install;

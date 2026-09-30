@@ -32,8 +32,9 @@ mod immunity;
 pub use immunity::{cc_exemption, grants_immunity, CcExemption};
 pub use radius::{load_spell_radii, SpellRadius, SpellRadiusCatalog};
 pub use ranges::{
-    load_spell_ranges, min_max_range, SpellRange, SpellRangeCatalog, COMBAT_REACH_ADD,
-    MELEE_RANGE_FLOOR, ON_NEXT_SWING_RANGE,
+    load_spell_ranges, min_max_range, min_max_range_reads_units, RangeTargets, RangeUnit,
+    SpellRange, SpellRangeCatalog, UnitMotion, COMBAT_REACH_ADD, MELEE_RANGE_FLOOR,
+    MOVING_BONUS_FLAGS, MOVING_RANGE_BONUS, ON_NEXT_SWING_RANGE,
 };
 pub use soft_float::modify as soft_modify;
 pub use tokens::{substitute, SpellMods, TokenContext, TokenNumber};
@@ -79,6 +80,9 @@ const COL_SPELL_FAMILY_NAME: usize = 160;
 const COL_SPELL_FAMILY_FLAGS_LOW: usize = 161;
 /// `Targets` (`+0x34`): the seed the cast arm loads into its targeting word (`0x6e525a`).
 const COL_TARGETS: usize = 13;
+/// `TargetCreatureType` (`+0x38`): the creature-type mask `BindTarget` (`0x6e5c26`) and
+/// `SpellCanTargetUnit`'s mirror (`0x6e6544`) test the unit's type against, bit `type - 1`.
+const COL_TARGET_CREATURE_TYPE: usize = 14;
 /// `EffectImplicitTargetA[0]` (`+0x148`), the key of the cast arm's 62-case switch (`0x6e5484`).
 const COL_IMPLICIT_TARGET_A1: usize = 82;
 /// `EffectImplicitTargetB[0]` (`+0x154`), walked beside A by the classifier `0x6ea280`.
@@ -104,6 +108,9 @@ const COL_ATTRIBUTES: usize = 6;
 const COL_ATTRIBUTES_EX: usize = 7;
 const COL_ATTRIBUTES_EX2: usize = 8;
 const COL_ATTRIBUTES_EX3: usize = 9;
+/// `AttributesEx4` (`+0x28`), the dword after `AttributesEx3`: the pet-bar spell arm tests its
+/// `0x20` at `0x4bd355`.
+const COL_ATTRIBUTES_EX4: usize = 10;
 const COL_SPEED: usize = 37;
 const COL_EFFECT_1: usize = 61;
 /// `EffectMiscValue[0]`, `61 + 15 × 3`: the 16th `[3]` array from `Effect`.
@@ -176,6 +183,10 @@ const COL_EFFECT_ITEM_TYPE_1: usize = 103;
 
 /// `SPELL_ATTR3_NORMAL_RANGED_ATTACK`: damage floats melee white (`0x6128b0`).
 const ATTR_EX3_NORMAL_RANGED_ATTACK: u32 = 0x8000;
+/// `SPELL_ATTR_EX4_ALLOW_CLIENT_TARGETING` (vmangos `SpellDefines.h:953`): a pet-bar press casts
+/// through the generic entry `0x6e4b60` (`0x4bd355`, `0x4bd378`) instead of sending the pet
+/// action.
+const ATTR_EX4_ALLOW_CLIENT_TARGETING: u32 = 0x20;
 /// `SPELL_ATTR_EX3_NO_CASTING_BAR_TEXT` (vmangos `SpellDefines.h:907`).
 const ATTR_EX3_NO_CASTING_BAR_TEXT: u32 = 0x4;
 /// `AttributesEx3` bit 13: `0x6e7595` tests it as `0x20` in the word's second byte.
@@ -189,6 +200,9 @@ const ATTR_RANGED: u32 = 0x2;
 const ATTR_TARGET_MAIN_HAND_ITEM: u32 = 0x200;
 /// `SPELL_ATTR_EX2_AUTO_REPEAT`: Auto Shot and wand Shoot.
 const ATTR_EX2_AUTO_REPEAT: u32 = 0x20;
+/// `SPELL_ATTR_EX2_ALLOW_DEAD_TARGET` (vmangos `SpellDefines.h:868`): the bind's dead-unit gate
+/// tests it at `0x6e5c85`.
+const ATTR_EX2_ALLOW_DEAD_TARGET: u32 = 0x1;
 const ATTR_EX2_DO_NOT_RESET_COMBAT_TIMERS: u32 = 0x20000;
 /// `SPELL_ATTR_PASSIVE`: the spellbook grays the spell (`SpellBookFrame.lua:379-390`).
 const ATTR_PASSIVE: u32 = 0x40;
@@ -485,6 +499,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 attributes_ex: u32_at(r, COL_ATTRIBUTES_EX).unwrap_or(0),
                 attributes_ex2: u32_at(r, COL_ATTRIBUTES_EX2).unwrap_or(0),
                 attributes_ex3: u32_at(r, COL_ATTRIBUTES_EX3).unwrap_or(0),
+                attributes_ex4: u32_at(r, COL_ATTRIBUTES_EX4).unwrap_or(0),
                 school: u32_at(r, COL_SCHOOL).unwrap_or(0),
                 mechanic: u32_at(r, COL_MECHANIC).unwrap_or(0),
                 effect_mechanic: std::array::from_fn(|i| {
@@ -528,6 +543,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 range_index: u32_at(r, COL_RANGE_INDEX).unwrap_or(0),
                 modal_next_spell: u32_at(r, COL_MODAL_NEXT_SPELL).unwrap_or(0),
                 targets: u32_at(r, COL_TARGETS).unwrap_or(0),
+                target_creature_type: u32_at(r, COL_TARGET_CREATURE_TYPE).unwrap_or(0),
                 implicit_target_a1: u32_at(r, COL_IMPLICIT_TARGET_A1).unwrap_or(0),
                 effect_implicit_target_a: std::array::from_fn(|i| {
                     u32_at(r, COL_IMPLICIT_TARGET_A1 + i).unwrap_or(0)

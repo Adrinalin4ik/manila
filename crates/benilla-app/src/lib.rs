@@ -45,6 +45,7 @@ mod console;
 #[cfg(not(target_arch = "wasm32"))]
 mod crash;
 mod creature_anim;
+mod creature_type;
 mod cursor;
 mod cvars;
 mod death;

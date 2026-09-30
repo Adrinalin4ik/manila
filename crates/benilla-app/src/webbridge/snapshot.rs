@@ -75,7 +75,10 @@ pub(crate) struct BridgeReadout<'w, 's> {
     names: Option<Res<'w, NameCache>>,
     factions: Option<Res<'w, Factions>>,
     reputations: Option<Res<'w, Reputations>>,
-    classes: Option<Res<'w, ChrClassTable>>,
+    /// `ChrClasses.dbc` and the creature-type resolver's form table, as one parameter:
+    /// upstream bundles them because its feeders sit at Bevy's 16-parameter limit, and the
+    /// bridge takes the same bundle so `snapshot`'s two table arguments come from one place.
+    tables: crate::ui_unit::SnapshotTables<'w>,
 }
 
 impl BridgeReadout<'_, '_> {
@@ -136,7 +139,13 @@ impl BridgeReadout<'_, '_> {
         ];
 
         let now = Instant::now();
-        let chr = self.classes.as_deref().map(|t| &t.0);
+        let chr = self.tables.classes();
+        // Without a name cache the resolver has no template stage; `Default` leaves every
+        // stage absent, which is what a unit with no sources resolves to anyway.
+        let types = self
+            .names
+            .as_deref()
+            .map_or_else(Default::default, |n| self.tables.types(n));
         let self_row = self.self_q.single().ok();
         let self_store = self_row.map(|(store, _, _)| store);
         let player_pos = self.player.as_ref().map(|p| p.pos);
@@ -146,7 +155,7 @@ impl BridgeReadout<'_, '_> {
             (Some(player), Some((store, motion, mounted))) => {
                 let guid = self.self_guid.as_ref().and_then(|g| g.0).unwrap_or(0);
                 let name = self.peek_name(guid);
-                let unit = crate::ui_unit::snapshot(store, guid, name, 0, chr);
+                let unit = crate::ui_unit::snapshot(store, guid, name, 0, chr, types);
                 let mut u = unit_fields(guid, EntityKind::Player, &unit, motion, None);
                 u.push(("pos".into(), pos_payload(player.pos)));
                 u.push((
@@ -205,6 +214,7 @@ impl BridgeReadout<'_, '_> {
                 self_store,
                 d2.sqrt(),
                 chr,
+                types,
             )
         };
         let mut target = PlainValue::Null;
@@ -257,6 +267,7 @@ impl BridgeReadout<'_, '_> {
         self_store: Option<&ObjectStore>,
         dist: f32,
         chr: Option<&benilla_formats::ChrClasses>,
+        types: crate::creature_type::CreatureTypeSources<'_>,
     ) -> PlainValue {
         let name = self.peek_name(guid);
         let mut u = match store {
@@ -270,7 +281,7 @@ impl BridgeReadout<'_, '_> {
                     }
                     _ => 0,
                 };
-                let unit = crate::ui_unit::snapshot(store, guid, name, reaction, chr);
+                let unit = crate::ui_unit::snapshot(store, guid, name, reaction, chr, types);
                 unit_fields(guid, net.kind, &unit, motion, store.0.unit_target())
             }
             None => vec![
