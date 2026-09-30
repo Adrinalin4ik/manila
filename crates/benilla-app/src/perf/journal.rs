@@ -684,7 +684,12 @@ fn take_moved() -> u64 {
 /// an env var and a file path - neither of which exists in a browser. So the numbers were being
 /// taken every frame and dropped on the floor on the one target that needed them.
 ///
-/// Fed from `trace_stream`, which already consumes the resource per frame by contract.
+/// Fed from `trace_stream` in a `dev` build and from [`note_stream_activity`] otherwise - and
+/// THAT is why these columns were empty. `trace_stream` lives in `PerfPlugin`, which is
+/// `#[cfg(feature = "dev")]` whole, while this journal is registered in every build. The browser
+/// build carries no `dev`, so the one system that published these numbers did not exist on the
+/// one target that ships the journal reading them.
+///
 /// Nanoseconds; see [`note_stream_ms`] for why not microseconds.
 static STREAM_NS: [std::sync::atomic::AtomicU64; 5] = [
     std::sync::atomic::AtomicU64::new(0),
@@ -724,6 +729,24 @@ pub(crate) fn note_stream_ms(parts: [f32; 5]) {
 /// `col_us` beside them is a second's total (`take_collider_build_micros`) and reads 166,850 in the
 /// same rows these read 0. Matching it makes the two comparable and keeps a cheap lane legible: a
 /// 40 us second now prints 40.
+/// **The non-`dev` half of the ownership, so these columns have a publisher in the build that
+/// actually reads them.** Exactly one system takes [`StreamActivity`] per frame in either build:
+/// `trace_stream` under `dev`, this otherwise. Two would each see half the frame's numbers.
+///
+/// Nothing else consumed the resource in a non-`dev` build - `any_event` is read only inside
+/// `trace_stream` - so before this it simply accumulated, unread, for the life of the session.
+#[cfg(not(feature = "dev"))]
+fn note_stream_activity(mut activity: ResMut<benilla_world::terrain_stream::StreamActivity>) {
+    let a = std::mem::take(&mut *activity);
+    note_stream_ms([
+        a.stream_ms,
+        a.furnish_ms,
+        a.mfurnish_ms,
+        a.spawn_ms,
+        a.collider_ms,
+    ]);
+}
+
 fn take_stream_us() -> [u64; 5] {
     use std::sync::atomic::Ordering::Relaxed;
     let mut out = [0u64; 5];
@@ -808,6 +831,16 @@ impl Plugin for FpsJournalPlugin {
                     sched_close,
                 )
                     .chain(),
+            )
+            // The streamer's five timers, published before the row that prints them. Only in a
+            // non-`dev` build: `trace_stream` owns the take under `dev`, and two owners would
+            // each see half the frame. See `note_stream_activity`.
+            .add_systems(
+                bevy::app::Last,
+                #[cfg(not(feature = "dev"))]
+                note_stream_activity.before(sched_close),
+                #[cfg(feature = "dev")]
+                || {},
             )
             // The armed one-shot dump; see `dumpSchedule` in `on_cvar` for why it cannot run
             // from the observer itself. Costs one atomic read per frame when disarmed.
