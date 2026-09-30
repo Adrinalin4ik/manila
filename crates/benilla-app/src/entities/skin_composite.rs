@@ -75,6 +75,26 @@ pub(super) struct SkinComposites {
     next_id: u32,
 }
 
+/// **`/console skinComposite 0`** - composite at the request, on this thread, as the client did
+/// before this lane existed.
+///
+/// A measuring lever, and the reason it exists is a measurement I got wrong: I compared the frame
+/// across two sessions and reported a 3.8 ms win that a second run of the same build refuted
+/// (22.0 and 22.8 ms before, 18.5 then 22.9 after). This harness's own README says why - a
+/// comparison across runs measures the afternoon, not the code - and a build cannot be A/B'd
+/// inside one session. A CVar can: `ab.mjs` runs both legs a minute apart on one crowd, which is
+/// the only comparison that has ever held here.
+///
+/// Off, the work runs where the request is made, so its cost lands on the drawing thread exactly
+/// as it used to. The plan, the blits and the atlas are otherwise identical, so the difference
+/// between the legs is the lane and nothing else.
+static INLINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set by the CVar; `on` = the off-thread lane, its default.
+pub(crate) fn set_off_thread(on: bool) {
+    INLINE.store(!on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// A composite in flight, and where.
 enum Running {
     /// The async compute pool - the right answer wherever bevy has threads.
@@ -121,6 +141,12 @@ impl SkinComposites {
     /// not start one). See [`Running::Worker`].
     #[cfg_attr(not(target_arch = "wasm32"), expect(unused_mut, reason = "the wasm arm bumps it"))]
     fn start(&mut self, plan: CompositePlan, chain: Arc<Mutex<Chain>>) -> Running {
+        // The lever: composite here and hand the finished atlas to an already-resolved task, so
+        // `land` installs it unchanged and only the COST moves. See `INLINE`.
+        if INLINE.load(std::sync::atomic::Ordering::Relaxed) {
+            let atlas = work(plan, chain)();
+            return Running::Pool(AsyncComputeTaskPool::get().spawn(async move { atlas }));
+        }
         #[cfg(target_arch = "wasm32")]
         {
             let id = self.next_id;

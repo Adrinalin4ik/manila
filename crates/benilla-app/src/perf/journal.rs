@@ -162,6 +162,13 @@ pub(crate) fn on_cvar(
     }
     // **`/console auraTrace 1`** - the aura subsystem's own trace, which existed behind an env
     // var and so was unreachable in the browser (`std::env::var` is always `None` on wasm32).
+    // **`/console skinComposite 0`** - the body composite back on the drawing thread, so the two
+    // lanes can be compared inside ONE session. See `entities::skin_composite::INLINE`.
+    if ev.is("skinComposite") {
+        let on = ev.flag();
+        crate::entities::skin_composite::set_off_thread(on);
+        info!("body composites {}", if on { "off-thread" } else { "INLINE (drawing thread)" });
+    }
     if ev.is("auraTrace") {
         let on = ev.flag();
         crate::ui_aura::set_trace(on);

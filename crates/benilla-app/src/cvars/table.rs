@@ -130,6 +130,7 @@ pub(crate) const SESSION_ONLY: &[&str] = &[
     "uiLua",
     "feedGateTrace",
     "auraTrace",
+    "skinComposite",
     "dumpSchedule",
     "archCensus",
 ];
@@ -879,6 +880,11 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "fxOff",
         "0",
         "benilla's own - 1.12 has particleDensity, which scales rate and never stops a lane",
+    ),
+    ours(
+        "skinComposite",
+        "1",
+        "benilla's own - 0 composites a body where it is asked for, the lane's own A/B",
     ),
     ours(
         "auraTrace",

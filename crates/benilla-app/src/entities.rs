@@ -29,7 +29,7 @@ mod attach;
 use attach::{attach_entity_visuals, build_dressup_preview, build_glue_pet, build_glue_preview};
 
 /// Composited body skins by look, built off the main thread.
-mod skin_composite;
+pub(crate) mod skin_composite;
 use skin_composite::{land_skin_composites, SkinComposites, SkinKey, SkinSections};
 
 /// The dynamic point lights an entity's own model carries, such as a held torch.
