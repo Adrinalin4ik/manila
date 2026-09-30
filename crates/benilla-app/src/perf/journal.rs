@@ -685,7 +685,8 @@ fn take_moved() -> u64 {
 /// taken every frame and dropped on the floor on the one target that needed them.
 ///
 /// Fed from `trace_stream`, which already consumes the resource per frame by contract.
-static STREAM_US: [std::sync::atomic::AtomicU64; 5] = [
+/// Nanoseconds; see [`note_stream_ms`] for why not microseconds.
+static STREAM_NS: [std::sync::atomic::AtomicU64; 5] = [
     std::sync::atomic::AtomicU64::new(0),
     std::sync::atomic::AtomicU64::new(0),
     std::sync::atomic::AtomicU64::new(0),
@@ -694,19 +695,40 @@ static STREAM_US: [std::sync::atomic::AtomicU64; 5] = [
 ];
 
 /// Called once a frame with the chain's own split, in milliseconds as the streamer keeps them.
+///
+/// **Accumulated in NANOSECONDS**, because the obvious `(ms * 1000.0) as u64` truncated each
+/// frame's contribution to whole microseconds BEFORE adding it: a stage costing 0.4 us a frame
+/// added 0 for ever, however long the run. That is the second half of the same defect
+/// [`take_stream_us`] carries the first half of, and fixing only the division would have left
+/// these columns reading 0 for exactly the same reason.
 pub(crate) fn note_stream_ms(parts: [f32; 5]) {
     use std::sync::atomic::Ordering::Relaxed;
-    for (cell, ms) in STREAM_US.iter().zip(parts) {
-        cell.fetch_add((ms * 1000.0) as u64, Relaxed);
+    for (cell, ms) in STREAM_NS.iter().zip(parts) {
+        cell.fetch_add((f64::from(ms) * 1_000_000.0) as u64, Relaxed);
     }
 }
 
-fn take_stream_us(frames: u64) -> [u64; 5] {
+/// **The second's TOTAL microseconds, not a per-frame average** - and that is a correction.
+///
+/// These five divided by the frame count, like the phase tiles above them, and read **0 in every
+/// row of every journal they have ever appeared in**. Not because nothing was measured: integer
+/// division floors anything under 1 us per frame to nothing, and the streamer's own chain is
+/// exactly that cheap. A 40 us second over 50 frames is 0.
+///
+/// Journal 83 is where that cost a reading. `u_stream` is 1.55 ms a frame and the second strongest
+/// correlate of the frame in a crowd (r = +0.868); these five exist to say what of it is the
+/// streamer, and they answered "nothing" in a spelling indistinguishable from "not measured". This
+/// file already says the difference matters, three hundred lines up, about `ui_us`: "unmeasured and
+/// free are different claims".
+///
+/// `col_us` beside them is a second's total (`take_collider_build_micros`) and reads 166,850 in the
+/// same rows these read 0. Matching it makes the two comparable and keeps a cheap lane legible: a
+/// 40 us second now prints 40.
+fn take_stream_us() -> [u64; 5] {
     use std::sync::atomic::Ordering::Relaxed;
     let mut out = [0u64; 5];
-    for (slot, cell) in out.iter_mut().zip(&STREAM_US) {
-        let us = cell.swap(0, Relaxed);
-        *slot = if frames > 0 { us / frames } else { 0 };
+    for (slot, cell) in out.iter_mut().zip(&STREAM_NS) {
+        *slot = cell.swap(0, Relaxed) / 1_000;
     }
     out
 }
@@ -1572,8 +1594,9 @@ vm {:.1}   ui {:.1}",
         line.push_str(&format!(",{us}"));
     }
     line.push_str(&format!(",{}", take_moved()));
-    // The streamer's own split of `u_stream` - see `STREAM_US`.
-    for us in take_stream_us(frames) {
+    // The streamer's own split of `u_stream` - see `STREAM_NS`. Totals for the second, like
+    // `col_us`, not per-frame averages: see `take_stream_us` for the rows that cost.
+    for us in take_stream_us() {
         line.push_str(&format!(",{us}"));
     }
     let (rig_wr, rig_sk) = benilla_world::rig_anim::take_anchor_writes();
