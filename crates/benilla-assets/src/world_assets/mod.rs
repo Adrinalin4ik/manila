@@ -232,9 +232,18 @@ fn decode_sprite_bytes(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
     }
 }
 
-/// Read a file from the patch chain, then, for an `Interface\AddOns\` path, the loose addon folder:
-/// how art, fonts and audio an addon ships all load. The reference asks the install tree first
-/// (`0x647e60`'s attempt #4 is the MPQ); the chain holds no `AddOns\` path, so the order is moot.
+/// Read a file from the patch chain, then, for an `Interface\AddOns\` path, the addon folder -
+/// on the web its `/addons` route, natively the loose tree: how art, fonts and audio an addon
+/// ships all load.
+///
+/// **The order is NOT moot, and a comment here used to say it was.** It claimed the chain holds no
+/// `AddOns\` path; the chain holds twelve of them, the `Blizzard_*` addons
+/// (`Interface\AddOns\Blizzard_TalentUI\…` answers 200 on `/data` with no folder present). So
+/// both stores really are consulted, and which wins decides whether a player's loose copy of a
+/// stock addon overrides the shipped one. The reference asks its install tree first (`0x647e60`'s
+/// attempt #4 is the MPQ), so loose-first is the faithful order and chain-first here is a
+/// divergence - left as it is rather than changed blind, because nothing has measured what
+/// overriding a `Blizzard_*` addon does in this client.
 pub fn read_chain_or_loose(
     chain: &Mutex<Chain>,
     loose_root: Option<&Path>,

@@ -114,22 +114,36 @@ impl AssetReader for MpqAssetReader {
         // archive name the web host resolves.
         let stripped = strip_sampler_marker(raw);
         let internal = stripped.as_deref().unwrap_or(raw);
-        // The SAME builder the chain's sync reads and the page's boot prefetch use: three URL
-        // shapes for one file would mean three cache entries, and a prefetch that warms none of
-        // the addresses actually read.
-        // **An addon's own art is not in the patch chain**, so `/data` can only ever 404 it.
-        // `read_chain_or_loose` already says this and answers it by reading the install tree; wasm
-        // has no filesystem, so the host's `/addons` route is that tree here. Without this branch
-        // every `.tga` and `.blp` an addon ships is silently missing in the browser while the same
-        // build shows it on the desktop.
-        let url = match benilla_formats::web::addons_rel(internal) {
-            Some(rel) => benilla_formats::web::addons_url(rel),
-            None => benilla_formats::web::data_url(internal),
-        };
-        let bytes = wasm_fetch(&url).await.map_err(|e| match e {
+        let fail = |e: WasmFetchError| match e {
             WasmFetchError::NotFound => AssetReaderError::NotFound(path.to_path_buf()),
             WasmFetchError::Other(msg) => AssetReaderError::Io(Arc::new(std::io::Error::other(msg))),
-        })?;
+        };
+        // **An `Interface\AddOns\` path has TWO stores, and both must be asked.** The art an
+        // addon ships is not in the archive, so `/data` alone can only 404 it - that is what the
+        // folder route answers. But the archive DOES hold this prefix: the twelve `Blizzard_*`
+        // addons live inside it (verified - `Interface\AddOns\Blizzard_TalentUI\…` answers 200
+        // on `/data` with no such folder needed), so a miss on the folder route is not the answer
+        // either, and replacing one route with the other would break them on any install that does
+        // not also carry them loose.
+        //
+        // The folder is asked FIRST, which is the reference's own order: its install tree comes
+        // before the MPQ (`0x647e60`'s attempt #4 is the archive), and that is how a player
+        // overriding a stock addon with a loose copy gets the loose one.
+        //
+        // `data_url` is the SAME builder the chain's sync reads and the page's boot prefetch use:
+        // three URL shapes for one file would mean three cache entries, and a prefetch that warms
+        // none of the addresses actually read.
+        let bytes = match benilla_formats::web::addons_rel(internal) {
+            Some(rel) => match wasm_fetch(&benilla_formats::web::addons_url(rel)).await {
+                Ok(bytes) => bytes,
+                Err(_) => wasm_fetch(&benilla_formats::web::data_url(internal))
+                    .await
+                    .map_err(fail)?,
+            },
+            None => wasm_fetch(&benilla_formats::web::data_url(internal))
+                .await
+                .map_err(fail)?,
+        };
         Ok(VecReader::new(bytes))
     }
 
