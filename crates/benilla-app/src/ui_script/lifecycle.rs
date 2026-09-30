@@ -94,6 +94,8 @@ fn install_addon_asset_resolvers(world: &mut World, script: &mut UiScript) {
                 || root
                     .as_deref()
                     .is_some_and(|r| benilla_assets::loose_addon_file(r, c).is_some())
+                // The browser's addon store, which has no filesystem for the leg above.
+                || benilla_assets::web_addon_exists(c)
         })
     }));
     // Keyed by the path exactly as the region carries it, so a hit allocates nothing (this is
@@ -119,7 +121,8 @@ fn install_addon_asset_resolvers(world: &mut World, script: &mut UiScript) {
         let found = font_chain.lock_recover().contains(path)
             || font_root.as_deref().is_some_and(|r| {
                 benilla_assets::loose_addon_file(r, &benilla_assets::normalize_path(path)).is_some()
-            });
+            })
+            || benilla_assets::web_addon_exists(&benilla_assets::normalize_path(path));
         seen.borrow_mut().insert(path.to_string(), found);
         found
     }));

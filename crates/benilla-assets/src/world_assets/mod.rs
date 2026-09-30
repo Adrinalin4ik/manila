@@ -128,6 +128,11 @@ fn decode_sprite(
                 return Some(decoded);
             }
         }
+        if let Some(decoded) = web_addon_file(candidate)
+            .and_then(|bytes| decode_sprite_bytes(&bytes).ok())
+        {
+            return Some(decoded);
+        }
     }
     // "Not there" and "there but would not decode" are different faults; say which.
     let found_but_undecodable: Vec<&String> = candidates
@@ -135,6 +140,7 @@ fn decode_sprite(
         .filter(|c| {
             chain.read_file(c).is_ok()
                 || loose_root.is_some_and(|root| loose_addon_file(root, c).is_some())
+                || web_addon_file(c).is_some()
         })
         .collect();
     if found_but_undecodable.is_empty() {
@@ -161,6 +167,61 @@ fn decode_sprite(
     None
 }
 
+/// **The browser's stand-in for the loose AddOns folder.** `loose_addon_file` reads the install
+/// tree, which wasm has no filesystem for, so `loose_root` is `None` there and an addon's own art
+/// fell through to the chain alone - where an `Interface\AddOns\` path never is. That is why
+/// every `.tga` and `.blp` an addon ships was missing in the browser while the same build showed
+/// it on the desktop.
+///
+/// The host's `/addons` route is that tree here, and this leg sits exactly where the native one
+/// does so the order stays the reference's: the chain first, then the addon folder.
+#[cfg(target_arch = "wasm32")]
+pub fn web_addon_file(candidate: &str) -> Option<Vec<u8>> {
+    let rel = benilla_formats::web::addons_rel(candidate)?;
+    benilla_formats::web::fetch_sync(&benilla_formats::web::addons_url(rel)).ok()
+}
+
+/// Native reads the folder itself ([`loose_addon_file`]); there is no route to ask.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn web_addon_file(_candidate: &str) -> Option<Vec<u8>> {
+    None
+}
+
+/// Does the host's `/addons` route hold this candidate? [`web_addon_file`]'s existence twin, for
+/// the probes that only need a yes or no.
+///
+/// **Memoised for the session, and that is not an optimisation.** The texture probe is asked once
+/// per zero-size textured region per layout pass; a synchronous `HEAD` each time would be a round
+/// trip storm on the main thread. An addon's folder does not change under a running client, so one
+/// answer per path is the whole truth - the same reason the size probe beside it caches, misses
+/// included.
+#[cfg(target_arch = "wasm32")]
+pub fn web_addon_exists(candidate: &str) -> bool {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static SEEN: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
+    }
+    let Some(rel) = benilla_formats::web::addons_rel(candidate) else {
+        return false;
+    };
+    SEEN.with(|seen| {
+        if let Some(&hit) = seen.borrow().get(candidate) {
+            return hit;
+        }
+        let url = benilla_formats::web::addons_url(rel);
+        let found = benilla_formats::web::exists_sync(&url).unwrap_or(false);
+        seen.borrow_mut().insert(candidate.to_string(), found);
+        found
+    })
+}
+
+/// Native asks the folder itself ([`loose_addon_file`]); there is no route to ask.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn web_addon_exists(_candidate: &str) -> bool {
+    false
+}
+
 /// Decode by content, not extension, since addon folders mislabel both ways: a `BLP2` magic is a
 /// BLP, anything else goes to the TGA decoder, whose header check is the gate.
 fn decode_sprite_bytes(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
@@ -180,6 +241,10 @@ pub fn read_chain_or_loose(
     path: &str,
 ) -> Option<Vec<u8>> {
     if let Ok(bytes) = chain.lock_recover().read(path) {
+        return Some(bytes);
+    }
+    // The browser's leg, before the filesystem one that cannot answer there.
+    if let Some(bytes) = web_addon_file(&normalize_path(path)) {
         return Some(bytes);
     }
     let file = loose_addon_file(loose_root?, &normalize_path(path))?;
