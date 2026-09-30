@@ -150,7 +150,28 @@ impl SkinComposites {
         #[cfg(target_arch = "wasm32")]
         {
             let id = self.next_id;
-            if crate::entities::attach::skin_worker::post(id, &plan).is_some() {
+            let took = crate::entities::attach::skin_worker::post(id, &plan).is_some();
+            // **Which path a composite actually took, counted.** The page's `request` answers
+            // false for every id when no Worker started, and the fallback below is silent - so
+            // "off the main thread" and "not off the main thread at all" produced the same screen,
+            // the same console and nearly the same `skin_us`. Said once per ten, which is often
+            // enough to notice a zero and rare enough to cost nothing.
+            {
+                use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+                static TO_WORKER: AtomicU32 = AtomicU32::new(0);
+                static TO_POOL: AtomicU32 = AtomicU32::new(0);
+                let c = if took {
+                    TO_WORKER.fetch_add(1, Relaxed) + 1
+                } else {
+                    TO_POOL.fetch_add(1, Relaxed);
+                    TO_WORKER.load(Relaxed)
+                };
+                let pool = TO_POOL.load(Relaxed);
+                if (c + pool) % 10 == 0 {
+                    info!("skin composites: {c} to the Worker, {pool} on this thread");
+                }
+            }
+            if took {
                 self.next_id = self.next_id.wrapping_add(1);
                 return Running::Worker {
                     id,

@@ -26,6 +26,13 @@ const q = new URLSearchParams({
   fps_journal: 'harness.csv',
 });
 if (char) q.set('char', char);
+// `$WOW_EXTRA=a=1&b=2`: CVar overrides that must be in force BEFORE world entry, which no chat
+// `/console` can be. The registry reads `WOW_<name>` off the query at load, so an arrival-phase
+// lever (`WOW_skinComposite`) is only reachable this way.
+for (const pair of (process.env.WOW_EXTRA ?? '').split('&').filter(Boolean)) {
+  const [k, ...v] = pair.split('=');
+  q.set(k, v.join('='));
+}
 // `%20`, not `+`: the client decodes with `decodeURIComponent`, which leaves `+` alone. A realm
 // named "Eversong Wilds" arrived as "Eversong+Wilds" and matched nothing, which looked exactly
 // like a realm refusing to be picked.

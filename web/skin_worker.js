@@ -23,14 +23,22 @@ function ensure() {
   if (worker || broken) return worker;
   try {
     worker = new Worker(new URL('./skin_worker_entry.js', import.meta.url), { type: 'module' });
+    // Said once, because "the worker is running" and "the worker silently never started" looked
+    // identical in the console and the owner asked which one he was looking at.
+    console.info('skin worker: started');
     worker.onmessage = (e) => {
       const { id, bytes } = e.data || {};
       if (typeof id !== 'number') return;
       if (bytes) done.set(id, new Uint8Array(bytes));
       else failed.add(id);
     };
-    worker.onerror = () => { broken = true; worker = null; };
-  } catch (_) {
+    worker.onerror = (e) => {
+      console.warn('skin worker: died, composites fall back to the main thread', e.message || e);
+      broken = true;
+      worker = null;
+    };
+  } catch (e) {
+    console.warn('skin worker: would not start, composites stay on the main thread', e);
     broken = true;
   }
   return worker;
