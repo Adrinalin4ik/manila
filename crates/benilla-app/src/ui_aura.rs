@@ -155,8 +155,24 @@ struct AuraFeedMemo {
     units: units::UnitAuras,
 }
 
-/// The `BENILLA_AURA_TRACE` period in seconds; a set value that is not a positive number means 1 s.
+/// **`/console auraTrace 1`**, or `BENILLA_AURA_TRACE` natively - the trace period in seconds.
+///
+/// The env var alone was unreachable where the question lives: `std::env::var` is always `None` on
+/// wasm32, so the one instrument built for this subsystem could not be switched on in a browser,
+/// which is the only place this client runs for its owner. The CVar is the same switch by a route
+/// the player has.
+static TRACE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Set by the CVar; 1 s, the env var's own default for a value it cannot parse.
+pub(crate) fn set_trace(on: bool) {
+    TRACE_MS.store(if on { 1000 } else { 0 }, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn trace_period() -> Option<f64> {
+    let ms = TRACE_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if ms > 0 {
+        return Some(ms as f64 / 1000.0);
+    }
     static PERIOD: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
     *PERIOD.get_or_init(|| {
         let v = std::env::var("BENILLA_AURA_TRACE").ok()?;
@@ -604,6 +620,23 @@ fn join_duration(
     bevy_now: f64,
     script_now: f64,
 ) -> (f64, f64) {
+    // The trace names the one rejection, because a dropped stamp and a stamp that never arrived
+    // are the same `(0, 0)` to everything downstream and need opposite fixes.
+    if trace_period().is_some() {
+        match stamp {
+            None => info!("aura trace: join - no stamp for an aura that appeared @ {appeared_at:.2}"),
+            Some(d) if d.received_at < appeared_at - DURATION_SLACK => info!(
+                "aura trace: join REJECTED - stamp received @ {:.2} is {:.2}s older than the aura                  @ {appeared_at:.2}, slack {DURATION_SLACK:.2}s",
+                d.received_at,
+                appeared_at - d.received_at
+            ),
+            Some(d) => info!(
+                "aura trace: join ok - {:.1}s total, {:.1}s left",
+                d.total,
+                d.expires_at - bevy_now
+            ),
+        }
+    }
     stamp
         .filter(|d| d.received_at >= appeared_at - DURATION_SLACK)
         .map(|d| (d.total, script_now + (d.expires_at - bevy_now)))

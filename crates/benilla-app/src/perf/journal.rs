@@ -160,6 +160,13 @@ pub(crate) fn on_cvar(
         benilla_world::particles::set_fx_off(on);
         info!("particle simulation stopped: {on}");
     }
+    // **`/console auraTrace 1`** - the aura subsystem's own trace, which existed behind an env
+    // var and so was unreachable in the browser (`std::env::var` is always `None` on wasm32).
+    if ev.is("auraTrace") {
+        let on = ev.flag();
+        crate::ui_aura::set_trace(on);
+        info!("aura trace: {on}");
+    }
     if ev.is("feedGateTrace") {
         let on = ev.flag();
         crate::ui_script::gate::set_trace(on);

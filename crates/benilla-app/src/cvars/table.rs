@@ -129,6 +129,7 @@ pub(crate) const SESSION_ONLY: &[&str] = &[
     "fxOff",
     "uiLua",
     "feedGateTrace",
+    "auraTrace",
     "dumpSchedule",
     "archCensus",
 ];
@@ -878,6 +879,11 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "fxOff",
         "0",
         "benilla's own - 1.12 has particleDensity, which scales rate and never stops a lane",
+    ),
+    ours(
+        "auraTrace",
+        "0",
+        "benilla's own - the aura trace, which 1.12 has no CVar for and wasm has no env var for",
     ),
     ours(
         "feedGateTrace",
