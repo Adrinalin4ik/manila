@@ -139,6 +139,21 @@ impl ShadeSel {
 #[derive(Default)]
 struct KeyAxes {
     misses: usize,
+    /// **Every key ever minted, by hash** - the one thing the axes above cannot say.
+    ///
+    /// The note above infers thrash from "the total grows while every axis is frozen", and that
+    /// inference has stood unproven since journal 38. It has two readings with opposite fixes: the
+    /// same keys rebuilt after the distance sweep expired them, or genuinely new COMBINATIONS of
+    /// values each axis already had. A per-axis set cannot tell them apart, because the key is the
+    /// product, not the axes.
+    ///
+    /// So this remembers the key itself. A miss on a hash already here is a REMINT: that material
+    /// existed, was dropped, and is being built again - which is a cache that does not hold, not a
+    /// key space that widens. Hashes rather than keys because `MatKey` is not `Clone`, and 8 bytes
+    /// an entry keeps the instrument affordable at the ten thousand the last run minted.
+    seen: std::collections::HashSet<u64>,
+    /// Misses whose key had been minted before. `misses - remints` is the true key count.
+    remints: usize,
     light: std::collections::HashSet<bevy::render::render_resource::BufferId>,
     texture: std::collections::HashSet<Option<AssetId<Image>>>,
     batch_order: std::collections::HashSet<u16>,
@@ -155,6 +170,14 @@ fn note_key_axes(key: &MatKey) {
     let Ok(mut guard) = KEY_AXES.lock() else { return };
     let a = guard.get_or_insert_with(KeyAxes::default);
     a.misses += 1;
+    {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut h);
+        if !a.seen.insert(h.finish()) {
+            a.remints += 1;
+        }
+    }
     a.light.insert(key.light);
     a.texture.insert(key.texture);
     a.batch_order.insert(key.batch_order);
@@ -175,6 +198,10 @@ pub fn key_axis_counts() -> Vec<(&'static str, usize)> {
     };
     vec![
         ("misses", a.misses),
+        // The pair that settles thrash: `remints` of them had been built before and dropped, so
+        // `misses - remints` is the key space this scene actually needs.
+        ("remints", a.remints),
+        ("keys", a.seen.len()),
         ("light", a.light.len()),
         ("texture", a.texture.len()),
         ("order", a.batch_order.len()),
