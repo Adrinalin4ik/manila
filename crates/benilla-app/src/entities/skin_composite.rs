@@ -243,7 +243,9 @@ impl SkinComposites {
             Some(Running::Worker { fallback, .. }) => fallback(),
             None => work().and_then(|w| w()),
         };
-        crate::perf::journal::note_skin_composite(started.elapsed().as_micros() as u64);
+        // The FORCED meter, not `skin_us`: this lane composites on the drawing thread by design,
+        // and folding the two made a measurement unreadable (see `journal::SKINS_FORCED`).
+        crate::perf::journal::note_skin_forced(started.elapsed().as_micros() as u64);
         self.install(key, atlas, images)
     }
 

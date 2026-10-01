@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,px_feedunits,gate_n,gate_open,rigs_live,rigs_park,arch,ent_alloc,px_vmtick\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,px_feedunits,gate_n,gate_open,rigs_live,rigs_park,arch,ent_alloc,px_vmtick,skf_n,skf_us\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -1101,6 +1101,31 @@ fn take_net_costs() -> (u32, u64) {
 static SKINS_NEW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static SKIN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// **The FORCED lane's own pair**, split out because one meter over two lanes cannot be read.
+///
+/// Since the composite moved off the thread there are two kinds of main-thread skin cost, and they
+/// answer opposite questions: `skin_us` is landing a finished atlas (a decode and an upload, which
+/// is what is LEFT), while this is a composite the client had to do here and now - the previews,
+/// a re-dress of a standing body, a rig heal - which the reference forces too (`0x44ad50`).
+///
+/// They were one meter for an afternoon and it voided a measurement: two runs of the SAME setting
+/// read 4,045 us and 108,610, because the second happened to force more composites. The spread was
+/// not noise and not the lane; it was the question being ambiguous.
+static SKINS_FORCED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static SKIN_FORCED_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// One composite the caller could not wait for; see [`SKINS_FORCED`].
+pub(crate) fn note_skin_forced(micros: u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    SKINS_FORCED.fetch_add(1, Relaxed);
+    SKIN_FORCED_US.fetch_add(micros, Relaxed);
+}
+
+fn take_skin_forced() -> (u32, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (SKINS_FORCED.swap(0, Relaxed), SKIN_FORCED_US.swap(0, Relaxed))
+}
+
 /// Called once per cache MISS on the way out, including a miss that fails to compose: the reads
 /// and the decode were paid either way, and the frame does not care that the result was dropped.
 pub(crate) fn note_skin_composite(micros: u64) {
@@ -1730,6 +1755,13 @@ vm {:.1}   ui {:.1}",
         // `ent_alloc` - 32,768 over a thousand, the same 32.77 "ms" in two captures
         // whose frames differed, and a power of two rather than a duration.
         let _ = write!(line, ",{}", VMTICK_US.swap(0, Relaxed) / f);
+    }
+    // The forced-composite pair, appended after it for the same reason that one is last: columns
+    // only ever grow at the end here, so every journal already recorded keeps parsing. See
+    // `SKINS_FORCED` for why it is not folded into `skin_us`.
+    {
+        let (n, us) = take_skin_forced();
+        let _ = write!(line, ",{n},{us}");
     }
     // **Every `#` line goes AFTER the last column, not before it.** Both blocks below used to sit
     // above the trailing columns, which was invisible while the systems one stayed empty and split
