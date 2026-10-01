@@ -30,6 +30,8 @@ use crate::char_select::InWorldGated;
 use crate::ui_script::{PlayerUiHover, PointerOverUiPanel, UiKeyboardCapture};
 
 pub(crate) mod chord;
+// wenilla: Press and Hold Casting, in its own file.
+pub(crate) mod hold_cast;
 mod script_input;
 mod store;
 
@@ -213,13 +215,16 @@ impl Plugin for BindingsPlugin {
         app.init_resource::<BindingDispatch>()
             .init_resource::<BindingsState>()
             .init_resource::<BindingFiles>()
+            .init_resource::<hold_cast::PressAndHoldCasting>()
+            .add_observer(hold_cast::on_cvar)
             .add_systems(
                 Update,
                 (
                     // The key sets are seeded at the VM's birth, not here: `seed_bindings_for_vm`
                     // runs in `load_ingame_ui_on_world_entry`, before FrameXML and every addon;
-                    // the commands come with the load.
-                    (sync_dispatch, latch_and_dispatch)
+                    // the commands come with the load. wenilla: the hold repeat reads this pass's
+                    // latches and queues ahead of `apply_script_calls`, which runs after UiInput.
+                    (sync_dispatch, latch_and_dispatch, hold_cast::tick)
                         .chain()
                         .in_set(crate::ui_script::UiInput)
                         .in_set(BindingSet)

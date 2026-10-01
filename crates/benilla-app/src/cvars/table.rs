@@ -778,6 +778,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // forces tracking always, `0` never. Which way is right is a measurement, not an opinion, and
     // `p_xform` in the journal is the one that answers it.
     same("staticTransforms", "0.3"),
+    // **Press and Hold Casting** - `crate::bindings::hold_cast`. The later clients' Controls
+    // option, under their CVar name: a held action-bar key casts again each time the slot is
+    // ready. Off by default, so a fresh install casts once per press, as 1.12 does.
+    ours(
+        crate::bindings::hold_cast::CVAR,
+        "0",
+        "a later-era name - 1.12 casts an action-bar key once, on its release",
+    ),
     // **The archetype census** - benilla's own, and the second instrument that ships:
     // `/console archCensus 1` prints one line per non-empty archetype to the console, entity
     // count beside component set, largest first. It answers "what ARE these 37,266 entities",

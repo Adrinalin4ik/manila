@@ -2247,9 +2247,10 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
             untipped.push(row.to_string());
             continue;
         }
-        // Four rows with no fitting 1.12 string carry a `BENILLA_` one, each held to its row:
-        // Render Scale and Enable Sound in Background have no 1.12 setting, Display Mode's
-        // string describes a checkbox, and `OPTION_TOOLTIP_GAMMA` cites art this page lacks.
+        // Five rows with no fitting 1.12 string carry a `BENILLA_` one, each held to its row:
+        // Render Scale, Enable Sound in Background and Press and Hold Casting have no 1.12
+        // setting, Display Mode's string describes a checkbox, and `OPTION_TOOLTIP_GAMMA` cites
+        // art this page lacks.
         const BENILLA_OWNED: &[(&str, &str)] = &[
             ("BENILLA_TOOLTIP_RENDER_SCALE", "GraphicsRowRenderScale"),
             ("BENILLA_TOOLTIP_DISPLAY_MODE", "GraphicsRowDisplayMode"),
@@ -2258,6 +2259,10 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
                 "AudioRowBackgroundSound",
             ),
             ("BENILLA_TOOLTIP_BRIGHTNESS", "GraphicsRowBrightness"),
+            (
+                "BENILLA_TOOLTIP_PRESS_AND_HOLD_CASTING",
+                "ControlsRowPressAndHoldCasting",
+            ),
         ];
         if let Some((_, want_row)) = BENILLA_OWNED.iter().find(|(k, _)| *k == key) {
             assert_eq!(row, *want_row, "{row}: not this row's string");
@@ -2281,9 +2286,9 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
         );
         checked += 1;
     }
-    // 82 rows less the three untipped below; four of the 79 carry a `BENILLA_` key, and a dropdown
+    // 83 rows less the three untipped below; five of the 80 carry a `BENILLA_` key, and a dropdown
     // row is checked on the key it wears at rest.
-    assert_eq!(checked, 79, "every tipped row carries a live key");
+    assert_eq!(checked, 80, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![

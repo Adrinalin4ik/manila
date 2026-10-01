@@ -433,11 +433,19 @@
             .. "which it could only do in exclusive fullscreen. benilla applies it to the "
             .. "finished image instead, so it works in both display modes."
 
+        -- No 1.12 string: the setting is the later clients' (ActionButtonUseKeyHeldSpell),
+        -- and this is their tooltip's text.
+        BENILLA_TOOLTIP_PRESS_AND_HOLD_CASTING =
+            "If enabled, allows the player to press and hold a keyboard hotkey to continually "
+            .. "cast a spell on an ActionBar without having to repeatedly press the button. This "
+            .. "only supports keyboard hotkeys, clicking a spell with the mouse will still cast "
+            .. "the spell a single time."
+
         BENILLA_OPTIONS_PAGE_ROWS = {
             -- The era Controls order first; the rest follow their 1.12 box's columns.
             Controls = {
                 "RowStickyTarget", "RowAssistAttack", "RowClearAFK",
-                "RowBlockTrades", "RowAutoSelfCast",
+                "RowBlockTrades", "RowAutoSelfCast", "RowPressAndHoldCasting",
                 "RowAutoLoot", "RowInvertMouse", "RowMouseSpeed",
                 "RowCameraFollowStyle", "RowFollowTerrain", "RowHeadBob",
                 "RowAutoFollowSpeed", "RowWaterCollision", "RowSmartPivot",
@@ -1631,10 +1639,21 @@
                                                     "OPTION_TOOLTIP_AUTO_SELF_CAST")
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowAutoLoot" inherits="BenillaOptionsCheckboxRowTemplate">
+                                        <!-- wenilla: not a 1.12 setting; bindings/hold_cast.rs. -->
+                                        <Frame name="$parentRowPressAndHoldCasting" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowAutoSelfCast" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowAutoSelfCast" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "ActionButtonUseKeyHeldSpell",
+                                                    "Press and Hold Casting", "BENILLA_TOOLTIP_PRESS_AND_HOLD_CASTING")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowAutoLoot" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowPressAndHoldCasting" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowPressAndHoldCasting" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <!-- No tip: 1.12 has no AUTO_LOOT string. -->
                                             <Scripts><OnLoad>BenillaOptionsRow_OnLoad(this, "autoLootDefault", "Auto Loot")</OnLoad></Scripts>

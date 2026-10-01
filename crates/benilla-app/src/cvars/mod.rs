@@ -1748,6 +1748,7 @@ mod tests {
             .init_resource::<crate::ui_guild::GuildMemberNotify>()
             .init_resource::<crate::ui_trade::BlockTrades>()
             .init_resource::<crate::spell::AutoSelfCast>()
+            .init_resource::<crate::bindings::hold_cast::PressAndHoldCasting>()
             .init_resource::<crate::perf::FpsJournalSetting>()
             .init_resource::<crate::text_filter::TextFilterSwitches>()
             .init_resource::<crate::game_tip::GameTipSetting>()
@@ -1782,6 +1783,9 @@ mod tests {
         },
         |app| {
             app.add_observer(crate::spell::cast_target::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::bindings::hold_cast::on_cvar);
         },
         |app| {
             app.add_observer(crate::combat_text::on_cvar);
