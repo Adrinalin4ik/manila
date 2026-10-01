@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,px_feedunits,gate_n,gate_open,rigs_live,rigs_park,arch,ent_alloc,px_vmtick,skf_n,skf_us,px_input,px_asstrk,wix_us\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,px_feedunits,gate_n,gate_open,rigs_live,rigs_park,arch,ent_alloc,px_vmtick,skf_n,skf_us,px_input,px_asstrk,px_uiload,aev,wix_us\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -465,8 +465,31 @@ static POSTCLEAN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// everything after it, which this file has already had happen once and which splits every row a
 /// reader checks against the header. So `MIDROW` stays 9 for ever and anything added lands at the
 /// END, where columns only ever grow.
+/// **What the asset pump actually moved** - the `aev` column, asset events seen in one second.
+///
+/// `px_asstrk` is 99.6% of `s_pre` but it is an upper bound on a bracket holding TWO systems:
+/// `handle_internal_asset_events`, which pumps pending loads and drops, and `AssetTrackingSystems`.
+/// They cannot be separated by a mark - the pump is `ambiguous_with_all` and in no named set - so
+/// this measures the pump's OUTPUT instead. Thousands of events in the spiking seconds is the pump;
+/// a flat count while `s_pre` swings seventeen thousandfold is not.
+static ASSET_EVENTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Count this frame's asset events for the three types that stream: the pump produced them.
+fn count_asset_events(
+    mut images: bevy::ecs::message::MessageReader<bevy::asset::AssetEvent<bevy::image::Image>>,
+    mut meshes: bevy::ecs::message::MessageReader<bevy::asset::AssetEvent<bevy::prelude::Mesh>>,
+    mut mats: bevy::ecs::message::MessageReader<
+        bevy::asset::AssetEvent<benilla_assets::materials::WowModelMaterial>,
+    >,
+) {
+    let n = (images.read().count() + meshes.read().count() + mats.read().count()) as u64;
+    if n > 0 {
+        ASSET_EVENTS.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 const MIDROW: usize = 9;
-const NSETS: usize = 11;
+const NSETS: usize = 12;
 static SET_US: [std::sync::atomic::AtomicU64; NSETS] = [ZERO; NSETS];
 
 /// Where each bracket's `open` leaves its timestamp. A resource rather than a static because it
@@ -876,8 +899,21 @@ impl Plugin for FpsJournalPlugin {
                 (
                     set_open::<9>.before(bevy::input::InputSystems),
                     set_close::<9>.after(bevy::input::InputSystems),
-                    set_open::<10>.before(bevy::asset::AssetTrackingSystems),
+                    // **`.after(run_pending_entry_load)`, and that is the fix for this bracket.**
+                    // With only `.before(AssetTrackingSystems)` the scheduler put `set_open::<10>`
+                    // at POSITION 0 of `PreUpdate` - the dump says so - so it measured the whole
+                    // schedule and read 99.6% of `s_pre`, which was then reported as "the asset
+                    // lane is the freeze". It was "the bracket is everything".
+                    set_open::<10>
+                        .after(crate::ui_script::lifecycle::run_pending_entry_load)
+                        .before(bevy::asset::AssetTrackingSystems),
                     set_close::<10>.after(bevy::asset::AssetTrackingSystems),
+                    // The UI load, ours, and the one named thing in `PreUpdate` big enough to be
+                    // seconds: it runs the client's own XML and Lua through the VM.
+                    set_open::<11>.before(crate::ui_script::lifecycle::run_pending_entry_load),
+                    set_close::<11>.after(crate::ui_script::lifecycle::run_pending_entry_load),
+                    // After the bracket, so it sees what the pump produced this frame.
+                    count_asset_events.after(bevy::asset::AssetTrackingSystems),
                 ),
             )
             // The player-UI bridge, in `Update`. Separate from the PostUpdate group and never
@@ -1806,7 +1842,15 @@ vm {:.1}   ui {:.1}",
             SET_US[9].swap(0, Relaxed) / per,
             SET_US[10].swap(0, Relaxed) / per
         );
+        let _ = write!(line, ",{}", SET_US[11].swap(0, Relaxed) / per);
     }
+    // What the pump moved this second; see `ASSET_EVENTS`. A TOTAL, not a per-frame average: the
+    // question is how much work arrived, not how it was spread.
+    let _ = write!(
+        line,
+        ",{}",
+        ASSET_EVENTS.swap(0, std::sync::atomic::Ordering::Relaxed)
+    );
     // The water index's own rebuild cost - see `benilla_world::liquid::WATER_INDEX_US`.
     let _ = write!(
         line,

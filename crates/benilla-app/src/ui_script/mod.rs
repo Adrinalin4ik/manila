@@ -384,7 +384,7 @@ fn arbitrate_pointer_over_ui(
 }
 
 /// The session lifecycle: the VM's birth, identity, death and reload.
-mod lifecycle;
+pub(crate) mod lifecycle;
 pub(crate) use lifecycle::{
     end_ui_session, ingame_ui_up, run_pending_reload, setup_script, AddOnIdentity,
     LeavingWorldArmed, PendingEntryUiLoad, ReloadUiPending,

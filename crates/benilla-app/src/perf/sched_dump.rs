@@ -41,7 +41,11 @@ pub(crate) fn dump_if_armed(world: &mut World) {
 /// Dump `Update` and `PostUpdate` in execution order. Exclusive, because the schedules live in the
 /// `World` and the order is only knowable after they are built.
 pub(crate) fn dump_schedule(world: &mut World) {
+    // `PreUpdate` joined the list on 2026-10-01: `s_pre` reached 3.6 s in a single second and the
+    // bracket that holds 99.6% of it covers two systems that cannot be told apart by a mark. The
+    // first question - what is even in there - had no answer because this dump did not look.
     for label in [
+        bevy::app::PreUpdate.intern(),
         bevy::app::Update.intern(),
         bevy::app::PostUpdate.intern(),
     ] {
