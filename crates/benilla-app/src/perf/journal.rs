@@ -179,6 +179,13 @@ pub(crate) fn on_cvar(
         crate::entities::skin_composite::set_off_thread(on);
         info!("body composites {}", if on { "off-thread" } else { "INLINE (drawing thread)" });
     }
+    // **`/console gpuMs 1`** - the whole-frame GPU meter, which was behind an env var and so had
+    // never run in a browser. See `perf::gpu::ON`.
+    if ev.is("gpuMs") {
+        let on = ev.flag();
+        crate::perf::gpu::set_enabled(on);
+        info!("gpu meter: {on} (takes effect on the next pipeline build)");
+    }
     if ev.is("auraTrace") {
         let on = ev.flag();
         crate::ui_aura::set_trace(on);
@@ -901,6 +908,10 @@ impl Plugin for FpsJournalPlugin {
                     .chain(),
             );
         }
+        // The GPU meter's own plugin, in a non-`dev` build only: `PerfPlugin` installs it under
+        // `dev`, and two installs would mean two sentinel pass pairs around one camera.
+        #[cfg(not(feature = "dev"))]
+        crate::perf::gpu::plugin(app);
         app.add_plugins(RenderDiagnosticsPlugin)
             .init_resource::<SchedStart>()
             // First of `First` and last of `Last`: the main schedule end to end, with nothing of

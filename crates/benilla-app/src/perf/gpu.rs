@@ -27,10 +27,28 @@ use bevy::render::{Render, RenderApp, RenderSystems};
 use bevy::ui_render::TransparentUi;
 use wgpu::{QuerySet, QuerySetDescriptor, QueryType};
 
-/// Whether the meter is armed, read once.
+/// **`/console gpuMs 1`**, or `WOW_GPU_MS=1` natively - whether the meter is armed.
+///
+/// The env var alone was unreachable where the question lives: `std::env::var` is always `None` on
+/// wasm32, so `gpu_ms` has read 0 in every browser journal ever taken, including the ones whose
+/// header says `gpu_ts yes`. That is the fourth instrument this week found switched off on the one
+/// target that needed it - the aura trace, the ablation levers and the streamer's own timers were
+/// the others - and it is the instrument the remaining freeze needs: `rapp` reaching 523,963 us
+/// with the seven render tiles naming 1.5% of it leaves present, and only this says whether the
+/// GPU was busy or the browser was simply not giving frames back.
+///
+/// Read fresh rather than once: a CVar can arm it mid-session, and a `OnceLock` would latch the
+/// answer from before the player typed it.
+static ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set by the CVar.
+pub(crate) fn set_enabled(on: bool) {
+    ON.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub(crate) fn enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("WOW_GPU_MS").as_deref() == Ok("1"))
+    ON.load(std::sync::atomic::Ordering::Relaxed)
+        || std::env::var("WOW_GPU_MS").as_deref() == Ok("1")
 }
 
 /// The freshest whole-frame GPU duration in nanoseconds, written by the render app's readback;

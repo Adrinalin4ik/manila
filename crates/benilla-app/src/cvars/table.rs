@@ -130,6 +130,7 @@ pub(crate) const SESSION_ONLY: &[&str] = &[
     "uiLua",
     "feedGateTrace",
     "auraTrace",
+    "gpuMs",
     "skinComposite",
     "matKeyOrder",
     "dumpSchedule",
@@ -899,6 +900,11 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "skinComposite",
         "1",
         "benilla's own - 0 composites a body where it is asked for, the lane's own A/B",
+    ),
+    ours(
+        "gpuMs",
+        "0",
+        "benilla's own - the whole-frame GPU meter, unreachable from a browser until now",
     ),
     ours(
         "auraTrace",

@@ -32,8 +32,12 @@ mod census;
 mod clock;
 #[cfg(feature = "dev")]
 mod crash_inject;
-#[cfg(feature = "dev")]
-mod gpu;
+// **Not `dev`-only since 2026-10-01.** `gpu_ms` has read 0 in every browser journal ever taken,
+// and the reason was not the hardware - the header says `gpu_ts yes` - but that this module did not
+// exist in the build that writes the journal. The meter is still off until armed; what changes is
+// that it CAN be armed where the question is (`/console gpuMs 1`). Same seam as the streamer's five
+// timers, which had a publisher only under `dev` for the same reason.
+pub(crate) mod gpu;
 #[cfg(feature = "dev")]
 mod hud;
 // `pub(crate)` for its two `note_*` sinks alone: the UI pass writes the script-cost columns
@@ -57,7 +61,6 @@ use bevy::prelude::*;
 pub(crate) use blend_check::BlendMismatchShared;
 #[cfg(feature = "dev")]
 pub(crate) use clock::{process_cpu_secs, process_faults, system_cpu_ticks, thread_cpu_table};
-#[cfg(feature = "dev")]
 pub(crate) use gpu::{GpuMsShared, WgpuCensusShared};
 #[cfg(feature = "dev")]
 pub(crate) use hud::PerfHud;
