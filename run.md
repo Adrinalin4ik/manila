@@ -54,12 +54,19 @@ those name their own outputs and are unaffected.
 ```bash
 git commit ...               # commit FIRST - the check below reads the commit hash
 scripts/web-build.sh         # bare environment, see the trap above
-grep -c "$(git rev-parse --short=8 HEAD)" web/dist/wenilla_bg.wasm     # must print 1
+grep -c "$(git rev-parse --short=8 HEAD)" web/dist/manila_bg.wasm      # must print 1
 ```
 
 `build_id.rs` bakes the short commit hash into the binary, so **finding it inside
-`web/dist/wenilla_bg.wasm` proves that bundle was compiled from that commit.** Nothing else here
-does. When the change was data rather than code, grep for a string you added as well (a new CVar
+`web/dist/manila_bg.wasm` proves that bundle was compiled from that commit.** Nothing else here
+does.
+
+**The name was `wenilla_bg.wasm` here until 2026-10-01 and had been wrong for as long as the crate
+has been called `manila`.** `grep -c` on a path that does not exist prints `0` and exits 1 — so the
+one check this file calls the only trustworthy one answered "that bundle is not from that commit"
+for every bundle, including correct ones. A check that cannot pass is worse than no check: it
+teaches people to stop running it. Run it against the file the build actually writes, and if the
+crate is ever renamed again, this line is what has to move with it. When the change was data rather than code, grep for a string you added as well (a new CVar
 name, a new label): `assets/ui` is compiled in through `include_dir!`, so it rides the same proof
 and needs no separate copy.
 
