@@ -288,8 +288,9 @@ pub(super) fn attach_entity_visuals(
     mut collider_epoch: ResMut<benilla_world::collision::ColliderEpoch>,
     time: Res<Time>,
 ) {
-    // Timed for the journal (`px_attach`/`px_drive`); see `perf::journal::ATTACH_US`.
+    // Timed for the journal (`px_attach`); see `perf::journal::ATTACH_US`.
     let _t = crate::perf::journal::SysTimer::new(crate::perf::journal::note_attach);
+    let frame_start = bevy::platform::time::Instant::now();
     let (
         sections,
         mut skin_composites,
@@ -972,8 +973,30 @@ pub(super) fn attach_entity_visuals(
                 super::equipment::Reattached,
                 super::live_display::ShownRebuild,
             )>();
+        // **A frame's worth of arrivals, then stop** - the third system here to need this and the
+        // third to need it for the same reason: a crowd arrives together, the loop builds every one
+        // of them, and the frame is however long that took.
+        //
+        // Measured: this system is 39% of the `Update` residual over a run and 68% of it in its
+        // worst second (245,797 us of 359,452), which is the lane the owner's crowd freeze sits in.
+        // The collider builds (569.8 ms -> 23.5) and the addon walk (14,797 ms -> 4,865) were the
+        // same shape and the same cure.
+        //
+        // Checked only after a build, never after one of the `continue`s above: a unit whose
+        // equipment has not settled costs nothing and must not spend the budget, or a street full
+        // of not-yet-ready players would stall the ones that are. The entities left over keep their
+        // place in the query and build next frame - they are simply not drawn yet, which is already
+        // what `Arrival` and the appear fade describe.
+        if frame_start.elapsed() >= ATTACH_VISUAL_BUDGET {
+            break;
+        }
     }
 }
+
+/// How long [`attach_entity_visuals`] may spend building arrivals before leaving the rest to the
+/// next frame. The same 4 ms the terrain streamer's own `SPAWN_BUDGET` uses, and for the same
+/// reason: a frame that yields is a frame the browser can answer.
+const ATTACH_VISUAL_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
 
 /// The union of a model's part boxes, its bind-pose extent: the election bound when the idle
 /// authors no CAaBox. Over-large only admits, never hides.
