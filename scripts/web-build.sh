@@ -50,7 +50,7 @@ SKIN_WASM="target/wasm32-unknown-unknown/${PROFILE}/manila_skin.wasm"
 [ -f "${SKIN_WASM}" ] || { echo "web-build: ${SKIN_WASM} was not produced" >&2; exit 1; }
 wasm-bindgen --target web --no-typescript "${strip[@]}" --out-name manila_skin --out-dir "${DIST}" "${SKIN_WASM}"
 cp web/index.html web/wasi_stubs.js web/boot.js web/platform.js web/bridge.js \
-   web/skin_worker.js web/skin_worker_entry.js "${DIST}/"
+   web/skin_worker.js web/skin_worker_entry.js web/frame_trace.js "${DIST}/"
 # The bridge examples (web/README.md § "JavaScript bridge"): a HUD, an idle loop.
 mkdir -p "${DIST}/examples" && cp web/examples/*.js "${DIST}/examples/"
 # The boot prefetch manifest (see web/boot.js) — optional so a tree that hasn't captured one

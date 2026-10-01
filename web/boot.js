@@ -36,6 +36,13 @@
 // pays nothing for it.
 import './skin_worker.js';
 
+// **The frame cadence as the browser sees it** (web/frame_trace.js). Imported here, statically and
+// at boot, because the span it measures is the one the client cannot: `rapp` minus the seven render
+// tiles - present - reached 480-520 ms on the owner's late freezes while the named tiles were 1.5%
+// of it, and no measurement inside wasm can tell a busy GPU from a tab that was not called. It
+// reports through `globalThis.__wenilla_frame_trace()`; nothing depends on it.
+import './frame_trace.js';
+
 const BR_RATIO = 5.0;
 const READY_TIMEOUT_MS = 20000;
 const PREFETCH_CONCURRENCY = 8;
