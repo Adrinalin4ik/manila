@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,px_feedunits,gate_n,gate_open,rigs_live,rigs_park,arch,ent_alloc,px_vmtick,skf_n,skf_us,px_input,px_asstrk,px_uiload,aev,wix_us\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,px_feedunits,gate_n,gate_open,rigs_live,rigs_park,arch,ent_alloc,px_vmtick,skf_n,skf_us,px_input,px_asstrk,px_uiload,px_auras,aev,wix_us\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -489,7 +489,7 @@ fn count_asset_events(
 }
 
 const MIDROW: usize = 9;
-const NSETS: usize = 12;
+const NSETS: usize = 13;
 static SET_US: [std::sync::atomic::AtomicU64; NSETS] = [ZERO; NSETS];
 
 /// Where each bracket's `open` leaves its timestamp. A resource rather than a static because it
@@ -941,6 +941,11 @@ impl Plugin for FpsJournalPlugin {
                     // additionally calls `FieldEdges::collect` above its own gate. Multiply it by
                     // the 190 `feed_*`/`drain_*` systems for the ceiling a set-level run
                     // condition could buy.
+                    // Through the SET, not the function: `feed_auras` and its `SystemParam` are
+                    // private, and opening three types to bracket one system is a worse trade than
+                    // bracketing the set it already declares.
+                    set_open::<12>.before(crate::ui_aura::AuraEvents),
+                    set_close::<12>.after(crate::ui_aura::AuraEvents),
                     set_open::<8>.before(crate::ui_unit::feed_units),
                     set_close::<8>.after(crate::ui_unit::feed_units),
                     // **The VM's own tick, alone.** `/console uiLua 0` took 10.9 ms off the MAIN
@@ -1843,6 +1848,12 @@ vm {:.1}   ui {:.1}",
             SET_US[10].swap(0, Relaxed) / per
         );
         let _ = write!(line, ",{}", SET_US[11].swap(0, Relaxed) / per);
+        // Two members of `UnitFeed`, bracketed by name. The set's own bracket reached 160,590 us
+        // in one second of the owner's journal 88 against ~3,000 calm, while `feed_units` - the
+        // only member with a bracket until now - was 4,532 of it. So the cost is in the other
+        // thirty, and these two are the ones a crowd can plausibly make expensive: every held
+        // unit's aura list, and the hover scan.
+        let _ = write!(line, ",{}", SET_US[12].swap(0, Relaxed) / per);
     }
     // What the pump moved this second; see `ASSET_EVENTS`. A TOTAL, not a per-frame average: the
     // question is how much work arrived, not how it was spread.
