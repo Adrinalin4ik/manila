@@ -269,6 +269,12 @@ fn init_stamp(
     queue: Option<Res<RenderQueue>>,
     shared: Res<GpuMsShared>,
 ) {
+    // The runtime gate: no query set, no ring, no `GpuStamp` while disarmed - and because every
+    // other part of the meter keys on `GpuStamp` existing, arming is one allocation and disarming
+    // costs nothing. See `plugin`.
+    if !enabled() {
+        return;
+    }
     if stamp.is_some() {
         return;
     }
@@ -366,9 +372,15 @@ fn readback(stamp: Option<ResMut<GpuStamp>>) {
 }
 
 pub(crate) fn plugin(app: &mut App) {
-    if !enabled() {
-        return;
-    }
+    // **No early return on `enabled()`, and that is the whole fix.** This ran at plugin BUILD time,
+    // before `load_config` has read a single CVar, so neither `/console gpuMs 1` nor the URL could
+    // ever arm it: the systems and the graph nodes were simply never registered, and `gpu_ms` read
+    // 0 for ever whatever anyone typed. An env var was the only thing early enough - and
+    // `std::env::var` is always `None` on wasm32, which is why the browser never saw this meter.
+    //
+    // Everything is registered now and the gate moved into the work itself: `init_stamp` allocates
+    // no query set while disarmed, and `GpuStampNode::run` does nothing without a `GpuStamp`, so a
+    // disarmed meter is two map lookups a frame.
     let shared = Arc::new(AtomicU64::new(0));
     let counts = Arc::new(WgpuCensus::default());
     app.insert_resource(GpuMsShared(shared.clone()));
