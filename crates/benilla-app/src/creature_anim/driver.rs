@@ -283,6 +283,8 @@ pub(super) fn drive_animations(
     // The last anim trace line per traced unit; the trace writes only on change.
     mut anim_trace_last: Local<std::collections::HashMap<Entity, String>>,
 ) {
+    // Timed for the journal (`px_attach`/`px_drive`); see `perf::journal::ATTACH_US`.
+    let _t = crate::perf::journal::SysTimer::new(crate::perf::journal::note_drive);
     let (emote_sounds, loot_kneel, time, names, mut recomputes) = aux;
     let dt = time.delta_secs();
     // This frame's one-shot plays per unit, replayed in the reference's call order (`PlaySeq`

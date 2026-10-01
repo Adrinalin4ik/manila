@@ -288,6 +288,8 @@ pub(super) fn attach_entity_visuals(
     mut collider_epoch: ResMut<benilla_world::collision::ColliderEpoch>,
     time: Res<Time>,
 ) {
+    // Timed for the journal (`px_attach`/`px_drive`); see `perf::journal::ATTACH_US`.
+    let _t = crate::perf::journal::SysTimer::new(crate::perf::journal::note_attach);
     let (
         sections,
         mut skin_composites,

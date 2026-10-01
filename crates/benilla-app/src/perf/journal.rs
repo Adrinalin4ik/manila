@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,px_feedunits,gate_n,gate_open,rigs_live,rigs_park,arch,ent_alloc,px_vmtick,skf_n,skf_us,px_input,px_asstrk,px_uiload,px_auras,aev,wix_us\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,px_feedunits,gate_n,gate_open,rigs_live,rigs_park,arch,ent_alloc,px_vmtick,skf_n,skf_us,px_input,px_asstrk,px_uiload,px_auras,px_attach,px_drive,aev,wix_us\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -473,6 +473,46 @@ static POSTCLEAN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// this measures the pump's OUTPUT instead. Thousands of events in the spiking seconds is the pump;
 /// a flat count while `s_pre` swings seventeen thousandfold is not.
 static ASSET_EVENTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// **Two systems of the `s_upd` residual, timed from INSIDE them.**
+///
+/// That residual reached 323,236 us in the owner's crowd second while the unit feed was 36 ms and
+/// the auras 6, so the cost is in the rest of `Update` - which the schedule dump says is 151
+/// systems. These two are what a crowd ARRIVING makes expensive: building each new entity's visual
+/// tree, and driving every rig's animation.
+///
+/// Timed inside rather than bracketed outside because bracketing one by name needs its module, its
+/// function, its `SystemParam` and every marker type in it to be `pub(crate)`: four privacy edits
+/// deep the chain had not ended, which is the point at which to stop widening and measure from
+/// within. `maintain_water_index` and the entry load's steps are already timed this way.
+static ATTACH_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DRIVE_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A drop guard that reports a system's own wall time; one line at the top of the system is the
+/// whole instrument, and it fires on every exit including an early return.
+pub(crate) struct SysTimer(bevy::platform::time::Instant, fn(u64));
+
+impl SysTimer {
+    pub(crate) fn new(sink: fn(u64)) -> Self {
+        Self(bevy::platform::time::Instant::now(), sink)
+    }
+}
+
+impl Drop for SysTimer {
+    fn drop(&mut self) {
+        (self.1)(self.0.elapsed().as_micros() as u64);
+    }
+}
+
+/// One run of `attach_entity_visuals`.
+pub(crate) fn note_attach(us: u64) {
+    ATTACH_US.fetch_add(us, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// One run of `drive_animations`.
+pub(crate) fn note_drive(us: u64) {
+    DRIVE_US.fetch_add(us, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Count this frame's asset events for the three types that stream: the pump produced them.
 fn count_asset_events(
@@ -1854,6 +1894,12 @@ vm {:.1}   ui {:.1}",
         // thirty, and these two are the ones a crowd can plausibly make expensive: every held
         // unit's aura list, and the hover scan.
         let _ = write!(line, ",{}", SET_US[12].swap(0, Relaxed) / per);
+        let _ = write!(
+            line,
+            ",{},{}",
+            ATTACH_US.swap(0, Relaxed),
+            DRIVE_US.swap(0, Relaxed)
+        );
     }
     // What the pump moved this second; see `ASSET_EVENTS`. A TOTAL, not a per-frame average: the
     // question is how much work arrived, not how it was spread.
