@@ -79,7 +79,8 @@ impl Budget {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+// See `BUILD_US` below for why this is not wasm32 alone.
+#[cfg(any(target_arch = "wasm32", test))]
 thread_local! { static BUDGET: RefCell<Budget> = RefCell::new(Budget::default()); }
 
 #[cfg(target_arch = "wasm32")]
@@ -102,7 +103,12 @@ pub(super) async fn wait_turn() {
         .await;
 }
 
-#[cfg(target_arch = "wasm32")]
+// `any(wasm32, test)`, matching the module's own gate: `take_build_micros` and `finish_build`
+// below are not wasm-gated and read this, so a NATIVE TEST build of this crate failed to compile
+// on an undefined `BUILD_US`. Same family as the ungated `take_build_micros` fixed in 4fdb4f69 -
+// an item inside a `cfg(any(wasm32, test))` module gated on wasm32 alone is a native test break
+// waiting to be noticed.
+#[cfg(any(target_arch = "wasm32", test))]
 /// Every microsecond spent inside `Collider::trimesh` since the last read — the FPS journal's
 /// `col_us` column.
 ///

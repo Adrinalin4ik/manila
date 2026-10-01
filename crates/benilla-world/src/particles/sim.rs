@@ -197,7 +197,11 @@ pub(crate) struct SceneGates<'w, 's> {
     /// The effects wall — see [`crate::particles::ParticleTuning::max_distance`]. Read here
     /// because this is the one place the draw-set's distance term is built, so there is no second
     /// path an emitter could take around it.
-    tuning: Res<'w, crate::particles::ParticleTuning>,
+    /// `Option` because this is a FORK carry and a bare app does not insert it. The wall is ours,
+    /// not the reference's, and a required `Res` for it made eight `doodad_anim` tests panic in
+    /// `gate_doodad_anim` with "Resource does not exist" - invisible until this crate's test build
+    /// was unblocked. Absent means no effects wall, which is the default value anyway.
+    tuning: Option<Res<'w, crate::particles::ParticleTuning>>,
     exterior_windows: Res<'w, crate::wmo_portal::ExteriorWindows>,
     camera_claim: Res<'w, crate::wmo_portal::CameraInteriorClaim>,
     portals: Query<'w, 's, &'static crate::wmo_portal::WmoPortalInstance>,
@@ -223,7 +227,9 @@ impl SceneGates<'_, '_> {
         (
             // The nearer of the two walls. Defaulting the effects one to the top of the farclip
             // range makes this `farclip` exactly until a player moves the slider.
-            self.view.farclip.min(self.tuning.max_distance),
+            self.tuning
+                .as_deref()
+                .map_or(self.view.farclip, |t| self.view.farclip.min(t.max_distance)),
             crate::exterior_cull::ExteriorGate::build(&self.exterior_windows, cam),
             self.camera_claim.0.map(|c| c.room.instance),
         )
@@ -369,7 +375,8 @@ fn scene_frozen(booth: Option<(bool, bool)>, owner_frozen: bool, draining: bool)
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(super) fn simulate_particles(
     time: Res<Time>,
-    tuning: Res<ParticleTuning>,
+    // See `SceneGates::tuning`: a fork carry, so never required.
+    tuning: Option<Res<ParticleTuning>>,
     // The draw-set gate's scene inputs: the far-clip wall, the exterior-window test (the camera's
     // own room exempt) and the portal PVS of the rooms inside a building.
     gates: SceneGates,
@@ -460,7 +467,7 @@ pub(super) fn simulate_particles(
         && !gates.changed()
         && !interleave.surfaces_changed();
     let cam_pos = cam_tf.translation();
-    let density = tuning.density.clamp(0.25, 1.0);
+    let density = tuning.as_deref().map_or(1.0, |t| t.density).clamp(0.25, 1.0);
     let snap_filter = crate::collision::WorldCollision::body_filter();
     let (_, cam_rot, _) = cam_tf.to_scale_rotation_translation();
     let cam_right = cam_rot * Vec3::X;

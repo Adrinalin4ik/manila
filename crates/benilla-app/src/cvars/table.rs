@@ -131,6 +131,7 @@ pub(crate) const SESSION_ONLY: &[&str] = &[
     "feedGateTrace",
     "auraTrace",
     "skinComposite",
+    "matKeyOrder",
     "dumpSchedule",
     "archCensus",
 ];
@@ -888,6 +889,11 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "fxOff",
         "0",
         "benilla's own - 1.12 has particleDensity, which scales rate and never stops a lane",
+    ),
+    ours(
+        "matKeyOrder",
+        "0",
+        "benilla's own - 1 restores the wide material key, for one-session A/B",
     ),
     ours(
         "skinComposite",

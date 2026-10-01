@@ -164,6 +164,16 @@ pub(crate) fn on_cvar(
     // var and so was unreachable in the browser (`std::env::var` is always `None` on wasm32).
     // **`/console skinComposite 0`** - the body composite back on the drawing thread, so the two
     // lanes can be compared inside ONE session. See `entities::skin_composite::INLINE`.
+    // **`/console matKeyOrder 1`** - the wide material key back, for the one-session A/B. See
+    // `benilla_world::model_render::KEY_ORDER`.
+    if ev.is("matKeyOrder") {
+        let on = ev.flag();
+        benilla_world::model_render::set_mat_key_order(on);
+        info!(
+            "material key: batch_order {}",
+            if on { "in the key for every batch (wide)" } else { "dropped for non-sorting batches" }
+        );
+    }
     if ev.is("skinComposite") {
         let on = ev.flag();
         crate::entities::skin_composite::set_off_thread(on);

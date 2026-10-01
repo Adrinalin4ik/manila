@@ -154,6 +154,21 @@ struct KeyAxes {
     seen: std::collections::HashSet<u64>,
     /// Misses whose key had been minted before. `misses - remints` is the true key count.
     remints: usize,
+    /// **The same keys with `batch_order` taken out** - what the key space would be if the sort
+    /// bias stopped being part of the material's identity.
+    ///
+    /// `batch_order` is the authored submesh index + 1 and exists only to bias the transparent
+    /// sort so coplanar batches draw in file order. It is the widest axis by far (3,089 distinct
+    /// against 1,480 textures), and whether moving it out of the material is worth the risk to
+    /// draw order is a question about ONE number: how many materials would be left. This counts
+    /// that number rather than estimating it.
+    no_order: std::collections::HashSet<u64>,
+    /// **The safe half of that**: `batch_order` kept for a batch that actually blends, dropped for
+    /// one that does not. The bias exists to stop coplanar TRANSPARENT batches flipping a sort tie;
+    /// an opaque or alpha-tested batch is depth-resolved and does not care what its bias is. So
+    /// this is the key space of a change that cannot reorder anything that was ordered on purpose,
+    /// where [`Self::no_order`] is the key space of one that could.
+    sorted_only: std::collections::HashSet<u64>,
     light: std::collections::HashSet<bevy::render::render_resource::BufferId>,
     texture: std::collections::HashSet<Option<AssetId<Image>>>,
     batch_order: std::collections::HashSet<u16>,
@@ -177,6 +192,65 @@ fn note_key_axes(key: &MatKey) {
         if !a.seen.insert(h.finish()) {
             a.remints += 1;
         }
+        // The same identity with the sort bias removed, field by field because `MatKey` is not
+        // `Clone` and a derived hash cannot skip one member. Every field below is in the real key;
+        // only `batch_order` is left out, which is the whole question.
+        let mut n = std::collections::hash_map::DefaultHasher::new();
+        key.light.hash(&mut n);
+        key.texture.hash(&mut n);
+        key.blend.hash(&mut n);
+        key.two_sided.hash(&mut n);
+        key.is_wmo.hash(&mut n);
+        key.is_interior.hash(&mut n);
+        key.is_emissive.hash(&mut n);
+        key.is_additive.hash(&mut n);
+        key.fade_variant.hash(&mut n);
+        key.no_depth_write.hash(&mut n);
+        key.no_depth_test.hash(&mut n);
+        key.fog_policy.hash(&mut n);
+        key.env_map.hash(&mut n);
+        key.shade.hash(&mut n);
+        key.uv_anim.hash(&mut n);
+        key.rgb_anim.hash(&mut n);
+        key.wmo_class.hash(&mut n);
+        key.sidn.hash(&mut n);
+        key.window.hash(&mut n);
+        key.zfill.hash(&mut n);
+        key.sky_depth.hash(&mut n);
+        key.instance.hash(&mut n);
+        a.no_order.insert(n.finish());
+        // ...and the same again, except a blending batch keeps its bias.
+        let mut q = std::collections::hash_map::DefaultHasher::new();
+        key.light.hash(&mut q);
+        key.texture.hash(&mut q);
+        key.blend.hash(&mut q);
+        key.two_sided.hash(&mut q);
+        key.is_wmo.hash(&mut q);
+        key.is_interior.hash(&mut q);
+        key.is_emissive.hash(&mut q);
+        key.is_additive.hash(&mut q);
+        key.fade_variant.hash(&mut q);
+        key.no_depth_write.hash(&mut q);
+        key.no_depth_test.hash(&mut q);
+        key.fog_policy.hash(&mut q);
+        key.env_map.hash(&mut q);
+        key.shade.hash(&mut q);
+        key.uv_anim.hash(&mut q);
+        key.rgb_anim.hash(&mut q);
+        key.wmo_class.hash(&mut q);
+        key.sidn.hash(&mut q);
+        key.window.hash(&mut q);
+        key.zfill.hash(&mut q);
+        key.sky_depth.hash(&mut q);
+        key.instance.hash(&mut q);
+        let sorts = !matches!(
+            key.blend,
+            benilla_formats::ModelBlend::Opaque | benilla_formats::ModelBlend::AlphaTest
+        );
+        if sorts {
+            key.batch_order.hash(&mut q);
+        }
+        a.sorted_only.insert(q.finish());
     }
     a.light.insert(key.light);
     a.texture.insert(key.texture);
@@ -202,6 +276,8 @@ pub fn key_axis_counts() -> Vec<(&'static str, usize)> {
         // `misses - remints` is the key space this scene actually needs.
         ("remints", a.remints),
         ("keys", a.seen.len()),
+        ("nokeys", a.no_order.len()),
+        ("sortkeys", a.sorted_only.len()),
         ("light", a.light.len()),
         ("texture", a.texture.len()),
         ("order", a.batch_order.len()),
@@ -226,6 +302,25 @@ pub(crate) fn note_lazy_material<A: bevy::asset::Asset>() {
     if std::any::TypeId::of::<A>() == std::any::TypeId::of::<WowModelMaterial>() {
         benilla_assets::materials::note_material(benilla_assets::materials::mat_lane::BATCH);
     }
+}
+
+/// **`/console matKeyOrder 1`** - put `batch_order` back in the material key for every batch, the
+/// behaviour before the collapse above.
+///
+/// Here so one battleground fight can answer for both lanes: a build cannot be A/B'd inside a
+/// session, and across sessions "measures the afternoon rather than the code" - this project's own
+/// harness README, and a rule I broke once already this week and had to retract a number for. The
+/// owner gets one fight; this makes it enough.
+static KEY_ORDER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set by the CVar; `on` = the old, wide key.
+pub fn set_mat_key_order(on: bool) {
+    KEY_ORDER.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether `batch_order` is dropped from the key of a batch that does not sort by it.
+fn mat_key_collapse() -> bool {
+    !KEY_ORDER.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Build or fetch the deduped [`WowModelMaterial`] for one model batch. `fade_variant` marks the
@@ -258,6 +353,48 @@ pub fn model_material(
     light: &Buffer,
     instance: Option<Entity>,
 ) -> Handle<WowModelMaterial> {
+    // An additive batch is a (ONE, ONE) add of gamma-space premultiplied colour: the shader and
+    // `specialize` must key on the same `clutter_fade.z` bit 2.
+    let source_cutout = blend == ModelBlend::AlphaTest && !alphatest_disabled();
+    let alpha_mode = if is_additive || fade_variant {
+        // A fade twin always blends (`0x70c1fd`); its source blend only sets the cutout marker.
+        AlphaMode::Blend
+    } else {
+        match blend {
+            ModelBlend::Opaque => AlphaMode::Opaque,
+            ModelBlend::AlphaTest if source_cutout => AlphaMode::Mask(VANILLA_ALPHA_KEY_REF),
+            ModelBlend::AlphaTest => AlphaMode::Opaque,
+            // Mod/Mod2x multiply what is drawn, so they need the scene under them; `specialize`
+            // sets the multiply factors from the marker bits below.
+            ModelBlend::Blend | ModelBlend::Mod | ModelBlend::Mod2x => AlphaMode::Blend,
+        }
+    };
+
+    // **`batch_order` leaves the key for every batch that does not sort by it.**
+    //
+    // The bias below is built from it only when `alpha_mode` is `Blend` - "Transparent batches
+    // only: opaque passes never sort by it", as the comment there has always said. For every other
+    // batch the authored index changed the material's IDENTITY and nothing the material DOES: one
+    // more key, one more `WowModelMaterial`, one more bind group for `RenderSystems::PrepareAssets`
+    // to build, and not one pixel different.
+    //
+    // Measured before the change, 110 s at a crowded spot: 15,515 distinct keys over 3,089 distinct
+    // `batch_order` values. Collapsing it for the non-sorting batches leaves **5,580**, 2.8x fewer.
+    // Dropping it everywhere - which WOULD reorder coplanar transparents - leaves 5,433, so the
+    // risky version buys 147 materials out of ten thousand and the question is not worth asking.
+    //
+    // Why it is worth anything: `r_assets` is ~2 ms a second standing still and reached **103 ms**
+    // in a battleground fight, where 1,742 materials appeared in twenty seconds and one frame took
+    // 1.4 s. Each of those is a bind group built on the render thread.
+    //
+    // Read off `alpha_mode`, never off `blend`: an additive batch and a fade twin both resolve to
+    // `Blend` and DO sort. Keying this on anything but the exact condition the bias uses is how the
+    // two drift apart in a later edit.
+    let batch_order = if matches!(alpha_mode, AlphaMode::Blend) || !mat_key_collapse() {
+        batch_order
+    } else {
+        0
+    };
     let key = MatKey {
         light: light.id(),
         texture: texture.as_ref().map(Handle::id),
@@ -286,22 +423,6 @@ pub fn model_material(
     if let Some(h) = cache.fetch(&key) {
         return h;
     }
-    // An additive batch is a (ONE, ONE) add of gamma-space premultiplied colour: the shader and
-    // `specialize` must key on the same `clutter_fade.z` bit 2.
-    let source_cutout = blend == ModelBlend::AlphaTest && !alphatest_disabled();
-    let alpha_mode = if is_additive || fade_variant {
-        // A fade twin always blends (`0x70c1fd`); its source blend only sets the cutout marker.
-        AlphaMode::Blend
-    } else {
-        match blend {
-            ModelBlend::Opaque => AlphaMode::Opaque,
-            ModelBlend::AlphaTest if source_cutout => AlphaMode::Mask(VANILLA_ALPHA_KEY_REF),
-            ModelBlend::AlphaTest => AlphaMode::Opaque,
-            // Mod/Mod2x multiply what is drawn, so they need the scene under them; `specialize`
-            // sets the multiply factors from the marker bits below.
-            ModelBlend::Blend | ModelBlend::Mod | ModelBlend::Mod2x => AlphaMode::Blend,
-        }
-    };
     // Single-sided unless the M2's 0x04 flag is set.
     let cull_mode = if two_sided { None } else { Some(Face::Back) };
     // Transparent batches only: opaque passes never sort by it. Tying past index 899 is safe:
