@@ -1894,11 +1894,15 @@ vm {:.1}   ui {:.1}",
         // thirty, and these two are the ones a crowd can plausibly make expensive: every held
         // unit's aura list, and the hover scan.
         let _ = write!(line, ",{}", SET_US[12].swap(0, Relaxed) / per);
+        // **Per FRAME, like every tile they are read against.** Written as second-totals first,
+        // which made `px_attach` read 135% of `s_upd` with a negative residual - the identical
+        // mistake `px_asstrk` made two days ago, in the same file, after I had written the comment
+        // explaining it. The residual is computed on purpose; it is what catches this.
         let _ = write!(
             line,
             ",{},{}",
-            ATTACH_US.swap(0, Relaxed),
-            DRIVE_US.swap(0, Relaxed)
+            ATTACH_US.swap(0, Relaxed) / per,
+            DRIVE_US.swap(0, Relaxed) / per
         );
     }
     // What the pump moved this second; see `ASSET_EVENTS`. A TOTAL, not a per-frame average: the
