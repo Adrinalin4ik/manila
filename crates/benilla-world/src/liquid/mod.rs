@@ -44,6 +44,20 @@ pub use query::{
     Underwater, WaterChunkInfo, WmoPool,
 };
 pub(crate) use spatial::{maintain_water_index, WaterIndex};
+
+/// Microseconds inside [`spatial::maintain_water_index`] since the last read - the journal's
+/// `wix_us` column. A rebuild-everything-on-any-change system in `PreUpdate`, which is the lane
+/// journal 86 caught at 2.85 s in one second.
+static WATER_INDEX_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn note_water_index(us: u64) {
+    WATER_INDEX_US.fetch_add(us, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Read and clear, once per journal row.
+pub fn take_water_index_micros() -> u64 {
+    WATER_INDEX_US.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
 pub(crate) use surface::{
     spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource, LiquidSurface,
 };

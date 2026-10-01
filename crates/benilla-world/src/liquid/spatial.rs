@@ -59,6 +59,14 @@ pub(crate) fn maintain_water_index(
     if removed.read().next().is_none() && added.is_empty() {
         return;
     }
+    // **Timed, because this rebuilds EVERYTHING on any one change.** One water chunk arriving or
+    // leaving clears the whole index and walks every chunk again, and while a player rides into a
+    // new area chunks arrive continuously - so this can run its full cost every frame for as long
+    // as the streaming lasts. The owner reports freezes approaching a crowded place; journal 86 has
+    // `s_pre` at 2,852,155 us in one second against ~213 calm, and this is one of only four systems
+    // this crate puts in `PreUpdate`. A suspect with a mechanism is still a suspect: this says
+    // whether it is the one.
+    let started = bevy::platform::time::Instant::now();
     index.cells.clear();
     for (entity, chunk) in &chunks {
         let Some([lo, hi]) = chunk.xy_bounds() else {
@@ -72,6 +80,7 @@ pub(crate) fn maintain_water_index(
             }
         }
     }
+    crate::liquid::note_water_index(started.elapsed().as_micros() as u64);
 }
 
 #[cfg(test)]
