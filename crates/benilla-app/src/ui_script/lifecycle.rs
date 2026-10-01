@@ -180,6 +180,9 @@ pub(crate) struct PendingEntryUiLoad {
     /// to carry the node set across the frames it is sliced over.
     roster: Vec<String>,
     version_check: bool,
+    /// The third-party walk, held open while its addons are stepped through one per frame — the
+    /// same shape the core and layer lists already have below, and for the same reason.
+    addons: Option<addons::ThirdParty>,
     /// The chain core and its file list, and benilla's layer and its own, both resolved once at
     /// the first step: upstream's `load_core`/`load_layer` each walk their list in one burst, and
     /// this path walks the same lists a file at a time.
@@ -203,7 +206,7 @@ impl PendingEntryUiLoad {
 /// Where the sliced entry load is — see [`PendingEntryUiLoad`]. The order is
 /// [`load_ingame_ui`]'s, one step per stage transition: what used to be one call is now the
 /// same calls with frame boundaries allowed between them.
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
 enum EntryStage {
     /// Waiting for the cover, or about to take the first step.
     #[default]
@@ -216,10 +219,15 @@ enum EntryStage {
     Layer { next: usize },
     /// `UIParent_ManageFramePositions()`.
     Positions,
-    /// Every third-party addon (one step: the walk is dependency-ordered and fires
-    /// `ADDON_LOADED` per addon — kept atomic; the page has no addon folder, and a native
-    /// player's addon burst is the reference's own behaviour).
-    ThirdParty,
+    /// Every third-party addon, **one per step** ([`addons::open_third_party`]).
+    ///
+    /// It was one step for all of them, "kept atomic", justified by the page having no addon
+    /// folder - which stopped being true when the `/addons` route started working. Measured on an
+    /// install with 44 of them: **14,797 ms in a single step**, and the entry load's frame budget
+    /// cannot break one step by construction ("at least one step always runs"). That is the
+    /// multi-second freeze. `ADDON_LOADED` still fires per addon and the dependency order is the
+    /// walk's own, so what changed is only where the frame boundaries may fall.
+    ThirdParty { next: usize },
     /// Saved variables, `VARIABLES_LOADED`, the failure count, the identity record.
     Finish,
 }
@@ -359,6 +367,11 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     world.resource_mut::<PendingEntryUiLoad>().frames += 1;
     loop {
         let stage = world.resource::<PendingEntryUiLoad>().stage;
+        // **Which STEP is slow, named.** The budget below bounds how many steps a frame takes, not
+        // what one costs - "at least one step always runs" - so a single step of three seconds is
+        // a three-second frame and the slicing cannot help. `px_uiload` says this system is 99.3%
+        // of `PreUpdate` and reached 3.03 s in one second; this says which step that was.
+        let step_start = bevy::platform::time::Instant::now();
         match stage {
             EntryStage::Armed => {
                 let (identity, roster, version_check) = entry_prepare(world, &mut script);
@@ -444,18 +457,36 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 let _ = super::manifest::bootstrap_positions(&script);
                 let mut pending = world.resource_mut::<PendingEntryUiLoad>();
                 pending.done += 1;
-                pending.stage = EntryStage::ThirdParty;
+                pending.stage = EntryStage::ThirdParty { next: 0 };
             }
-            EntryStage::ThirdParty => {
-                let (identity, roster, version_check) = {
-                    let p = world.resource::<PendingEntryUiLoad>();
-                    (p.identity.clone(), p.roster.clone(), p.version_check)
-                };
-                let _ =
-                    addons::load_third_party(&mut script, identity.as_ref(), &roster, version_check);
+            EntryStage::ThirdParty { next } => {
+                if next == 0 {
+                    let (identity, roster, version_check) = {
+                        let p = world.resource::<PendingEntryUiLoad>();
+                        (p.identity.clone(), p.roster.clone(), p.version_check)
+                    };
+                    let walk = addons::open_third_party(
+                        &mut script,
+                        identity.as_ref(),
+                        &roster,
+                        version_check,
+                    );
+                    world.resource_mut::<PendingEntryUiLoad>().addons = Some(walk);
+                }
                 let mut pending = world.resource_mut::<PendingEntryUiLoad>();
+                let total = pending.addons.as_ref().map_or(0, addons::ThirdParty::len);
+                if let Some(walk) = pending.addons.as_mut() {
+                    addons::load_one_addon(walk, &mut script, next);
+                }
                 pending.done += 1;
-                pending.stage = EntryStage::Finish;
+                pending.stage = if next + 1 < total {
+                    EntryStage::ThirdParty { next: next + 1 }
+                } else {
+                    if let Some(walk) = pending.addons.take() {
+                        let _ = addons::close_third_party(walk);
+                    }
+                    EntryStage::Finish
+                };
             }
             EntryStage::Finish => {
                 let pending = world
@@ -483,6 +514,14 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 );
                 return;
             }
+        }
+        let step = step_start.elapsed();
+        if step >= std::time::Duration::from_millis(50) {
+            warn!(
+                "ui load: step {:?} took {:.0} ms - one step, so the frame budget could not break it",
+                stage,
+                step.as_secs_f64() * 1000.0
+            );
         }
         if frame_start.elapsed() >= ENTRY_LOAD_FRAME_BUDGET {
             break; // resume next frame

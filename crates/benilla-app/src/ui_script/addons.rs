@@ -959,6 +959,124 @@ pub(super) fn load_third_party(
     state.failures
 }
 
+/// **The third-party walk, held open across frames** - see [`open_third_party`].
+pub(super) struct ThirdParty {
+    addons: Vec<Addon>,
+    walk: Walk,
+}
+
+impl ThirdParty {
+    /// How many addons the walk will step through.
+    pub(super) fn len(&self) -> usize {
+        self.addons.len()
+    }
+}
+
+/// **Everything [`load_third_party`] does BEFORE its per-addon loop**, so the loop can be sliced.
+///
+/// The loop was one step of the entry load, and the entry load's frame budget only decides whether
+/// a SECOND step starts - "at least one step always runs". So every addon a player has loaded in
+/// one unbreakable frame: measured at **14,797 ms** on an install with 44 of them, which is the
+/// multi-second freeze the owner reported. The comment that kept it atomic said "the page has no
+/// addon folder"; that stopped being true the day the `/addons` route started working.
+pub(super) fn open_third_party(
+    script: &mut UiScript,
+    identity: Option<&(String, String)>,
+    roster: &[String],
+    version_check: bool,
+) -> ThirdParty {
+    let addons = discover();
+    let mut infos: Vec<_> = addons.iter().map(info_for).collect();
+    script.set_addon_chain_reader(Box::new(super::reference_ui::read));
+    let store = EnableStore::load(
+        identity
+            .map(|(realm, _)| realm.as_str())
+            .unwrap_or_default(),
+        &store_nodes(identity, roster),
+    );
+    let character = identity.map(|(_, c)| c.as_str());
+    for (info, addon) in infos.iter_mut().zip(addons.iter()) {
+        info.enabled = store.enabled_for(&info.name, addon.toc.default_state(), character);
+    }
+    let disabled: HashSet<String> = infos
+        .iter()
+        .filter(|i| !i.enabled)
+        .map(|i| i.name.to_ascii_lowercase())
+        .collect();
+    script.register_addons(
+        infos,
+        root(),
+        crate::local_state::addon_saved_account_dir(),
+        identity.and_then(|(r, c)| crate::local_state::addon_saved_character_dir(r, c)),
+    );
+    script.set_addon_enable_hash(
+        character
+            .and_then(|c| store.node(c))
+            .cloned()
+            .unwrap_or_default(),
+    );
+    if !addons.is_empty() {
+        info!(
+            "ui_script: {} addon(s) found: {}",
+            addons.len(),
+            addons
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    ThirdParty {
+        addons,
+        walk: Walk {
+            disabled,
+            version_check,
+            ..Walk::default()
+        },
+    }
+}
+
+/// One addon of the walk, by index - the body of the loop that used to run all of them at once.
+pub(super) fn load_one_addon(state: &mut ThirdParty, script: &mut UiScript, i: usize) {
+    let Some(addon) = state.addons.get(i) else {
+        return;
+    };
+    let name = addon.name.clone();
+    // `## LoadOnDemand: 1` waits for `LoadAddOn`: `0x51f600` loads only records whose
+    // LoadOnDemand byte is 0.
+    if addon.toc.load_on_demand() {
+        info!("ui_script: {name} is LoadOnDemand - not loaded (no LoadAddOn() yet)");
+        return;
+    }
+    // Re-armed per addon, so one runaway cannot fail every addon after it; a dependency chain
+    // loads under its dependent's arming, as in the harness's survey.
+    script.set_instruction_budget(LOAD_INSTRUCTION_BUDGET);
+    let addons = std::mem::take(&mut state.addons);
+    let started = bevy::platform::time::Instant::now();
+    let _ = state.walk.load(script, &addons, &name);
+    state.addons = addons;
+    // Named here because the name is in hand: the step timer upstream of this can only say
+    // `ThirdParty { next: 19 }`, and an index is not something anyone can act on. Slicing the
+    // walk per addon cut the worst frame from 3,076 ms to 1,868, but one addon can still be
+    // seconds on its own and no slicing reaches inside a single `load`.
+    let took = started.elapsed();
+    if took >= std::time::Duration::from_millis(250) {
+        warn!(
+            "ui_script: addon {name} loaded in {:.0} ms - one addon, one step",
+            took.as_secs_f64() * 1000.0
+        );
+    }
+    let spent = script.instructions_used();
+    if spent > 1_000_000 {
+        info!("ui_script: {name} spent {spent} VM instructions loading");
+    }
+}
+
+/// The walk's failures, once every addon has had its step.
+pub(super) fn close_third_party(state: ThirdParty) -> Vec<String> {
+    state.walk.failures
+}
+
 /// The recursive load's bookkeeping, for [`Walk::load`].
 #[derive(Default)]
 struct Walk {
