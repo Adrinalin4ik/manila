@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,px_feedunits,gate_n,gate_open,rigs_live,rigs_park,arch,ent_alloc,px_vmtick,skf_n,skf_us,wix_us\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,px_feedunits,gate_n,gate_open,rigs_live,rigs_park,arch,ent_alloc,px_vmtick,skf_n,skf_us,px_input,px_asstrk,wix_us\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -460,7 +460,13 @@ static POSTCLEAN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 ///
 /// `UiFeed` (53 members), `UnitFeed` (31) and `UiInput` (2) already exist as sets, so this costs
 /// no change to 190 registrations to find out.
-const NSETS: usize = 9;
+/// **Nine brackets sit mid-row and two more do not.** Slots 0-8 are written by the loop in the
+/// middle of the row, where the `px_*` columns are; growing that loop would shift `gate_n` and
+/// everything after it, which this file has already had happen once and which splits every row a
+/// reader checks against the header. So `MIDROW` stays 9 for ever and anything added lands at the
+/// END, where columns only ever grow.
+const MIDROW: usize = 9;
+const NSETS: usize = 11;
 static SET_US: [std::sync::atomic::AtomicU64; NSETS] = [ZERO; NSETS];
 
 /// Where each bracket's `open` leaves its timestamp. A resource rather than a static because it
@@ -863,6 +869,17 @@ impl Plugin for FpsJournalPlugin {
             // from the observer itself. Costs one atomic read per frame when disarmed.
             .add_systems(bevy::app::Last, crate::perf::sched_dump::dump_if_armed)
             .init_resource::<SetClocks>()
+            // `PreUpdate`'s two bracketable residents; see the write site for why the third, and
+            // likeliest, is not one of them.
+            .add_systems(
+                bevy::app::PreUpdate,
+                (
+                    set_open::<9>.before(bevy::input::InputSystems),
+                    set_close::<9>.after(bevy::input::InputSystems),
+                    set_open::<10>.before(bevy::asset::AssetTrackingSystems),
+                    set_close::<10>.after(bevy::asset::AssetTrackingSystems),
+                ),
+            )
             // The player-UI bridge, in `Update`. Separate from the PostUpdate group and never
             // chained to it: they are different schedules, and an ordering edge across the two
             // is meaningless to the scheduler and misleading to a reader.
@@ -1727,7 +1744,7 @@ vm {:.1}   ui {:.1}",
             MESH_ALL.swap(0, Relaxed) / f
         );
         let _ = write!(line, ",{}", POSTCLEAN_US.swap(0, Relaxed) / f);
-        for cell in &SET_US {
+        for cell in &SET_US[..MIDROW] {
             let _ = write!(line, ",{}", cell.swap(0, Relaxed) / f);
         }
         // Gated feeds reached, and those the gate let through — per frame, like the tiles.
@@ -1762,6 +1779,33 @@ vm {:.1}   ui {:.1}",
     {
         let (n, us) = take_skin_forced();
         let _ = write!(line, ",{n},{us}");
+    }
+    // **The two `PreUpdate` brackets**, at the end of the row (see `MIDROW`).
+    //
+    // `s_pre` reached 2,852,155 us in one second of the owner's journal 86 and 2,565,728 in a run
+    // here, against ~213 calm, and nothing could say what inside it. This workspace puts four
+    // systems in `PreUpdate` and one of them, the water index, has been measured and cleared
+    // (`wix_us`, 1,755 us over a whole run). So the cost is bevy's own, and bevy puts three things
+    // there: `InputSystems`, `AssetTrackingSystems`, and `handle_internal_asset_events` - an
+    // EXCLUSIVE system taking `&mut World` that pumps every pending asset load and drop, which is
+    // exactly the work a player riding into a crowded place creates.
+    //
+    // That one cannot be bracketed: it is `ambiguous_with_all` and in no named set. The other two
+    // can, so `s_pre - px_input - px_asstrk` is what it costs, by subtraction - the same shape the
+    // `r_*` tiles use for `ExtractSchedule` and present.
+    //
+    // **Per FRAME, divided like the tiles they are compared against.** Written as second-totals
+    // first, which made `px_asstrk` read 517% of `s_pre` and the residual negative - the one
+    // arithmetic that cannot be true, and the reason the residual is computed at all.
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        let per = frames.max(1);
+        let _ = write!(
+            line,
+            ",{},{}",
+            SET_US[9].swap(0, Relaxed) / per,
+            SET_US[10].swap(0, Relaxed) / per
+        );
     }
     // The water index's own rebuild cost - see `benilla_world::liquid::WATER_INDEX_US`.
     let _ = write!(
