@@ -378,10 +378,20 @@ pub fn model_material(
     // more key, one more `WowModelMaterial`, one more bind group for `RenderSystems::PrepareAssets`
     // to build, and not one pixel different.
     //
-    // Measured before the change, 110 s at a crowded spot: 15,515 distinct keys over 3,089 distinct
-    // `batch_order` values. Collapsing it for the non-sorting batches leaves **5,580**, 2.8x fewer.
-    // Dropping it everywhere - which WOULD reorder coplanar transparents - leaves 5,433, so the
-    // risky version buys 147 materials out of ten thousand and the question is not worth asking.
+    // **What it actually delivers: 17,187 keys become 12,071, a factor of 1.42.** Measured with the
+    // collapse on and off in the same place, two runs each.
+    //
+    // The 2.8x this comment used to claim was measured with a DIFFERENT predicate than the one
+    // below: the counter that produced it kept `batch_order` for `!matches!(blend, Opaque |
+    // AlphaTest)`, while this keeps it for `alpha_mode == Blend`, which is broader - an additive
+    // batch and a fade twin resolve to `Blend` and sort, and they are thousands of keys. The code
+    // is right and the number was not; predicting a change with one rule and shipping another is
+    // how an estimate becomes a promise nobody checks.
+    //
+    // Worth it on its own terms (a quarter of the materials, for nothing), but it did NOT move the
+    // multi-second `PreUpdate` freeze: with and without, `s_pre` totals were 1.81/2.12 M us against
+    // 1.50/3.08 M, the two settings straddling each other. That lane is bevy's asset pump
+    // (`px_asstrk`, 99.6% of `s_pre`) and ten thousand fewer material assets did not reach it.
     //
     // Why it is worth anything: `r_assets` is ~2 ms a second standing still and reached **103 ms**
     // in a battleground fight, where 1,742 materials appeared in twenty seconds and one frame took
