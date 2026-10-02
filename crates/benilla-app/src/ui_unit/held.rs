@@ -116,6 +116,11 @@ pub(super) fn feed_chain_units(
     changed: Query<(), (Changed<ObjectStore>, Without<crate::items::ItemObject>)>,
     mut removed: RemovedComponents<Guid>,
     mut memo: Local<VmMemo<ChainMemo>>,
+    // wenilla carry: our own descriptor's edge, for the narrowed gate below.
+    #[cfg(not(target_os = "macos"))] self_changed: Query<
+        (),
+        (With<SelfPlayer>, Changed<ObjectStore>),
+    >,
 ) {
     let Some(mut script) = script else {
         return;
@@ -128,7 +133,19 @@ pub(super) fn feed_chain_units(
     // unit's target.
     let names_moved = memo.names_generation.moved(names.generation());
     let ends_moved = memo.ends != ends;
+    #[cfg(target_os = "macos")]
     let stores_changed = !changed.is_empty();
+    // wenilla carry: only the chain ends' descriptors and ours (the reaction reads it) open the
+    // gate; any unit's change did, which in a crowd is every frame, rebuilding every end's state.
+    // An end that moves to a new guid is `ends_moved`; a despawn is `stores_removed`.
+    #[cfg(not(target_os = "macos"))]
+    let stores_changed = !self_changed.is_empty()
+        || ends.iter().any(|guid| {
+            index
+                .as_ref()
+                .and_then(|i| i.0.get(guid))
+                .is_some_and(|e| changed.contains(*e))
+        });
     let stores_removed = !removed.is_empty();
     let group_changed = group.is_changed();
     let reps_changed = reputations.is_changed();

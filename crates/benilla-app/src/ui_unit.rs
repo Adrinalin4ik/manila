@@ -1240,7 +1240,31 @@ pub(crate) fn feed_units(
     let names_moved = memo.names_generation.moved(names.generation());
     let guild_moved = memo.guild_generation.moved(guild.identity_generation());
     let selection_changed = selection.is_changed();
+    #[cfg(target_os = "macos")]
     let stores_changed = !stores.changed.is_empty();
+    // wenilla carry: only the descriptors this feed reads open the gate - ours, the target's, its
+    // target's and the interaction NPC's. `Changed<ObjectStore>` over every unit is true on every
+    // frame of a crowd, so the four snapshots, their strings and their diffs were rebuilt each
+    // frame for units nobody watches (`px_feedunits` ~2 ms at 1,000 rigs, journal 93). A new
+    // target-of-target moves the target's own `UNIT_FIELD_TARGET`, and a despawn is
+    // `stores_removed`, so both still open it. Not covered: a change on the target's OWNER alone
+    // (the `CanAssist` owner chase in `held.state`) waits for the next change that opens the gate.
+    #[cfg(not(target_os = "macos"))]
+    let stores_changed = {
+        let entity_of = |guid: u64| index.as_ref().and_then(|i| i.0.get(&guid).copied());
+        let self_e = self_q.iter().next().and_then(|(_, g)| entity_of(g.0));
+        let tot_e = selection
+            .target
+            .and_then(|e| stores.all.get(e).ok())
+            .and_then(|s| s.0.unit_target())
+            .filter(|guid| *guid != 0)
+            .and_then(entity_of);
+        let npc_e = interact.as_deref().and_then(|i| i.0);
+        [self_e, selection.target, tot_e, npc_e]
+            .into_iter()
+            .flatten()
+            .any(|e| stores.changed.contains(e))
+    };
     let stores_removed = !stores.removed.is_empty();
     let group_changed = group.is_changed();
     let reps_changed = reputations.is_changed();
