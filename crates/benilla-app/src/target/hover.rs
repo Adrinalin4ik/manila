@@ -18,7 +18,7 @@ use crate::ui_script::PointerOverUi;
 use benilla_world::billboard::BillboardCard;
 use benilla_world::collision::PickOccluder;
 use benilla_world::interact::{
-    ray_mesh_bounds, ray_posed_mesh, CreaturePickPart, GoPickPart, PickParts,
+    ray_mesh_bounds, CreaturePickPart, GoPickPart, PickParts,
 };
 use benilla_world::view::WorldCamera;
 
@@ -81,6 +81,9 @@ pub(super) struct PickPose<'w, 's> {
     /// The world-space matrices the vertex stage skins with, read from the CPU rows.
     palettes: Res<'w, benilla_world::rig_palette::RigPalettes>,
     rigs: Query<'w, 's, &'static benilla_world::rig_palette::RigSkin>,
+    /// wenilla carry: pass 1's skinned parts, kept for pass 2 (`interact/posed_once.rs`).
+    #[cfg(not(target_os = "macos"))]
+    scratch: Local<'s, benilla_world::interact::PosedPickScratch>,
 }
 
 /// The local identity and what of it and of the corpses the pick takes, one [`SystemParam`] under
@@ -186,7 +189,8 @@ pub(super) fn update_hover(
     plate_hover: Res<crate::vplates::PlateHover>,
     mut hovered: ResMut<Hovered>,
     mesh_assets: Res<Assets<Mesh>>,
-    pose: PickPose,
+    #[allow(unused_mut)] // mutated only by the non-macOS carry
+    mut pose: PickPose,
     // Our own body joins the pick only while a targeting word takes it (`0x6e61a0`).
     target_state: TargetHoverState,
     // Last frame's pick, which outranks everything in pass 2 (the reference's anti-flicker cache).
@@ -345,9 +349,25 @@ pub(super) fn update_hover(
     // Pass 1: the exact posed mesh, nearest wins, unbounded as in the reference; occlusion is one
     // compare on the result, below.
     let mut best: Option<(f32, Entity)> = None;
+    #[cfg(not(target_os = "macos"))]
+    pose.scratch.clear();
     for (entity, _, mesh_ids, palette) in &candidates {
         for id in mesh_ids {
-            let Some(t) = ray_posed_mesh(&mesh_assets, *id, palette, origin, dir, false) else {
+            #[cfg(target_os = "macos")]
+            let hit = benilla_world::interact::ray_posed_mesh(
+                &mesh_assets,
+                *id,
+                palette,
+                origin,
+                dir,
+                false,
+            );
+            // Skinned once and kept: pass 2 reads these vertices instead of skinning again.
+            #[cfg(not(target_os = "macos"))]
+            let hit = pose
+                .scratch
+                .ray_exact(&mesh_assets, *id, palette, origin, dir);
+            let Some(t) = hit else {
                 continue;
             };
             if best.is_none_or(|(bt, _)| t < bt) {
@@ -389,11 +409,33 @@ pub(super) fn update_hover(
     // Pass 2, when nothing hit exactly: the halo, won by the priority ladder, not distance.
     if best.is_none() {
         let mut best2: Option<(f32, u32, Entity)> = None;
+        // Pass 1 pushed one span per mesh in this same order.
+        #[cfg(not(target_os = "macos"))]
+        let mut span = 0usize;
         for (entity, priority, mesh_ids, palette) in &candidates {
+            #[cfg(target_os = "macos")]
             let hit = mesh_ids
                 .iter()
-                .filter_map(|id| ray_posed_mesh(&mesh_assets, *id, palette, origin, dir, true))
+                .filter_map(|id| {
+                    benilla_world::interact::ray_posed_mesh(
+                        &mesh_assets,
+                        *id,
+                        palette,
+                        origin,
+                        dir,
+                        true,
+                    )
+                })
                 .min_by(f32::total_cmp);
+            #[cfg(not(target_os = "macos"))]
+            let hit = {
+                let _ = palette; // already applied by pass 1
+                let first = span;
+                span += mesh_ids.len();
+                (first..span)
+                    .filter_map(|i| pose.scratch.ray_halo(&mesh_assets, i, origin, dir))
+                    .min_by(f32::total_cmp)
+            };
             let Some(t) = hit else { continue };
             let prio = if *last_pick == Some(*entity) {
                 u32::MAX // the sticky-hover cache outranks everything

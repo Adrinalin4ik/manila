@@ -12,6 +12,11 @@ use bevy::prelude::*;
 use crate::model_render::ModelKind;
 
 mod pick;
+// wenilla carry: the hover pick skins each candidate once per frame (see the file).
+#[cfg(not(target_os = "macos"))]
+mod posed_once;
+#[cfg(not(target_os = "macos"))]
+pub use posed_once::PosedPickScratch;
 
 pub use pick::{
     cast_object_ray, cast_pick_ray, cast_pick_ray_inflated, pick_at_cursor, pick_object_at_cursor,
