@@ -855,7 +855,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ),
     ours(
         "uploadBudgetMb",
-        "8",
+        "0",
         "benilla's own - a browser upload cap so an arriving crowd spreads over frames",
     ),
     // **Upstream PR 438's `> 1700` rule, switchable** - `benilla_formats::set_unmanaged_geosets_visible`.

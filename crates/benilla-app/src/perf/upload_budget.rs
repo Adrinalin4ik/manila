@@ -19,16 +19,18 @@
 //! bodies already fade in over two seconds, which covers a few frames of it.
 //!
 //! Browser only: the native build keeps its env-var lever and its unlimited default. `0` removes
-//! the cap.
+//! the cap, and is the default (see [`DEFAULT_MB`] for why).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bevy::prelude::*;
 use bevy::render::render_asset::RenderAssetBytesPerFrame;
 
-/// The cvar's default, in MiB per frame; keep in step with `cvars/table.rs`. At 60 fps that is
-/// still ~480 MiB/s, so only a burst ever waits.
-pub(crate) const DEFAULT_MB: usize = 8;
+/// The cvar's default, in MiB per frame; keep in step with `cvars/table.rs`. Off: the owner's
+/// one-session A/B did not support the hypothesis above. Journal 95 (8 MiB) had 15 seconds with
+/// a p95 over 150 ms and a worst p95 of 1,696 ms; journal 96 (`uploadBudgetMb 0`, same route)
+/// had 7 and 802. One run each, so not a measurement of harm - but no evidence of help either.
+pub(crate) const DEFAULT_MB: usize = 0;
 
 static MB: AtomicUsize = AtomicUsize::new(DEFAULT_MB);
 
