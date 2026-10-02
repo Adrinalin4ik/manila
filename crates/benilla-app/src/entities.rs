@@ -569,6 +569,12 @@ pub(crate) struct EntitiesPlugin;
 
 impl Plugin for EntitiesPlugin {
     fn build(&self, app: &mut App) {
+        // wenilla carry: hosted effects park with their host's rig, before the pose evaluation.
+        #[cfg(not(target_os = "macos"))]
+        app.add_systems(
+            PostUpdate,
+            spell_fx::park_effect_rigs.before(bevy::app::AnimationSystems),
+        );
         app.add_systems(
             Update,
             publish_world_units

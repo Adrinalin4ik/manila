@@ -12,6 +12,11 @@
 //! for the client's completion callback.
 
 mod lifecycle;
+// wenilla carry: an effect on a parked host stops writing its joints (see the file).
+#[cfg(not(target_os = "macos"))]
+mod park;
+#[cfg(not(target_os = "macos"))]
+pub(crate) use park::park_effect_rigs;
 
 use std::collections::HashMap;
 
