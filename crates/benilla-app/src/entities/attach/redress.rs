@@ -21,9 +21,11 @@ use super::super::{
     Characters, Creatures, EntityPart, Equipment, ItemDisplays, SkinComposites, SkinSections,
     VisualAttached,
 };
+#[cfg(target_os = "macos")]
+use super::char_skin::forced_body_atlas;
 use super::char_skin::{
-    build_char_skin_materials, equip_geosets, forced_body_atlas, resolve_char_look,
-    resolve_worn_equip, skin_key, CharSkinMaterials,
+    build_char_skin_materials, equip_geosets, resolve_char_look, resolve_worn_equip, skin_key,
+    CharSkinMaterials,
 };
 use super::dress::{part_materials, spawn_group, DressedPart, PartDress};
 use super::merge::{self, DressedGroup, MergedFormsCache};
@@ -95,10 +97,20 @@ pub(in crate::entities) fn redress_player_looks(
         ResMut<benilla_world::mat_anim_table::MatAnimTable>,
     ),
     time: Res<Time>,
+    // wenilla carry: when each pending player's worn set last changed (`SETTLE_SECS`).
+    #[cfg(not(target_os = "macos"))] mut settling: Local<
+        bevy::ecs::entity::EntityHashMap<(Equipment, f32)>,
+    >,
 ) {
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(unused_mut, unused_variables, reason = "the forced arm is macOS-only")
+    )]
     let (sections, mut skin_composites, asset_server, mut mats, mut meshes, mut merged, mut images) =
         skin_build;
     let now = time.elapsed_secs();
+    #[cfg(not(target_os = "macos"))]
+    settling.retain(|e, _| players.contains(*e));
     for (entity, net, live, mut applied, children, rig, bones, mut pose, bake_center, unit_fade) in
         &mut players
     {
@@ -106,6 +118,21 @@ pub(in crate::entities) fn redress_player_looks(
         if net.kind != EntityKind::Player || !live.settled || *live == applied.0 {
             continue;
         }
+        // wenilla carry: a worn set must hold for `SETTLE_SECS` before it re-dresses, so item
+        // fields landing over several packets cost one re-dress, not one per settled state.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let since = settling.entry(entity).or_insert((*live, now));
+            if since.0 != *live {
+                *since = (*live, now);
+            }
+            if now - since.1 < SETTLE_SECS {
+                continue;
+            }
+        }
+        // Kept to undo the stamp while the new atlas composites (the non-macOS arm below).
+        #[cfg(not(target_os = "macos"))]
+        let previous = applied.0;
         // Stamp first: a model-less player has nothing to re-dress and must not retry every frame.
         applied.0 = *live;
         let Some(dm) = net
@@ -124,6 +151,7 @@ pub(in crate::entities) fn redress_player_looks(
         // geosets apply at once and the atlas composites that frame when its sections are
         // resident, never gated or withheld. So it composites here, in the frame, taking over a
         // running composite of the same look; only an arriving body waits for its atlas.
+        #[cfg(target_os = "macos")]
         let body_tex = look.as_ref().and_then(|l| {
             forced_body_atlas(
                 l,
@@ -135,6 +163,33 @@ pub(in crate::entities) fn redress_player_looks(
                 &mut images,
             )
         });
+        // wenilla carry: the arrival's lane, not the forced one. A forced composite runs on the
+        // drawing thread, with a blocking fetch per uncached BLP on wasm, and journals 93-96
+        // priced one at 64-764 ms (`skf_us`; 2-8 a run, each a freeze of its own). Requested, it
+        // goes to the Worker; until it lands the body keeps its standing look and the stamp is
+        // undone, so the re-dress retries each frame - a cheap `running` lookup - and then applies
+        // geosets and atlas together. The reference composites in the frame; this shows the new
+        // gear a composite later.
+        #[cfg(not(target_os = "macos"))]
+        let body_tex = match look.as_ref().map(|l| {
+            super::char_skin::body_atlas(
+                l,
+                skin_key(l, worn.bodyslots, worn.emblem, worn.tabard_preview),
+                displays.as_deref(),
+                sections.as_deref(),
+                &mut skin_composites,
+                &asset_server,
+            )
+        }) {
+            None => None,
+            Some(super::super::skin_composite::BodyAtlas::Ready(tex)) => tex,
+            Some(super::super::skin_composite::BodyAtlas::Pending) => {
+                applied.0 = previous;
+                continue;
+            }
+        };
+        #[cfg(not(target_os = "macos"))]
+        settling.remove(&entity);
         let eg = equip_geosets(
             displays.as_deref(),
             &worn.bodyslots,
@@ -277,6 +332,12 @@ pub(in crate::entities) fn redress_player_looks(
         );
     }
 }
+
+/// wenilla carry: how long a player's worn set must hold before it re-dresses. Item fields of one
+/// gear change arrive within a packet or two; a quarter second spans that and is under the
+/// Worker composite that follows it anyway.
+#[cfg(not(target_os = "macos"))]
+const SETTLE_SECS: f32 = 0.25;
 
 /// Re-point one standing part at its unit's new materials. The records always update; the
 /// displayed material only when no fade ramp owns it, since `apply_render_fade` re-resolves a
