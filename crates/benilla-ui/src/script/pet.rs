@@ -104,22 +104,28 @@ pub struct PetStats {
 pub(crate) struct PetBarState {
     /// `PetHasActionBar()`: there is a bar, even one of ten empty slots.
     pub(crate) has_bar: bool,
-    /// `GetPetActionsUsable()`: false desaturates the whole bar.
+    /// `GetPetActionsUsable()` (`0x4bcf70`): false desaturates the whole bar, and refuses the
+    /// drag's bar writes with it (`0x4bc9d0`).
     pub(crate) actions_usable: bool,
     pub(crate) slots: Vec<StoredPetAction>,
     /// `HasPetUI`'s first return: a pet with a nonzero `UNIT_FIELD_PETNUMBER` (`0x4be697`). Not
     /// `has_bar`, whose gate is the cached guid alone.
     pub(crate) has_ui: bool,
     pub(crate) stats: PetStats,
-    /// `PickupPetAction`'s gate, `UNIT_FLAG_POSSESSED` clear (`0x4be1c1`), which blocks the drop
-    /// as well as the pick-up. Not `actions_usable`: possession does not grey the bar, and the
-    /// flags that grey it do not block a drag.
+    /// `PickupPetAction`'s gate: the pet's object resolves (`0x4be1f7`) and `UNIT_FLAG_POSSESSED`
+    /// is clear (`0x4be20a`), which blocks the drop as well as the pick-up. Not `actions_usable`:
+    /// possession does not grey the bar, and the pick-up itself does not ask it. The writes at
+    /// both ends do (`0x4bc9d0`), so a greyed bar with its pet in view still lifts an action onto
+    /// the cursor and then writes nothing.
     pub(crate) pickup_allowed: bool,
     /// `PetCanBeAbandoned()`: a kept pet rather than a summon. It forks the pet menu: paperdoll,
     /// rename and abandon show when true, dismiss only when false (`UnitPopup.lua:402-417`).
     pub(crate) can_be_abandoned: bool,
     /// `PetCanBeRenamed()`, ANDed with the above for the rename row; set until the first rename.
     pub(crate) can_be_renamed: bool,
+    /// The charm or possess expiry `[0xb714a8]` on the `GetTime` clock, in seconds: the last
+    /// `SMSG_PET_SPELLS` duration past its arrival, `None` for a packet whose duration is 0.
+    pub(crate) expiry: Option<f64>,
 }
 
 impl super::UiScript {
@@ -160,6 +166,12 @@ impl super::UiScript {
         bar.stats = stats;
     }
 
+    /// Push the pet's expiry on the `GetTime` clock, `None` for none: `SetPet` (`0x4bc7e0`)
+    /// stores `OsTick() + duration` for each `SMSG_PET_SPELLS` whose duration is not 0, else 0.
+    pub fn set_pet_expiry(&mut self, expiry: Option<f64>) {
+        self.model_mut().pet_bar.expiry = expiry;
+    }
+
     /// Push the menu's two predicates, which move with the pet's `UNIT_FIELD_FLAGS`.
     pub fn set_pet_menu(&mut self, can_be_abandoned: bool, can_be_renamed: bool) {
         let bar = &mut self.model_mut().pet_bar;
@@ -167,9 +179,13 @@ impl super::UiScript {
         bar.can_be_renamed = can_be_renamed;
     }
 
-    /// Drain the 1-based slots `CastPetAction` queued; the app decides what each one sends.
+    /// Take the `CastPetAction` calls out of the call stream, as 1-based slots; the app decides
+    /// what each one sends.
     pub fn take_pet_actions(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().pet_actions_pressed)
+        self.take_calls_where(|c| match c {
+            super::ScriptCall::PetAction(slot) => Some(*slot),
+            _ => None,
+        })
     }
 
     /// Drain the 1-based slot indices `TogglePetAutocast` queued.
@@ -182,9 +198,13 @@ impl super::UiScript {
         std::mem::replace(&mut self.model_mut().pet_stop_attacks, 0)
     }
 
-    /// Drain the one-shot orders (`PetAttack` and the rest), each a packed slot word.
+    /// Take the one-shot orders (`PetAttack` and the rest) out of the call stream, each a packed
+    /// slot word.
     pub fn take_pet_orders(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().pet_orders)
+        self.take_calls_where(|c| match c {
+            super::ScriptCall::PetOrder(packed) => Some(*packed),
+            _ => None,
+        })
     }
 
     /// Set the flag `HasFullControl` answers.
@@ -226,6 +246,28 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
     let flag = |b: bool| if b { Value::Integer(1) } else { Value::Nil };
+
+    // GetPetTimeRemaining() (`0x4be600`): nil with no expiry, else the milliseconds to it as an
+    // unsigned 32-bit tick difference (`fild qword` over a zero high dword), so one past its
+    // expiry wraps to about 4.29e9 until the next packet. The stock caller is commented out
+    // (`PetFrame.lua:91-97`).
+    g.set(
+        "GetPetTimeRemaining",
+        lua.create_function(|lua, ()| {
+            let expiry = lua
+                .app_data_ref::<Model>()
+                .expect("model app_data")
+                .pet_bar
+                .expiry;
+            let Some(expiry) = expiry else {
+                return Ok(Value::Nil);
+            };
+            let now = crate::script::clock::now(lua);
+            #[allow(clippy::cast_possible_truncation)] // a tick difference, wrapped as the u32 is
+            let ms = ((expiry - now) * 1000.0).round() as i64 as u32;
+            Ok(Value::Number(f64::from(ms)))
+        })?,
+    )?;
 
     g.set(
         "PetHasActionBar",
@@ -272,7 +314,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetPetActionCooldown",
         lua.create_function(|lua, i: u32| {
-            let now: f64 = lua.globals().get("__benilla_now").unwrap_or(0.0);
+            let now = crate::script::clock::now(lua);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(match slot_at(&model, i).and_then(|s| s.cooldown) {
                 Some((start, duration, enabled)) if start + duration > now || !enabled => {
@@ -300,7 +342,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, i: u32| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             if slot_at(&model, i).is_some_and(|s| s.view.name.is_some()) {
-                model.pet_actions_pressed.push(i);
+                model.script_calls.push(super::ScriptCall::PetAction(i));
             }
             Ok(())
         })?,
@@ -461,7 +503,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             lua.create_function(move |lua, ()| {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 if model.pet_bar.has_bar {
-                    model.pet_orders.push(packed);
+                    model.script_calls.push(super::ScriptCall::PetOrder(packed));
                 }
                 Ok(())
             })?,
@@ -537,6 +579,39 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 mod tests {
     use super::{PetActionView, PetStats};
     use crate::script::UiScript;
+
+    /// A charmed or possessed unit's time left in ms, nil for none, and the unsigned wrap once
+    /// the expiry has passed (`0x4be634`).
+    #[test]
+    fn pet_time_remaining_counts_down_to_the_expiry() {
+        let mut s = UiScript::new().unwrap();
+        assert!(s
+            .eval::<Option<f64>>("return GetPetTimeRemaining()")
+            .unwrap()
+            .is_none());
+        s.tick(10.0);
+        s.set_pet_expiry(Some(12.5));
+        assert_eq!(
+            s.eval::<f64>("return GetPetTimeRemaining()").unwrap(),
+            2500.0
+        );
+        s.tick(2.0);
+        assert_eq!(
+            s.eval::<f64>("return GetPetTimeRemaining()").unwrap(),
+            500.0
+        );
+        s.tick(1.0);
+        assert_eq!(
+            s.eval::<f64>("return GetPetTimeRemaining()").unwrap(),
+            f64::from(u32::MAX - 499),
+            "0.5 s past it"
+        );
+        s.set_pet_expiry(None);
+        assert!(s
+            .eval::<Option<f64>>("return GetPetTimeRemaining()")
+            .unwrap()
+            .is_none());
+    }
 
     /// Attack (a token, attacking), Claw (a spell, autocasting, cooling down), an empty slot.
     fn slots() -> Vec<PetActionView> {

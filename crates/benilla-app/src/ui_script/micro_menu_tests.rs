@@ -18,22 +18,22 @@ fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for file in [
-        "Interface\\FrameXML\\Fonts.xml",
-        "Interface\\FrameXML\\Cooldown.xml",
-        "Interface\\FrameXML\\ActionButtonTemplate.xml",
-        "Interface\\FrameXML\\TextStatusBar.lua",
-        "Interface\\FrameXML\\TextStatusBar.xml",
-        r"Interface\FrameXML\UIParent.xml",
         // The labels each button's OnLoad reads, through `TEXT()`.
         "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\Fonts.xml",
         "Interface\\FrameXML\\BasicControls.xml",
-        "Interface\\FrameXML\\MainMenuBar.xml",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
         "Interface\\FrameXML\\GameTooltip.xml",
+        "Interface\\FrameXML\\TextStatusBar.lua",
+        "Interface\\FrameXML\\TextStatusBar.xml",
+        "Interface\\FrameXML\\MainMenuBar.xml",
+        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
+        "Interface\\FrameXML\\Cooldown.xml",
+        "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\ActionBarFrame.xml",
         "Interface\\FrameXML\\BonusActionBarFrame.xml",
-        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
     ] {
         super::test_ui::load_ui(&s, file);
     }
@@ -216,7 +216,7 @@ fn every_micro_button_hovers_with_its_reference_explanation() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run("SHOW_NEWBIE_TIPS = \"1\"").unwrap();
-    s.register_bindings(&crate::bindings::registry_commands());
+    crate::ui_script::load_stock_bindings(&mut s);
     assert_eq!(
         s.eval::<Option<i64>>("return SetBinding(\"C\", \"TOGGLECHARACTER0\")")
             .unwrap(),

@@ -1,8 +1,8 @@
 //! What a submitted slash line means: [`parse_line`] resolves it through the boot-built command
 //! table ([`super::super::commands`], the shipped `GlobalStrings.lua` aliases) into a
-//! [`ParsedChat`] for [`super`] to execute. A typed line reaches it only through benilla's own
-//! `SlashCmdList` entries, once the stock `ChatEdit_ParseText` finds no built-in; a probe's line
-//! reaches it directly.
+//! [`ParsedChat`] for [`super`] to execute. A typed line reaches it only through the dev
+//! instruments' `SlashCmdList` rows (dev builds), once the stock `ChatEdit_ParseText` finds no
+//! built-in; a probe's line reaches it directly.
 
 use crate::ui_chat::commands::{Command, DevCmd, SlashCommands, SlashIndex};
 
@@ -49,13 +49,10 @@ pub(in crate::ui_chat) enum ParsedChat {
     Liquid,
     /// `/reaction [name]`: every input and rung of the reaction ladder for one unit.
     Reaction { name: Option<String> },
-    /// `/convertraid` (`CMSG_GROUP_RAID_CONVERT`), benilla's own: 1.12 converts only from the
-    /// RaidFrame's Convert button.
-    ConvertRaid,
     /// `/help`.
     Help,
     /// An `EmotesText` command (`/wave` is 101), sent as `CMSG_TEXT_EMOTE` at the selection.
-    TextEmote(u32),
+    TextEmote { text_id: u32, arg: Option<String> },
     /// A channel verb the stock handler parsed and the VM queued; never from [`parse_line`].
     Channel(benilla_ui::script::ChannelCommand),
     /// `/castvis`: a locally synthesized [`crate::creature_anim::CastEvent`], at the selection
@@ -102,8 +99,6 @@ pub(in crate::ui_chat) enum ParsedChat {
     Follow { name: Option<String> },
     /// `/macrohelp`: `ChatFrame_DisplayMacroHelpText`'s five `MACRO_HELP_TEXT_LINE`s.
     MacroHelp,
-    /// `/reload`, benilla's own: the in-world rebuild `ReloadUI()` queues.
-    ReloadUi,
     /// A `/console` line the CVar store did not consume, for the `ConsoleCommand` registry
     /// ([`crate::console::execute`]).
     Console { line: String },
@@ -133,7 +128,10 @@ pub(in crate::ui_chat) fn parse_line(table: &SlashCommands, line: &str) -> Parse
     match table.lookup(cmd) {
         Some(Command::Slash(index)) => slash_command(index, args),
         // The alias table did the `DoEmote(token)` resolve at boot: `/lol` arrives as LAUGH's id.
-        Some(Command::Emote { text_id }) => ParsedChat::TextEmote(text_id),
+        Some(Command::Emote { text_id }) => ParsedChat::TextEmote {
+            text_id,
+            arg: (!args.is_empty()).then(|| args.to_string()),
+        },
         Some(Command::Dev(dev)) => dev_command(dev, args),
         // `HELP_TEXT_SIMPLE`'s case, after the drain offers the line to `SlashCmdList`.
         None => ParsedChat::Unknown,
@@ -288,18 +286,6 @@ fn slash_command(index: SlashIndex, args: &str) -> ParsedChat {
             body: "ShowMacroFrame()".into(),
         },
         S::MacroHelp => ParsedChat::MacroHelp,
-        // `/reload` is the rebuild `/console reloadUI` runs (`0x4035f0`, which reads no arguments).
-        S::ReloadUi => ParsedChat::ReloadUi,
-        S::ConvertRaid => ParsedChat::ConvertRaid,
-        // `/errors`, benilla's own: toggles the script error log, a FrameXML window;
-        // `/errors clear` empties it.
-        S::ScriptErrors => ParsedChat::Lua {
-            body: if args.trim().eq_ignore_ascii_case("clear") {
-                "BenillaScriptLog_Clear()".into()
-            } else {
-                "BenillaScriptLog_Toggle()".into()
-            },
-        },
         // `SlashCmdList["CONSOLE"]` (`ChatFrame.lua:671`) is `ConsoleExec(msg)`. A typed line runs
         // it; one that skipped the edit box calls the same verb, so a CVar line writes the CVar
         // and anything else comes back through `engine_verbs`.

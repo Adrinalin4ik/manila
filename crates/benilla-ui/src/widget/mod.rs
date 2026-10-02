@@ -218,7 +218,8 @@ pub struct Region {
     pub kind: RegionKind,
     pub owner: FrameHandle,
     pub draw_layer: DrawLayer,
-    /// A later client's `textureSubLevel`; 1.12 has no sub-level (`0x76a860`).
+    /// The engine's own order within a layer, which only the EditBox caret sets, to draw over the
+    /// text; 1.12 gives Lua and XML no sub-level (`0x76a860`, `0x79a780`).
     pub sub_level: i8,
     /// The index within the owner frame, the last within-layer draw tiebreak.
     pub decl_seq: u32,
@@ -248,6 +249,9 @@ pub struct WidgetArena {
     tooltip_kinds: Vec<FrameHandle>,
     /// The live Minimaps, kept the same way, for the containment, zoom and arrow-facing feeds.
     minimap_kinds: Vec<FrameHandle>,
+    /// The live EditBoxes, kept the same way, for the resize re-seat (`reseat_resized`) and the
+    /// tick's walk, which flushes every shown box.
+    editbox_kinds: Vec<FrameHandle>,
 }
 
 impl Default for WidgetArena {
@@ -290,6 +294,7 @@ impl WidgetArena {
             ticked_kinds: Vec::new(),
             tooltip_kinds: Vec::new(),
             minimap_kinds: Vec::new(),
+            editbox_kinds: Vec::new(),
         }
     }
 
@@ -309,6 +314,10 @@ impl WidgetArena {
 
     pub fn minimap_kinds(&self) -> &[FrameHandle] {
         &self.minimap_kinds
+    }
+
+    pub fn editbox_kinds(&self) -> &[FrameHandle] {
+        &self.editbox_kinds
     }
 
     // ── Read access ────────────────────────────────────────────────────────────────────────────
@@ -498,6 +507,7 @@ impl WidgetArena {
             self.names.entry(n).or_insert(handle);
         }
         if matches!(kind, FrameKind::EditBox) {
+            self.editbox_kinds.push(handle);
             self.build_editbox_engine_regions(handle);
         }
         if matches!(kind, FrameKind::Minimap) {
@@ -555,6 +565,7 @@ impl WidgetArena {
         self.ticked_kinds.retain(|&t| t != h);
         self.tooltip_kinds.retain(|&t| t != h);
         self.minimap_kinds.retain(|&t| t != h);
+        self.editbox_kinds.retain(|&t| t != h);
 
         for c in children {
             self.destroy(c);

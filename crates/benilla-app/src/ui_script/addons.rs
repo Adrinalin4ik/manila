@@ -1,15 +1,16 @@
 //! Where interfaces come from: addon discovery under [`root`] and the load walk ([`Walk::load`]).
-//! An [`Addon`] is a name, a parsed `.toc` and the [`Source`] its files come from. benilla's own
-//! interface is one too, with the compiled-in tree as its source, but not for the lifecycle: like
-//! FrameXML it loads outside `AddOn_Load` ([`super::manifest::load_ingame_ui`]) and gets no
-//! `ADDON_LOADED`.
+//! An [`Addon`] is a name, a parsed `.toc` and the [`Source`] its files come from. The core
+//! interface (the chain's own FrameXML) and benilla's layer (the compiled-in tree) are two more,
+//! but not for the lifecycle: they load outside `AddOn_Load`
+//! ([`super::manifest::load_ingame_ui`]), get no `ADDON_LOADED` and have no registry row.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 
-use benilla_ui::script::{ScriptValue, UiScript};
+use benilla_ui::script::{EnableHash, ScriptValue, UiScript};
+use benilla_ui::status::{self, Status};
 use benilla_ui::toc::Toc;
 
 use super::content;
@@ -23,7 +24,7 @@ pub(crate) const LOAD_INSTRUCTION_BUDGET: u64 = 200_000_000;
 
 /// Where one interface's files come from.
 pub(super) enum Source {
-    /// benilla's own interface: the compiled-in tree, shadowed by `assets/ui` in a dev build.
+    /// The layer's own files: the compiled-in tree, shadowed by `assets/ui` in a dev build.
     Builtin,
     /// The AddOns root on disk, not this addon's own folder: a request under `Interface/AddOns/`
     /// maps onto it, so a dependent can reach a shared library addon beside it.
@@ -34,8 +35,8 @@ pub(super) enum Source {
 
 /// One loadable interface: a name, its parsed manifest, and where its files come from.
 pub(super) struct Addon {
-    /// The folder name (`"benilla"` for the builtin): what the AddOn API keys on and what
-    /// `ADDON_LOADED` carries.
+    /// The folder name (`"FrameXML"` for the core and `"benilla"` for the layer, which have no
+    /// registry row): what the AddOn API keys on and what `ADDON_LOADED` carries.
     pub(super) name: String,
     /// The parsed `.toc`: the ordered file list plus every directive.
     pub(super) toc: Toc,
@@ -48,15 +49,18 @@ impl Addon {
         Addon { name, toc, source }
     }
 
-    /// benilla's own interface, which is in the binary and so cannot be missing.
-    pub(super) fn builtin() -> Self {
-        let toc = content::read(super::manifest::MANIFEST)
+    /// benilla's layer, [`super::manifest::LAYER_MANIFEST`], which is in the binary and so cannot
+    /// be missing.
+    pub(super) fn layer() -> Self {
+        Self::shipped(super::manifest::LAYER_MANIFEST)
+    }
+
+    /// The interface one shipped `.toc` names.
+    fn shipped(manifest: &str) -> Self {
+        let toc = content::read(manifest)
             .map(|t| Toc::parse(&t))
             .unwrap_or_else(|| {
-                error!(
-                    "ui_script: {} is not in the shipped UI — no interface will load",
-                    super::manifest::MANIFEST
-                );
+                error!("ui_script: {manifest} is not in the shipped UI — it will not load");
                 Toc::default()
             });
         Addon {
@@ -67,7 +71,7 @@ impl Addon {
     }
 
     /// One file's bytes, by a path already resolved into the source's path space. A `Dir` reads
-    /// under the AddOns root, then the chain ([`read_addon_file`]); only the flat builtin falls
+    /// under the AddOns root, then the chain ([`read_addon_file`]); only the flat shipped tree falls
     /// back to the basename, which for a `Dir` would rescue an escaping path. Bytes, not text: a
     /// `.lua` reaches Lua as it is on disk.
     fn read(&self, req: &str) -> Option<Vec<u8>> {
@@ -85,7 +89,7 @@ impl Addon {
     }
 
     /// The base this addon's manifest entries resolve against: `Interface/AddOns/<Folder>` for a
-    /// `Dir`, empty for the builtin's flat tree and the chain's full paths.
+    /// `Dir`, empty for the shipped flat tree and the chain's full paths.
     fn prefix(&self) -> String {
         match &self.source {
             Source::Builtin | Source::Chain => String::new(),
@@ -95,7 +99,7 @@ impl Addon {
 
     /// The chunk name, which addons parse: `"@%s"` (`0x8716e0`) over the resolved install path,
     /// built by `0x704bc0` for every `.lua`, as for `<Script file=>`. Ace2 libraries find their
-    /// addon by splitting a `debugstack` frame on `\AddOns\` (`AceDB-2.0.lua:742`). The builtin's
+    /// addon by splitting a `debugstack` frame on `\AddOns\` (`AceDB-2.0.lua:742`). The shipped
     /// flat tree keeps [`benilla_ui::script::addon_chunk_name`].
     fn chunk_name(&self, file: &str, path: &str) -> String {
         match &self.source {
@@ -104,16 +108,29 @@ impl Addon {
         }
     }
 
-    /// Load this addon's `.toc`-listed files, in listed order. Each error is logged as it happens
-    /// and also returned, tagged `"<Addon>/<file>: <error>"`, for the tests to assert empty.
-    fn load(&self, script: &UiScript) -> Vec<String> {
-        self.load_files(script, &self.toc.files)
+    /// Load this addon's `.toc`-listed files, in listed order, reporting into `toc`, the `.toc`'s
+    /// load record. Each error is logged as it happens and also returned, tagged
+    /// `"<Addon>/<file>: <error>"`, for the tests to assert empty.
+    fn load(&self, script: &UiScript, toc: &mut Status) -> Vec<String> {
+        self.load_files_into(script, &self.toc.files, toc)
     }
 
-    /// [`Addon::load`] over an explicit slice, for the builtin's two-phase boot. A manifest lists
-    /// both kinds of file (the reference's `FrameXML.toc` opens with `GlobalStrings.lua`): a `.lua`
-    /// runs as a chunk in the shared state, anything else is parsed as FrameXML and materialized.
+    /// [`Addon::load_files_into`] with the load record dropped.
     pub(super) fn load_files(&self, script: &UiScript, files: &[String]) -> Vec<String> {
+        self.load_files_into(script, files, &mut Status::default())
+    }
+
+    /// [`Addon::load`] over an explicit slice. A manifest lists both kinds of file (the
+    /// reference's `FrameXML.toc` opens with `GlobalStrings.lua`): a `.lua` runs as a chunk in the
+    /// shared state, anything else is parsed as FrameXML and materialized. What the reference's
+    /// `.toc` runner (`0x6edb90`) reports goes into `toc`: a file that did not open or parse, and
+    /// each document's own record under its banner.
+    pub(super) fn load_files_into(
+        &self,
+        script: &UiScript,
+        files: &[String],
+        toc: &mut Status,
+    ) -> Vec<String> {
         let mut failures = Vec::new();
         // The `<Include>` / `<Script file=>` provider; `read` is the sandbox.
         let provider = |req: &str| -> Option<Vec<u8>> { self.read(req) };
@@ -121,10 +138,12 @@ impl Addon {
             // Resolved once into the source's path space, for `read` and the loader alike.
             let path = benilla_ui::loader::join_ref(&self.prefix(), file);
             let Some(bytes) = self.read(&path) else {
+                toc.report(status::FAILURE, status::missing(&path, is_lua(file)));
                 let e = format!("{}/{file}: not found", self.name);
-                // Severity follows whose manifest is wrong. Ours (the builtin, or a `benilla.toc`
-                // line the player's chain lacks) is an ERROR. A player's addon is the package's
-                // fault, which the reference skips silently, and an ERROR line fails `smoke.sh`.
+                // Severity follows whose manifest is wrong. Ours, or the core's (a shipped file, or
+                // a `FrameXML.toc` row the player's chain lacks), is an ERROR. A player's addon is
+                // the package's fault, which the reference skips silently, and an ERROR line fails
+                // `smoke.sh`.
                 match self.source {
                     Source::Builtin | Source::Chain => error!("ui_script: {e}"),
                     Source::Dir(_) => warn!("ui_script: {e}"),
@@ -152,6 +171,7 @@ impl Addon {
             let doc = match benilla_ui::framexml::parse(&benilla_ui::source::decode(&bytes)) {
                 Ok(d) => d,
                 Err(e) => {
+                    toc.report(status::FAILURE, status::unparsed(&path));
                     let e = format!("{}/{file}: {e}", self.name);
                     error!("ui_script: parsing {e}");
                     // No dialog, as the reference only logs it (FrameXML.log); still retained.
@@ -162,7 +182,12 @@ impl Addon {
             };
             // The loader resolves relative references against the document's own directory, and
             // names the file a raise came from.
-            let report = benilla_ui::loader::load_in(script, &doc, &path, &provider);
+            let mut report = benilla_ui::loader::load_in(script, &doc, &path, &provider);
+            std::mem::take(&mut report.status).close_into(
+                toc,
+                script.framexml_debug(),
+                status::file_banner(&path),
+            );
             // `FrameXML_Debug` traces go to the log only: the reference files them at severity 0
             // (`0x6ee2bc`) in a per-document record whose surface is untraced.
             for t in &report.traces {
@@ -175,7 +200,7 @@ impl Addon {
             }
             // A file the document names and the provider lacks is a `.toc` line naming no file:
             // never a script error, as the reference logs `Couldn't open %s` and carries on, but a
-            // `failures` entry, so our boot tests catch one in a `benilla.toc` document.
+            // `failures` entry, so our boot tests catch one in a core or layer document.
             for m in &report.missing_files {
                 let e = format!("{}/{file}: {m}", self.name);
                 match self.source {
@@ -527,13 +552,14 @@ pub(crate) fn installed_rows() -> Vec<InstalledAddOn> {
 
 /// The reference's `ADDONSTATELIST` (`0xbe1bd0`): a node per character in `SMSG_CHAR_ENUM` order,
 /// rebuilt whole (`0x51f0b0` clears it, then callback `0x472300` fills a node per record through
-/// `AddOnList_LoadCharacter 0x51ebe0`), each holding that character's explicit `AddOns.txt` rows.
-/// A character with no file is an empty node, whose enable bit is answered from the others.
+/// `AddOnList_LoadCharacter 0x51ebe0`), each holding that character's enable hash. A character
+/// with no file is an empty node, whose enable bit is answered from the others.
 #[derive(Default)]
 pub(crate) struct EnableStore {
-    /// `(character, explicit rows)` in character-list order; names lowercased, as every compare in
-    /// the reference is `SStrCmpI`.
-    nodes: Vec<(String, HashMap<String, bool>)>,
+    /// The realm half of every node's file.
+    realm: String,
+    /// `(character, enable hash)` in character-list order.
+    nodes: Vec<(String, EnableHash)>,
 }
 
 impl EnableStore {
@@ -548,26 +574,36 @@ impl EnableStore {
                     .and_then(|p| std::fs::read(p).ok())
                     .map(|b| parse_enable_state(&benilla_ui::source::decode(&b)))
                     .unwrap_or_default();
-                let hash = rows
-                    .into_iter()
-                    // Last line wins, like the reference's hash insert (`0x51eeef`).
-                    .map(|(name, on)| (name.to_ascii_lowercase(), on))
-                    .collect();
-                (character.clone(), hash)
+                (character.clone(), EnableHash::from_rows(rows))
             })
             .collect();
-        Self { nodes }
+        Self {
+            realm: realm.to_string(),
+            nodes,
+        }
+    }
+
+    /// A node per character, none with a row, as for characters with no file; for tests that
+    /// must not read the state folder.
+    #[cfg(test)]
+    pub(crate) fn blank(realm: &str, characters: &[String]) -> Self {
+        Self {
+            realm: realm.to_string(),
+            nodes: characters
+                .iter()
+                .map(|c| (c.clone(), EnableHash::default()))
+                .collect(),
+        }
     }
 
     /// `0x51e470(addon, NULL, useDefault = 0)`, the explicit-only aggregate over the nodes with a
     /// row (`0x51e5df je 0x51e60a`): `Some(v)` when all say `v` (the reference's 2 or 0), `None`
     /// when they are mixed or there are none.
     fn aggregate(&self, addon: &str) -> Option<bool> {
-        let key = addon.to_ascii_lowercase();
         let mut total = 0usize;
         let mut on = 0usize;
         for (_, hash) in &self.nodes {
-            if let Some(&v) = hash.get(&key) {
+            if let Some(v) = hash.get(addon) {
                 total += 1;
                 on += usize::from(v);
             }
@@ -581,7 +617,7 @@ impl EnableStore {
     }
 
     /// The bit a character gets, `0x51e470(addon, character, useDefault = 1)` (0 or 2 as a bool):
-    /// * an explicit row in their file wins;
+    /// * an explicit row in their hash wins;
     /// * a node with no row takes [`Self::aggregate`] (`0x51e5f0`'s self-recursion), then
     ///   `## DefaultState` where that is undecided;
     /// * no node at all, or no character, takes `## DefaultState`: the walk passes each
@@ -596,13 +632,33 @@ impl EnableStore {
         let Some(node) = character.and_then(|c| self.node(c)) else {
             return default_state;
         };
-        match node.get(&addon.to_ascii_lowercase()) {
-            Some(&explicit) => explicit,
+        match node.get(addon) {
+            Some(explicit) => explicit,
             None => self.aggregate(addon).unwrap_or(default_state),
         }
     }
 
-    fn node(&self, character: &str) -> Option<&HashMap<String, bool>> {
+    /// The setter `0x51ea20`: `None` is every node (the glue's All), a name its one node; a name
+    /// with no node is a no-op, as the setter never creates one.
+    pub(crate) fn set(&mut self, addon: &str, character: Option<&str>, on: bool) {
+        for (name, hash) in &mut self.nodes {
+            if character.is_none_or(|c| name.eq_ignore_ascii_case(c)) {
+                hash.set(addon, on);
+            }
+        }
+    }
+
+    /// The writer `0x51ef20`, glue `SaveAddOns` (`0x46d990`): each dirty node's file, rewritten
+    /// from its hash; a clean node is skipped (`0x51ef59`) and its file left as it is.
+    pub(crate) fn save(&mut self) {
+        for (name, hash) in &mut self.nodes {
+            if let Some(rows) = hash.take_dirty() {
+                write_enable_state(Some(&(self.realm.clone(), name.clone())), &rows);
+            }
+        }
+    }
+
+    pub(crate) fn node(&self, character: &str) -> Option<&EnableHash> {
         self.nodes
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(character))
@@ -622,40 +678,25 @@ fn store_nodes(identity: Option<&(String, String)>, roster: &[String]) -> Vec<St
     names
 }
 
-/// Write a character's enable state, from the AddOns screen and at logout, merged into the file:
-/// the reference's writer `0x51ef20` emits its enable hash a line per entry (`0x853968`), built by
-/// `0x51ebe0` from the file, so an uninstalled addon's row survives and names keep their spelling.
-pub(crate) fn write_enable_state(identity: Option<&(String, String)>, states: &[(String, bool)]) {
+/// Write one character's enable hash as its whole file, a line per entry (`0x853968`), as the
+/// writer `0x51ef20` creates it afresh (`CREATE_ALWAYS`). The hash holds every row the file had,
+/// so an uninstalled addon's row survives and a name keeps its spelling.
+pub(crate) fn write_enable_state(identity: Option<&(String, String)>, rows: &[(String, bool)]) {
     let Some(path) = enable_state_path(identity) else {
         return; // no character picked, or no state folder
     };
-    let mut merged: Vec<(String, bool)> = std::fs::read(&path)
-        .ok()
-        .map(|b| parse_enable_state(&benilla_ui::source::decode(&b)))
-        .unwrap_or_default();
-    for (name, on) in states {
-        match merged
-            .iter_mut()
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
-        {
-            Some(row) => row.1 = *on,
-            None => merged.push((name.clone(), *on)),
-        }
-    }
-    match crate::local_state::write_atomic(&path, &render_enable_state(&merged)) {
-        Ok(()) => info!("addons: wrote {} ({} rows)", path.display(), merged.len()),
+    match crate::local_state::write_atomic(&path, &render_enable_state(rows)) {
+        Ok(()) => info!("addons: wrote {} ({} rows)", path.display(), rows.len()),
         Err(e) => warn!("addons: cannot write {}: {e}", path.display()),
     }
 }
 
-/// Write the enable state back at shutdown, the reference's last step (`0x490c88`, after the
-/// saved-variables files), through the AddOns screen's merging writer.
+/// Write the current character's enable hash at shutdown, the reference's last step (`0x490c88`,
+/// after the saved-variables files), only when a verb changed it this session.
 pub(super) fn save_enable_state(script: &UiScript, identity: Option<&(String, String)>) {
-    let states = script.addon_enable_states();
-    if states.is_empty() {
-        return; // nothing registered: a glue-only run or a capture
+    if let Some(rows) = script.take_addon_enable_rows() {
+        write_enable_state(identity, &rows);
     }
-    write_enable_state(identity, &states);
 }
 
 /// Write every loaded addon's declared saved variables at shutdown (`0x490c83`, after the flat
@@ -737,6 +778,13 @@ pub(super) fn load_third_party(
         root(),
         crate::local_state::addon_saved_account_dir(),
         identity.and_then(|(r, c)| crate::local_state::addon_saved_character_dir(r, c)),
+    );
+    // The verbs write through the character's own hash, so logout saves only what they changed.
+    script.set_addon_enable_hash(
+        character
+            .and_then(|c| store.node(c))
+            .cloned()
+            .unwrap_or_default(),
     );
     if addons.is_empty() {
         return Vec::new();
@@ -877,7 +925,17 @@ impl Walk {
             return Err(());
         }
 
-        self.failures.extend(addon.load(script));
+        // The add-on's record: its `.toc`'s under that banner (`0x6eddc8`), then its own banner
+        // (`0x51f464`), merged into the UI load's.
+        let debug = script.framexml_debug();
+        let mut toc = Status::default();
+        self.failures.extend(addon.load(script, &mut toc));
+        let mut own = Status::default();
+        let toc_path = status::addon_toc_path(&addon.name);
+        toc.close_into(&mut own, debug, status::toc_banner(&toc_path));
+        let mut block = Status::default();
+        own.close_into(&mut block, debug, status::addon_banner(&addon.name));
+        script.report_load_status(block);
         // `Bindings.xml` (`0x51f400`), after the files whose functions a binding calls, through
         // the addon's own sandboxed reader; absent is normal.
         let bindings_xml = benilla_ui::loader::join_ref(&addon.prefix(), "Bindings.xml");
@@ -1065,7 +1123,7 @@ mod tests {
     }
 
     /// Every chain row is LoadOnDemand and chain-sourced, the eight windows the interface opens
-    /// through them are rows, and `benilla.toc` lists none, like the reference's `FrameXML.toc`.
+    /// through them are rows, and the core, the chain's `FrameXML.toc`, lists none.
     #[test]
     fn the_chain_carries_blizzards_load_on_demand_addons_as_registry_rows() {
         let _data = benilla_formats::wow_data_or_skip!();
@@ -1104,12 +1162,13 @@ mod tests {
             );
         }
         assert!(
-            !Addon::builtin()
+            !super::super::reference_ui::core()
+                .expect("the player's FrameXML.toc")
                 .toc
                 .files
                 .iter()
                 .any(|f| f.replace('/', "\\").starts_with("Interface\\AddOns\\")),
-            "benilla.toc lists a Blizzard addon eagerly; the reference loads every one on demand"
+            "the core lists a Blizzard addon eagerly; the reference loads every one on demand"
         );
         // The glue's list is the player's folder alone.
         assert!(installed_rows()
@@ -1210,7 +1269,7 @@ mod tests {
         };
 
         let script = UiScript::new().unwrap();
-        let failures = addon.load(&script);
+        let failures = addon.load(&script, &mut Status::default());
         assert!(
             failures.is_empty(),
             "a listed Bindings.xml costs log lines, not script errors: {failures:?}"
@@ -1254,7 +1313,7 @@ mod tests {
         };
 
         let script = UiScript::new().unwrap();
-        assert!(addon.load(&script).is_empty());
+        assert!(addon.load(&script, &mut Status::default()).is_empty());
 
         // The exact pattern the libraries run, on each file's own traceback.
         let folder = |global: &str| -> Option<String> {
@@ -1375,7 +1434,7 @@ mod tests {
         };
         let mut script = UiScript::new().unwrap();
         script.set_screen_size(1024.0, 768.0);
-        let failures = addon.load(&script);
+        let failures = addon.load(&script, &mut Status::default());
         assert!(failures.is_empty(), "addon load errors: {failures:#?}");
 
         assert_eq!(
@@ -1618,9 +1677,8 @@ mod tests {
         }];
         let mut w = Walk::default();
         let _ = w.load(&mut script, &all, "EventProbe");
-        // The builtin, loaded as production loads it: its own manifest, not the walk.
-        let builtin = Addon::builtin();
-        let _ = builtin.load_files(&script, builtin.toc.files.get(..1).unwrap_or_default());
+        // The core, loaded as production loads it: the chain's own toc, not the walk.
+        let _ = super::super::manifest::load_core(&script);
 
         let log = event_log(&script);
         assert!(
@@ -1843,9 +1901,10 @@ mod tests {
         );
     }
 
-    /// A row for an addon not installed now survives the AddOns screen's write.
+    /// A row for an addon not installed now survives the AddOns screen's write: the loader put it
+    /// in the hash, and the writer writes the hash.
     #[test]
-    fn the_addons_screen_write_merges_with_what_is_already_on_disk() {
+    fn the_addons_screen_write_keeps_the_rows_the_file_had() {
         let _l = crate::local_state::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1855,7 +1914,10 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "Gone: disabled\nStays: enabled\n").unwrap();
 
-        write_enable_state(Some(&id), &[("Stays".into(), false), ("New".into(), true)]);
+        let mut store = EnableStore::load("Realm", &["Char".to_string()]);
+        store.set("Stays", Some("char"), false);
+        store.set("New", None, true);
+        store.save();
 
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -2094,6 +2156,51 @@ mod tests {
                 .ok()
                 .as_deref(),
             Some("1")
+        );
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// A runtime `LoadAddOn`'s misses are one block appended to `Logs\FrameXML.log`
+    /// (`0x46aac0`): the add-on's banner, its toc's, then each document by its own record, an
+    /// included miss under its includer's banner (`0x6ee21c`).
+    #[test]
+    fn a_load_addon_appends_its_misses_as_one_block() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let (home, _h) = hermetic_root("lod-log");
+        write_addon(
+            &home,
+            "Demand",
+            "## Interface: 11200\n## LoadOnDemand: 1\nlate.xml\ngone.xml\ngone.lua\n",
+            &[("late.xml", "<Ui><Include file=\"nope.xml\"/></Ui>")],
+        );
+        let mut script = UiScript::new().unwrap();
+        script.set_screen_size(1024.0, 768.0);
+        let _ = load_third_party(&mut script, None, &[], true);
+        seat_stock_addon_reply(&mut script);
+        assert!(script.take_load_log_writes().is_empty());
+        script.run("LoadAddOn('Demand')").unwrap();
+        assert_eq!(
+            script.take_load_log_writes(),
+            vec![benilla_ui::status::LogWrite::Append(
+                [
+                    "Loading add-on Demand",
+                    "** Loading table of contents Interface\\AddOns\\Demand\\Demand.toc",
+                    "++ Loading file Interface\\AddOns\\Demand\\late.xml",
+                    "Couldn't open Interface\\AddOns\\Demand\\nope.xml",
+                    "Couldn't open Interface\\AddOns\\Demand\\gone.xml",
+                    "Error loading Interface\\AddOns\\Demand\\gone.lua",
+                ]
+                .map(String::from)
+                .to_vec()
+            )]
+        );
+        script.run("LoadAddOn('Demand')").unwrap();
+        assert!(
+            script.take_load_log_writes().is_empty(),
+            "an already loaded add-on reports nothing"
         );
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }
@@ -2365,16 +2472,10 @@ mod tests {
         save_enable_state(&script, Some(&id));
 
         let written = std::fs::read_to_string(home.join("addons/Realm-Char.txt")).unwrap();
-        // Registry order: the chain's Blizzard rows, then the folder's two (`0x51c777` before
-        // `0x51c78f`, tail-inserted), one line per registry row.
-        let mut expected = String::new();
-        for a in chain_addons() {
-            expected.push_str(&format!("{}: enabled\n", a.name));
-        }
-        expected.push_str("Drop: disabled\nKeep: enabled\n");
         assert_eq!(
-            written, expected,
-            "the reference's own one-line-per-addon format"
+            written, "Drop: disabled\n",
+            "one line per hash entry (`0x51f006`), and the hash holds only the toggled addon: no \
+             `Keep`, no `Blizzard_*` row"
         );
 
         let mut next = UiScript::new().unwrap();
@@ -2383,6 +2484,94 @@ mod tests {
             next.eval::<bool>("return DropRan == nil").ok(),
             Some(true),
             "the disable survived the session"
+        );
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// A session whose verbs changed nothing leaves the node clean, and the writer skips a clean
+    /// node (`0x51ef59`): no file is created, and one that exists keeps its bytes, even through
+    /// a verb that sets a row to the value it already has and a toggle `ResetDisabledAddOns`
+    /// reverts (`0x48e830` reloads the hash clean, `0x51ec59`).
+    #[test]
+    fn a_session_that_toggles_nothing_writes_nothing() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let (home, _h) = hermetic_root("untouched");
+        write_addon(&home, "Keep", "## Interface: 11200\n", &[]);
+        write_addon(&home, "Off", "## Interface: 11200\n", &[]);
+        let fresh = ("Realm".to_string(), "Fresh".to_string());
+        let mut script = UiScript::new().unwrap();
+        let _ = load_third_party(&mut script, Some(&fresh), &[], true);
+        crate::ui_script::shutdown_ui_state(&mut script, Some(&fresh), true);
+        assert!(
+            !enable_state_path(Some(&fresh)).unwrap().exists(),
+            "a login and logout with no toggle creates no AddOns file"
+        );
+
+        let id = ("Realm".to_string(), "Char".to_string());
+        let path = enable_state_path(Some(&id)).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let before = "off: disabled\nstray line\n";
+        std::fs::write(&path, before).unwrap();
+        for (lua, why) in [
+            ("DisableAddOn('Off')", "a row set to the value it has"),
+            (
+                "DisableAddOn('Keep') ResetDisabledAddOns()",
+                "a toggle reverted",
+            ),
+        ] {
+            let mut script = UiScript::new().unwrap();
+            let _ = load_third_party(&mut script, Some(&id), &[], true);
+            script.run(lua).unwrap();
+            crate::ui_script::shutdown_ui_state(&mut script, Some(&id), true);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                before,
+                "{why} leaves the file as it was"
+            );
+        }
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// The issue's example end to end, through the logout writer and the query `0x51e470`: Alice
+    /// and Bob have both played with `Shared` installed, then Bob turns it off. Alice, with no
+    /// row of her own, and a character created afterwards both follow Bob.
+    #[test]
+    fn a_character_that_never_chose_follows_the_realms_other_characters() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let (home, _h) = hermetic_root("follow");
+        write_addon(
+            &home,
+            "Shared",
+            "## Interface: 11200\nran.lua\n",
+            &[("ran.lua", "SharedRan = true")],
+        );
+        let roster = ["Alice".to_string(), "Bob".to_string()];
+        let session = |who: &str, roster: &[String], lua: &str| -> bool {
+            let id = ("Realm".to_string(), who.to_string());
+            let mut script = UiScript::new().unwrap();
+            script.set_screen_size(1024.0, 768.0);
+            let _ = load_third_party(&mut script, Some(&id), roster, true);
+            let ran = script.eval::<bool>("return SharedRan == true").unwrap();
+            script.run(lua).unwrap();
+            crate::ui_script::shutdown_ui_state(&mut script, Some(&id), true);
+            ran
+        };
+        assert!(session("Alice", &roster, ""), "enabled by default");
+        assert!(session("Bob", &roster, "DisableAddOn('Shared')"));
+        assert!(
+            !session("Alice", &roster, ""),
+            "Alice's first logout wrote no row, so she follows Bob's disable"
+        );
+        let with_new = ["Alice".to_string(), "Bob".to_string(), "Newbie".to_string()];
+        assert!(
+            !session("Newbie", &with_new, ""),
+            "and so does a character created afterwards"
         );
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }

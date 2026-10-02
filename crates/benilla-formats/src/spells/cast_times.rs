@@ -11,26 +11,37 @@ use benilla_dbc::{FieldType, Schema, SchemaField};
 
 use crate::dbc::{i32_at, parse, u32_at};
 
-/// One `SpellCastTimes.dbc` row, in ms.
+/// One `SpellCastTimes.dbc` row, in ms. All three columns are signed: row 18, the hunter shots',
+/// is `{-1000000, 0, -1000000}`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpellCastTime {
-    /// The cast time a level-independent tooltip shows; 0 is instant.
-    pub base_ms: u32,
+    /// The cast time at the spell's `BaseLevel`; 0 is instant.
+    pub base_ms: i32,
     /// Added per caster level above the spell's `BaseLevel`; negative on a few rows (row 10).
     pub per_level_ms: i32,
-    /// The floor the level-scaled cast time clamps to.
-    pub minimum_ms: u32,
+    /// The floor the level-scaled cast time is raised to.
+    pub minimum_ms: i32,
 }
 
 impl SpellCastTime {
-    /// The level-scaled cast time (`0x6e3340`): `base + perLevel·(casterLevel − baseLevel)`,
-    /// floored to the row minimum and to zero. `base_level` is the DBC's `baseLevel`
-    /// ([`crate::spells::SpellDisplay::base_level`]), not `spellLevel`. Spell-mod op `0xa` is not
-    /// applied.
-    pub fn resolved_ms(&self, caster_level: u32, base_level: u32) -> u32 {
-        let delta = i64::from(caster_level.saturating_sub(base_level));
-        let scaled = i64::from(self.base_ms) + i64::from(self.per_level_ms) * delta;
-        scaled.max(i64::from(self.minimum_ms)).max(0) as u32
+    /// The level-scaled cast time (`0x6e3395`-`0x6e33b4`): `base + perLevel·(casterLevel −
+    /// baseLevel)`, the level delta signed, raised to the row minimum and nothing else, so row 18
+    /// stays negative. `base_level` is the DBC's `baseLevel`
+    /// ([`crate::spells::SpellDisplay::base_level`]), not `spellLevel`. Spell-mod op `0xa` and the
+    /// clamp at zero are the caller's.
+    pub fn resolved_ms(&self, caster_level: u32, base_level: u32) -> i32 {
+        let delta = (caster_level as i32).wrapping_sub(base_level as i32);
+        let scaled = self
+            .base_ms
+            .wrapping_add(self.per_level_ms.wrapping_mul(delta));
+        scaled.max(self.minimum_ms)
+    }
+}
+
+impl SpellCastTime {
+    /// Whether the caster's level moves [`Self::resolved_ms`]: only through the per-level column.
+    pub fn reads_caster_level(&self) -> bool {
+        self.per_level_ms != 0
     }
 }
 
@@ -41,6 +52,13 @@ pub struct SpellCastTimeCatalog {
 }
 
 impl SpellCastTimeCatalog {
+    /// A catalog of the given rows, for callers' tests.
+    pub fn from_rows(rows: impl IntoIterator<Item = (u32, SpellCastTime)>) -> Self {
+        SpellCastTimeCatalog {
+            times: rows.into_iter().collect(),
+        }
+    }
+
     pub fn get(&self, index: u32) -> Option<&SpellCastTime> {
         self.times.get(&index)
     }
@@ -76,9 +94,9 @@ pub fn load_spell_cast_times(chain: &mut Chain) -> Result<SpellCastTimeCatalog> 
         times.insert(
             id,
             SpellCastTime {
-                base_ms: u32_at(r, 1).unwrap_or(0),
+                base_ms: i32_at(r, 1).unwrap_or(0),
                 per_level_ms: i32_at(r, 2).unwrap_or(0),
-                minimum_ms: u32_at(r, 3).unwrap_or(0),
+                minimum_ms: i32_at(r, 3).unwrap_or(0),
             },
         );
     }
@@ -88,6 +106,50 @@ pub fn load_spell_cast_times(chain: &mut Chain) -> Result<SpellCastTimeCatalog> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A row reads the caster's level when some level changes its answer, which the per-level
+    /// column decides for every row shape the data has.
+    #[test]
+    fn a_row_reads_the_caster_level_only_through_its_per_level_column() {
+        for row in [
+            SpellCastTime {
+                base_ms: 0,
+                per_level_ms: 0,
+                minimum_ms: 0,
+            },
+            SpellCastTime {
+                base_ms: 1500,
+                per_level_ms: 0,
+                minimum_ms: 1500,
+            },
+            SpellCastTime {
+                base_ms: -1_000_000,
+                per_level_ms: 0,
+                minimum_ms: -1_000_000,
+            },
+            SpellCastTime {
+                base_ms: 1000,
+                per_level_ms: -100,
+                minimum_ms: 500,
+            },
+            SpellCastTime {
+                base_ms: 1000,
+                per_level_ms: 50,
+                minimum_ms: 0,
+            },
+        ] {
+            for base_level in [0, 10] {
+                let moves = (0..=60).any(|level| {
+                    row.resolved_ms(level, base_level) != row.resolved_ms(level + 1, base_level)
+                });
+                assert_eq!(
+                    row.reads_caster_level(),
+                    moves,
+                    "{row:?} at base {base_level}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn resolved_ms_scales_and_floors() {
@@ -115,13 +177,16 @@ mod tests {
         assert_eq!(scaling.resolved_ms(13, 10), 700);
         assert_eq!(scaling.resolved_ms(60, 10), 500, "the minimum floor");
 
-        // A hypothetical floor-less shrink clamps at zero rather than going negative.
-        let floorless = SpellCastTime {
-            base_ms: 100,
-            per_level_ms: -100,
-            minimum_ms: 0,
+        // Below the spell's level the delta goes negative and the cast lengthens.
+        assert_eq!(scaling.resolved_ms(8, 10), 1200);
+
+        // Row 18: a negative base under a negative minimum stays negative.
+        let shots = SpellCastTime {
+            base_ms: -1_000_000,
+            per_level_ms: 0,
+            minimum_ms: -1_000_000,
         };
-        assert_eq!(floorless.resolved_ms(60, 1), 0);
+        assert_eq!(shots.resolved_ms(60, 1), -1_000_000);
     }
 
     #[test]

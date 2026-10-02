@@ -32,7 +32,7 @@ pub(super) fn register(app: &mut App) {
 
 /// A lost socket sends no zero-guid `SMSG_PET_SPELLS`, so the session end resets the bar itself.
 fn on_session_end(In(_): In<SessionEvent>, mut bar: ResMut<PetBar>) {
-    *bar = PetBar::default();
+    bar.clear();
 }
 
 fn on_spells(In(ev): In<SessionEvent>, catalog: Option<Res<Spells>>, mut bar: ResMut<PetBar>) {
@@ -96,7 +96,7 @@ fn pet_spells(spells: PetSpells, catalog: Option<&Spells>, bar: &mut PetBar) {
         if bar.spells.pet_guid != 0 {
             debug!("net: pet bar torn down");
         }
-        *bar = PetBar::default();
+        bar.clear();
         return;
     }
     // A new pet guid clears the attack latch (`0x4bc8ce`); a re-send from the same pet keeps it.
@@ -154,12 +154,18 @@ fn pet_spells(spells: PetSpells, catalog: Option<&Spells>, bar: &mut PetBar) {
             .join(" · ")
     );
     let now = Instant::now();
-    bar.cooldowns = crate::spell::Cooldowns::default();
+    // `SetPet` (`0x4bc7e0`) re-arms the expiry on every packet, and a 0 duration clears it.
+    bar.expires = (spells.duration_ms != 0)
+        .then(|| now + std::time::Duration::from_millis(u64::from(spells.duration_ms)));
+    bar.cooldowns.clear_silent();
     for cd in &spells.cooldowns {
         let display = catalog.and_then(|c| c.catalog.get(cd.spell_id));
         bar.cooldowns.seed_pet(cd, display, now);
     }
     bar.spells = spells;
+    // `SetPet` (`0x4bc7e0`) ends in `SignalEvent(0x161)` on every packet (`0x4bc90c`), whatever
+    // changed: the one repaint a packet that moves only the pet's cooldowns gets.
+    bar.bar_signals = bar.bar_signals.wrapping_add(1);
 }
 
 /// `SMSG_PET_MODE`: the state word alone, applied only to the bar of the pet it names.
@@ -280,6 +286,28 @@ mod tests {
         pet_spells(PetSpells::default(), None, &mut bar);
         assert_eq!(bar.spells, PetSpells::default());
         assert!(!bar.has_bar());
+    }
+
+    /// `SetPet` (`0x4bc7e0`): each packet re-arms the expiry from its own duration, 0 clears it,
+    /// and the teardown clears it too.
+    #[test]
+    fn each_pet_packet_rearms_or_clears_the_expiry() {
+        let mut bar = PetBar::default();
+        let mut charm = a_bar(0x2A);
+        charm.duration_ms = 60_000;
+        let before = Instant::now();
+        pet_spells(charm.clone(), None, &mut bar);
+        let left = bar.expires.expect("armed").duration_since(before);
+        assert!(
+            left >= std::time::Duration::from_secs(60) && left < std::time::Duration::from_secs(61)
+        );
+
+        pet_spells(a_bar(0x2A), None, &mut bar);
+        assert_eq!(bar.expires, None, "a 0 duration clears it");
+        pet_spells(charm, None, &mut bar);
+        assert!(bar.expires.is_some());
+        pet_spells(PetSpells::default(), None, &mut bar);
+        assert_eq!(bar.expires, None, "the teardown clears it");
     }
 
     #[test]

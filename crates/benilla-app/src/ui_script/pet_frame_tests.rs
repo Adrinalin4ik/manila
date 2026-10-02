@@ -1,4 +1,5 @@
-//! The stock pet frame, `PetFrame.xml`, over synthetic `"pet"` snapshots and the feed's events.
+//! The stock pet frame, `PetFrame.xml`, over `"pet"` snapshots built from synthetic descriptors
+//! and the feed's events.
 //! `UNIT_PET` names the owner (`arg1 == "player"`, `0x4bc84f`) and every other `UNIT_*` names the
 //! pet: a frame that mixes the two repaints off the player's health.
 
@@ -14,18 +15,18 @@ fn load_pet_frame() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
-    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
-    load_xml(&s, "Interface\\FrameXML\\UnitPopup.xml");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
     load_xml(&s, "Interface\\FrameXML\\BuffFrame.xml");
-    load_xml(&s, "Interface\\FrameXML\\UnitFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\CombatFeedback.xml");
+    load_xml(&s, "Interface\\FrameXML\\UnitPopup.xml");
+    load_xml(&s, "Interface\\FrameXML\\UnitFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\PlayerFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\PartyFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\TargetFrame.xml");
@@ -48,22 +49,28 @@ fn load_pet_frame() -> UiScript {
     s
 }
 
-/// A pet snapshot; `max_power == 0` is a powerless pet, which swaps the art.
+/// A pet snapshot off a descriptor through the real [`crate::ui_unit::snapshot`], as the `"pet"`
+/// feed builds it, so whatever that builder leaves unset (the connection flag included) reaches the
+/// stock frame here as it does in game; `max_power == 0` is a powerless pet, which swaps the art.
 fn pet(name: &str, health: u32, power: u32, max_power: u32, power_type: u8) -> UnitState {
-    UnitState {
-        exists: true,
-        name: Some(name.into()),
-        health,
-        max_health: 100,
-        level: 60,
-        power_type,
-        power,
-        max_power,
-        // The feed marks every unit it pushes connected; stock `UnitFrameManaBar_Update` greys a
-        // disconnected unit's bar (UnitFrame.lua:214-216).
-        is_connected: true,
-        ..UnitState::default()
-    }
+    // `UNIT_FIELD_` HEALTH, POWER1, MAXHEALTH, MAXPOWER1, LEVEL, BYTES_0 (the power type is its
+    // byte 3), the power pair at its type's slot.
+    const HEALTH: u16 = 22;
+    const POWER1: u16 = 23;
+    const MAXHEALTH: u16 = 28;
+    const MAXPOWER1: u16 = 29;
+    const LEVEL: u16 = 34;
+    const BYTES_0: u16 = 36;
+    let slot = u16::from(power_type);
+    let store = crate::net::ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+        (HEALTH, health),
+        (MAXHEALTH, 100),
+        (LEVEL, 60),
+        (BYTES_0, u32::from(power_type) << 24),
+        (POWER1 + slot, power),
+        (MAXPOWER1 + slot, max_power),
+    ]));
+    crate::ui_unit::snapshot(&store, 0, Some(name.into()), 0, None, Default::default())
 }
 
 /// Every texture path drawn this frame, with its vertex tint.
@@ -260,8 +267,15 @@ fn the_debuff_row_fills_from_the_pets_own_auras() {
     s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 0)));
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
 
-    s.set_auras(
-        "pet",
+    // `"pet"` resolves to the pet's guid, whose list the row reads.
+    const PET: u64 = 0xF140_0000_0000_0077;
+    s.set_unit_guids(&benilla_ui::script::UnitGuids {
+        player: 1,
+        pet: PET,
+        ..Default::default()
+    });
+    s.set_unit_auras(
+        PET,
         Some(vec![pet_buff(1000, "Rend", 1), pet_buff(1001, "Sunder", 3)]),
     );
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("pet".into())]);
@@ -289,7 +303,7 @@ fn the_debuff_row_fills_from_the_pets_own_auras() {
     );
     assert!(draws(&mut s, "Interface\\Icons\\Spell_1001"));
 
-    s.set_auras("pet", Some(vec![]));
+    s.set_unit_auras(PET, Some(vec![]));
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("pet".into())]);
     assert!(!s
         .eval::<bool>("return PetFrameDebuff1:IsVisible()")

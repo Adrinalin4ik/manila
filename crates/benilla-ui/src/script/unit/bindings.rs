@@ -6,10 +6,12 @@
 use mlua::{Lua, Value};
 
 use super::super::binding_abi::flag;
+use super::super::calls::ScriptCall;
 use super::super::Model;
 use super::{
-    check_unit_token, classification_word, grey_band, level_reads_unknown, pick_unit_token,
-    unit_predicate, unknownobject, with_unit, PlayerRecord, SelectionRequest,
+    check_unit_token, classification_word, grey_band, level_reads_unknown, parse_unit_token,
+    pick_unit_token, unit_predicate, unknownobject, with_unit, PlayerRecord, SelectionRequest,
+    UnitBase, UnitTokenParse,
 };
 
 /// The `"player"` fast path of `UnitName`, `UnitRace`, `UnitClass` and `UnitSex`, never
@@ -522,7 +524,16 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             if !u.exists || !grouped {
                 return Ok(Value::Nil);
             }
-            let hit = (t.starts_with("party") && !t.starts_with("partypet"))
+            // A `partyN` token itself names a member; a chain off one (`party1target`) names
+            // whoever that member targets, which the guid arms below judge.
+            let party_slot = matches!(
+                parse_unit_token(&t),
+                UnitTokenParse::Unit {
+                    base: UnitBase::Party(_),
+                    hops: 0
+                }
+            );
+            let hit = party_slot
                 || t.eq_ignore_ascii_case("player")
                 || (u.guid != 0
                     && (model.unit("player").is_some_and(|p| p.guid == u.guid)
@@ -579,8 +590,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // The party frame's status predicates. `UnitIsAFK` and `UnitIsDND` do not exist in the 1.12
-    // client, which has no unit AFK or DND predicate; benilla adds them beyond the 1.12 surface.
+    // The party frame's status predicates; 1.12 has no unit AFK or DND predicate.
     g.set(
         "UnitIsConnected",
         lua.create_function(|lua, token: Value| {
@@ -590,18 +600,6 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 r#"Usage: UnitIsConnected("unit")"#,
             )?);
             unit_predicate(lua, &token, |u| u.is_connected)
-        })?,
-    )?;
-    g.set(
-        "UnitIsAFK",
-        lua.create_function(|lua, token: Option<String>| {
-            unit_predicate(lua, &token, |u| u.is_afk)
-        })?,
-    )?;
-    g.set(
-        "UnitIsDND",
-        lua.create_function(|lua, token: Option<String>| {
-            unit_predicate(lua, &token, |u| u.is_dnd)
         })?,
     )?;
     g.set(
@@ -735,6 +733,19 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // GetDamageBonusStat() (`0x48b520`): the active player's `ChrClasses.dbc` field 2 plus one,
+    // the 1-based `UnitStat` index its melee damage scales with; 0 with no player or no class row
+    // (`0x48b58a`). No stock caller.
+    g.set(
+        "GetDamageBonusStat",
+        lua.create_function(|lua, ()| {
+            let stat = with_unit(lua, &Some("player".to_string()), None, |u| {
+                u.damage_bonus_stat
+            })?;
+            Ok(stat.map_or(0, |s| i64::from(s) + 1))
+        })?,
+    )?;
+
     // UnitSex(unit): 2 male, 3 female, or 1 neuter, which no feed sends. A unit that does not
     // resolve answers 2, never nil (`0x517f9f`).
     g.set(
@@ -755,13 +766,13 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // UnitCreatureType(unit) (`0x51a280`): one string, nil for a token naming no unit (`0x51a2b8`).
-    // Its resolver `0x605570` tries the shapeshift form's type (`SpellShapeshiftForm.dbc` column
-    // 12, only above 0, `0x60559a`), the cached creature record, then the race's (`ChrRaces.dbc`
-    // column 9, "Humanoid" for every race). The form stage is not built (no form index here), so an
-    // animal-form druid or a Ghost Wolf shaman answers "Humanoid" where the reference says "Beast".
-    // A missing argument, or one neither string nor number, raises `Usage:` (`0x6f3510`,
-    // `0x6f4940`).
+    // UnitCreatureType(unit) (`0x51a280`): one string, nil for a token naming no unit (`0x51a2b8`)
+    // and for a type of 0 (`0x51a2c3`). The type is the snapshot's, which the app resolved as the
+    // reference's `0x605570` does: the shapeshift form's (`SpellShapeshiftForm.dbc` column 12, only
+    // above 0), else the cached creature record's, else the race's (`ChrRaces.dbc` column 9). A
+    // snapshot with no descriptor behind it carries none, as the reference's token resolver finds
+    // no object for it. A missing argument, or one neither string nor number, raises `Usage:`
+    // (`0x6f3510`, `0x6f4940`).
     g.set(
         "UnitCreatureType",
         lua.create_function(|lua, token: Value| {
@@ -772,12 +783,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 Value::Number(_) | Value::Integer(_) => Some(String::new()),
                 _ => return Err(mlua::Error::runtime("Usage: UnitCreatureType(\"unit\")")),
             };
-            let word = with_unit(lua, &token, None, |u| {
-                u.creature_type_name
-                    .clone()
-                    // The race stage, collapsed: every player race maps to type 7.
-                    .or_else(|| u.is_player.then(|| "Humanoid".to_string()))
-            })?;
+            let word = with_unit(lua, &token, None, |u| u.creature_type_name.clone())?;
             match word {
                 Some(w) => Ok(Value::String(lua.create_string(&w)?)),
                 None => Ok(Value::Nil),
@@ -986,7 +992,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, token: Option<String>| {
             if let Some(token) = token {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                model.selection_requests.push(SelectionRequest::Unit(token));
+                model
+                    .script_calls
+                    .push(ScriptCall::Select(SelectionRequest::Unit(token)));
             }
             Ok(())
         })?,
@@ -1003,8 +1011,8 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             if let Some(token) = token {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 model
-                    .selection_requests
-                    .push(SelectionRequest::Assist(token));
+                    .script_calls
+                    .push(ScriptCall::Select(SelectionRequest::Assist(token)));
             }
             Ok(())
         })?,
@@ -1016,26 +1024,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "TargetLastEnemy",
         lua.create_function(|lua, ()| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.selection_requests.push(SelectionRequest::LastEnemy);
-            Ok(())
-        })?,
-    )?;
-
-    // TargetNearestFriend([reverse]) (`0x489aa0`): the Tab cycler `0x493f60` in mode 2 (enemy is
-    // 1), whose filter (`0x493eca`) wants `CanAssist` and health above 0. Argument 1 reverses
-    // (`0x6f1c10`, absent is 0); stock `Bindings.xml` says "1 (or "true")", so a number or a
-    // boolean reverses.
-    g.set(
-        "TargetNearestFriend",
-        lua.create_function(|lua, reverse: Option<Value>| {
-            let reverse = match reverse {
-                None | Some(Value::Nil) | Some(Value::Boolean(false)) => false,
-                Some(Value::Integer(n)) => n != 0,
-                Some(Value::Number(n)) => n != 0.0,
-                Some(_) => true,
-            };
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.target_nearest_friend_requests.push(reverse);
+            model
+                .script_calls
+                .push(ScriptCall::Select(SelectionRequest::LastEnemy));
             Ok(())
         })?,
     )?;
@@ -1061,7 +1052,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(_) => true,
             };
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.target_by_name_requests.push((name, exact));
+            model
+                .script_calls
+                .push(ScriptCall::TargetByName { name, exact });
             Ok(())
         })?,
     )?;
@@ -1101,21 +1094,21 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             }
             check_unit_token(&Some(token.clone()))?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.spell_target_unit.push(token);
+            model.script_calls.push(ScriptCall::SpellTargetUnit(token));
             Ok(())
         })?,
     )?;
 
-    // ClearTarget(): 1 when it cleared a target, nil when there was none, which `ToggleGameMenu`'s
-    // Escape chain needs to fall through to the menu. The app commits the deselect.
+    // ClearTarget() (`0x489ff0`): 1 when it cleared a target, nil when there was none, which
+    // `ToggleGameMenu`'s Escape chain needs to fall through to the menu. The deselect is queued
+    // either way: it reads the selection as the calls before it leave it (`0x489ff0`-`0x489fff`),
+    // so `TargetUnit("player") ClearTarget()` ends with nothing selected.
     g.set(
         "ClearTarget",
         lua.create_function(|lua, ()| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let had = model.unit("target").is_some_and(|u| u.exists);
-            if had {
-                model.target_clear = true;
-            }
+            model.script_calls.push(ScriptCall::ClearTarget);
             Ok(flag(had))
         })?,
     )?;

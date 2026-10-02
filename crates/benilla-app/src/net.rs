@@ -226,6 +226,18 @@ pub(crate) fn current_speed(s: &MoveSpeeds, flags: u32) -> f32 {
 #[derive(Component, Clone, Default)]
 pub(crate) struct ObjectStore(pub(crate) ObjectFields);
 
+impl ObjectStore {
+    /// The object manager's unit lookup (`0x468460`, `ecx = 8`): a unit or a player, which share
+    /// the unit block; a game object, corpse or item is not one.
+    pub(crate) fn is_unit(&self) -> bool {
+        use benilla_protocol::messages::ObjectType;
+        matches!(
+            self.0.object_type(),
+            Some(ObjectType::Unit | ObjectType::Player)
+        )
+    }
+}
+
 /// One descriptor dword moved on a streamed object, the reference's `CMirrorHandler` edge: the
 /// values notifier (`0x465330`) diffs live against a shadow copy and passes the old value
 /// (`0x465570`). A first create fires nothing; a re-create of a live guid fires like a delta.
@@ -406,28 +418,42 @@ pub(crate) struct LoginAbandon(pub(crate) std::sync::Arc<std::sync::atomic::Atom
 #[derive(Resource, Default)]
 pub(crate) struct GuidIndex(pub(crate) HashMap<u64, Entity>);
 
-/// The object manager's guid lookup (`ClntObjMgrObjectPtr 0x468460`): a guid to its descriptor
-/// store, whatever the kind, and an item's countdown cells. Read-only.
+/// The streamed objects, whatever the kind, with their descriptor stores, our own player, and an
+/// item's countdown cells. Read-only. The by-guid lookups are `ClntObjMgrObjectPtr` (`0x468460`).
 #[derive(SystemParam)]
-pub(crate) struct Objects<'w, 's> {
+pub struct Objects<'w, 's> {
     index: Res<'w, GuidIndex>,
     stores: Query<'w, 's, &'static ObjectStore>,
     countdowns: Query<'w, 's, &'static crate::items::Countdowns>,
+    me: Query<'w, 's, Entity, With<SelfPlayer>>,
 }
 
 impl Objects<'_, '_> {
-    /// The entity behind a guid, if streamed.
-    pub(crate) fn entity(&self, guid: u64) -> Option<Entity> {
+    /// The entity behind a guid, if streamed (`ClntObjMgrObjectPtr`, `0x468460`).
+    pub fn entity(&self, guid: u64) -> Option<Entity> {
         self.index.0.get(&guid).copied()
     }
 
-    /// A streamed object's merged descriptor fields.
-    pub(crate) fn object(&self, guid: u64) -> Option<&ObjectFields> {
+    /// A streamed object's merged descriptor fields, found as `0x468460` does, by guid.
+    pub fn object(&self, guid: u64) -> Option<&ObjectFields> {
         self.index
             .0
             .get(&guid)
             .and_then(|&e| self.stores.get(e).ok())
             .map(|s| &s.0)
+    }
+
+    /// Every streamed object, items included.
+    pub fn iter(&self) -> impl Iterator<Item = (u64, Entity, &ObjectFields)> + '_ {
+        self.index
+            .0
+            .iter()
+            .filter_map(|(&guid, &e)| Some((guid, e, &self.stores.get(e).ok()?.0)))
+    }
+
+    /// Our own player, once in the world.
+    pub fn player(&self) -> Option<Entity> {
+        self.me.single().ok()
     }
 
     /// An item object's countdown cells.
@@ -678,21 +704,60 @@ pub(crate) fn addon_wire_chat_type(distribution: benilla_ui::script::AddonDistri
 /// `HandleChatMessageOpcode`). `Whisper` and `Channel` name their target in `target`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ChatKind {
+    /// `/say`; GM dot-commands go out this way, parsed after the language gate.
     Say,
+    /// `/yell` (`CHAT_MSG_YELL`, `SharedDefines.h:1199`).
     Yell,
+    /// A custom `/emote`, shown verbatim as `"PlayerName <text>"`.
     Emote,
+    /// `/whisper`: the target's name precedes the text (`Chat.cpp:3-12`).
     Whisper,
+    /// `/p`, dropped silently when ungrouped (`ChatHandler.cpp:472-493`).
     Party,
+    /// `/ra`; needs a raid (`ChatHandler.cpp:514-536`).
     Raid,
+    /// `/rl`, leader only (`ChatHandler.cpp:538-559`).
     RaidLeader,
+    /// `/rw`, leader or assistant only (`ChatHandler.cpp:561-576`).
     RaidWarning,
+    /// `/g`; needs a guild (`ChatHandler.cpp:494-503`).
     Guild,
+    /// `/o`; needs a guild (`ChatHandler.cpp:504-513`).
     Officer,
+    /// Needs a battleground group (`ChatHandler.cpp:579-593`).
     Battleground,
+    /// Battleground leader only (`ChatHandler.cpp:595-609`).
     BattlegroundLeader,
+    /// Toggles AFK, the text the auto-reply if any; it clears DND (`ChatHandler.cpp:611-630`).
     Afk,
+    /// Toggles DND, which clears AFK (`ChatHandler.cpp:632-648`).
     Dnd,
+    /// A channel line by name, dropped unless we are on it (`ChatHandler.cpp:255-327`).
     Channel,
+}
+
+impl ChatKind {
+    /// The `CMSG_MESSAGECHAT` `type` field.
+    pub(crate) fn chat_type(self) -> u32 {
+        use benilla_protocol::messages as m;
+        match self {
+            Self::Say => m::CHAT_TYPE_SAY,
+            Self::Yell => m::CHAT_TYPE_YELL,
+            Self::Emote => m::CHAT_TYPE_EMOTE,
+            Self::Whisper => m::CHAT_TYPE_WHISPER,
+            Self::Party => m::CHAT_TYPE_PARTY,
+            Self::Raid => m::CHAT_TYPE_RAID,
+            Self::RaidLeader => m::CHAT_TYPE_RAID_LEADER,
+            Self::RaidWarning => m::CHAT_TYPE_RAID_WARNING,
+            Self::Guild => m::CHAT_TYPE_GUILD,
+            Self::Officer => m::CHAT_TYPE_OFFICER,
+            Self::Battleground => m::CHAT_TYPE_BATTLEGROUND,
+            Self::BattlegroundLeader => m::CHAT_TYPE_BATTLEGROUND_LEADER,
+            Self::Afk => m::CHAT_TYPE_AFK,
+            Self::Dnd => m::CHAT_TYPE_DND,
+            Self::Channel => m::CHAT_TYPE_CHANNEL,
+        }
+    }
 }
 
 /// `WOW_CAST_TRACE=1`: log our own cast packets and every outbound movement packet. vmangos
@@ -780,6 +845,8 @@ pub(crate) enum ClientCommand {
         kind: ChatKind,
         target: Option<String>,
         text: String,
+        /// The `Languages.dbc` id `SendChatMessage` named; `None` speaks the character's own.
+        language: Option<u32>,
     },
     /// `SendAddonMessage`: a `CMSG_MESSAGECHAT` in `LANG_ADDON` (1.12 has no addon opcode and no
     /// whispered addon message). `text` is `prefix` TAB `message`.
@@ -919,8 +986,9 @@ pub(crate) enum ClientCommand {
         toggles: u8,
     },
     /// `CMSG_PET_ACTION`: `packed` is the slot's word as the server sent it, dispatched on its type
-    /// byte; `target_guid` is our selection (`0x4bd212`). The server does not reply, so the
-    /// caller applies the change locally first.
+    /// byte; `target_guid` is our selection (`0x4bd212`), or the player under the pet book's
+    /// `onSelf` (`0x4b4345`). The server does not reply, so the caller applies the change locally
+    /// first.
     PetAction {
         pet_guid: u64,
         packed: u32,
@@ -1361,6 +1429,8 @@ pub(crate) enum ClientCommand {
         body: String,
         /// The `Stationery.dbc` id, the sixth field.
         stationery: u32,
+        /// The `Package.dbc` id, the seventh field, 0 without an item.
+        package: u32,
         item_guid: u64,
         money: u32,
         cod: u32,
@@ -1581,6 +1651,8 @@ pub(crate) enum ClientCommand {
     },
     /// `/played` (`CMSG_PLAYED_TIME`).
     PlayedTime,
+    /// `OpeningCinematic()`: `CMSG_OPENING_CINEMATIC`, empty.
+    OpeningCinematic,
     /// `CMSG_COMPLETE_CINEMATIC`, at the end or skip, or at once for an unresolvable trigger.
     /// Unacked, vmangos keeps visibility on the cinematic camera and nearby NPCs despawn.
     CompleteCinematic,
@@ -2120,6 +2192,8 @@ pub(crate) enum ServerSoundKind {
 /// and sex).
 #[derive(Message, Clone, Copy)]
 pub(crate) struct EmoteMessage {
+    /// The performer's wire guid, known even while its entity has not streamed.
+    pub(crate) guid: u64,
     pub(crate) source: Option<Entity>,
     pub(crate) kind: EmoteKind,
 }
@@ -2394,5 +2468,38 @@ mod tests {
                 "{refused:#04x} is a lane the client never sends addon data on"
             );
         }
+    }
+
+    #[test]
+    fn objects_lists_every_streamed_object_and_names_our_own() {
+        use bevy::ecs::system::RunSystemOnce;
+        const ME: u64 = 0x5E1F;
+        const BOAR: u64 = 0xF130_0000_0000_0042;
+        let mut world = World::new();
+        world.init_resource::<GuidIndex>();
+        let fields = |health| {
+            ObjectStore(ObjectFields::from_pairs(&[(
+                benilla_protocol::field::FIELD_UNIT_HEALTH,
+                health,
+            )]))
+        };
+        let me = world.spawn((SelfPlayer, Guid(ME), fields(256))).id();
+        let boar = world.spawn((Guid(BOAR), fields(40))).id();
+        world
+            .resource_mut::<GuidIndex>()
+            .0
+            .extend([(ME, me), (BOAR, boar)]);
+        let (listed, player) = world
+            .run_system_once(|objects: Objects| {
+                let mut listed: Vec<_> = objects
+                    .iter()
+                    .map(|(guid, e, f)| (guid, e, f.unit_health()))
+                    .collect();
+                listed.sort_by_key(|&(guid, ..)| guid);
+                (listed, objects.player())
+            })
+            .unwrap();
+        assert_eq!(listed, [(ME, me, Some(256)), (BOAR, boar, Some(40))]);
+        assert_eq!(player, Some(me));
     }
 }

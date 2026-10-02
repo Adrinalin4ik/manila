@@ -557,6 +557,8 @@ pub(super) fn tick_script(
     for w in script.take_warnings() {
         warn!("ui_script: {w}");
     }
+    // A runtime `LoadAddOn`'s record, appended to `Logs\FrameXML.log`.
+    super::load_log::write(script.take_load_log_writes());
 
     // ── The handover ────────────────────────────────────────────────────────────────────────
     *pass = super::UiPassState {
@@ -661,23 +663,8 @@ pub(super) fn paint_script(
     // The focused editbox's per-byte advances, measured as it draws, for click and scroll.
     if let Some(atlas) = font_atlas.as_deref_mut() {
         if let Some(req) = script.editbox_advances_request() {
-            let spec = crate::ui_text::FontSpec {
-                path: req.font.as_deref(),
-                // At the drawn size, divided by the seam alone: screen UI units, like the mouse.
-                height: crate::ui_text::drawn_px(req.height, None, s * req.scale),
-                outline: req.outline,
-                alpha_gradient: None, // alpha never changes metrics
-            };
-            let cum: Vec<f32> = crate::ui_text::line_advances(&mut atlas.lock(), &req.text, spec)
-                .iter()
-                .map(|a| a / s)
-                .collect();
-            // A multiline box also gets the draw's row starts and pitch, in UI units.
-            let (rows, cell_h) = match req.wrap_width {
-                Some(w) => crate::ui_text::line_rows(&mut atlas.lock(), &req.text, w * s, spec),
-                None => (vec![0], 0.0),
-            };
-            script.set_editbox_advances(req.id, req.key, cum, rows, cell_h / s);
+            let (cum, rows, cell_h) = crate::ui_text::editbox_advances(&mut atlas.lock(), s, &req);
+            script.set_editbox_advances(req.id, req.key, cum, rows, cell_h);
         }
     }
     // The focused editbox's text UI: its Text quad, scroll window, caret and selection spans,
@@ -1278,7 +1265,7 @@ fn convert_entry(
                     },
                     color: [1.0, 1.0, 1.0, eq.alpha],
                     // `SetPortraitTexture` cuts the inscribed circle, as the reference stamps into
-                    // its 64² bake's alpha; `BenillaSetBoothTexture` samples square.
+                    // its 64² bake's alpha.
                     circular,
                     premultiplied,
                     clip,
@@ -2094,15 +2081,15 @@ mod extract_gate_tests {
         let mut app = app_with_marker();
         app.world_mut()
             .non_send_resource_mut::<UiScript>()
-            .run("BenillaSetBoothTexture(marker, 'paperdoll')")
+            .run("SetPortraitTexture(marker, 'target')")
             .unwrap();
-        // The booth publishes a live bake for that slot; without an entry the region draws nothing.
+        // The booth publishes a live bake for that unit; without an entry the region draws nothing.
         let bake = app
             .world_mut()
             .resource_mut::<Assets<Image>>()
             .add(Image::default());
         app.world_mut().resource_mut::<PortraitImages>().0.insert(
-            "paperdoll".to_string(),
+            "target".to_string(),
             crate::portrait::PortraitSource::Live(bake.clone()),
         );
         app.update();

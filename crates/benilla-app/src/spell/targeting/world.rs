@@ -77,8 +77,8 @@ pub(crate) fn commit_ground_cast_on_click(
 /// not range nor the lock: the refusal is the server's `SMSG_CAST_RESULT`. The right-click path
 /// ([`crate::target::click`], `0x5f33e0`) does resolve the lock and can refuse locally. Otherwise
 /// the picked unit goes to the unit arm ([`super::bind_target_unit`]) and the picked corpse to the
-/// corpse arm ([`super::corpse::bind_target_corpse`]); a unit click under a lock word binds nothing
-/// there, since every unit arm tests a bit the word lacks.
+/// corpse arm ([`super::corpse::bind_target_corpse`]). A lock word has no unit bit, so it puts no
+/// unit in the pick and the click reaches what stands behind one ([`super::pick`]).
 ///
 /// Runs after `select_on_click`, as the terrain commit does.
 pub(crate) fn commit_object_cast_on_click(
@@ -149,6 +149,7 @@ mod tests {
         world.init_resource::<crate::spell::AutoRepeatActive>();
         world.init_resource::<crate::ui_tradeskill::TradeSkillOpens>();
         world.init_resource::<super::super::SpellTargeting>();
+        world.init_resource::<crate::spell::HeldForPick>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
         world.init_resource::<Messages<WorldClick>>();
         // The commit legs read the press latch, not the live hover.
@@ -188,6 +189,7 @@ mod tests {
                 crate::target::PickOcclusion {
                     distance: 5.0,
                     point: Some(Vec3::new(1.0, 2.0, 3.0)),
+                    ray: None,
                 };
         };
         let run = |world: &mut World, id: SystemId| {

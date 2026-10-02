@@ -18,12 +18,15 @@ mod tga;
 pub use tga::tga_to_rgba;
 /// Where the WoW install is; [`Chain`] opens it.
 mod install;
-pub use install::{addon_corpus, addon_corpus_candidates, candidates, skipped, wow_data};
+pub use install::{
+    addon_corpus, addon_corpus_candidates, candidates, project_folder, set_project_folder, skipped,
+    wow_data,
+};
 mod characters;
 pub use characters::{
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
-    BlitSource, CharCreateCatalog, CharSections, CharacterGeosets, DialRanges, EmblemLayer,
-    EquipBlit, EquipGeosets, GuildEmblem, StartOutfitItem,
+    BlitSource, CharCreateCatalog, CharSections, CharacterGeosets, CompositePlan, DialRanges,
+    EmblemLayer, EquipBlit, EquipGeosets, GuildEmblem, StartOutfitItem, VisibleGeosets,
 };
 mod camera_shakes;
 mod cinematics;
@@ -97,6 +100,8 @@ mod stable_slot_prices;
 pub use stable_slot_prices::{load_stable_slot_prices, StableSlotPrices};
 mod page_text_material;
 pub use page_text_material::{load_page_text_material_catalog, PageTextMaterialCatalog};
+mod packages;
+pub use packages::{load_packages, PackageRow};
 mod stationery;
 pub use stationery::{
     load_stationery_catalog, StationeryCatalog, StationeryRow, STATIONERY_DEFAULT,
@@ -169,7 +174,7 @@ pub use creature_sound::{load_creature_voice_catalog, CreatureVoice, CreatureVoi
 mod npc_greeting;
 pub use npc_greeting::{load_npc_greeting_catalog, NpcGreeting, NpcGreetingCatalog};
 mod emotes;
-pub use emotes::{load_emote_sound_catalog, EmoteSoundCatalog};
+pub use emotes::{load_emote_sound_catalog, EmoteSoundCatalog, EMOTE_FLAG_INTERACTION};
 mod emote_text;
 pub use emote_text::{load_emote_text_catalog, EmoteLine, EmoteTextCatalog};
 mod environmental_damage;
@@ -204,15 +209,16 @@ mod spells;
 pub use spells::{
     cc_exemption, grants_immunity, load_shapeshift_forms, load_spell_cast_times,
     load_spell_catalog, load_spell_dispel_types, load_spell_durations, load_spell_radii,
-    load_spell_ranges, min_max_range, substitute, CcExemption, FormRefusal, LearnAnnouncement,
-    LearnEffect, OpenLock, ShapeshiftForm, SpellCastTime, SpellCastTimeCatalog, SpellCatalog,
-    SpellDispelTypes, SpellDisplay, SpellDuration, SpellDurationCatalog, SpellRadius,
-    SpellRadiusCatalog, SpellRange, SpellRangeCatalog, TokenContext, ATTR_CASTABLE_WHILE_DEAD,
+    load_spell_ranges, min_max_range, min_max_range_reads_units, soft_modify, substitute,
+    CcExemption, FormRefusal, LearnAnnouncement, LearnEffect, OpenLock, RangeTargets, RangeUnit,
+    ShapeshiftForm, SpellCastTime, SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes,
+    SpellDisplay, SpellDuration, SpellDurationCatalog, SpellMods, SpellRadius, SpellRadiusCatalog,
+    SpellRange, SpellRangeCatalog, TokenContext, TokenNumber, UnitMotion, ATTR_CASTABLE_WHILE_DEAD,
     ATTR_NOT_IN_COMBAT, ATTR_ONLY_STEALTHED, COMBAT_REACH_ADD, MELEE_RANGE_FLOOR,
-    ON_NEXT_SWING_RANGE, SPELL_ATTR_IS_TRADESKILL, SPELL_EFFECT_CREATE_ITEM,
-    SPELL_EFFECT_ENCHANT_ITEM, SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, SPELL_EFFECT_LEARN_PET_SPELL,
-    SPELL_EFFECT_LEARN_SPELL, SPELL_EFFECT_PROSPECTING, SPELL_EFFECT_SKILL_STEP,
-    SPELL_EFFECT_SKINNING, SPELL_EFFECT_TRADE_SKILL,
+    MOVING_BONUS_FLAGS, MOVING_RANGE_BONUS, ON_NEXT_SWING_RANGE, SPELL_ATTR_IS_TRADESKILL,
+    SPELL_EFFECT_CREATE_ITEM, SPELL_EFFECT_ENCHANT_ITEM, SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY,
+    SPELL_EFFECT_LEARN_PET_SPELL, SPELL_EFFECT_LEARN_SPELL, SPELL_EFFECT_PROSPECTING,
+    SPELL_EFFECT_SKILL_STEP, SPELL_EFFECT_SKINNING, SPELL_EFFECT_TRADE_SKILL,
 };
 mod skill_lines;
 pub use skill_lines::{
@@ -339,6 +345,8 @@ pub use text_filter_lists::{load_chat_profanity, load_spam_messages, FilterPatte
 mod race_sound;
 pub use race_sound::{load_exploration_sound_catalog, ExplorationSoundCatalog};
 
+mod race_creature_type;
+pub use race_creature_type::load_race_creature_types;
 mod race_pvp_team;
 pub use race_pvp_team::load_race_pvp_teams;
 mod zone_map;

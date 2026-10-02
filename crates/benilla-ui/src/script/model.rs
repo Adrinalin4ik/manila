@@ -6,16 +6,22 @@ use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 use super::{
     auction, backdrop, bank, bind_confirm, camera_view, char_stats, chat_window, colorselect,
     container, craft, cursor, death, duel, follow, gossip, guild, inspect, item_text, loot,
-    loot_roll, macros, mail, merchant, party, petition, pvp, quest, quest_log, reputation, session,
-    simplehtml, skills, slider, social, spellbook, stable, taxi, trade, tradeskill, trainer,
-    weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView, MusicRequest,
-    PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
+    loot_roll, macros, mail, merchant, parse_unit_token, party, petition, pvp, quest, quest_log,
+    reputation, session, simplehtml, skills, slider, social, spellbook, stable, taxi, trade,
+    tradeskill, trainer, weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView,
+    MusicRequest, PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState, UnitTokenParse,
 };
 
 // ── The Rust-side model ──
 
 /// The host's answer to whether a texture path resolves to a file.
 pub type TextureProbe = Box<dyn Fn(&str) -> bool>;
+
+/// The host's world-to-map projection (`0x4a7360`): the displayed map's selection as
+/// [`super::UiScript::world_map_selection`] reads it, a map id and a world `(x, y)`, to the map UV,
+/// `None` where the reference's outputs stay at their `(0, 0)`.
+pub type WorldLocProjector =
+    Box<dyn Fn((u32, u32, Option<u32>), u32, f32, f32) -> Option<(f32, f32)>>;
 
 /// The host's answer to a texture path's size in texels.
 pub type TextureSizeProbe = Box<dyn Fn(&str) -> Option<(u32, u32)>>;
@@ -62,6 +68,11 @@ pub(crate) struct Model {
     /// Lowercased names `SMSG_ADDON_INFO` marked `status = 2`; `None` until the reply arrives, and
     /// until then `GetNumAddOns()` is 0, as in the reference (`[0xbe1b90]`, reset at `0x51fad1`).
     pub(crate) addon_info_hidden: Option<Vec<String>>,
+    /// The current character's enable hash, which every enable verb writes through and the
+    /// shutdown writer (`0x490c88` into `0x51ef20`) saves only while dirty.
+    pub(crate) addon_enable: super::EnableHash,
+    /// The hash as the host read it from the file, what `ResetDisabledAddOns` reloads (`0x48e830`).
+    pub(crate) addon_enable_saved: super::EnableHash,
     /// The AddOns folder, so `LoadAddOn` can read an addon's files from inside a Lua binding.
     pub(crate) addons_root: Option<std::path::PathBuf>,
     /// The host's reader for chain-sourced addon files; without one such an addon is `MISSING`.
@@ -71,6 +82,8 @@ pub(crate) struct Model {
     /// Whether a texture path resolves (patch chain or loose addon file), so the path form of
     /// `SetTexture` returns the reference's 1 or nil inline (`0x79bb40`). `None` answers nil.
     pub(crate) texture_probe: Option<TextureProbe>,
+    /// `GetWorldLocMapPosition`'s projection; `None` answers `(0, 0)`.
+    pub(crate) world_loc_projector: Option<WorldLocProjector>,
     /// A path's texel size, which an axis authored as 0 takes, one texel per unit, as the client's
     /// `GetWidth` (`0x770720`) and `GetHeight` (`0x770790`) do; `None` leaves it as authored.
     pub(crate) texture_size_probe: Option<TextureSizeProbe>,
@@ -89,6 +102,8 @@ pub(crate) struct Model {
     /// `FrameXML_Debug`'s flag (`0x488440` over `[0xceea30]`, boots 0); the loader's trace lines
     /// print while it is greater than 0 (`0x6ee298`), so it is signed.
     pub(crate) framexml_debug: std::cell::Cell<i32>,
+    /// The loads' records for `Logs\FrameXML.log` and the drains the host has yet to write.
+    pub(crate) load_log: crate::status::LoadLog,
     /// The FrameXML font registry, a namespace apart from templates (a font inherits only a font).
     pub(crate) framexml_fonts:
         std::cell::RefCell<std::collections::HashMap<String, crate::framexml::Element>>,
@@ -138,8 +153,6 @@ pub(crate) struct Model {
     pub(crate) layout_rounds: u64,
     /// Per frame, rasterized links `(y-up rect, link, full |H…|h markup)` for `OnHyperlinkClick`.
     pub(crate) link_spans: HashMap<FrameHandle, Vec<(Rect, String, String)>>,
-    /// Tab was pressed in the chat edit box (`BenillaChatTabPressed`), for the whisper cycle.
-    pub(crate) chat_tab: bool,
     /// Region visuals (texture, colour, text) and layout (anchors, size, justify).
     pub(crate) region_data: HashMap<RegionHandle, RegionData>,
     /// Each frame's backdrop plate (`<Backdrop>` or `SetBackdrop`, the client's `frame+0x1ac`).
@@ -173,10 +186,6 @@ pub(crate) struct Model {
     pub(crate) model_facts: HashMap<String, std::sync::Arc<crate::widget::ModelFileFacts>>,
     /// Model files still waiting for their facts, for the host to load; deduplicated.
     pub(crate) model_facts_wanted: Vec<String>,
-    /// Edit boxes owed `OnTextChanged`: the reference's dirty bit (`[E+0x31c]` bit 0), set by
-    /// `SetText`/`Insert`, cleared only by `0x77d3e0`: one fire per drain, with the final text, as
-    /// `MoneyInputFrame_SetCopper` needs. A hidden box's fire waits for a show, key or mouse-down.
-    pub(crate) dirty_editboxes: Vec<FrameHandle>,
     /// Event name to its frames in registration order, never a set: `SignalEvent` (`0x703e50`)
     /// dispatches in that order across frames. Re-registering keeps a frame's position.
     pub(crate) event_to_frames: HashMap<String, Vec<FrameHandle>>,
@@ -225,26 +234,29 @@ pub(crate) struct Model {
     /// Each unit token's state as pushed this frame, keyed lowercased because 1.12's resolver
     /// (`0x515970`) matches with `SStrCmpI`: read it only through `unit`, where the fold lives.
     pub(crate) units_by_lower: HashMap<String, UnitState>,
-    /// Per unit token, auras in display order: the player's by insertion, the rest by aura slot.
-    pub(crate) auras: HashMap<String, Vec<AuraState>>,
+    /// The snapshot of each unit a `target` chain can end on, by guid, which the app pushes for
+    /// [`super::UnitGuids::chain_ends`]: a token with a hop that no push names reads its
+    /// resolved guid's entry here.
+    pub(crate) units_by_guid: HashMap<u64, UnitState>,
+    /// The player's auras in the reference cache's insertion order (`0xbc6040`), durations joined:
+    /// the `GetPlayerBuff` family's list, and any token naming the player's.
+    pub(crate) player_auras: Vec<AuraState>,
+    /// Every other unit's auras by guid, ascending aura slot: one list per unit, whatever token
+    /// names it.
+    pub(crate) unit_auras: HashMap<u64, Vec<AuraState>>,
+    /// The unit-token resolver's inputs (`0x515970`), which the aura bindings resolve through.
+    pub(crate) unit_guids: super::UnitGuids,
     /// Spell ids the cancel verbs queued (`CancelPlayerBuff`, `CancelTrackingBuff`, …), one
     /// `CMSG_CANCEL_AURA` each.
     pub(crate) cancel_aura_requests: Vec<u32>,
     /// The player's active tracking aura, behind `GetTrackingTexture`.
     pub(crate) tracking: Option<super::aura::TrackingState>,
-    /// `TargetUnit`, `AssistUnit` and `TargetLastEnemy` calls in call order, one queue as the
-    /// reference routes all three through one helper; an unresolvable one is a no-op, as there.
-    pub(crate) selection_requests: Vec<super::SelectionRequest>,
-    /// `TargetNearestFriend` calls, `true` for the reverse cycle.
-    pub(crate) target_nearest_friend_requests: Vec<bool>,
-    /// `TargetByName(name, exactMatch)` calls, for the app's by-name resolver.
-    pub(crate) target_by_name_requests: Vec<(String, bool)>,
-    /// `ClearTarget()` fired with a live target, the last step of `ToggleGameMenu`'s ESC chain.
-    pub(crate) target_clear: bool,
+    /// The calls that touch the selection, the cast or the targeting cursor, in call order.
+    pub(crate) script_calls: Vec<super::calls::ScriptCall>,
+    /// The binding functions' queue, gate depth and mouselook state.
+    pub(crate) input: super::input_verbs::InputState,
     /// `DropItemOnUnit` tokens (`0x48d960`), gated by the app; a refusal silently keeps the item.
     pub(crate) drop_item_on_unit: Vec<String>,
-    /// `SpellTargetUnit` tokens: a unit frame binds the spell currently waiting on the cursor.
-    pub(crate) spell_target_unit: Vec<String>,
 
     /// Channels the server confirmed, in join order: the numbers `GetChannelName` answers.
     pub(crate) joined_channels: Vec<Option<String>>,
@@ -258,6 +270,13 @@ pub(crate) struct Model {
     pub(crate) saved_instances: Vec<party::SavedInstanceInfo>,
     /// `SetRaidRosterSelection`'s raid row index, client-side only.
     pub(crate) raid_selection: i64,
+    /// `GetTime()`'s session seconds, which only the host moves ([`super::UiScript::tick`],
+    /// [`super::UiScript::set_now`]); off `_G`, as the reference's clock is the OS tick count.
+    pub(crate) now: f64,
+    /// `GetGameTime()`'s `(hour, minute)`, pushed by the host as the game clock ticks.
+    pub(crate) game_time: (u32, u32),
+    /// The zone caches the four zone-text getters and `GetZonePVPInfo` read.
+    pub(crate) zone: super::ZoneTexts,
     /// The current map's `Map.dbc` `InstanceType`, all `IsInInstance()` reads; `None` for no row.
     pub(crate) instance_type: Option<u32>,
     /// `CanShowResetInstances()`, the reference's four-term predicate (`0x495c90`), app-computed.
@@ -291,6 +310,8 @@ pub(crate) struct Model {
     pub(crate) chat_colors_changed: bool,
     /// The languages this character knows, in `Languages.dbc` row order.
     pub(crate) known_languages: Vec<String>,
+    /// `Languages.dbc`'s `(ID, Name_lang)` rows in file order, whatever the character knows.
+    pub(crate) language_table: Vec<(u32, String)>,
     pub(crate) zone_channel_catalog: Vec<super::channel::ZoneChannelRow>,
     pub(crate) channel_commands: Vec<super::channel::ChannelCommand>,
     /// The recruitment auto-join latch `[0x843608]`: 0 `STANDARD`, 1 `AUTO` (`0x49ea70` maps any
@@ -373,6 +394,9 @@ pub(crate) struct Model {
     /// `(name, default)` per addon `RegisterCVar` that created a slot.
     pub(crate) cvar_registrations: Vec<(String, String)>,
     pub(crate) cvars_warned: HashSet<String>,
+    /// The lowercased names a Lua `SetCVar` refuses, the reference's flag bit2 (`rec+0x1c & 4`,
+    /// `CVar::SetReadOnly 0x63e030`). Kept beside the rows, so a host re-seed never clears it.
+    pub(crate) cvars_read_only: HashSet<String>,
 
     /// The adapter's multisample formats in dropdown order, the reference's list `[0xb4b444]` of
     /// `{colorBits, depthBits, multisample}` (count `[0xb4b440]`, built by `0x48c3e0`).
@@ -401,7 +425,6 @@ pub(crate) struct Model {
     /// Per action, its usable, range, current and cooldown state; an absent one reads cold.
     pub(crate) action_states: HashMap<u32, super::action::StoredActionState>,
     pub(crate) bonus_bar_offset: u8,
-    pub(crate) action_uses: Vec<super::action::ActionUse>,
     /// `(action id, packed)` per slot `PickupAction`/`PlaceAction` changed, 0 clearing it: one
     /// `CMSG_SET_ACTION_BUTTON` each, so a drag swap is two sends.
     pub(crate) action_sets: Vec<(u32, u32)>,
@@ -418,27 +441,22 @@ pub(crate) struct Model {
     pub(crate) macros_dirty: bool,
     /// Bumped by every seed and change, for readers that must not drain `macros_dirty`.
     pub(crate) macros_generation: u64,
+    /// Each macro's cached cast by 1-based index, from the app; an absent macro reads unbound.
+    pub(crate) macro_bindings: HashMap<u32, macros::MacroBinding>,
     /// The macro icon paths from `SpellIcon.dbc`, behind `GetMacroIconInfo`.
     pub(crate) macro_icons: Vec<String>,
-    /// Spell ids `CastSpell` queued.
-    pub(crate) spell_casts: Vec<u32>,
-    /// `CastSpell(id, "pet")` ids, sent as `CMSG_PET_ACTION` with a type-1 word (`0x4b34ce`).
-    pub(crate) pet_spell_casts: Vec<u32>,
     /// `ToggleSpellAutocast` ids for `CMSG_PET_SPELL_AUTOCAST` (`0x2F3`), which names a spell.
     pub(crate) pet_spell_autocasts: Vec<u32>,
     /// An auto-repeat or cast that `SpellStopCasting()` can stop, not a channel (`0x6e6e80`). Its
     /// 1 or nil matters: the ESC chain (`UIParent.lua:1489`) reaches `CloseAllWindows()` on nil.
     pub(crate) casting: bool,
-    /// `SpellStopCasting()` fired while casting: the ESC cancel.
-    pub(crate) spell_stop: bool,
     /// Spell targeting is on (`SpellIsTargeting`, `0x6e6cd0`); it gates `SpellStopTargeting()`,
     /// whose nil the ESC chain falls through on (`UIParent.lua:1490`).
     pub(crate) spell_targeting: bool,
-    /// Tokens for which `SpellCanTargetUnit`'s armed unit word clears fully, used by stock unit
-    /// frames before they call `SpellTargetUnit`.
-    pub(crate) spell_targetable_units: HashSet<String>,
-    /// `SpellStopTargeting()` fired while targeting: the ESC targeting cancel.
-    pub(crate) spell_stop_targeting: bool,
+    /// The units, by guid, for which `SpellCanTargetUnit`'s armed unit word clears fully, which
+    /// stock unit frames ask before they call `SpellTargetUnit`; a token resolves to its guid
+    /// through [`Self::unit_guids`].
+    pub(crate) spell_targetable_units: HashSet<u64>,
 
     pub(crate) talents: super::talent::TalentUiState,
     /// `LearnTalent(tab, index)` calls queued.
@@ -473,8 +491,10 @@ pub(crate) struct Model {
     pub(crate) battlefield_list: super::battlefield_queue::BattlefieldListView,
     /// The selected instance id (`[0xb6eba0]`), not an index; written by `SetSelectedBattlefield`.
     pub(crate) battlefield_selected: u32,
-    /// The three queue slots, pushed each frame with their clocks reduced to values.
-    pub(crate) battlefield_slots: Vec<super::battlefield_queue::BattlefieldQueueSlot>,
+    /// The three queue slots, pushed each frame with their clocks reduced to values. Zeroed
+    /// until the first push, as the reference's static slots (`0xb6e9d0`) are, so each answers
+    /// "none" from the first frame.
+    pub(crate) battlefield_slots: [super::battlefield_queue::BattlefieldQueueSlot; 3],
     /// `GetBattlefieldInstanceExpiration()`, pushed each frame.
     pub(crate) battlefield_instance_expiration_ms: u32,
     /// `JoinBattlefield` calls, `(instance id, as group)`.
@@ -500,19 +520,13 @@ pub(crate) struct Model {
 
     /// The stance bar's forms, in bar order.
     pub(crate) shapeshift_forms: Vec<super::shapeshift::StoredShapeshiftForm>,
-    /// Form spell ids `CastShapeshiftForm` queued.
-    pub(crate) shapeshift_casts: Vec<u32>,
 
     /// The pet bar's ten slots and two bar-wide bits, replaced whole by every `SMSG_PET_SPELLS`.
     pub(crate) pet_bar: super::pet::PetBarState,
-    /// 1-based slots `CastPetAction` queued.
-    pub(crate) pet_actions_pressed: Vec<u32>,
     /// 1-based slot indices `TogglePetAutocast` queued.
     pub(crate) pet_autocast_toggles: Vec<u32>,
     /// `PetStopAttack()` calls.
     pub(crate) pet_stop_attacks: u32,
-    /// `PetAttack`, `PetFollow`, `PetWait` and mode orders, as the packed word of their bar slot.
-    pub(crate) pet_orders: Vec<u32>,
     /// `HasFullControl`, the reference's `[0xb4b3e4]`: set by `SMSG_CLIENT_CONTROL_UPDATE` for the
     /// player, boots 1, and every cast, item and cursor gate refuses at 0.
     pub(crate) player_control: bool,
@@ -525,9 +539,8 @@ pub(crate) struct Model {
     /// Names `PetRename` queued, from the `PETRENAMECONFIRM` popup.
     pub(crate) pet_renames: Vec<String>,
 
-    /// Bag contents by API bag id (0 is the backpack), and the queued `UseContainerItem` calls.
+    /// Bag contents by API bag id (0 is the backpack).
     pub(crate) containers: HashMap<i64, container::ContainerState>,
-    pub(crate) container_uses: Vec<(i64, u32)>,
     /// Per `(bag, slot)`, `(start, duration, enabled)` in `GetTime` seconds, stamped at push.
     pub(crate) container_cooldowns: HashMap<(i64, u32), (f64, f64, bool)>,
     /// `HasKey()`: a keys-family item in equipment, bags, bank or keyring; gates the keyring UI.
@@ -594,8 +607,10 @@ pub(crate) struct Model {
 
     /// The open vendor's stock, the `BuyMerchantItem` calls and whether `CloseMerchant` ran.
     pub(crate) merchant: Option<merchant::MerchantState>,
-    /// `GetRepairAllCost`'s total, which the app pushes every frame a vendor is open.
+    /// `GetRepairAllCost`'s total; 0 unless a repairer is open.
     pub(crate) repair_all_cost: u32,
+    /// The repair costs `SetInventoryItem` and `SetBagItem` return.
+    pub(crate) repair_costs: merchant::RepairCosts,
     pub(crate) merchant_buys: Vec<(u32, u32)>,
     /// The held `(bag, slot)` when `PickupMerchantItem` sells, sent as `CMSG_SELL_ITEM`.
     pub(crate) merchant_cursor_sells: Vec<(i64, u32)>,
@@ -670,8 +685,8 @@ pub(crate) struct Model {
     pub(crate) bind_on_use_confirms: u32,
 
     /// The open loot, the row clicks and whether `CloseLoot` ran. A click is the reference's take
-    /// `0x4c2790` with flag 0, raising `LOOT_BIND` for a bind-on-pickup row (the C `CLootButton`,
-    /// here `BenillaTakeLootSlot`); `LootSlot` passes 1 (`0x4c2e70`), taking it after the confirm.
+    /// `0x4c2790` with flag 0, raising `LOOT_BIND` for a bind-on-pickup row (a `LootButton`'s own
+    /// click, `0x4c1820`); `LootSlot` passes 1 (`0x4c2e70`), taking it after the confirm.
     pub(crate) loot: Option<loot::LootState>,
     pub(crate) loot_picks: Vec<u32>,
     /// `LootSlot(slot)` rows, 1-based, apart from clicks for the reference's pending-slot gate.
@@ -709,6 +724,10 @@ pub(crate) struct Model {
     pub(crate) mail_stationeries: Vec<mail::StationeryView>,
     /// `SelectStationery`'s `Stationery.dbc` id; 0 is none, which silences `SendMail`.
     pub(crate) mail_stationery: u32,
+    /// `Package.dbc`'s rows in file order, `GetPackageInfo`'s list.
+    pub(crate) mail_packages: Vec<mail::PackageView>,
+    /// `SelectPackage`'s `Package.dbc` id (`[0xb6efb8]`); 0 is none.
+    pub(crate) mail_package: u32,
     /// `HasNewMail()` (`0x4afea0`), from `MSG_QUERY_NEXT_MAIL_TIME` and `SMSG_RECEIVED_MAIL`.
     pub(crate) has_new_mail: bool,
 
@@ -778,6 +797,12 @@ pub(crate) struct Model {
     /// Spell id to its tooltip view, and the misses asked for.
     pub(crate) spell_tooltips: HashMap<u32, super::SpellTooltipView>,
     pub(crate) spell_tooltip_asks: HashSet<u32>,
+    /// The same for the views built against the player's pet, which the spell builder's unit
+    /// selector asks for (`0x52e610`'s fourth argument).
+    pub(crate) pet_spell_tooltips: HashMap<u32, super::SpellTooltipView>,
+    pub(crate) pet_spell_tooltip_asks: HashSet<u32>,
+    /// The tooltips whose spell render missed its view, re-rendered when the app answers.
+    pub(crate) spell_tooltip_waits: HashMap<FrameHandle, super::tooltip_spell::SpellWait>,
     /// `CollapseQuestHeader`/`ExpandQuestHeader` as `(1-based entry, collapse)`, entry 0 for all.
     pub(crate) quest_log_collapses: Vec<(u32, bool)>,
     /// Watched quest ids in watch order, pruned when a quest leaves the log.
@@ -832,8 +857,6 @@ pub(crate) struct Model {
     pub(crate) bank_bag_slots: char_stats::BankBagSlots,
     /// `GetInventoryAlertStatus` in `0x806eb8` order; every push fires `UPDATE_INVENTORY_ALERTS`.
     pub(crate) inventory_alerts: [u8; 12],
-    /// `UseInventoryItem` slot ids, sent as `CMSG_USE_ITEM` on the equipped item.
-    pub(crate) inventory_uses: Vec<u32>,
     /// Equipped slot ids clicked while the merchant repair cursor is armed.
     pub(crate) inventory_repairs: Vec<u32>,
     /// Main- and off-hand temporary enchants in `GetWeaponEnchantInfo`'s order, pushed each frame.
@@ -854,8 +877,8 @@ pub(crate) struct Model {
     pub(crate) tabard_intents: Vec<super::tabard::TabardIntent>,
     /// The `WorldFrame` type's one-shot record: true once the first is made.
     pub(crate) world_frame_made: bool,
-    /// Per lowercased live-unit token, reach for `CanInspect`/`CheckInteractDistance`; absent: nil.
-    pub(crate) unit_reach: HashMap<String, super::UnitReach>,
+    /// Per live-unit guid, reach for `CanInspect`/`CheckInteractDistance`; absent: nil.
+    pub(crate) unit_reach: HashMap<u64, super::UnitReach>,
 
     /// The skills pane's snapshot and the display tree built from it.
     pub(crate) skills: skills::SkillsState,
@@ -878,7 +901,7 @@ pub(crate) struct Model {
     /// Reputation calls queued, applied locally first because none of the three sends is acked.
     pub(crate) reputation_sends: Vec<reputation::ReputationSend>,
 
-    /// Lines the chat box submitted (`SubmitChatInput`), for the app's slash-command parser.
+    /// Lines for the app's slash-command parser: a probe's, or a host `SlashCmdList` row's.
     pub(crate) chat_input: Vec<String>,
 
     /// The world map's pushed catalog and feed, and its selection.
@@ -905,6 +928,8 @@ pub(crate) struct Model {
     pub(crate) addon_sends: Vec<super::addon_message::AddonSend>,
     /// `RequestTimePlayed()` calls, one empty `CMSG_PLAYED_TIME` each.
     pub(crate) played_time_asks: u32,
+    /// `OpeningCinematic()` calls, one empty `CMSG_OPENING_CINEMATIC` each.
+    pub(crate) opening_cinematic_asks: u32,
     /// `Screenshot()` calls, one capture each.
     pub(crate) screenshot_asks: u32,
     /// `GetRealmName()`: `""` until pushed, never nil, since addons index tables with it at load.
@@ -975,13 +1000,34 @@ impl Model {
         self.warnings.push(msg);
     }
 
-    /// A unit token's state, folded as 1.12's resolver `0x515970` folds (`_strnicmp`: `A`..`Z`
-    /// only, never a byte of 0x80 or more), so `to_ascii_lowercase`, never `to_lowercase`.
+    /// The state of the unit `token` names, as the `Unit*` getters read it: the snapshot the app
+    /// pushed under the token, else, for a token with a `target` hop, the chain's end.
     pub(crate) fn unit(&self, token: &str) -> Option<&UnitState> {
+        self.pushed_unit(token).or_else(|| self.chained_unit(token))
+    }
+
+    /// The snapshot pushed under `token` itself, folded as 1.12's resolver `0x515970` folds
+    /// (`_strnicmp`: `A`..`Z` only, never a byte of 0x80 or more), so `to_ascii_lowercase`, never
+    /// `to_lowercase`.
+    pub(crate) fn pushed_unit(&self, token: &str) -> Option<&UnitState> {
         if token.bytes().any(|b| b.is_ascii_uppercase()) {
             self.units_by_lower.get(&token.to_ascii_lowercase())
         } else {
             self.units_by_lower.get(token)
+        }
+    }
+
+    /// The unit a token with a `target` hop and no push of its own names: the resolver's guid
+    /// (`0x515970`, which the getters call before their own object lookup, `0x468460`), then that
+    /// guid's snapshot. A token without a hop is the app's to push, base by base, and reads
+    /// nothing here.
+    fn chained_unit(&self, token: &str) -> Option<&UnitState> {
+        match parse_unit_token(token) {
+            UnitTokenParse::Unit { base, hops } if hops > 0 => {
+                let guid = self.unit_guids.resolve_unit(base, hops)?;
+                self.units_by_guid.get(&guid)
+            }
+            _ => None,
         }
     }
 
@@ -990,16 +1036,20 @@ impl Model {
             addons: Vec::new(),
             addon_index: Vec::new(),
             addon_info_hidden: None,
+            addon_enable: Default::default(),
+            addon_enable_saved: Default::default(),
             addons_root: None,
             addons_chain_reader: None,
             measurer: None,
             texture_probe: None,
+            world_loc_projector: None,
             texture_size_probe: None,
             font_probe: None,
             addons_saved_account: None,
             addons_saved_character: None,
             framexml_templates: Default::default(),
             framexml_debug: Default::default(),
+            load_log: Default::default(),
             framexml_fonts: Default::default(),
             arena: WidgetArena::new(),
             layout_inputs: HashMap::new(),
@@ -1020,7 +1070,6 @@ impl Model {
             layout_rounds: 0,
             resolved: HashMap::new(),
             link_spans: HashMap::new(),
-            chat_tab: false,
             region_data: HashMap::new(),
             backdrops: HashMap::new(),
             simple_html: simplehtml::SimpleHtmlStates::new(),
@@ -1038,7 +1087,6 @@ impl Model {
             on_update_model_frames: Vec::new(),
             model_facts: HashMap::new(),
             model_facts_wanted: Vec::new(),
-            dirty_editboxes: Vec::new(),
             event_to_frames: HashMap::new(),
             frame_events: HashMap::new(),
             all_event_frames: Vec::new(),
@@ -1056,21 +1104,24 @@ impl Model {
             // 1024x768 until the host calls `set_screen_size`; y-up `[bottom, left, top, right]`.
             screen: Rect::new(0.0, 0.0, 768.0, 1024.0),
             units_by_lower: HashMap::new(),
-            auras: HashMap::new(),
+            units_by_guid: HashMap::new(),
+            player_auras: Vec::new(),
+            unit_auras: HashMap::new(),
+            unit_guids: Default::default(),
             cancel_aura_requests: Vec::new(),
             tracking: None,
-            selection_requests: Vec::new(),
-            target_nearest_friend_requests: Vec::new(),
-            target_by_name_requests: Vec::new(),
+            script_calls: Vec::new(),
+            input: Default::default(),
             drop_item_on_unit: Vec::new(),
-            spell_target_unit: Vec::new(),
-            target_clear: false,
             joined_channels: Vec::new(),
             party: party::PartyState::default(),
             party_requests: Vec::new(),
             ready_check: party::ReadyCheckState::default(),
             saved_instances: Vec::new(),
             raid_selection: 0,
+            now: 0.0,
+            game_time: (0, 0),
+            zone: Default::default(),
             instance_type: None,
             can_reset_instances: false,
             reset_instance_asks: 0,
@@ -1089,6 +1140,7 @@ impl Model {
             chat_colors: super::chat_types::seed(),
             chat_colors_changed: false,
             known_languages: Vec::new(),
+            language_table: Vec::new(),
             zone_channel_catalog: Vec::new(),
             channel_commands: Vec::new(),
             guild_recruitment_mode: 1,
@@ -1125,6 +1177,7 @@ impl Model {
             cvar_changes: Vec::new(),
             cvar_registrations: Vec::new(),
             cvars_warned: HashSet::new(),
+            cvars_read_only: HashSet::new(),
             multisample_formats: Vec::new(),
             screen_resolutions: Vec::new(),
             current_resolution: None,
@@ -1136,7 +1189,6 @@ impl Model {
             actions: HashMap::new(),
             action_states: HashMap::new(),
             bonus_bar_offset: 0,
-            action_uses: Vec::new(),
             action_sets: Vec::new(),
             ui_errors: Vec::new(),
             spellbook: spellbook::SpellBookState::default(),
@@ -1144,15 +1196,12 @@ impl Model {
             macros: macros::MacroState::default(),
             macros_dirty: false,
             macros_generation: 0,
+            macro_bindings: HashMap::new(),
             macro_icons: Vec::new(),
-            spell_casts: Vec::new(),
-            pet_spell_casts: Vec::new(),
             pet_spell_autocasts: Vec::new(),
             casting: false,
-            spell_stop: false,
             spell_targeting: false,
             spell_targetable_units: HashSet::new(),
-            spell_stop_targeting: false,
             talents: super::talent::TalentUiState::default(),
             talent_learns: Vec::new(),
             talent_wipe_confirms: 0,
@@ -1170,7 +1219,7 @@ impl Model {
             battlefield_leave_requests: 0,
             battlefield_list: Default::default(),
             battlefield_selected: 0,
-            battlefield_slots: Vec::new(),
+            battlefield_slots: Default::default(),
             battlefield_instance_expiration_ms: 0,
             battlefield_join_requests: Vec::new(),
             battlefield_list_requests: Vec::new(),
@@ -1186,19 +1235,15 @@ impl Model {
             tutorial_clears: 0,
             tutorial_resets: 0,
             shapeshift_forms: Vec::new(),
-            shapeshift_casts: Vec::new(),
             pet_bar: super::pet::PetBarState::default(),
-            pet_actions_pressed: Vec::new(),
             pet_autocast_toggles: Vec::new(),
             pet_stop_attacks: 0,
-            pet_orders: Vec::new(),
             player_control: true,
             pet_set_actions: Vec::new(),
             pet_abandons: 0,
             pet_dismisses: 0,
             pet_renames: Vec::new(),
             containers: HashMap::new(),
-            container_uses: Vec::new(),
             container_cooldowns: HashMap::new(),
             has_key: false,
             cursor: None,
@@ -1229,6 +1274,7 @@ impl Model {
             gossip_quest_selects: Vec::new(),
             merchant: None,
             repair_all_cost: 0,
+            repair_costs: Default::default(),
             merchant_buys: Vec::new(),
             merchant_cursor_sells: Vec::new(),
             merchant_slot_buys: Vec::new(),
@@ -1292,6 +1338,8 @@ impl Model {
             mail_send_item: None,
             mail_stationeries: Vec::new(),
             mail_stationery: 0,
+            mail_packages: Vec::new(),
+            mail_package: 0,
             has_new_mail: false,
             auction: None,
             auction_item_classes: Vec::new(),
@@ -1335,6 +1383,9 @@ impl Model {
             player_req: PlayerReqState::default(),
             spell_tooltips: HashMap::new(),
             spell_tooltip_asks: HashSet::new(),
+            pet_spell_tooltips: HashMap::new(),
+            pet_spell_tooltip_asks: HashSet::new(),
+            spell_tooltip_waits: HashMap::new(),
             quest_log_collapses: Vec::new(),
             quest_log_watched: Vec::new(),
             server_unix_time: None,
@@ -1348,6 +1399,7 @@ impl Model {
             chat_sends: Vec::new(),
             addon_sends: Vec::new(),
             played_time_asks: 0,
+            opening_cinematic_asks: 0,
             screenshot_asks: 0,
             realm_name: String::new(),
             player_record: super::PlayerRecord::default(),
@@ -1388,7 +1440,6 @@ impl Model {
             inventory_slots: Default::default(),
             bank_bag_slots: Default::default(),
             inventory_alerts: [0; 12],
-            inventory_uses: Vec::new(),
             inventory_repairs: Vec::new(),
             weapon_enchants: [None; 2],
             inspect: None,

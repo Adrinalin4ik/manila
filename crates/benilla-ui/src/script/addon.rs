@@ -11,6 +11,7 @@ use mlua::{Lua, MultiValue, Value};
 use super::addon_gate::{can_load, GateRow, Verdict};
 use super::binding_abi::flag;
 use super::Model;
+use crate::status::Status;
 
 /// Reads a chain-sourced addon's file by its path inside the patch chain.
 pub type AddonChainReader = Box<dyn Fn(&str) -> Option<Vec<u8>>>;
@@ -139,6 +140,15 @@ fn row_of(model: &Model, key: &AddonKey) -> Option<usize> {
         AddonKey::Index(i) => Some(*i),
         AddonKey::Name(n) => by_name(model, n),
     }
+}
+
+/// The enable setter (`0x51ea20`), the one write every enable verb makes, for the current
+/// character's row: the registry bit the gate reads, and the character's enable hash, which the
+/// setter dirties only when the row changes or is new.
+fn set_enabled(model: &mut Model, i: usize, on: bool) {
+    model.addons[i].enabled = on;
+    let name = model.addons[i].name.clone();
+    model.addon_enable.set(&name, on);
 }
 
 /// The registry as [`super::addon_gate`] rows, the one input every verb's verdict reads.
@@ -322,29 +332,33 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let key = addon_key(lua, &model, &key, usage)?;
                 if let Some(i) = row_of(&model, &key) {
-                    model.addons[i].enabled = on;
+                    set_enabled(&mut model, i, on);
                 }
                 Ok(())
             })?,
         )?;
     }
 
-    // No arguments read (`0x48e720`, `0x48e7f0`).
+    // No arguments read (`0x48e720`, `0x48e7f0`). The loop runs over the Lua index array, not the
+    // registry: bound `0x51def0`, each name from `0x51df00`, into the setter `0x51ea20`. The array
+    // leaves out what `SMSG_ADDON_INFO` hid (`0x51dc4f`), which is every `Blizzard_*` addon on a
+    // server that hides them (vmangos `AddonHandler.cpp:129`), so their state is never touched.
     for (name, on) in [("EnableAllAddOns", true), ("DisableAllAddOns", false)] {
         g.set(
             name,
             lua.create_function(move |lua, _: MultiValue| {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
-                for a in &mut model.addons {
-                    a.enabled = on;
+                for k in 0..model.addon_index.len() {
+                    let i = model.addon_index[k];
+                    set_enabled(&mut model, i, on);
                 }
                 Ok(())
             })?,
         )?;
     }
 
-    // `0x48e830` reloads the enable state from `AddOns.txt`, which is unchanged until the shutdown
-    // write, so reverting to the state as registered is the same thing.
+    // `0x48e830` reloads the enable hash from `AddOns.txt`, clean (`0x51ec59`), and the file is
+    // unchanged until the shutdown write, so reverting to the state as registered is the same.
     g.set(
         "ResetDisabledAddOns",
         lua.create_function(|lua, ()| {
@@ -352,6 +366,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             for a in &mut model.addons {
                 a.enabled = a.saved_enabled;
             }
+            model.addon_enable = model.addon_enable_saved.clone();
             Ok(())
         })?,
     )?;
@@ -370,7 +385,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     lua_str(lua, "MISSING")?,
                 ]));
             };
-            match load_addon(lua, i) {
+            // One record for the call and the calls inside it (`ds:0xb4e3e0` counts them,
+            // `0x48ea85`/`0x48ea9d`), drained when the outermost returns (`0x48eab4`).
+            lua.app_data_mut::<Model>()
+                .expect("model")
+                .load_log
+                .demand_depth += 1;
+            let result = load_addon(lua, i);
+            {
+                let mut model = lua.app_data_mut::<Model>().expect("model");
+                let log = &mut model.load_log;
+                log.demand_depth -= 1;
+                if log.demand_depth == 0 && !log.demand.is_empty() {
+                    let lines = log.demand.take_lines();
+                    log.writes.push(crate::status::LogWrite::Append(lines));
+                }
+            }
+            match result {
                 Ok(()) => Ok(MultiValue::from_vec(vec![Value::Integer(1), Value::Nil])),
                 Err(reason) => Ok(MultiValue::from_vec(vec![
                     Value::Nil,
@@ -463,7 +494,18 @@ fn load_addon(lua: &Lua, i: usize) -> Result<(), String> {
         }
     }
 
-    run_files(lua, &name, &read, &files);
+    let mut toc = crate::status::Status::default();
+    run_files(lua, &name, &read, &files, &mut toc);
+    // The toc's record under its banner, then the add-on's (`0x6eddc8`, `0x51f464`).
+    let debug = framexml_debug(lua);
+    let mut own = crate::status::Status::default();
+    let toc_path = crate::status::addon_toc_path(&name);
+    toc.close_into(&mut own, debug, crate::status::toc_banner(&toc_path));
+    {
+        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let banner = crate::status::addon_banner(&name);
+        own.close_into(&mut model.load_log.demand, debug, banner);
+    }
     // `Bindings.xml` loads between the files and the saved variables.
     load_bindings(lua, &name, &read);
     load_saved_variables(lua, i);
@@ -541,22 +583,38 @@ fn load_saved_variables(lua: &Lua, i: usize) {
 /// player's addon, the patch chain for a Blizzard LoadOnDemand one.
 type Reader = Box<dyn Fn(&str) -> Option<Vec<u8>>>;
 
+/// `FrameXML_Debug` above 0, which puts every banner in the load log.
+fn framexml_debug(lua: &Lua) -> bool {
+    lua.app_data_ref::<Model>()
+        .expect("model")
+        .framexml_debug
+        .get()
+        > 0
+}
+
+/// Where the reader's paths sit in the install's, for the load log's lines.
+const ADDONS_ROOT: &str = "Interface/AddOns/";
+
 /// Run the addon's `.toc` files in order, by the startup walk's rules: `.lua` is a chunk,
-/// anything else FrameXML, each path resolved against the including file's directory.
-fn run_files(lua: &Lua, name: &str, read: &Reader, files: &[String]) {
+/// anything else FrameXML, each path resolved against the including file's directory. `toc` is
+/// the `.toc`'s load record (`0x6edb90`).
+fn run_files(lua: &Lua, name: &str, read: &Reader, files: &[String], toc: &mut Status) {
     let provider = |req: &str| -> Option<Vec<u8>> { read(req) };
     for file in files {
         let path = crate::loader::join_ref(name, file);
+        let install = format!("{ADDONS_ROOT}{path}");
+        let lua_file = crate::status::runs_as_lua(&path);
         let Some(bytes) = read(&path) else {
             // The reference logs `Couldn't open %s` and carries on, so the addon still loads and
             // `IsAddOnLoaded` answers 1; the miss is warned, never a script error.
+            toc.report(
+                crate::status::FAILURE,
+                crate::status::missing(&install, lua_file),
+            );
             load_miss(lua, name, file);
             continue;
         };
-        if std::path::Path::new(file)
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("lua"))
-        {
+        if lua_file {
             if let Err(e) = run_chunk(lua, &bytes, &crate::script::addon_chunk_name(name, file)) {
                 log_error(lua, &format!("{name}/{file}: {e}"));
             }
@@ -567,11 +625,14 @@ fn run_files(lua: &Lua, name: &str, read: &Reader, files: &[String]) {
             Err(e) => {
                 // A document that will not parse is a load failure, not a raise: the reference
                 // logs `Couldn't parse XML in %s` (`0x846fd8`) to `FrameXML.log` and goes on.
+                toc.report(crate::status::FAILURE, crate::status::unparsed(&install));
                 load_failure(lua, &format!("{name}/{file}: {e}"));
                 continue;
             }
         };
-        let report = crate::loader::load_into(lua, &doc, &path, &provider);
+        let report = crate::loader::load_into_under(lua, &doc, &path, &provider, ADDONS_ROOT);
+        let banner = crate::status::file_banner(&install);
+        report.status.close_into(toc, framexml_debug(lua), banner);
         // Warnings take the `<Addon>/<file>` prefix; a bare loader warning names no document.
         for w in report.warnings {
             crate::script::diagnostics::record_warning(lua, &format!("{name}/{file}: {w}"));
@@ -712,12 +773,17 @@ impl super::UiScript {
         }
     }
 
-    /// `(name, enabled)` per registered addon, in order: what the host writes to `AddOns.txt`.
-    pub fn addon_enable_states(&self) -> Vec<(String, bool)> {
-        self.model_ref()
-            .addons
-            .iter()
-            .map(|a| (a.name.clone(), a.enabled))
-            .collect()
+    /// Seat the current character's enable hash as the loader read it from `AddOns.txt`
+    /// (`0x51ebe0`, re-read at every UI boot, `0x48ff2a`).
+    pub fn set_addon_enable_hash(&mut self, hash: super::EnableHash) {
+        let mut model = self.model_mut();
+        model.addon_enable_saved = hash.clone();
+        model.addon_enable = hash;
+    }
+
+    /// The shutdown writer's rows (`0x490c88` into `0x51ef20`): the current character's whole
+    /// enable hash when a verb changed it this session, else `None`, and nothing is written.
+    pub fn take_addon_enable_rows(&self) -> Option<Vec<(String, bool)>> {
+        self.model_mut().addon_enable.take_dirty()
     }
 }

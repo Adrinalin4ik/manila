@@ -13,6 +13,9 @@ pub struct OpenLock {
 
 /// One spell's `Spell.dbc` row, as the display, tooltip and cast gates read it.
 pub struct SpellDisplay {
+    /// `ID` (column 0): the row's own id, which `GetEffectPoints` hands the level lookup
+    /// `0x6e3130` (`0x6e384b`).
+    pub id: u32,
     pub name: String,
     /// `SpellNameSubtext` enUS (column 129): "Rank N", even "Rank 1", or a word such as "Racial".
     pub rank: Option<String>,
@@ -35,6 +38,8 @@ pub struct SpellDisplay {
     /// `AttributesEx3` (column 9). Bits `0x400` and `0x1000000` limit the equipped-item search to
     /// the main or the off hand (`0x5f0c50`).
     pub attributes_ex3: u32,
+    /// `AttributesEx4` (column 10, `+0x28`).
+    pub attributes_ex4: u32,
     /// `SpellFamilyName` (column 160): `GetSpellModifiers` (`0x6e6b30`) applies nothing unless it
     /// is nonzero and equals the local player's class family (`[0xcecaac]`, `0x6e6b46`).
     pub spell_family: u32,
@@ -101,6 +106,9 @@ pub struct SpellDisplay {
     pub range_index: u32,
     /// `Targets` (column 13): the `TARGET_FLAG_*` seed of the cast arm's targeting word.
     pub targets: u32,
+    /// `TargetCreatureType` (column 14): the creature types the spell may target, bit `type - 1`
+    /// each; 0 is any. Hibernate takes Beast and Dragonkin, Banish Demon and Elemental.
+    pub target_creature_type: u32,
     /// `EffectImplicitTargetA[0]` (column 82): the cast arm's switch adjusts the targeting word
     /// by it, and the usable walk's target-aura-state leg forks on it (6 enemy, 21 friend).
     pub implicit_target_a1: u32,
@@ -147,8 +155,19 @@ pub struct SpellDisplay {
     pub duration_index: u32,
     /// `CastingTimeIndex` (column 18): the `SpellCastTimes.dbc` row; row 1 is instant.
     pub casting_time_index: u32,
+    /// `ProcFlags` (column 24, `SpellRec+0x60`): bit 0 makes the description's `$t` a fixed five
+    /// seconds.
+    pub proc_flags: u32,
     /// `ProcChance` (column 25): percent; vmangos reads 101 as always, with no roll.
     pub proc_chance: u32,
+    /// `ProcCharges` (column 26): the description expander's `$n` value before op 4.
+    pub proc_charges: u32,
+    /// `StackAmount` (column 39): the description expander's `$u` (`507ef1`).
+    pub stack_amount: u32,
+    /// `MaxTargetLevel` (column 159): the description expander's `$v` (`507f4f`).
+    pub max_target_level: u32,
+    /// `MaxAffectedTargets` (column 163): the description expander's `$i` (`507fc3`).
+    pub max_affected_targets: u32,
     /// `EffectBasePoints[3]` (columns 76-78, signed): each roll's floor; -1 on weapon damage.
     pub effect_base_points: [i32; 3],
     /// `EffectDieSides[3]` (columns 64-66, signed): with n dice, the value runs base + n to
@@ -169,6 +188,10 @@ pub struct SpellDisplay {
     pub effect_chain_targets: [u32; 3],
     /// `EffectMultipleValue[3]` (columns 97-99, float): the chain or multi-target falloff.
     pub effect_multiple_value: [f32; 3],
+    /// `DmgMultiplier[3]` (columns 167-169, float): `$f`/`$F` print it scaled (`507ff7`, `508025`).
+    pub damage_multiplier: [f32; 3],
+    /// `EffectPointsPerComboPoint[3]` (columns 112-114, float): `$b` prints it chopped (`507ed4`).
+    pub effect_points_per_combo_point: [f32; 3],
     /// `EffectTriggerSpell[3]` (columns 109-111): each effect's triggered spell, 0 for none.
     pub effect_trigger_spell: [u32; 3],
     /// `EffectItemType[3]` (columns 103-105): the item a `SPELL_EFFECT_CREATE_ITEM` effect makes.
@@ -187,6 +210,7 @@ pub struct SpellDisplay {
 impl Default for SpellDisplay {
     fn default() -> Self {
         SpellDisplay {
+            id: 0,
             name: String::new(),
             rank: None,
             icon: None,
@@ -199,6 +223,7 @@ impl Default for SpellDisplay {
             attributes_ex2: 0,
             modal_next_spell: 0,
             attributes_ex3: 0,
+            attributes_ex4: 0,
             spell_family: 0,
             spell_family_flags: 0,
             prevention_type: 0,
@@ -226,6 +251,7 @@ impl Default for SpellDisplay {
             mana_per_second: 0,
             range_index: 0,
             targets: 0,
+            target_creature_type: 0,
             implicit_target_a1: 0,
             stances: 0,
             stances_not: 0,
@@ -245,7 +271,12 @@ impl Default for SpellDisplay {
             aura_description: None,
             duration_index: 0,
             casting_time_index: 0,
+            proc_flags: 0,
             proc_chance: 0,
+            proc_charges: 0,
+            stack_amount: 0,
+            max_target_level: 0,
+            max_affected_targets: 0,
             effect_base_points: [0; 3],
             effect_die_sides: [0; 3],
             effect_base_dice: [0; 3],
@@ -259,6 +290,8 @@ impl Default for SpellDisplay {
             effect_radius_index: [0; 3],
             effect_chain_targets: [0; 3],
             effect_multiple_value: [0.0; 3],
+            damage_multiplier: [0.0; 3],
+            effect_points_per_combo_point: [0.0; 3],
             effect_trigger_spell: [0; 3],
             effect_item_type: [0; 3],
             effect_misc_value: [0; 3],
@@ -267,6 +300,18 @@ impl Default for SpellDisplay {
 }
 
 impl SpellDisplay {
+    /// The level the effect values, cast time, cost and duration scale by for a caster whose
+    /// skill in this spell's line is `skill_value` (`0x6e3130`): the skill capped at
+    /// `maxLevel × 5` unless `maxLevel` is 0 (`0x5ea6dc`-`0x5ea6ea`), over 5 (`0x6e3195`).
+    pub fn skill_level(&self, skill_value: u32) -> u32 {
+        let capped = if self.max_level > 0 {
+            skill_value.min(self.max_level.saturating_mul(5))
+        } else {
+            skill_value
+        };
+        capped / 5
+    }
+
     /// The `LockType` this spell opens, if any.
     pub fn open_lock_type(&self) -> Option<u32> {
         self.open_lock.map(|o| o.lock_type)
@@ -278,14 +323,10 @@ impl SpellDisplay {
     /// the flat terms.
     pub fn open_lock_skill(&self, skill_value: u32) -> Option<i32> {
         let e = self.open_lock?.effect;
-        // The skill capped at maxLevel·5, 0 uncapped (`0x5ea6e3`), integer /5 (`0x6e3195`), less
-        // baseLevel floored at 0 (read at `0x6e3854`, subtracted at `0x6e385b`-`0x6e385f`).
-        let capped = if self.max_level > 0 {
-            skill_value.min(self.max_level * 5)
-        } else {
-            skill_value
-        };
-        let delta = (capped / 5).saturating_sub(self.base_level) as f32;
+        // Less baseLevel floored at 0 (read at `0x6e3854`, subtracted at `0x6e385b`-`0x6e385f`).
+        let delta = self
+            .skill_level(skill_value)
+            .saturating_sub(self.base_level) as f32;
         let v = self.effect_base_points[e] as f32
             + self.effect_base_dice[e] as f32
             + self.effect_dice_per_level[e] as f32 * delta
@@ -336,6 +377,12 @@ impl SpellDisplay {
         self.attributes_ex2 & ATTR_EX2_AUTO_REPEAT != 0
     }
 
+    /// `AttributesEx4 & 0x20` (`0x4bd355`): a pet-bar spell press takes the generic cast entry
+    /// `0x6e4b60` and returns, sending no pet action and starting no GCD of its own.
+    pub fn allows_client_targeting(&self) -> bool {
+        self.attributes_ex4 & ATTR_EX4_ALLOW_CLIENT_TARGETING != 0
+    }
+
     /// `AttributesEx3 & 0x400000`: a running auto-repeat with this bit ends when any new cast
     /// begins (`0x60959e`). Only wand Shoot 5019 has it; Auto Shot survives, so hunters weave.
     pub fn casting_cancels_autorepeat(&self) -> bool {
@@ -366,10 +413,26 @@ impl SpellDisplay {
         self.attributes_ex3 & ATTR_EX3_NO_CHANNEL_BAR != 0
     }
 
-    /// `AttributesEx & 0x80000`: the targeting cursor never takes the caster, neither the world
-    /// pick (`0x6e61a0` at `6e61cf`) nor `SpellCanTargetUnit`'s unit leg (`0x6e6460` at `6e6507`).
+    /// `AttributesEx & 0x80000`: the caster is never a bind candidate, not in `BindTarget`
+    /// (`0x6e5b40` at `6e5bf7`), not for `SpellCanTargetUnit`'s unit leg (`0x6e6460` at `6e6507`)
+    /// and not for the world pick (`0x6e61a0` at `6e61cf`).
     pub fn excludes_caster(&self) -> bool {
         self.attributes_ex & ATTR_EX_EXCLUDE_CASTER != 0
+    }
+
+    /// `AttributesEx2 & 0x1` (vmangos `SPELL_ATTR_EX2_ALLOW_DEAD_TARGET`, `SpellDefines.h:868`):
+    /// a dead unit stays a bind candidate (`BindTarget` at `6e5c85`).
+    pub fn allows_dead_target(&self) -> bool {
+        self.attributes_ex2 & ATTR_EX2_ALLOW_DEAD_TARGET != 0
+    }
+
+    /// The `TargetCreatureType` gate of `BindTarget` (`6e5c23`-`6e5c53`) and its mirror
+    /// (`6e6544`-`6e656c`): no mask admits any unit, else a unit of type 0 is refused and type `t`
+    /// needs bit `t - 1`. The shift wraps at 32 as the hardware's does.
+    pub fn admits_creature_type(&self, creature_type: u32) -> bool {
+        self.target_creature_type == 0
+            || (creature_type != 0
+                && self.target_creature_type & 1u32.wrapping_shl(creature_type - 1) != 0)
     }
 
     /// `AttributesEx & 0x2000_0000` (`0x6e759a`): the channel bar shows the spell's own name
@@ -459,13 +522,20 @@ impl SpellDisplay {
         self.attributes_ex & ATTR_EX_CHANNELED != 0
     }
 
+    /// Predicate `0x6e5200`: an on-next-swing, `INITIATES_COMBAT` or `INITIATE_COMBAT_POST_CAST`
+    /// spell. TryCast runs the attack validator's target pick for it (`0x6e4edf`), so a press
+    /// with no hostile selection acquires one, as the Attack button does.
+    pub fn initiates_combat(&self) -> bool {
+        self.attributes & ATTR_ON_NEXT_SWING != 0
+            || self.attributes_ex & ATTR_EX_INITIATES_COMBAT != 0
+            || self.attributes_ex2 & ATTR_EX2_INITIATE_COMBAT_POST_CAST != 0
+    }
+
     /// Casting this starts melee auto-attack at the send unless one runs (`TryCast` tail
     /// `0x6e51b5`): predicate `0x6e5200` with `AttributesEx2` bit 20 clear, so an on-next-swing
     /// or `INITIATES_COMBAT` spell. Every cast path shares the tail; there is no macro opt-out.
     pub fn initiates_auto_attack(&self) -> bool {
-        (self.attributes & ATTR_ON_NEXT_SWING != 0
-            || self.attributes_ex & ATTR_EX_INITIATES_COMBAT != 0)
-            && self.attributes_ex2 & ATTR_EX2_INITIATE_COMBAT_POST_CAST == 0
+        self.initiates_combat() && !self.initiates_auto_attack_at_go()
     }
 
     /// This spell's own `SMSG_SPELL_GO` starts melee auto-attack (`0x6131a0`) at its first hit

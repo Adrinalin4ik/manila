@@ -24,8 +24,6 @@ pub(super) struct PointerFeed<'w> {
     hovered_object: Res<'w, crate::target::HoveredObject>,
     occlusion: Res<'w, crate::target::PickOcclusion>,
     payload_held: ResMut<'w, CursorPayloadHeld>,
-    /// TOGGLEUI ([`crate::ui_hide::UiHidden`]): a hidden UI takes no mouse at all.
-    hidden: Res<'w, crate::ui_hide::UiHidden>,
     /// A headless probe drives the pointer ([`super::SyntheticPointer`]), not the real cursor.
     synthetic: Res<'w, super::SyntheticPointer>,
     /// A capture owns the pointer ([`super::CapturePointerPinned`]): no OS cursor in the shot.
@@ -46,6 +44,18 @@ impl PointerFeed<'_> {
         }
     }
 }
+
+/// The buttons the pointer feed hands the UI, by the names its handlers read (`arg1` of `OnClick`,
+/// `OnMouseDown` and `OnMouseUp`, and the ones `RegisterForClicks` takes,
+/// `Blizzard_BindingUI.xml:10`); buttons 4 and 5 on the physical buttons the binding chords call
+/// BUTTON4 and BUTTON5 (`bindings::chord`).
+const UI_MOUSE_BUTTONS: [(MouseButton, &str); 5] = [
+    (MouseButton::Left, "LeftButton"),
+    (MouseButton::Right, "RightButton"),
+    (MouseButton::Middle, "MiddleButton"),
+    (MouseButton::Forward, "Button4"),
+    (MouseButton::Back, "Button5"),
+];
 
 /// One `OnMouseWheel` call per whole notch, `arg1 = ±1`, the fraction carried in `notches`: a
 /// trackpad gesture arrives as a `Pixel` trickle, and the stock handlers act on the sign alone
@@ -82,12 +92,13 @@ pub(super) fn feed_ui_input(
         ResMut<UiKeyboardCapture>,
         NonSendMut<HostClipboard>,
     ),
+    // The characters the active layout makes, which name a key for a keyboard frame.
+    layout: Res<crate::bindings::LayoutNames>,
     // The uiScale dial folded into the seam scale.
     ui_scale: Res<super::UiScaleCvar>,
 ) {
     let (keyboard, keys, capture, clipboard) = (&mut kbd.0, &kbd.1, &mut kbd.2, &mut kbd.3);
     let world_pick = pointer.world_pick();
-    let ui_hidden = pointer.hidden.0;
     // The OS pointer is not ours while a probe drives a gesture through the real pointer path or a
     // capture pins it: skip the mouse half whole, else-arm included, whose `pointer_left_window`
     // would disarm the probe's gesture between its press and release.
@@ -120,13 +131,13 @@ pub(super) fn feed_ui_input(
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     script.set_modifiers(shift, ctrl, alt);
-    // ── Mouse ── A cursor off the window, or a UI hidden by TOGGLEUI, skips only the mouse feed.
+    // ── Mouse ── A cursor off the window skips only the mouse feed.
     // The headless hover probe's aim stands in for a missing cursor, so `PointerOverUi` rises and
     // falls over a panel in an automated run as it does for a person; a real pointer always wins.
     if let Some(cursor) = window
         .cursor_position()
         .or_else(crate::target::hover_probe_point)
-        .filter(|_| !ui_hidden && !synthetic)
+        .filter(|_| !synthetic)
     {
         // The window cursor is logical px, y-down from the top left; the UI is y-up in 768-high
         // units under uiScale: flip through the window height, then undo the extract seam's scale.
@@ -162,11 +173,7 @@ pub(super) fn feed_ui_input(
                 );
             }
         }
-        for (btn, name) in [
-            (MouseButton::Left, "LeftButton"),
-            (MouseButton::Right, "RightButton"),
-            (MouseButton::Middle, "MiddleButton"),
-        ] {
+        for (btn, name) in UI_MOUSE_BUTTONS {
             if buttons.just_pressed(btn) {
                 // A left press that would drop into the world (`world_drop_click`: any payload over
                 // terrain or nothing) is consumed now: the drop fires on the release, but the world
@@ -227,8 +234,11 @@ pub(super) fn feed_ui_input(
             KeyCode::Tab => Some("TAB"),
             _ => None,
         };
+        // What the layout names the key: the clipboard chords' letters, and a keyboard frame's
+        // `arg1` below.
+        let token = crate::bindings::chord::key_token(ev.key_code, &layout);
         // Dispatched unconditionally: unfocused, they fall through to the camera and turn keys.
-        let chord = keymap::chord(ev.key_code, mods, mac);
+        let chord = keymap::chord(ev.key_code, token, mods, mac);
         // A keyboard frame gets these by name before their chord runs (a dialog needs BACKSPACE);
         // `frame_key_input` declines at a focused box, so no frame steals its editing keys. `true`
         // suppresses the chord and the key's binding (the reference's existence gate, `0x76b7d0`).
@@ -253,14 +263,15 @@ pub(super) fn feed_ui_input(
         }
         // Every other key reaches a keyboard frame by name too: the reference's key-down walk
         // takes its `arg1` from the table the binding chord uses (`0x4b66b0`), `chord::key_token`
-        // here, and the gate is existence, not handling: a shown keyboard frame with an
-        // `OnKeyDown` swallows the key whatever its script does (`0x76b7d0`, `0x76ba25`).
+        // under the active layout here, so the Key Bindings window stores the name the key's
+        // press dispatches by. The gate is existence, not handling: a shown keyboard frame with
+        // an `OnKeyDown` swallows the key whatever its script does (`0x76b7d0`, `0x76ba25`).
         // Consumption suppresses only the key's binding: `OnChar` is a separate dispatcher
         // (`0x765df0`), so the stack-split spinner still gets a digit its `OnKeyDown` ate, and it
         // is not a focus change, so it releases nothing held.
         else if named.is_none() {
-            if let Some(token) = crate::bindings::chord::key_token(ev.key_code) {
-                if script.frame_key_input(token) {
+            if let Some(token) = token {
+                if script.frame_key_input(&token.to_string()) {
                     capture.consumed.push(ev.key_code);
                 }
             }
@@ -274,7 +285,7 @@ pub(super) fn feed_ui_input(
             }
         } else if let Some(chord) = chord {
             // The gate is on the key, not the action: a gated arrow never reaches the box (the
-            // reference's `return 0`), while HOME/END, which also make `Move { unit: Edge }`, do.
+            // reference's `return 0`), while HOME/END, which also make a `Move`, do.
             let gated_arrow = capture.arrows_fall_through
                 && matches!(
                     ev.key_code,
@@ -388,6 +399,32 @@ mod tests {
             "ten frames adding up to one line fired {n} wheel calls (sum {sum})"
         );
         assert!(sum <= 1.0, "…and they may move at most one notch: {sum}");
+    }
+
+    /// Every button 1.12's frames take reaches the UI, under the name its binding chord agrees
+    /// with, so the Key Bindings page binds mouse 4 and 5 from a click.
+    #[test]
+    fn the_ui_takes_all_five_buttons_under_the_chords_names() {
+        let names: Vec<&str> = UI_MOUSE_BUTTONS.iter().map(|(_, n)| *n).collect();
+        assert_eq!(
+            names,
+            [
+                "LeftButton",
+                "RightButton",
+                "MiddleButton",
+                "Button4",
+                "Button5"
+            ]
+        );
+        for (i, (button, _)) in UI_MOUSE_BUTTONS.iter().enumerate() {
+            let chord = crate::bindings::chord::Chord::parse(&format!("BUTTON{}", i + 1));
+            assert_eq!(
+                chord.map(|c| c.key),
+                Some(crate::bindings::chord::BindKey::Mouse(*button)),
+                "BUTTON{} is {button:?}",
+                i + 1
+            );
+        }
     }
 
     #[test]

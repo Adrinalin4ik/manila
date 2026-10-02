@@ -164,7 +164,7 @@ impl Default for UnitCombatStats {
 /// [`super::container::ContainerSlot`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InvSlotView {
-    /// The item's template entry (`GetInventoryItemID`).
+    /// The item's template entry, the id inside `GetInventoryItemLink`'s link.
     pub item_id: u32,
     /// Whether the item may go on an action bar, by the same filter as a bag slot's.
     pub bar_placeable: bool,
@@ -312,15 +312,8 @@ impl super::UiScript {
     pub fn set_inventory_slots(&mut self, slots: InventorySlots) {
         {
             let mut model = self.model_mut();
-            let alerts: [u8; 12] = std::array::from_fn(|i| {
-                if i == 11 {
-                    ammo_alert_status(&slots[ALERT_SLOTS[i]])
-                } else {
-                    alert_status(&slots[ALERT_SLOTS[i]])
-                }
-            });
             model.inventory_slots = slots;
-            model.inventory_alerts = alerts;
+            recompute_inventory_alerts(&mut model);
         }
         // Every recompute fires it, never diffed against the last (`0x4c7ee0`); the app pushes
         // only on a real change.
@@ -333,16 +326,32 @@ impl super::UiScript {
         self.model_mut().bank_bag_slots = slots;
     }
 
-    /// Drain the slot ids `UseInventoryItem` queued; the app sends each as `CMSG_USE_ITEM`, bag
-    /// 255 and the 0-based slot.
+    /// Take the `UseInventoryItem` calls out of the call stream; the app sends each as
+    /// `CMSG_USE_ITEM`, bag 255 and the 0-based slot.
     pub fn take_inventory_uses(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().inventory_uses)
+        self.take_calls_where(|c| match c {
+            super::ScriptCall::UseInventoryItem(id) => Some(*id),
+            _ => None,
+        })
     }
 
     /// Drain equipped slots clicked in repair mode, for `CMSG_REPAIR_ITEM`.
     pub fn take_inventory_repairs(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.model_mut().inventory_repairs)
     }
+}
+
+/// The 12 alert statuses off the doll snapshot (`0x4c7ee0`'s recompute), without the event.
+pub(super) fn recompute_inventory_alerts(model: &mut Model) {
+    let slots = &model.inventory_slots;
+    let alerts: [u8; 12] = std::array::from_fn(|i| {
+        if i == 11 {
+            ammo_alert_status(&slots[ALERT_SLOTS[i]])
+        } else {
+            alert_status(&slots[ALERT_SLOTS[i]])
+        }
+    });
+    model.inventory_alerts = alerts;
 }
 
 fn with_unit_stats<T>(
@@ -391,14 +400,28 @@ const BANK_BAG_INV_SLOTS: std::ops::RangeInclusive<usize> = 64..=69;
 /// The vault's container id; must match `ui_items::BANK_CONTAINER` in the app.
 const BANK_CONTAINER: i64 = -1;
 
+/// The keyring's live-API ids: `KeyRingButtonIDToInvSlotID` adds `0x51` to a 1-based button id
+/// (`0x4c818b`), and the slot reader takes 0-based 81..=112 (`0x4c8567`).
+pub(super) const KEYRING_INV_SLOTS: std::ops::RangeInclusive<usize> = 82..=113;
+
+/// The keyring's container id (`KEYRING_CONTAINER`, `MainMenuBarBagButtons.lua:1`); must match
+/// `ui_items::KEYRING_CONTAINER` in the app, which feeds the keys as that container.
+const KEYRING_CONTAINER: i64 = -2;
+
 impl Model {
     /// The item `token` exposes at live-API id `slot`, the one routing the `GetInventoryItem*`
     /// getters and `GameTooltip:SetInventoryItem` share. Stock paints the bank through this API
-    /// (`BankFrame.lua:35`), so the bank band is answered from the container snapshot.
+    /// (`BankFrame.lua:35`) and hovers a key through it (`ContainerFrame.lua:616-619`), so the
+    /// bank and keyring bands are answered from the container snapshots.
     pub(super) fn inv_slot(&self, token: &str, slot: usize) -> Option<InvSlotView> {
         if token.eq_ignore_ascii_case("player") {
             if let Some(view) = self.bank_inv_slot(slot) {
                 return Some(view);
+            }
+            if KEYRING_INV_SLOTS.contains(&slot) {
+                let n = (slot - KEYRING_INV_SLOTS.start() + 1) as u32;
+                let keyring = self.containers.get(&KEYRING_CONTAINER)?;
+                return keyring.slots.get(&n).map(InvSlotView::from_container_slot);
             }
             return self.inventory_slots.get(slot)?.clone();
         }
@@ -408,6 +431,24 @@ impl Model {
             .slots
             .get(slot)?
             .clone()
+    }
+
+    /// The player's repair cost at live id `slot`, the vault and keyring bands by their container
+    /// slots.
+    pub(super) fn inv_repair_cost(&self, slot: usize) -> u32 {
+        let costs = &self.repair_costs;
+        let cost = if BANK_INV_SLOTS.contains(&slot) {
+            let n = (slot - BANK_INV_SLOTS.start() + 1) as u32;
+            costs.bags.get(&(BANK_CONTAINER, n))
+        } else if KEYRING_INV_SLOTS.contains(&slot) {
+            let n = (slot - KEYRING_INV_SLOTS.start() + 1) as u32;
+            costs.bags.get(&(KEYRING_CONTAINER, n))
+        } else {
+            u32::try_from(slot)
+                .ok()
+                .and_then(|s| costs.equipped.get(&s))
+        };
+        cost.copied().unwrap_or(0)
     }
 
     fn bank_inv_slot(&self, slot: usize) -> Option<InvSlotView> {
@@ -429,7 +470,7 @@ impl Model {
 /// The inventory-slot reader's whitelist (`0x4c8520`) on its 0-based slot (`0x4c8546`); outside
 /// it the binding raises "Invalid inventory slot in …". The backpack's item slots (23..=38) and
 /// buyback (69..=80) are container-API slots, not in it.
-fn inventory_slot_reader_accepts(slot0: i32) -> bool {
+pub(super) fn inventory_slot_reader_accepts(slot0: i32) -> bool {
     slot0 == -1                            // Lua 0      the ammo leg
         || (0x00..=0x16).contains(&slot0)  // Lua 1..=23   the doll + the four equipped bags
         || (0x27..=0x3e).contains(&slot0)  // Lua 40..=63  the bank vault
@@ -725,17 +766,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     .as_ref()
                     .is_some_and(|s| s.has_wand),
             ))
-        })?,
-    )?;
-
-    // GetInventoryItemID(unit, slot) → itemId or nil.
-    g.set(
-        "GetInventoryItemID",
-        lua.create_function(|lua, (token, slot): (Option<String>, i64)| {
-            match player_inv_slot(lua, &token, slot) {
-                Some(v) if v.item_id != 0 => Ok(Value::Integer(i64::from(v.item_id))),
-                _ => Ok(Value::Nil),
-            }
         })?,
     )?;
 
@@ -1541,6 +1571,14 @@ mod tests {
         );
     }
 
+    /// The item id in `GetInventoryItemLink("player", slot)`'s link, 1.12's only road to it.
+    fn link_id(slot: &str) -> String {
+        format!(
+            r#"local _, _, id = string.find(GetInventoryItemLink("player", {slot}), "item:(%d+)")
+               return tonumber(id)"#
+        )
+    }
+
     #[test]
     fn inventory_item_bindings_serve_occupied_empty_and_absent_shapes() {
         let mut s = UiScript::new().unwrap();
@@ -1552,6 +1590,7 @@ mod tests {
             count: 1,
             quality: 2,
             name: Some("Brawler's Harness".into()),
+            link: Some("|cff1eff00|Hitem:2263:0:0:0|h[Brawler's Harness]|h|r".into()),
             ..Default::default()
         });
         slots[0] = Some(InvSlotView {
@@ -1560,15 +1599,12 @@ mod tests {
             count: 200,
             quality: 1,
             name: Some("Rough Arrow".into()),
+            link: Some("|cffffffff|Hitem:2512:0:0:0|h[Rough Arrow]|h|r".into()),
             ..Default::default()
         });
         s.set_inventory_slots(slots);
 
-        assert_eq!(
-            s.eval::<i64>(r#"return GetInventoryItemID("player", 1)"#)
-                .unwrap(),
-            2263
-        );
+        assert_eq!(s.eval::<i64>(&link_id("1")).unwrap(), 2263);
         assert_eq!(
             s.eval::<String>(r#"return GetInventoryItemTexture("player", 1)"#)
                 .unwrap(),
@@ -1585,11 +1621,7 @@ mod tests {
             2
         );
         // The ammo slot (0) reads through the same family.
-        assert_eq!(
-            s.eval::<i64>(r#"return GetInventoryItemID("player", 0)"#)
-                .unwrap(),
-            2512
-        );
+        assert_eq!(s.eval::<i64>(&link_id("0")).unwrap(), 2512);
         assert_eq!(
             s.eval::<i64>(r#"return GetInventoryItemCount("player", 0)"#)
                 .unwrap(),
@@ -1597,7 +1629,7 @@ mod tests {
         );
         // An empty slot: nil id, texture and quality, and count 1 (`0x4c8797`).
         assert!(s
-            .eval::<bool>(r#"return GetInventoryItemID("player", 5) == nil"#)
+            .eval::<bool>(r#"return GetInventoryItemLink("player", 5) == nil"#)
             .unwrap());
         assert!(s
             .eval::<bool>(r#"return GetInventoryItemTexture("player", 5) == nil"#)
@@ -1612,7 +1644,7 @@ mod tests {
             .unwrap());
         // A token with no items behind it: the empty shape.
         assert!(s
-            .eval::<bool>(r#"return GetInventoryItemID("target", 1) == nil"#)
+            .eval::<bool>(r#"return GetInventoryItemLink("target", 1) == nil"#)
             .unwrap());
         assert_eq!(
             s.eval::<i64>(r#"return GetInventoryItemCount("target", 1)"#)
@@ -1622,10 +1654,10 @@ mod tests {
         );
         // Out-of-range slots: the empty shape, no error.
         assert!(s
-            .eval::<bool>(r#"return GetInventoryItemID("player", 25) == nil"#)
+            .eval::<bool>(r#"return GetInventoryItemLink("player", 25) == nil"#)
             .unwrap());
         assert!(s
-            .eval::<bool>(r#"return GetInventoryItemID("player", -1) == nil"#)
+            .eval::<bool>(r#"return GetInventoryItemLink("player", -1) == nil"#)
             .unwrap());
     }
 

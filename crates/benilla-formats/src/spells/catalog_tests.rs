@@ -594,6 +594,11 @@ fn real_spell_catalog_reads_tooltip_columns() {
     assert_eq!(frost_armor.casting_time_index, 1);
     assert_eq!(cast_times.get(1).unwrap().base_ms, 0, "instant");
     assert_eq!(
+        cast_times.get(18).unwrap().resolved_ms(60, 1),
+        -1_000_000,
+        "the hunter shots' row reads signed and stays negative"
+    );
+    assert_eq!(
         frost_armor.effect_apply_aura[0], 22,
         "SPELL_AURA_MOD_RESISTANCE"
     );
@@ -617,9 +622,35 @@ fn real_spell_catalog_reads_tooltip_columns() {
     );
 }
 
+/// The WDBC schema must decode the new float arrays before `f32_at` can pass them to token
+/// expansion. An integer schema silently turns Chain Heal's 0.5 into the loader's 0.0 fallback.
+#[test]
+fn spell_schema_decodes_token_float_columns() {
+    let mut raw = Vec::new();
+    raw.extend_from_slice(b"WDBC");
+    for n in [1u32, SPELL_FIELDS as u32, (SPELL_FIELDS * 4) as u32, 1] {
+        raw.extend_from_slice(&n.to_le_bytes());
+    }
+    let mut row = vec![0u8; SPELL_FIELDS * 4];
+    row[COL_DAMAGE_MULTIPLIER_1 * 4..COL_DAMAGE_MULTIPLIER_1 * 4 + 4]
+        .copy_from_slice(&0.5f32.to_le_bytes());
+    row[COL_EFFECT_POINTS_PER_COMBO_POINT_1 * 4..COL_EFFECT_POINTS_PER_COMBO_POINT_1 * 4 + 4]
+        .copy_from_slice(&20.0f32.to_le_bytes());
+    raw.extend_from_slice(&row);
+    raw.push(0);
+    let set = parse(&raw, spell_schema(), "Spell.dbc").expect("synthetic Spell.dbc");
+    let spell = set.records().first().unwrap();
+    assert_eq!(f32_at(spell, COL_DAMAGE_MULTIPLIER_1), Some(0.5));
+    assert_eq!(
+        f32_at(spell, COL_EFFECT_POINTS_PER_COMBO_POINT_1),
+        Some(20.0)
+    );
+}
+
 /// The attack-start masks, rows from vmangos: [`SpellDisplay::on_next_swing`] (`0x404`),
 /// [`SpellDisplay::initiates_auto_attack`] (adding `AttributesEx & 0x200`) and
-/// [`SpellDisplay::initiates_auto_attack_at_go`] (`AttributesEx2 & 0x100000`).
+/// [`SpellDisplay::initiates_auto_attack_at_go`] (`AttributesEx2 & 0x100000`), whose union is
+/// [`SpellDisplay::initiates_combat`] (`0x6e5200`).
 #[test]
 fn real_spell_catalog_classifies_combat_initiation() {
     let data = crate::wow_data_or_skip!();
@@ -634,6 +665,7 @@ fn real_spell_catalog_classifies_combat_initiation() {
         (772, "Rend", false, true, false),           // Ex 0x8000200
         (7386, "Sunder Armor", false, true, false),  // Ex 0x8000200
         (1464, "Slam", false, true, false),          // Ex 0x8000200
+        (1752, "Sinister Strike", false, true, false), // Ex 0x8000200
         (100, "Charge", false, false, false),        // Ex 0x400: neither bit, bit 20 clear
         (6673, "Battle Shout", false, false, false), // Ex 0x0
         (6603, "Attack", false, false, false),       // the auto-attack pseudo-spell itself
@@ -677,6 +709,14 @@ fn real_spell_catalog_classifies_combat_initiation() {
             "{name} ({id}) initiates_auto_attack_at_go (Ex2 {:#x})",
             d.attributes_ex2
         );
+        assert_eq!(
+            d.initiates_combat(),
+            next_swing || initiates || at_go,
+            "{name} ({id}) initiates_combat (Attributes {:#x}, Ex {:#x}, Ex2 {:#x})",
+            d.attributes,
+            d.attributes_ex,
+            d.attributes_ex2
+        );
         // Bit 20 suppresses the send-time start, so no spell starts the attack twice.
         assert!(
             !(d.initiates_auto_attack() && d.initiates_auto_attack_at_go()),
@@ -714,6 +754,42 @@ fn real_spell_catalog_classifies_combat_initiation() {
             "Test Stab R50",
         ],
         "the deferred-start class is the openers, the positional strikes and Judgement"
+    );
+}
+
+/// TryCast's attack pick (`0x6e4edf`) is built for a spell press alone, so no form, recipe
+/// (`SPELL_EFFECT_CREATE_ITEM` 24, `SPELL_EFFECT_ENCHANT_ITEM` 53) or `modalNextSpell` chain may
+/// carry predicate `0x6e5200`. No item's use spell does either (vmangos `item_template`).
+#[test]
+fn real_spell_catalog_keeps_the_attack_pick_to_spell_presses() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
+    let (mut checked, mut chained) = (0, 0);
+    for (id, d) in cat.iter() {
+        let recipe = d.effects.iter().any(|&e| e == 24 || e == 53);
+        if d.shapeshift_form.is_some() || recipe {
+            checked += 1;
+            assert!(
+                !d.initiates_combat(),
+                "{} ({id}) is a form or a recipe of predicate 0x6e5200",
+                d.name
+            );
+        }
+        if d.modal_next_spell != 0 {
+            chained += 1;
+            let next = cat.get(d.modal_next_spell);
+            assert!(
+                !next.is_some_and(|n| n.initiates_combat()),
+                "{} ({id}) chains {} of predicate 0x6e5200",
+                d.name,
+                d.modal_next_spell
+            );
+        }
+    }
+    assert!(
+        checked > 0 && chained > 0,
+        "the forms, recipes and Auto Shot's chain are read"
     );
 }
 
@@ -1396,4 +1472,117 @@ fn real_spell_family_columns_carry_the_modifier_gate() {
             .collect();
         assert_eq!(set, bits, "{id} {:?} family bits", d.name);
     }
+}
+
+/// The pet bar's GCD starts from the pressed spell's `StartRecoveryCategory`/`StartRecoveryTime`
+/// pair (`0x6e2de0`), which every learnable pet ability carries as category 133, and its press
+/// route branches on `AttributesEx4 & 0x20` (`0x4bd355`), the dword at `+0x28`, column 10.
+#[test]
+fn real_pet_spells_carry_the_gcd_pair_and_ex4_reads_column_10() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
+
+    // (id, name, startRecoveryCategory, startRecoveryTime): the ranks a pet learns, one per
+    // ability, with Claw's first rank and every Firebolt rank on 1 s and the rest on 1.5 s.
+    for (id, name, gcd_category, gcd_ms) in [
+        (1082u32, "Claw", 133u32, 1000u32),
+        (3010, "Claw", 133, 1500),
+        (17258, "Bite", 133, 1500),
+        (3110, "Firebolt", 133, 1000),
+        (11763, "Firebolt", 133, 1000),
+        (7814, "Lash of Pain", 133, 1500),
+        (3716, "Torment", 133, 1500),
+        (17735, "Suffering", 133, 1500),
+    ] {
+        let d = cat.get(id).unwrap_or_else(|| panic!("{name} {id}"));
+        assert_eq!(d.name, name);
+        assert_eq!(
+            (d.start_recovery_category, d.start_recovery_ms),
+            (gcd_category, gcd_ms),
+            "{name} {id}"
+        );
+        assert!(
+            !d.allows_client_targeting(),
+            "{name} {id} is an ordinary press"
+        );
+    }
+    // Bite's own timer is its category's, beside the GCD.
+    let bite = cat.get(17258).expect("Bite");
+    assert_eq!((bite.category, bite.category_recovery_ms), (19, 10_000));
+
+    // The rows with the bit are Flamestrike and Rain of Fire, the ground-targeted casts.
+    for id in [11829u32, 19474] {
+        let d = cat.get(id).expect("a ground-targeted row");
+        assert_eq!(d.attributes_ex4, 0x20, "{} {id}", d.name);
+        assert!(d.allows_client_targeting());
+    }
+}
+
+/// `TargetCreatureType` (column 14), read as the bind gate does: bit `type - 1` of the mask.
+/// Beast is type 1, Dragonkin 2, Demon 3, Elemental 4, Undead 6, Humanoid 7.
+#[test]
+fn real_spell_catalog_reads_the_bind_gate_columns() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
+
+    for (id, mask, admits, refuses) in [
+        // Hibernate: Beast and Dragonkin.
+        (2637u32, 0x3u32, [1u32, 2], [7u32, 6]),
+        // Banish: Demon and Elemental.
+        (710, 0xc, [3, 4], [1, 7]),
+        // Turn Undead: Undead alone.
+        (2878, 0x20, [6, 6], [7, 1]),
+        // Mind Control: Humanoid alone, so a player (Humanoid) is a candidate.
+        (605, 0x40, [7, 7], [1, 6]),
+    ] {
+        let d = cat.get(id).expect("spell row");
+        assert_eq!(d.target_creature_type, mask, "{} ({id})", d.name);
+        for t in admits {
+            assert!(d.admits_creature_type(t), "{} admits type {t}", d.name);
+        }
+        for t in refuses {
+            assert!(!d.admits_creature_type(t), "{} refuses type {t}", d.name);
+        }
+    }
+    // Fireball has no mask: any type, and a unit with none too.
+    let fireball = cat.get(133).expect("Fireball");
+    assert_eq!(fireball.target_creature_type, 0);
+    assert!(fireball.admits_creature_type(0));
+
+    // Bloodlust (24185, a frenzy that never takes its own caster) and Revive (24341, which
+    // `AttributesEx2 & 1` lets reach a corpse): `AttributesEx` bit 19 and `AttributesEx2` bit 0.
+    assert!(cat.get(24185).expect("Bloodlust").excludes_caster());
+    assert!(!fireball.excludes_caster());
+    assert!(cat.get(24341).expect("Revive").allows_dead_target());
+    assert!(!fireball.allows_dead_target());
+}
+
+/// The mask rule alone: no mask admits everything, a masked spell refuses a unit of type 0, and
+/// the bit is `type - 1`, wrapping at 32 like the hardware's shift.
+#[test]
+fn creature_type_mask_rule() {
+    let masked = |mask| SpellDisplay {
+        target_creature_type: mask,
+        ..Default::default()
+    };
+    let open = masked(0);
+    for t in [0u32, 1, 7, 32, 33, u32::MAX] {
+        assert!(open.admits_creature_type(t), "no mask admits type {t}");
+    }
+    let beast = masked(1);
+    assert!(beast.admits_creature_type(1));
+    assert!(
+        !beast.admits_creature_type(0),
+        "type 0 is refused under a mask"
+    );
+    assert!(!beast.admits_creature_type(2));
+    let top = masked(1 << 31);
+    assert!(top.admits_creature_type(32), "type 32 is bit 31");
+    assert!(
+        !top.admits_creature_type(1),
+        "type 1 is bit 0, not the wrapped bit 32"
+    );
+    assert!(masked(1).admits_creature_type(33), "bit 32 wraps to bit 0");
 }

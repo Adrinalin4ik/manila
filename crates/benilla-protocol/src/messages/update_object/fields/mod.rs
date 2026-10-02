@@ -33,6 +33,8 @@ pub const FIELD_CORPSE_DYNAMIC_FLAGS: u16 = 36;
 // bytes 0xa0, 0x1f0, 0x224 and 0x234.
 /// The unit's target; the client turns an idle unit to face it, and no packet carries that facing.
 const FIELD_UNIT_TARGET: u16 = 16;
+/// The unit this one charms (`UpdateFields_1_12_1.h:41`), descriptor byte 0.
+const FIELD_UNIT_CHARM: u16 = 6;
 /// The unit this one summoned (`UpdateFields_1_12_1.h:42`); on us, the `"pet"` unit. The pet bar
 /// reads its guid off `SMSG_PET_SPELLS`, so the two can disagree briefly around a summon.
 const FIELD_UNIT_SUMMON: u16 = 8;
@@ -71,6 +73,7 @@ const FIELD_UNIT_AURASTATE: u16 = 125;
 const FIELD_UNIT_BOUNDINGRADIUS: u16 = 129;
 const FIELD_UNIT_COMBATREACH: u16 = 130;
 const FIELD_UNIT_BASE_MANA: u16 = 162;
+const FIELD_UNIT_BASE_HEALTH: u16 = 163;
 const FIELD_UNIT_DISPLAYID: u16 = 131;
 /// The unshifted appearance, untouched by forms, morphs and polymorph (`UpdateFields_1_12_1.h:77`).
 /// The client sizes the mover collision box from it (`0x60b270`), so a shapeshift keeps the box.

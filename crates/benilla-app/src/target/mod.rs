@@ -40,6 +40,8 @@ mod reticle;
 // `pub(crate)` for the hover inspector too: its faction catalog feeds `go_highlightable`.
 pub(crate) mod ring;
 mod scan;
+mod script;
+pub(crate) use script::ScriptSelect;
 
 /// `Faction.dbc` and our reputation table as one [`SystemParam`], since every reaction function
 /// takes both; `factions` is `Option` so a UI-only harness runs without client data.
@@ -60,17 +62,22 @@ pub(crate) use flash::CombatFlash;
 pub(crate) use price_discount::vendor_price_discount;
 #[cfg(test)]
 pub(crate) use price_discount::{stormwind_fixture, HUMAN_WARRIOR};
-// The attack-with-no-target request, and the same nearest-enemy core called synchronously for the
-// pet bar's Attack, whose order must leave in the frame it was pressed.
-pub(crate) use relations::{can_assist, can_attack, can_interact, corpse_friendly};
-pub(crate) use scan::{attack_order_target, AttackNearestRequest, TargetScan};
+pub(crate) use relations::{
+    can_assist, can_attack, can_interact, corpse_friendly, is_possessed_by, UNIT_FLAG_POSSESSED,
+};
+// The attack validator's target half, run in the call that asks, for the player's Attack and the
+// pet bar's; the melee probe's press with nothing selected.
+pub(crate) use scan::{AttackNearestRequest, AttackPick};
 // The chat layer's by-name asks (`/target`, `/assist`).
-pub(crate) use by_name::{AssistRequest, TargetByNameRequest};
+pub(crate) use by_name::{AssistRequest, PlayerLookup, TargetByNameRequest};
+// The one SetSelection path, for the loot response's select (`0x48f3a0`).
+pub(crate) use by_name::SelectCommit;
 // The reaction decode and its faction catalog, which also tint the target frame
 // (`TargetFrame_CheckFaction`); `duel_rung` is the same walk, for `/reaction`.
 pub(crate) use ring::{duel_rung, ring_reaction, ring_variant, Factions, RingVariant};
 
 pub(crate) use click::DeselectGuid;
+pub use click::Interact;
 
 /// Our target, set the instant we click, as the 1.12 client does without waiting for the server,
 /// and cleared on deselect or when it streams out. `CMSG_SET_SELECTION` carries the guid, which the
@@ -79,6 +86,10 @@ pub(crate) use click::DeselectGuid;
 pub(crate) struct Selection {
     pub(crate) target: Option<Entity>,
     pub(crate) guid: Option<u64>,
+    /// The last-target pair `[0xb4e2e0]` that `TargetLastTarget` reads: `SetSelection` stamps the
+    /// outgoing selection, none included, on every change it makes, a select or a deselect
+    /// (`0x49361d`-`0x493628`); a teardown clear (`0x493910` alone) leaves it.
+    pub(crate) last: Option<u64>,
 }
 
 /// This frame's character-model pick, by [`hover::update_hover`]. At most one slot is set: the
@@ -107,6 +118,16 @@ impl Hovered {
     pub(crate) fn any(&self) -> Option<Entity> {
         self.target.or(self.corpse)
     }
+
+    /// The unit `"mouseover"` names: the hovered unit, unless a nearer GameObject won the pick.
+    /// The publisher `0x492890` writes whatever won to `0xb4e2c8`/`0xb4e2cc` (`0x492927`,
+    /// `0x492938`), and the token resolver re-resolves it as a unit (`0x515bca mov ecx,8`), so a
+    /// GameObject, a corpse or nothing names nobody (`0x515bd9 je`).
+    pub(crate) fn mouseover(&self, go: &HoveredObject) -> Option<(Entity, u64)> {
+        self.target
+            .zip(self.guid)
+            .filter(|_| !go_is_nearest(self, go))
+    }
 }
 
 /// The GameObject under the cursor this frame, by [`hover::update_hovered_object`]: usable, never
@@ -126,6 +147,8 @@ pub(crate) struct PickOcclusion {
     pub(crate) distance: f32,
     /// The world hit point, which the ground-targeting cursor rides, as in the reference.
     pub(crate) point: Option<Vec3>,
+    /// The cursor ray's direction, which a right-click on the sky walks along (`0x492d6c`).
+    pub(crate) ray: Option<Dir3>,
 }
 
 impl Default for PickOcclusion {
@@ -133,6 +156,7 @@ impl Default for PickOcclusion {
         Self {
             distance: f32::INFINITY,
             point: None,
+            ray: None,
         }
     }
 }
@@ -268,6 +292,7 @@ impl Plugin for TargetPlugin {
             .add_message::<TargetByNameRequest>()
             .add_message::<AssistRequest>()
             .add_message::<click::DeselectGuid>()
+            .add_message::<Interact>()
             .add_systems(
                 Startup,
                 (
@@ -308,34 +333,35 @@ impl Plugin for TargetPlugin {
                     // order is free.
                     crate::spell::targeting::commit_ground_cast_on_click,
                     crate::spell::targeting::commit_object_cast_on_click,
-                    click::act_on_right_click,
-                    click::clear_target_requests,
-                    // The UI's unit-token drains. `SpellTargetUnit` first: it binds the cursor's
-                    // cast and never moves the selection. Then the selection asks (`TargetUnit`,
-                    // `AssistUnit`, `TargetLastEnemy`: one drain, as the reference has one
-                    // `0x489a40`) and `DropItemOnUnit`'s pet leg, independent of each other.
+                    // The verb a walk owes runs at its stop, ahead of this frame's click.
                     (
-                        crate::spell::targeting::drain_spell_target_unit,
-                        (
-                            click::selection_requests,
-                            crate::ui_action::drop_item::drop_item_on_unit,
-                        ),
+                        click::act_on_arrival,
+                        click::act_on_right_click,
+                        click::act_on_interact,
                     )
                         .chain(),
-                    // The by-name asks: `/target`, the Lua `TargetByName` and `/assist` commit
-                    // through `scan::commit`; `/follow` hands its subject to `crate::player`.
+                    // The loot close's guid-scoped deselect.
+                    click::clear_target_requests,
+                    // The script calls that touch the selection, the cast or the targeting cursor
+                    // (`TargetUnit`, `/target`, `ClearTarget`, `/cast`, `UseAction`, …), applied
+                    // in the order the script made them; then `DropItemOnUnit`'s pet leg.
+                    (
+                        crate::script_calls::apply_script_calls,
+                        crate::ui_action::drop_item::drop_item_on_unit,
+                    )
+                        .chain(),
+                    // The chat layer's by-name asks: `/target` and `/assist` commit through
+                    // `scan::commit`; `/follow` hands its subject to `crate::player`.
                     (
                         by_name::target_by_name_requests,
-                        by_name::script_target_by_name_requests,
                         by_name::assist_requests,
                         by_name::follow_requests,
                     )
                         .chain(),
                     scan::auto_acquire_attacker,
-                    // The one cycler's two sides (`0x493f60`, modes 1 and 2), chained: they share
-                    // `TabHistory`, which a side switch clears.
-                    (scan::tab_target, scan::target_nearest_friend_requests).chain(),
-                    scan::acquire_and_attack,
+                    // The melee probe's press, the player's Attack; the TAB keys and ATTACKTARGET
+                    // run their bodies' `TargetNearestEnemy` and `AttackTarget` as script calls.
+                    crate::ui_action::attack_nearest_probe,
                     flash::drive_flash,
                     // The last-enemy stamp before the ring's death-clear, so a hostile that dies
                     // selected is still remembered (the reference's `TargetLastEnemy` has no

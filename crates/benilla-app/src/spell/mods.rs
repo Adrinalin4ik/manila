@@ -15,12 +15,12 @@
 //! boolean, so a bare `(flat, pct)` pair would zero every unmodified spell; hence
 //! [`SpellModifiers::modifiers`] returns `Option` and [`SpellMod`] is private.
 //!
-//! All 29 ops are stored; only op 14 (`COST`) is read here. Op 24 is the one the client routes
-//! aura 65 (casting speed) to, whatever vmangos names it.
+//! All 29 ops are stored. Op 24 is the one the client routes aura 65 (casting speed) to,
+//! whatever vmangos names it.
 
 use bevy::prelude::*;
 
-use benilla_formats::SpellDisplay;
+use benilla_formats::{SpellDisplay, SpellRange};
 
 use crate::chr_classes::ChrClassTable;
 use crate::net::{ObjectStore, SelfPlayer};
@@ -35,6 +35,16 @@ const CELLS: usize = BITS * OPS;
 /// `SPELLMOD_COST`, read by [`crate::spell::usable::power_cost`] (`GetPowerCost 0x6e31b0` at
 /// `6e32e3`).
 pub(crate) const OP_COST: u8 = 14;
+/// `SPELLMOD_CASTING_TIME`, applied by `GetCastTime 0x6e3340` at `0x6e33b7`.
+pub(crate) const OP_CAST_TIME: u8 = 10;
+/// `GetMinMaxRange 0x6e3480` applies op 5 to its maximum at `0x6e3744`.
+pub(crate) const OP_RANGE: u8 = 5;
+/// `GetCurrentCastRadius 0x6e6350` applies op 6 before the reticle's 20-yard cap.
+pub(crate) const OP_RADIUS: u8 = 6;
+/// `StartGlobalCooldown 0x6e2de0` applies op 21 to `startRecoveryTime`.
+pub(crate) const OP_GCD: u8 = 21;
+/// `StartCooldown 0x6e2c60` and the tooltip apply op 11 to both recovery columns.
+pub(crate) const OP_COOLDOWN: u8 = 11;
 
 /// `SPELL_ATTR_EX3_IGNORE_CASTER_MODIFIERS` (vmangos `SpellDefines.h:940`): a spell carrying it
 /// takes no modifier (`0x6e6b52`).
@@ -73,7 +83,7 @@ impl SpellMod {
 
 /// The two tables and the class family the gate compares against (`0xcead60`, `0xcecb30`,
 /// `0xcecaac`). Written only by the wire, cleared only at world-enter, read live.
-#[derive(Resource)]
+#[derive(Clone, Resource)]
 pub(crate) struct SpellModifiers {
     flat: [i32; CELLS],
     pct: [i32; CELLS],
@@ -125,15 +135,45 @@ impl SpellModifiers {
         self.class_family = 0;
     }
 
+    /// The two family gates of `GetSpellModifiers 0x6e6b30` (`SpellFamilyName` nonzero and the
+    /// class's, `AttributesEx3` bit 29 clear).
+    fn gates_pass(&self, d: &SpellDisplay) -> bool {
+        d.spell_family != 0
+            && d.spell_family == self.class_family
+            && d.attributes_ex3 & ATTR_EX3_IGNORE_CASTER_MODIFIERS == 0
+    }
+
+    /// The `SpellFamilyFlags` bits whose cells any read for `d` can sum, whatever the op: its
+    /// whole mask past the gates, none before them. A change to another bit's cells cannot move
+    /// a value modified for `d`; a change of the class family can, whatever the bit.
+    pub(crate) fn read_bits(&self, d: &SpellDisplay) -> u64 {
+        if self.gates_pass(d) {
+            d.spell_family_flags
+        } else {
+            0
+        }
+    }
+
+    /// What differs from `prev`: the `SpellFamilyFlags` bits with any changed cell, in either
+    /// table and at any op, and whether the class family moved.
+    pub(crate) fn diff(&self, prev: &SpellModifiers) -> ModsDiff {
+        let bits = (0..BITS).fold(0u64, |bits, bit| {
+            let row = bit * OPS..(bit + 1) * OPS;
+            let same = self.flat[row.clone()] == prev.flat[row.clone()]
+                && self.pct[row.clone()] == prev.pct[row];
+            bits | u64::from(!same) << bit
+        });
+        ModsDiff {
+            bits,
+            class_family: self.class_family != prev.class_family,
+        }
+    }
+
     /// `GetSpellModifiers 0x6e6b30` for one spell and op. `None` covers all four of its false
     /// exits: the three gates and both sums zero (`6e6ba8`/`6e6bad`). The op range check is ours;
     /// the reference's call sites all pass a literal.
     fn modifiers(&self, d: &SpellDisplay, op: u8) -> Option<SpellMod> {
-        if d.spell_family == 0
-            || d.spell_family != self.class_family
-            || d.attributes_ex3 & ATTR_EX3_IGNORE_CASTER_MODIFIERS != 0
-            || usize::from(op) >= OPS
-        {
+        if !self.gates_pass(d) || usize::from(op) >= OPS {
             return None;
         }
         // All 64 bits, no early break (`6e6b8f`/`6e6b97`); the accumulators wrap, as the
@@ -161,6 +201,73 @@ impl SpellModifiers {
     pub(crate) fn apply(&self, d: &SpellDisplay, op: u8, value: i32) -> i32 {
         self.modifiers(d, op).map_or(value, |m| m.apply(value))
     }
+
+    /// The reference applies op 11 separately to RecoveryTime and to CategoryRecoveryTime
+    /// after `0x6e2b60` adds the ranged attack time to the latter.
+    pub(crate) fn spell_cooldowns(&self, d: &SpellDisplay, ranged_ms: u32) -> (u32, u32) {
+        let recovery = self.apply(d, OP_COOLDOWN, d.recovery_ms as i32).max(0) as u32;
+        let category_base = d.category_recovery_ms.saturating_add(ranged_ms);
+        let category = self.apply(d, OP_COOLDOWN, category_base as i32).max(0) as u32;
+        (recovery, category)
+    }
+
+    /// The reference's float applier `0x6e6bf0`: add the flat integer, then multiply by the
+    /// summed percentage and its stored single-precision 0.01 constant.
+    pub(crate) fn apply_float(&self, d: &SpellDisplay, op: u8, value: f32) -> f32 {
+        self.modifiers(d, op).map_or(value, |m| {
+            ((f64::from(value) + f64::from(m.flat)) * f64::from(m.pct) * f64::from(0.01f32)) as f32
+        })
+    }
+
+    /// The software-float applier `0x6e6c30` that `GetEffectPoints` calls
+    /// ([`benilla_formats::soft_modify`]).
+    pub(crate) fn apply_soft(&self, d: &SpellDisplay, op: u8, value: f32) -> f32 {
+        self.modifiers(d, op).map_or(value, |m| {
+            benilla_formats::soft_modify(value, m.flat, m.pct)
+        })
+    }
+
+    /// `GetMinMaxRange` modifies only the maximum at its common tail, after the moving bonus
+    /// (`0x6e3648`-`0x6e36a2`, then op 5 at `0x6e3746`). The on-next-swing `Attributes & 0x404` arm
+    /// returns before that tail (`0x6e350f`).
+    pub(crate) fn min_max_range(
+        &self,
+        d: &SpellDisplay,
+        row: Option<&SpellRange>,
+        caster: benilla_formats::RangeUnit,
+        targets: benilla_formats::RangeTargets,
+    ) -> Option<(f32, f32)> {
+        let (min, max) = benilla_formats::min_max_range(d, row, caster, targets)?;
+        Some((
+            min,
+            if d.on_next_swing() {
+                max
+            } else {
+                self.apply_float(d, OP_RANGE, max)
+            },
+        ))
+    }
+}
+
+/// How one snapshot of the tables differs from an earlier one ([`SpellModifiers::diff`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ModsDiff {
+    /// Bit `b` set: a cell of family-flag bit `b` changed, in either table at any op.
+    pub(crate) bits: u64,
+    pub(crate) class_family: bool,
+}
+
+/// The description expander's view of the tables.
+impl benilla_formats::SpellMods for SpellModifiers {
+    fn apply_int(&self, d: &SpellDisplay, op: u8, value: i32) -> i32 {
+        self.apply(d, op, value)
+    }
+    fn apply_float(&self, d: &SpellDisplay, op: u8, value: f32) -> f32 {
+        SpellModifiers::apply_float(self, d, op, value)
+    }
+    fn apply_soft(&self, d: &SpellDisplay, op: u8, value: f32) -> f32 {
+        SpellModifiers::apply_soft(self, d, op, value)
+    }
 }
 
 /// Entering the world clears the tables and class family: `Spell_C::SystemInitialize 0x6e7150`,
@@ -183,7 +290,7 @@ pub(super) fn track_class_family(
         return;
     };
     let family = classes.0.spell_family(u32::from(class));
-    // Guarded: the tooltip feed rebuilds whenever the resource is marked changed.
+    // Guarded: the tooltip feed diffs the tables whenever the resource is marked changed.
     if mods.class_family != family {
         mods.set_class_family(family);
     }
@@ -384,6 +491,89 @@ mod tests {
             mods.apply(cat.get(116).expect("Frostbolt"), OP_COST, 100),
             96,
             "four set bits, four cells"
+        );
+    }
+
+    /// `GetCastTime` applies op 10 after resolving the DBC row; an instant modifier lifts the
+    /// moving-cast refusal for Frostbolt, while another class's spell keeps its cast time.
+    #[test]
+    fn cast_time_uses_the_live_modifier() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let catalog = benilla_formats::load_spell_catalog(&mut chain).expect("load Spell.dbc");
+        let mut spells = crate::ui_action::Spells::empty_for_tests();
+        spells.cast_times =
+            benilla_formats::load_spell_cast_times(&mut chain).expect("load SpellCastTimes.dbc");
+        let frostbolt = catalog.get(116).expect("Frostbolt");
+        let mut mods = mage_tables();
+        let base = spells.cast_time_ms(frostbolt, 60, &mods);
+        assert!(base > 0);
+        mods.set(false, 5, OP_CAST_TIME, -100);
+        assert_eq!(spells.cast_time_ms(frostbolt, 60, &mods), 0);
+    }
+
+    #[test]
+    fn range_modifier_changes_only_the_maximum_after_reach() {
+        let mut mods = mage_tables();
+        let d = mage(&[5]);
+        let row = SpellRange {
+            min: 8.0,
+            max: 35.0,
+            flags: 0,
+        };
+        mods.set(false, 5, OP_RANGE, 20);
+        let caster = benilla_formats::RangeUnit::still(1.5);
+        let target = benilla_formats::RangeTargets {
+            target: Some(benilla_formats::RangeUnit::still(1.5)),
+            attack_target: None,
+        };
+        let (min, max) = mods.min_max_range(&d, Some(&row), caster, target).unwrap();
+        assert_eq!(min, 11.0);
+        assert!((max - 45.6).abs() < 0.001, "38 yards with +20% range");
+        assert_eq!(mods.min_max_range(&d, None, caster, target), None);
+
+        let on_next_swing = SpellDisplay {
+            attributes: 0x404,
+            ..d
+        };
+        assert_eq!(
+            mods.min_max_range(&on_next_swing, Some(&row), caster, target),
+            benilla_formats::min_max_range(&on_next_swing, Some(&row), caster, target),
+            "the reference's early return bypasses op 5"
+        );
+    }
+
+    /// The moving bonus is part of the max before op 5 scales it (`0x6e3648`-`0x6e36a2`, then
+    /// `0x6e3746`): a +20% talent on the melee row of two running units scales 5 + 2.6667.
+    #[test]
+    fn range_modifier_scales_the_moving_bonus() {
+        let mut mods = mage_tables();
+        let d = mage(&[5]);
+        let melee = SpellRange {
+            min: 0.0,
+            max: 5.0,
+            flags: 1,
+        };
+        mods.set(false, 5, OP_RANGE, 20);
+        let runner = benilla_formats::RangeUnit {
+            motion: benilla_formats::UnitMotion {
+                flags: 1,
+                speed: 7.0,
+                walk_speed: 2.5,
+            },
+            ..benilla_formats::RangeUnit::still(1.5)
+        };
+        let targets = benilla_formats::RangeTargets {
+            target: Some(runner),
+            attack_target: None,
+        };
+        let (_, max) = mods
+            .min_max_range(&d, Some(&melee), runner, targets)
+            .unwrap();
+        let bonus = benilla_formats::MOVING_RANGE_BONUS;
+        assert!(
+            (max - (5.0 + bonus) * 1.2).abs() < 1e-4,
+            "the modifier scales the bonused max, not the bare 5.0: {max}"
         );
     }
 }

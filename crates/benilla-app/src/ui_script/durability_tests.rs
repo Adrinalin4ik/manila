@@ -9,18 +9,18 @@ fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in [
-        "Interface\\FrameXML\\Fonts.xml",
-        r"Interface\FrameXML\MoneyFrame.lua",
-        r"Interface\FrameXML\MoneyFrame.xml",
-        r"Interface\FrameXML\UIParent.xml",
-        r"Interface\FrameXML\UIPanelTemplates.lua",
-        r"Interface\FrameXML\UIPanelTemplates.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\Fonts.xml",
         "Interface\\FrameXML\\BasicControls.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
-        "Interface\\FrameXML\\StaticPopup.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\BattlefieldFrame.xml",
         "Interface\\FrameXML\\Minimap.xml",
         "Interface\\FrameXML\\DurabilityFrame.xml",
@@ -28,9 +28,9 @@ fn harness() -> UiScript {
         load_xml(&s, f);
     }
     // Deviation: the seat refreshes on every alert recompute, because the stock one goes stale
-    // when a side glyph appears while shown and hangs the shield off the screen edge. The app
-    // installs this after every load.
-    super::manifest::install_durability_reseat(&s).unwrap();
+    // when a side glyph appears while shown and hangs the shield off the screen edge. The layer
+    // installs this after every stock file.
+    load_xml(&s, "FrameXMLFixes.xml");
     s
 }
 
@@ -350,31 +350,30 @@ fn the_quest_tracker_stacks_below_the_durability_guy() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in [
-        "Interface\\FrameXML\\Fonts.xml",
-        r"Interface\FrameXML\MoneyFrame.lua",
-        r"Interface\FrameXML\MoneyFrame.xml",
         "Interface\\FrameXML\\GlobalStrings.lua",
-        r"Interface\FrameXML\UIParent.xml",
-        r"Interface\FrameXML\UIPanelTemplates.lua",
-        r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\Fonts.xml",
         "Interface\\FrameXML\\BasicControls.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
-        "Interface\\FrameXML\\StaticPopup.xml",
+        r"Interface\FrameXML\UIParent.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
         "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\BattlefieldFrame.xml",
         "Interface\\FrameXML\\Minimap.xml",
-        "ScrollTemplates.xml",
-        "Interface\\FrameXML\\DurabilityFrame.xml",
-        "Interface\\FrameXML\\BasicControls.xml",
+        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
         "Interface\\FrameXML\\ItemButtonTemplate.xml",
         "Interface\\FrameXML\\QuestFrame.xml",
-        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
         "Interface\\FrameXML\\QuestLogFrame.xml",
+        "Interface\\FrameXML\\DurabilityFrame.xml",
+        "ScrollTemplates.xml",
     ] {
         load_xml(&s, f);
     }
-    super::manifest::install_durability_reseat(&s).unwrap();
+    load_xml(&s, "FrameXMLFixes.xml");
 
     let mut inv: InventorySlots = Default::default();
     inv[18] = slot(2504, Some((0, 20)));

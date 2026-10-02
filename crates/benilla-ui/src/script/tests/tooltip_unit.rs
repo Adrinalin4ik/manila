@@ -25,6 +25,7 @@ fn seed_level_strings(s: &mut UiScript) {
 fn wolf() -> UnitState {
     UnitState {
         exists: true,
+        guid: 0xF130_0000_4500_0001,
         name: Some("Timber Wolf".into()),
         health: 30,
         max_health: 50,
@@ -390,6 +391,55 @@ fn level_line_variants() {
     assert!(s.take_errors().is_empty());
 }
 
+/// A player's level line reads "Race Class (Player)" whatever creature type the snapshot carries:
+/// the builder tests the player type bit (`0x52a4a6`) and takes the race and class names for a
+/// player (`0x52a4e5`-`0x52a555`), the type row only otherwise (`0x52a4bd`-`0x52a4d4`), so a
+/// shapeshifted player's Beast never reaches the line.
+#[test]
+fn a_players_level_line_ignores_the_snapshots_creature_type() {
+    let mut s = script();
+    seed_level_strings(&mut s);
+    s.set_screen_size(800.0, 600.0);
+    s.set_player_req_state(PlayerReqState {
+        level: 60,
+        ..Default::default()
+    });
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "UF3"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+    "#,
+    )
+    .unwrap();
+    let druid = |reaction: u8, creature_type: Option<&str>| UnitState {
+        exists: true,
+        name: Some("Fenwick".into()),
+        level: 40,
+        reaction,
+        is_player: true,
+        race: Some("Night Elf".into()),
+        class: Some("Druid".into()),
+        creature_type_name: creature_type.map(str::to_string),
+        ..Default::default()
+    };
+    // Hostile, neutral and friendly: the three sides of the reaction gate the creature arm reads.
+    for reaction in [2, 4, 6] {
+        for creature_type in [None, Some("Humanoid"), Some("Beast")] {
+            s.set_unit("target", Some(druid(reaction, creature_type)));
+            s.run(
+                r#"
+                TT:SetOwner(UF3, "ANCHOR_RIGHT"); TT:SetUnit("target")
+                assert(TTTextLeft2:GetText() == "[LEVEL_CLASS_TYPE 40 Night Elf Druid [PLAYER]]",
+                    "got " .. TTTextLeft2:GetText())
+            "#,
+            )
+            .unwrap_or_else(|e| panic!("reaction {reaction}, type {creature_type:?}: {e}"));
+        }
+    }
+    assert!(s.take_errors().is_empty());
+}
+
 /// `world_tooltip_unit` fires the default anchor, renders, then fires `UPDATE_MOUSEOVER_UNIT`.
 #[test]
 fn world_hover_drive_and_health_watcher() {
@@ -454,8 +504,28 @@ fn world_hover_drive_and_health_watcher() {
         r#"assert(GameTooltipStatusBar:GetValue() == 12, "the health watcher tracked the push")"#,
     )
     .unwrap();
+    // Hover lost: the fade arms and `"mouseover"` names nobody (`0x492890` zeroes the pair), yet
+    // the fading plate keeps its bar, whose watcher follows the unit's guid, not the token.
     s.world_tooltip_fade();
-    s.tick(0.6);
+    s.set_unit("mouseover", None);
+    s.tick(0.1);
+    s.run(
+        r#"
+        assert(UnitExists("mouseover") == nil, "the token is cleared")
+        assert(GameTooltip:IsShown(), "still fading")
+        assert(GameTooltipStatusBar:IsShown(), "the fading plate keeps its bar")
+        assert(GameTooltipStatusBar:GetValue() == 12, "and its value")
+        assert(recolored == 1, "the clear fires no UPDATE_MOUSEOVER_UNIT")
+    "#,
+    )
+    .unwrap();
+    // The same unit pushed under another token still drives the bar.
+    let mut as_target = wolf();
+    as_target.health = 8;
+    s.set_unit("target", Some(as_target));
+    s.run(r#"assert(GameTooltipStatusBar:GetValue() == 8, "the watcher follows the guid")"#)
+        .unwrap();
+    s.tick(0.5);
     s.run(r#"assert(not GameTooltip:IsShown(), "faded out after the ramp")"#)
         .unwrap();
     assert!(s.take_errors().is_empty());

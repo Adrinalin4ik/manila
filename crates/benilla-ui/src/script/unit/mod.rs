@@ -1,10 +1,11 @@
 //! The `Unit*` bindings. The app pushes each token's [`UnitState`] every frame through
-//! [`UiScript::set_unit`], and the globals read that plain data, which keeps this crate free of
+//! [`UiScript::set_unit`], and the units a `target` chain ends on by guid through
+//! [`UiScript::set_unit_by_guid`]; the globals read that plain data, which keeps this crate free of
 //! the ECS. Every predicate answers the number `1` or nil, never a Lua boolean.
 
 use mlua::Lua;
 
-use super::Model;
+use super::{Model, NearestMode, ScriptCall};
 
 /// A selection ask from Lua, queued in call order for the app to resolve and commit. The reference
 /// routes `TargetUnit`, `AssistUnit` and `TargetLastEnemy` through one helper (`0x489a40`: commit,
@@ -46,8 +47,9 @@ pub struct PlayerRecord {
     pub sex: u8,
 }
 
-/// One unit token's snapshot, pushed by the app each frame and read by the `Unit*` bindings;
-/// plain data, with no mlua handles or ECS types.
+/// One unit's snapshot, pushed by the app each frame under a token, or under a guid for a unit a
+/// `target` chain ends on, and read by the `Unit*` bindings; plain data, with no mlua handles or
+/// ECS types.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UnitState {
     /// `UnitExists`, true for an out-of-range party member through the roster fallback. The
@@ -107,6 +109,9 @@ pub struct UnitState {
     /// `UnitHasRelicSlot` (`0x519e50`): INVSLOT 17 is a relic slot, from `ChrClasses.dbc` field
     /// 16. Players only, true for Paladin, Shaman and Druid.
     pub has_relic_slot: bool,
+    /// `ChrClasses.dbc` field 2 for a player's class, 0-based (Strength 0, Agility 1), which
+    /// `GetDamageBonusStat` (`0x48b520`) reads for the active player; `None` with no class row.
+    pub damage_bonus_stat: Option<u32>,
     /// `UnitSex`'s scale, 2 male and 3 female, from `UNIT_FIELD_BYTES_0` byte 2 (0 male, 1
     /// female). The unfilled 0 answers 2, the reference's unresolved answer (`0x517f9f`).
     pub sex: u8,
@@ -134,7 +139,10 @@ pub struct UnitState {
     pub guild: Option<super::guild::UnitGuild>,
     /// The creature template's subname ("Stable Master"), the tooltip's second line.
     pub subtitle: Option<String>,
-    /// The creature type word ("Beast") from `CreatureType.dbc`, the level line's class slot.
+    /// The word ("Beast") from `CreatureType.dbc` for the type the reference's resolver `0x605570`
+    /// returns for any unit: the shapeshift form's, else the creature template's, else the
+    /// race's. `UnitCreatureType` answers it, and a creature's level line takes it as its class
+    /// slot; a player's reads race and class instead. `None` for type 0 or no descriptor.
     pub creature_type_name: Option<String>,
     /// Creature rank 0..=4 as the reference's getter (`0x605620`) answers it, so already gated:
     /// 0 without a cached creature template or with a pet number. The tooltip's rank word,
@@ -151,14 +159,11 @@ pub struct UnitState {
     /// The faction name ("Stormwind"), the tooltip line after the level line, from `Faction.dbc`
     /// through the faction template with its hiding gates applied; `None` shows no line.
     pub faction_name: Option<String>,
-    /// `UnitIsConnected`; party tokens take the roster status byte's `0x01`. The default `false`
-    /// reads disconnected, which greys a stock mana bar (`UnitFrame.lua:214`), so a synthetic
-    /// live unit must set it.
+    /// `UnitIsConnected`: any unit the object manager holds answers 1 (`0x517daf`); a party token
+    /// with no object takes the roster status byte's `0x01`. The default `false` reads
+    /// disconnected, which greys a stock mana bar (`UnitFrame.lua:214`), so a hand-built live
+    /// unit must set it; the app's `snapshot` does for every held one.
     pub is_connected: bool,
-    /// `UnitIsAFK`, the roster status byte's `0x40`, fed for party tokens.
-    pub is_afk: bool,
-    /// `UnitIsDND`, the roster status byte's `0x80`, fed for party tokens.
-    pub is_dnd: bool,
     /// `UnitIsPVPFreeForAll`: `PLAYER_FLAGS` bit `0x80`, or the roster status byte's `0x10`;
     /// independent of [`Self::pvp`].
     pub is_pvp_ffa: bool,
@@ -187,7 +192,7 @@ pub struct UnitState {
     pub raid_target: u8,
     /// Whether the player can attack the unit, `UnitCanAttack("player", unit)`, which the binding
     /// (`0x516c50`, delegating to `CanAttack` `0x606980`) answers for both argument orders. Fed for
-    /// `target`, `targettarget` and `npc`; other tokens read false.
+    /// `target`, `targettarget`, `npc` and the units a chain ends on; other tokens read false.
     pub can_attack: bool,
     /// `UnitIsCorpse` (`0x5161c0`): the token names a `TYPEID_CORPSE` object, which a dead unit
     /// is not. No feed sets it.
@@ -308,8 +313,34 @@ impl super::UiScript {
                 }
             }
         }
-        // A push for a tooltip's live unit token re-drives its health bar, without a line rebuild.
+        // A push of the unit a tooltip shows re-drives its health bar, without a line rebuild.
         super::tooltip_unit::on_unit_push(&self.lua, token);
+    }
+
+    /// Push, or clear with `None`, the snapshot of a unit a `target` chain can end on, by guid. A
+    /// token with a hop that no push names (`"party1target"`, `"raid3targettarget"`) resolves
+    /// through [`UnitGuids`] to a guid and reads that guid's entry, the reference's order
+    /// (`0x515970`, then each getter's object lookup `0x468460`); the guids to cover are
+    /// [`Self::chain_end_guids`]. A token without a hop reads its own push, not this.
+    pub fn set_unit_by_guid(&mut self, guid: u64, state: Option<UnitState>) {
+        let mut model = self.model_mut();
+        match state {
+            Some(s) => {
+                model.units_by_guid.insert(guid, s);
+            }
+            None => {
+                model.units_by_guid.remove(&guid);
+            }
+        }
+    }
+
+    /// The guids the chains a script can spell end on ([`UnitGuids::chain_ends`]), each once: the
+    /// units whose snapshots [`Self::set_unit_by_guid`] serves.
+    pub fn chain_end_guids(&self) -> Vec<u64> {
+        let mut ends: Vec<u64> = self.model_ref().unit_guids.chain_ends().collect();
+        ends.sort_unstable();
+        ends.dedup();
+        ends
     }
 
     /// Push the player's copper (`PLAYER_FIELD_COINAGE`), read by `GetMoney`.
@@ -386,25 +417,37 @@ impl super::UiScript {
         model.combo_target = target;
     }
 
-    /// Drain the queued [`SelectionRequest`]s, in call order.
+    /// Take the queued [`SelectionRequest`]s out of the call stream, in call order.
     pub fn take_selection_requests(&mut self) -> Vec<SelectionRequest> {
-        std::mem::take(&mut self.model_mut().selection_requests)
+        self.take_calls_where(|c| match c {
+            ScriptCall::Select(r) => Some(r.clone()),
+            _ => None,
+        })
     }
 
-    /// Drain the `TargetNearestFriend([reverse])` calls, `true` for reverse. It names no unit: the
-    /// reference runs the TAB cycler (`0x493f60`, mode 2) straight into `SetSelection`.
-    pub fn take_target_nearest_friend_requests(&mut self) -> Vec<bool> {
-        std::mem::take(&mut self.model_mut().target_nearest_friend_requests)
+    /// Take the `TargetNearest*([reverse])` calls out of the call stream, `true` for reverse.
+    /// They name no unit: the reference runs the TAB cycler (`0x493f60`) straight into
+    /// `SetSelection`.
+    pub fn take_target_nearest_requests(&mut self) -> Vec<(NearestMode, bool)> {
+        self.take_calls_where(|c| match c {
+            ScriptCall::TargetNearest { mode, reverse } => Some((*mode, *reverse)),
+            _ => None,
+        })
     }
 
-    /// Drain the `TargetByName(name, exactMatch)` calls for the app's by-name resolver.
+    /// Take the `TargetByName(name, exactMatch)` calls out of the call stream.
     pub fn take_target_by_name_requests(&mut self) -> Vec<(String, bool)> {
-        std::mem::take(&mut self.model_mut().target_by_name_requests)
+        self.take_calls_where(|c| match c {
+            ScriptCall::TargetByName { name, exact } => Some((name.clone(), *exact)),
+            _ => None,
+        })
     }
 
-    /// Drain `ClearTarget()`: true if it fired with a live target; the app deselects (guid 0).
+    /// Take the `ClearTarget()` calls out of the call stream: whether there was one.
     pub fn take_target_clear(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().target_clear)
+        !self
+            .take_calls_where(|c| matches!(c, ScriptCall::ClearTarget).then_some(()))
+            .is_empty()
     }
 
     /// Drain `DropItemOnUnit`'s tokens; on the pet the app casts the learned Feed Pet spell at
@@ -413,9 +456,12 @@ impl super::UiScript {
         std::mem::take(&mut self.model_mut().drop_item_on_unit)
     }
 
-    /// Drain `SpellTargetUnit` calls for the host's pending unit-target spell binder.
+    /// Take the `SpellTargetUnit` calls out of the call stream.
     pub fn take_spell_target_unit(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.model_mut().spell_target_unit)
+        self.take_calls_where(|c| match c {
+            ScriptCall::SpellTargetUnit(token) => Some(token.clone()),
+            _ => None,
+        })
     }
 }
 
@@ -429,33 +475,7 @@ fn pick_unit_token(a: &Option<String>, b: &Option<String>) -> Option<String> {
     }
 }
 
-/// The token prefixes the resolver (`0x515970`) tests, in its order (`partypet` before `party`).
-/// Each is a prefix test, so `"playerfoo"` is recognised; `npc`, its one full-string compare, is
-/// tested apart.
-const UNIT_TOKEN_PREFIXES: [&str; 8] = [
-    "player",
-    "pet",
-    "target",
-    "partypet",
-    "party",
-    "raidpet",
-    "raid",
-    "mouseover",
-];
-
-/// Whether the resolver recognises the token, not whether it names a unit: `"party5"` solo is
-/// recognised and answers nil, and only a token none of its nine compares match raises.
-pub(crate) fn token_recognised(token: &str) -> bool {
-    // `npc` full-string, the rest prefixes, all folded as `_strnicmp` folds: ASCII only.
-    token.eq_ignore_ascii_case("npc")
-        || UNIT_TOKEN_PREFIXES
-            .iter()
-            // Bytes, not a `str` slice, which panics mid-character on a multibyte token.
-            .any(|p| {
-                token.len() >= p.len()
-                    && token.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
-            })
-}
+use resolve::token_recognised;
 
 /// The resolver's token check: an unrecognised token raises `Unknown unit name`, as `0x515970`
 /// ends in `luaL_error`; `""`, an absent token and a recognised one naming nothing pass. Whether
@@ -501,6 +521,11 @@ fn unit_predicate(
 /// The `Unit*` and `GetQuestGreenRange` registrations.
 mod bindings;
 #[cfg(test)]
+mod chain_tests;
+mod resolve;
+#[cfg(test)]
 mod tests;
+
+pub use resolve::{parse_unit_token, UnitBase, UnitGuids, UnitTokenParse};
 
 pub(super) use bindings::install;

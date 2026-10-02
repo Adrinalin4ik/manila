@@ -28,6 +28,10 @@ use display::{
 mod attach;
 use attach::{attach_entity_visuals, build_dressup_preview, build_glue_pet, build_glue_preview};
 
+/// Composited body skins by look, built off the main thread.
+mod skin_composite;
+use skin_composite::{land_skin_composites, SkinComposites, SkinKey, SkinSections};
+
 /// The dynamic point lights an entity's own model carries, such as a held torch.
 mod carried_light;
 use carried_light::spawn_carried_lights;
@@ -251,6 +255,11 @@ impl Creatures {
         self.catalog.foley_material(display_id)
     }
 
+    /// A display's override race and sex (`CreatureDisplayInfoExtra`), `None` without one.
+    pub(crate) fn display_race_sex(&self, display_id: u32) -> Option<(u8, u8)> {
+        self.catalog.display_race_sex(display_id)
+    }
+
     /// A display's collision height in raw model units; [`CollisionHeight`] is the world value.
     pub(crate) fn collision_height(&self, display_id: u32) -> Option<f32> {
         self.catalog.collision_height(display_id)
@@ -384,34 +393,28 @@ struct GameObjects {
 #[derive(Resource)]
 struct Characters(CharacterGeosets);
 
-/// The `CharSections` skin lookup; without it a player's body skin stays untextured.
-#[derive(Resource)]
-struct SkinSections(CharSections);
-
 /// Character-creation data (body displays, race and class combos, appearance ranges).
 #[derive(Resource)]
 pub(crate) struct CharCreate(pub(crate) CharCreateCatalog);
 
-/// Composited body skins by look, so every player wearing a look shares one 256² atlas.
-#[derive(Resource, Default)]
-struct SkinComposites(benilla_assets::SpatialCache<SkinKey, Handle<Image>>);
+/// When a net entity arrived, on the appear fade's clock: the reference stamps a unit's fade as its
+/// create block is processed (`0x465c50` → `0x5fb880`, a player's through `0x5debe0` →
+/// `0x613af0` at `0x5fb956` → `0x614f80`), before its model or composite is ready, so the ramp runs
+/// from here however long the visual waits. A mount child carries its rider's, as the reference
+/// writes the unit's one fade onto the mount model (`0x614ae6`–`0x614af4`, `0x614b9e`–`0x614bba`).
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Arrival(pub(crate) f32);
 
-/// What decides a composited body skin: race and sex pick the `CharSections` rows, the dials pick
-/// the variations, and `equip` holds the worn armour display ids by body slot − 2.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct SkinKey {
-    pub(super) race: u8,
-    pub(super) sex: u8,
-    pub(super) skin: u8,
-    pub(super) face: u8,
-    pub(super) facial_hair: u8,
-    pub(super) hair_style: u8,
-    pub(super) hair_color: u8,
-    pub(super) equip: [u32; 8],
-    /// The guild emblem: two guilds' members wear one tabard display but must not share an atlas.
-    pub(super) emblem: Option<benilla_formats::GuildEmblem>,
-    /// The tabard designer's preview: the emblem paints over an empty tabard slot.
-    pub(super) tabard_preview: bool,
+/// Stamp each net entity's [`Arrival`] the frame it streams in.
+fn stamp_arrivals(
+    mut commands: Commands,
+    time: Res<Time>,
+    arrived: Query<Entity, (Added<NetEntity>, Without<Arrival>)>,
+) {
+    let now = time.elapsed_secs();
+    for entity in &arrived {
+        commands.entity(entity).insert(Arrival(now));
+    }
 }
 
 /// Marks a net entity whose visual is attached; the `waterfx` rig pre-marks its dummy unit.
@@ -449,9 +452,9 @@ fn evict_display_caches(
         items.as_ref().map_or(0, |i| i.models.len()),
         fx.models.len(),
         glows.as_ref().map_or(0, |g| g.models.len()),
-        composites.0.len(),
+        composites.done.len(),
     );
-    composites.0.clear();
+    composites.clear();
     fx.models.clear();
     if let Some(mut c) = creatures {
         c.models.clear();
@@ -474,7 +477,10 @@ fn scope_entity_art(
     mut scope: benilla_world::art_scope::ArtScope,
     mut composites: ResMut<SkinComposites>,
 ) {
-    scope.apply(&mut composites.0, benilla_world::art_scope::ArtSlot::Skins);
+    scope.apply(
+        &mut composites.done,
+        benilla_world::art_scope::ArtSlot::Skins,
+    );
 }
 
 /// A built body's armed-idle box in model space, which [`publish_world_units`] restates as
@@ -603,6 +609,21 @@ impl Plugin for EntitiesPlugin {
         .add_message::<live_display::DisplaySwapped>()
         .add_systems(Startup, setup_entities.after(AssetSet::Open))
         .add_systems(Update, (evict_display_caches, scope_entity_art))
+        // An arrival is stamped the frame it streams in, before its visual is asked for.
+        .add_systems(
+            Update,
+            stamp_arrivals
+                .after(WorldStage::Net)
+                .before(EntityVisualsSet),
+        )
+        // Finished body composites land before the frame's bodies ask for their atlas.
+        .add_systems(
+            Update,
+            land_skin_composites
+                .after(evict_display_caches)
+                .before(EntityVisualsSet)
+                .after(WorldStage::Net),
+        )
         // After the net stage, whose Commands create the entity; until then its readers take the
         // constructor default.
         .add_systems(Update, stamp_collision_heights.after(WorldStage::Net))
@@ -874,7 +895,9 @@ fn setup_entities(
         Err(e) => warn!("character geosets unavailable, players show every geoset: {e:#}"),
     }
     match CharSections::load(&mut chain) {
-        Ok(sections) => commands.insert_resource(SkinSections(sections)),
+        Ok(sections) => {
+            commands.insert_resource(SkinSections::new(sections, world_assets.chain.clone()))
+        }
         Err(e) => warn!("char sections unavailable, player bodies stay untextured: {e:#}"),
     }
     match CharCreateCatalog::load(&mut chain) {
@@ -935,6 +958,10 @@ fn setup_entities(
     match benilla_formats::load_stationery_catalog(&mut chain) {
         Ok(catalog) => commands.insert_resource(crate::ui_mail::Stationery(catalog)),
         Err(e) => warn!("stationery catalog unavailable, mail uses the default backdrop: {e:#}"),
+    }
+    match benilla_formats::load_packages(&mut chain) {
+        Ok(rows) => commands.insert_resource(crate::ui_mail::Packages(rows)),
+        Err(e) => warn!("mail packages unavailable, GetNumPackages answers 0: {e:#}"),
     }
     match benilla_formats::load_page_text_material_catalog(&mut chain) {
         Ok(catalog) => commands.insert_resource(crate::ui_item_text::PageMaterials(catalog)),

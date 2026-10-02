@@ -254,8 +254,6 @@ impl PluginGroup for GamePlugins {
             .add(crate::raid_marks::RaidMarksPlugin)
             .add(crate::vplates::VPlatesPlugin)
             .add(crate::chat_bubble::ChatBubblePlugin)
-            // TOGGLEUI (`ALT-Z`): the whole quad layer goes dark, leaving the world and the cursor.
-            .add(crate::ui_hide::UiHidePlugin)
             .add(UiItemsPlugin)
             .add(UiGossipPlugin)
             .add(UiMerchantPlugin)
@@ -698,11 +696,32 @@ pub(crate) mod schedule_tests {
     /// - `ui_quest::lines::feed_quest_lines` against `ui_items::feed_item_stats` and
     ///   `ui_tooltip::feed_spell_tooltips` over `Items` and the VM: it only reads templates, which
     ///   those two do not write, and a chat line commutes with their pushes;
-    /// - `spell::targeting::drain_spell_target_unit` against the lone `.after(UiInput)` cast
-    ///   drains over the `CastLadder`, and the party, pet-book and chat drains over the unit-token
-    ///   resolver: the class `drop_item_on_unit` and the world click's legs already carry, as none
-    ///   of those drains orders against the target chain. A cast press and a unit-frame bind in one
-    ///   frame take either order until the cast drains share a set that does.
+    /// - `script_calls::apply_script_calls`, in the target chain, against the `.after(UiInput)`
+    ///   drains of gestures that are not such script calls (the ATTACKTARGET binding, the
+    ///   item-pick commit, the GameObject openers, the chat, party, duel, trade and death drains)
+    ///   over the `CastLadder`, the selection and the unit-token resolver: the class
+    ///   `drop_item_on_unit` and the world click's legs already carry, as none of those drains
+    ///   orders against the target chain. Such a gesture and a script call in one frame take
+    ///   either order;
+    /// - the range compare's readers (`ui_action::state::feed_action_state`,
+    ///   `ui_tooltip::spell_feed::feed_spell_tooltips`, `spell::targeting::feed_targeting_to_vm`,
+    ///   the targeting cursor and the object-click commit) against the writers of `Player` and
+    ///   `RemoteMotion` (`camera_saved::load_camera_pose`, `world_focus`'s focus publish and settle
+    ///   release, `transport::compose_riders` and `ground_deck_riders`): the readers take the
+    ///   movement flags of the caster (`Player::move_flags`) and its target
+    ///   (`RemoteMotion::flags`), and those writers touch `login_pitch`, the settle fields and a
+    ///   rider's pose, never the flags;
+    /// - Click to Move's steer and arrival (`player::approach::steer_approach`,
+    ///   `target::click::act_on_arrival`) against what `steer_follow` and `act_on_right_click`
+    ///   already pair with: the steer is chained after follow's and writes the same `Player`
+    ///   fields, the arrival runs the click's dispatchers, and their `Transform` reads are the
+    ///   disjoint-lane kind. The dispatchers also carry the walk's start (`Player`,
+    ///   `FollowState`, `Approach`, the stand request), which only a click, an arrival or a
+    ///   crate's interaction writes;
+    /// - a crate's interaction (`target::click::act_on_interact`) against what
+    ///   `act_on_right_click` and the cursor classifier already pair with: it runs the click's
+    ///   dispatchers over the classifier's reading of its object, and its attack leg
+    ///   selects as the click does, so it writes `Selection` where the click's drain does.
     ///
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
@@ -715,7 +734,11 @@ pub(crate) mod schedule_tests {
     /// rows) and one pair each of the new systems against the two exclusive systems. Upstream
     /// 5,481 + ours = 5,509, read off the merged tree (upstream v0.2.0 ba7fe6e2; three more of ours
     /// pair with upstream's new v0.2.0 systems).
-    const UPDATE_ACTIONABLE_CEILING: usize = 5_509;
+    ///
+    /// MONKEY (merge upstream b396bbf6, 2026-10-02): upstream's own declarations dropped its
+    /// ceiling to 4,980; the merged tree reads 4,999 = upstream 4,980 + 19 of ours (the lanes'
+    /// residual pairs above, unchanged in kind). Read off the merged tree's test run.
+    const UPDATE_ACTIONABLE_CEILING: usize = 4_999;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -1196,8 +1219,6 @@ pub(crate) mod schedule_tests {
          "`told` is a `VmMemo` inside the session (a fresh VM re-begins), and the open is a player click"),
         ("ui_items/drain.rs", "drain_container_destroys", Because::FilledByVm,
          "`take_container_destroys` is a VM-owned queue filled by Lua's `DeleteCursorItem`"),
-        ("ui_items/drain.rs", "drain_container_uses", Because::FilledByVm,
-         "`take_container_uses` and `take_container_repairs` are Lua intents held by the VM"),
         ("ui_logout.rs", "feed_logout", Because::PlayerRoundTrip,
          "both packets answer the `CMSG_LOGOUT_REQUEST`/cancel the game menu sent"),
         ("ui_loot/mod.rs", "drain_loot", Because::Deliberate,

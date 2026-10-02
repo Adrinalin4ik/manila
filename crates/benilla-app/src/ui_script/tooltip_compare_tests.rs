@@ -10,14 +10,10 @@ use benilla_ui::script::{
 
 use super::test_ui::{bag_slot_button, hover, BAG_UI, CHARACTER_UI};
 
-/// Loads each file once across the overlapping lists, in first-seen order: loading a file twice
+/// Loads the lists merged, each file once, in the production order: loading a file twice
 /// redeclares its frames.
-fn load_once(s: &UiScript, seen: &mut Vec<&'static str>, files: &[&'static str]) {
-    for f in files {
-        if seen.contains(f) {
-            continue;
-        }
-        seen.push(f);
+fn load_once(s: &UiScript, parts: &[&[&str]]) {
+    for f in super::test_ui::production_order(parts) {
         super::test_ui::load_ui_strict(s, f);
     }
 }
@@ -26,9 +22,7 @@ fn load_once(s: &UiScript, seen: &mut Vec<&'static str>, files: &[&'static str])
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    let mut seen = Vec::new();
-    load_once(&s, &mut seen, CHARACTER_UI);
-    load_once(&s, &mut seen, &ROUTER_UI);
+    load_once(&s, &[CHARACTER_UI, &ROUTER_UI]);
     s.set_money(0);
     s.set_unit("player", Some(player()));
     s
@@ -36,10 +30,10 @@ fn harness() -> UiScript {
 
 /// `MerchantFrame.xml`, then `ItemRef.xml` with its `ItemRefTooltip`, in `FrameXML.toc` order.
 const ROUTER_UI: [&str; 4] = [
-    "ScrollTemplates.xml", // our scroll kits
     "Interface\\FrameXML\\CharacterFrameTemplates.xml",
     "Interface\\FrameXML\\MerchantFrame.xml",
     "Interface\\FrameXML\\ItemRef.xml",
+    "ScrollTemplates.xml", // our scroll kits
 ];
 
 /// Race and class carry both halves: stock `PaperDollFrame_SetLevel` formats them unguarded on
@@ -56,15 +50,12 @@ fn player() -> UnitState {
     }
 }
 
-/// [`harness`] with the stock bag windows. `CHARACTER_UI` leads, as in `FrameXML.toc`, because
-/// `BagSlotButtonTemplate` inherits `PaperDollItemSlotButtonTemplate` from `PaperDollFrame.xml`.
+/// [`harness`] with the stock bag windows: `BagSlotButtonTemplate` inherits
+/// `PaperDollItemSlotButtonTemplate` from `PaperDollFrame.xml`, which the toc lists first.
 fn harness_with_bags() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    let mut seen = Vec::new();
-    load_once(&s, &mut seen, CHARACTER_UI);
-    load_once(&s, &mut seen, BAG_UI);
-    load_once(&s, &mut seen, &ROUTER_UI);
+    load_once(&s, &[CHARACTER_UI, BAG_UI, &ROUTER_UI]);
     s.set_money(0);
     s
 }
@@ -245,6 +236,112 @@ fn doll_hover_renders_the_live_instance() {
         "the doll hover carries the instance's live pair"
     );
 
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}
+
+/// In repair mode a damaged item's hover adds `REPAIR_COST` and its coins, worn
+/// (`PaperDollFrame.lua:757-760`) or bagged (`ContainerFrame.lua:274-277`); out of it, neither.
+#[test]
+fn repair_mode_hover_shows_the_items_repair_cost() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = harness_with_bags();
+    s.set_unit("player", Some(player()));
+    let mut inv: InventorySlots = Default::default();
+    inv[16] = Some(InvSlotView {
+        item_id: 1300,
+        count: 1,
+        quality: 2,
+        name: Some("Worn Sword".into()),
+        link: Some("|cff1eff00|Hitem:1300:0:0:0|h[Worn Sword]|h|r".into()),
+        durability: Some((35, 75)),
+        equip_slots: vec![16],
+        ..Default::default()
+    });
+    s.set_inventory_slots(inv);
+    let mut slots = std::collections::HashMap::new();
+    slots.insert(
+        1,
+        ContainerSlot {
+            item_id: 1301,
+            count: 1,
+            quality: Some(2),
+            link: Some("|cff1eff00|Hitem:1301:0:0:0|h[Worn Helm]|h|r".into()),
+            durability: Some((10, 40)),
+            equip_slots: vec![1],
+            ..Default::default()
+        },
+    );
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 16,
+            slots,
+        }),
+    );
+    s.set_item_template(
+        1300,
+        ItemTemplateView {
+            class: 2,
+            subclass: 7,
+            max_durability: 75,
+            sell_price: 5,
+            ..armor_template("Worn Sword", 13)
+        },
+    );
+    s.set_item_template(
+        1301,
+        ItemTemplateView {
+            max_durability: 40,
+            sell_price: 5,
+            ..armor_template("Worn Helm", 1)
+        },
+    );
+    let mut costs = benilla_ui::script::RepairCosts::default();
+    costs.equipped.insert(16, 40);
+    costs.bags.insert((0, 1), 57);
+    s.set_repair_costs(costs);
+    s.set_merchant(Some(benilla_ui::script::MerchantState {
+        can_repair: true,
+        ..Default::default()
+    }));
+    // `MERCHANT_SHOW` opens the backpack.
+    s.fire_event("MERCHANT_SHOW", vec![]);
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
+    s.take_sounds();
+    let repair_line = |s: &UiScript| -> Option<String> {
+        s.eval::<bool>(
+            "for i = 1, GameTooltip:NumLines() do \
+               if getglobal('GameTooltipTextLeft' .. i):GetText() == REPAIR_COST then \
+                 return true end \
+             end return false",
+        )
+        .unwrap()
+        .then(|| {
+            s.eval::<String>("return GameTooltipMoneyFrameCopperButton:GetText()")
+                .unwrap()
+        })
+    };
+    let bag = bag_slot_button(&s, 0, 1);
+
+    hover(&mut s, &bag);
+    assert_eq!(repair_line(&s), None, "a bag hover out of repair mode");
+    hover(&mut s, "CharacterMainHandSlot");
+    assert_eq!(repair_line(&s), None, "a doll hover out of repair mode");
+
+    s.run("ShowRepairCursor()").unwrap();
+    hover(&mut s, &bag);
+    assert_eq!(
+        repair_line(&s).as_deref(),
+        Some("57"),
+        "the bag slot's cost"
+    );
+    hover(&mut s, "CharacterMainHandSlot");
+    assert_eq!(
+        repair_line(&s).as_deref(),
+        Some("40"),
+        "the worn sword's cost"
+    );
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
 }
 

@@ -16,6 +16,8 @@ use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 
 mod cast_fail;
 mod drain;
+// A `UseAction` press, applied in call order by `crate::script_calls`.
+pub(crate) use drain::{attack_nearest_probe, use_action, ActionPress, AttackPress, UseOutcome};
 #[cfg(test)]
 mod drain_tests;
 pub(crate) mod drop_item;
@@ -31,7 +33,8 @@ mod weapon_icon;
 
 /// Every feed that pushes cooldown triples runs `.before` this set: [`state::feed_action_state`]
 /// fires the cooldown events synchronously, so a triple pushed later goes unread until the next
-/// cooldown change.
+/// cooldown change. The pet list's flush, `ui_pet::bar::fire_pet_cooldown_events`, runs `.after`
+/// it on the same rule.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CooldownEvents;
 
@@ -97,17 +100,33 @@ pub(crate) struct Spells {
 }
 
 impl Spells {
-    /// The cast time in ms (`GetCastTime 0x6e3340`), level-scaled from the `CastingTimeIndex`
-    /// row; a missing row reads 0. Spell-mod op `0xa` is not applied, so a talent-shortened cast
-    /// shows its base length.
+    /// The cast time in ms as `GetCastTime 0x6e3340` returns it for argument 1, the tooltip's
+    /// (`52eb4b`): the level-scaled `CastingTimeIndex` row, then spell-mod op 10 (`0x6e33b7`),
+    /// with no clamp, so row 18's negative time survives. A missing row returns 0 before the
+    /// modifier (`0x6e338a`). The cast-speed multiply (`0x6e3422`) is not applied.
+    pub(crate) fn cast_time_unclamped_ms(
+        &self,
+        def: &benilla_formats::SpellDisplay,
+        caster_level: u32,
+        mods: &crate::spell::SpellModifiers,
+    ) -> i32 {
+        self.cast_times
+            .get(def.casting_time_index)
+            .map_or(0, |row| {
+                let resolved = row.resolved_ms(caster_level, def.base_level);
+                mods.apply(def, crate::spell::OP_CAST_TIME, resolved)
+            })
+    }
+
+    /// [`Self::cast_time_unclamped_ms`] for argument 0, the cast validator's (`0x609e16`): a
+    /// result at or below zero reads 0 (`0x6e3461`-`0x6e3470`).
     pub(crate) fn cast_time_ms(
         &self,
         def: &benilla_formats::SpellDisplay,
         caster_level: u32,
+        mods: &crate::spell::SpellModifiers,
     ) -> u32 {
-        self.cast_times
-            .get(def.casting_time_index)
-            .map_or(0, |row| row.resolved_ms(caster_level, def.base_level))
+        self.cast_time_unclamped_ms(def, caster_level, mods).max(0) as u32
     }
 }
 
@@ -240,9 +259,6 @@ impl Plugin for UiActionPlugin {
                         .in_set(CooldownEvents)
                         .after(feed::feed_actions),
                     drain::drain_action_sets.after(UiInput),
-                    drain::drain_action_uses.after(UiInput),
-                    // The ATTACKTARGET binding, after the dispatch wrote this frame's key fires.
-                    drain::attack_target_binding.after(UiInput),
                     // The target chain queues the openers earlier in the frame.
                     drain::drain_go_openers.after(UiInput),
                     // The latches must be current before the target chain's cursor reads them.

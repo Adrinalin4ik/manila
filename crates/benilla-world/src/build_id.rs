@@ -1,13 +1,15 @@
 //! Which build is running: the release and the commit the binary was built from, stamped at
 //! compile time by the launcher shims' build script (`benilla-buildstamp`) and passed to `run` as
-//! the [`BuildId`] resource. It shows in the startup log line ([`banner`]), in crash reports and in
-//! the debug panel's footer.
+//! the [`BuildId`] resource, and whether a crate on top of benilla extended it. It shows in the
+//! startup log line ([`banner`]), in crash reports and in the debug panel's footer. A dev build's
+//! stamp also names the launcher's project folder, which the entry point hands to
+//! `benilla_formats::set_project_folder`.
 
 use bevy::prelude::*;
 
 /// The launcher shim's compile-time stamp. The git fields are empty when the build had no
 /// checkout or no `git` on `PATH`, which [`BuildId::summary`] reports as an unknown commit.
-#[derive(Resource, Clone, Copy)]
+#[derive(Resource, Clone, Copy, Default)]
 pub struct BuildId {
     /// The workspace version from `Cargo.toml`, which every release bumps.
     pub version: &'static str,
@@ -22,6 +24,12 @@ pub struct BuildId {
     pub date: &'static str,
     /// The cargo profile directory: `debug`, `release` or `ship`.
     pub profile: &'static str,
+    /// The launcher's project folder in a dev build, where its `WoW` link, `benilla-config/` and
+    /// `.probe-identity` live; empty in a player build, which carries no source path.
+    pub project_dir: &'static str,
+    /// Whether a crate on top of benilla added plugins through `benilla_app::run_with`. The entry
+    /// point sets it, so a launcher leaves it to `..Default::default()`.
+    pub extended: bool,
 }
 
 impl BuildId {
@@ -35,9 +43,10 @@ impl BuildId {
         }
     }
 
-    /// The one-line build id: release, short sha, commit date and profile.
+    /// The one-line build id: release, short sha, commit date and profile, then `extended` when a
+    /// crate on top added plugins, so a report from that client reads apart from stock.
     pub fn summary(&self) -> String {
-        if self.short.is_empty() {
+        let stamp = if self.short.is_empty() {
             format!(
                 "{} · unknown commit (built without a git checkout) · {}",
                 self.release(),
@@ -51,6 +60,11 @@ impl BuildId {
                 self.date,
                 self.profile
             )
+        };
+        if self.extended {
+            stamp + " · extended"
+        } else {
+            stamp
         }
     }
 }
@@ -82,6 +96,8 @@ mod tests {
             short,
             date: "2026-09-27",
             profile: "release",
+            project_dir: "",
+            extended: false,
         }
     }
 
@@ -125,6 +141,28 @@ mod tests {
         assert_eq!(
             b.summary(),
             "0.2.0 · unknown commit (built without a git checkout) · release"
+        );
+    }
+
+    #[test]
+    fn an_extended_client_says_so_and_stock_reads_as_before() {
+        let stock = build("0.2.0", "v0.2.0-12-gb17be27", "b17be27");
+        assert_eq!(stock.summary(), "0.2.0+12 · b17be27 · 2026-09-27 · release");
+        assert_eq!(
+            BuildId {
+                extended: true,
+                ..stock
+            }
+            .summary(),
+            "0.2.0+12 · b17be27 · 2026-09-27 · release · extended"
+        );
+        assert_eq!(
+            BuildId {
+                extended: true,
+                ..build("0.2.0", "", "")
+            }
+            .summary(),
+            "0.2.0 · unknown commit (built without a git checkout) · release · extended"
         );
     }
 }

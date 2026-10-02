@@ -80,7 +80,7 @@ fn hermetic_addon(
     (tmp, capture, benilla_home)
 }
 
-/// The world after `Startup` ([`super::setup_script`]): a VM with only the font registry.
+/// The world after `Startup` ([`super::setup_script`]): a boot VM, no frames.
 fn booted_world() -> World {
     let mut world = World::new();
     world.init_resource::<super::AddOnIdentity>();
@@ -270,6 +270,50 @@ fn the_login_arms_the_world_latch_and_the_logout_spends_it() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// `CGGameUI::InitializeGame` flags `realmList`, `realmName` and `scriptMemory` read-only for the
+/// world session (`0x48f566`-`0x48f584`) and `ShutdownGame` clears them (`0x491240`): an
+/// in-game `SetCVar` of one raises, through a reload too, and the character screen's does not.
+#[test]
+fn the_realm_cvars_are_read_only_to_lua_only_in_the_world() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("readonly");
+    let mut world = booted_world();
+    world.init_resource::<super::LeavingWorldArmed>();
+    let set = |world: &World, chunk: &str| {
+        let s = world.non_send_resource::<benilla_ui::script::UiScript>();
+        // A bare test world has no registry to seed the VM from.
+        s.register_cvars(crate::cvars::registered_pairs());
+        s.run(chunk).map_err(|e| e.to_string())
+    };
+
+    assert_eq!(
+        set(&world, "SetCVar(\"realmList\", \"glue.example.org\")"),
+        Ok(()),
+        "the character screen's VM may write it"
+    );
+
+    log_in_as(&mut world, "Onehunter", 1);
+    for name in ["realmList", "realmName"] {
+        let err = set(&world, &format!("SetCVar({name:?}, \"x\")")).expect_err(name);
+        assert!(err.contains(&format!("\"{name}\" is read-only")), "{err}");
+    }
+    assert_eq!(set(&world, "SetCVar(\"MusicVolume\", 0.5)"), Ok(()));
+
+    reload(&mut world, crate::char_select::ClientState::InWorld);
+    assert!(
+        set(&world, "SetCVar(\"realmList\", \"x\")").is_err(),
+        "a reload keeps the flag, as the reference's rows keep theirs"
+    );
+
+    super::end_ui_session(&mut world);
+    assert_eq!(set(&world, "SetCVar(\"realmList\", \"x\")"), Ok(()));
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// The reference's one guard in the shutdown tail: `0x490bd0` tests the active player's GUID pair
 /// (`0x490bee call 0x468550`, `0x490bf3 or eax,edx`) and with none jumps (`0x490bf5 je 0x490c25`)
 /// past only the `PLAYER_LEAVING_WORLD` fire, `0x490c20 call 0x490a80`; in-world roots fire both.
@@ -361,7 +405,7 @@ fn logging_out_leaves_no_in_game_frames_behind() {
         world
             .get_non_send_resource::<benilla_ui::script::UiScript>()
             .is_some(),
-        "a boot VM stays: the character screen's text still bakes off the shared font registry"
+        "a boot VM stays, for the feeds that resolve lines outside the world"
     );
 
     drop(world);
@@ -821,8 +865,9 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// An addon that fails to load without raising (a `.toc` naming a file the package lacks) is kept
-/// in the log, readable from Lua by the error window, and announced in chat.
+/// An addon that fails to load without raising (a `.toc` naming a file the package lacks) reaches
+/// no Lua error handler, so the `/errors` log (which collects off the handler) does not hold it:
+/// the engine's record keeps it, and `Logs\FrameXML.log` names it as the reference's does.
 #[test]
 fn an_addon_that_fails_to_load_without_raising_is_readable_in_the_error_log() {
     benilla_formats::wow_data_or_skip!();
@@ -835,7 +880,7 @@ fn an_addon_that_fails_to_load_without_raising_is_readable_in_the_error_log() {
     std::fs::create_dir_all(&dir).expect("addon dir");
     std::fs::write(
         dir.join("AaMissing.toc"),
-        "## Interface: 11200\nBossnames\\BossNames.xml\n",
+        "## Interface: 11200\nBossnames\\BossNames.xml\nDatabase\\hash.lua\n",
     )
     .expect("toc");
     // …and no such file is written.
@@ -870,57 +915,20 @@ fn an_addon_that_fails_to_load_without_raising_is_readable_in_the_error_log() {
         row.message
     );
 
-    // 2. Readable from Lua through the window's own reads.
-    let count: i64 = script
-        .eval("local shown = BenillaGetNumScriptErrors() return shown")
-        .expect("BenillaGetNumScriptErrors is installed");
-    assert!(count >= 1, "the window's own read sees it");
-    let seen: String = script
-        .eval(
-            "local text = '' \
-             for i = 1, BenillaGetNumScriptErrors() do \
-                local seq, kind, message = BenillaGetScriptErrorInfo(i) \
-                if kind == 'load' then text = message end \
-             end \
-             return text",
-        )
-        .expect("BenillaGetScriptErrorInfo is installed");
-    assert!(
-        seen.contains("AaMissing"),
-        "the window walks the log and finds it: {seen:?}"
-    );
-
-    assert!(
-        script
-            .eval::<bool>("return BenillaScriptLogFrame ~= nil")
-            .expect("eval"),
-        "ScriptLogFrame.xml loaded and built the window"
-    );
-
-    // The repaint runs over a real row, so a nil global anywhere on its path raises here.
+    // 2. Not in the `/errors` log: it never reached the error handler.
     script
         .eval::<()>("BenillaScriptLog_Update() return nil")
-        .expect("the window repaints over a real log without raising");
-    // Some row shows it, not necessarily row 1: the log also holds the warnings a world entry
-    // raises before any addon loads.
-    let row_labels: Vec<String> = (1..=13)
-        .filter_map(|i| {
-            script
-                .eval::<Option<String>>(&format!("return BenillaScriptLogRow{i}Label:GetText()"))
-                .expect("eval")
-        })
-        .collect();
+        .expect("the window repaints without raising");
     assert!(
-        row_labels.iter().any(|l| l.contains("AaMissing")),
-        "a row shows the failure, trimmed to the row's width: {row_labels:?}"
-    );
-    let summary: String = script
-        .eval::<Option<String>>("return BenillaScriptLogSummary:GetText()")
-        .expect("eval")
-        .unwrap_or_default();
-    assert!(
-        summary.contains("problem"),
-        "the summary line counted them: {summary:?}"
+        !script
+            .eval::<bool>(
+                "for _, row in ipairs(BenillaScriptLog.rows) do \
+                    if strfind(row.message, 'AaMissing', 1, 1) then return true end \
+                 end \
+                 return false"
+            )
+            .expect("eval"),
+        "a failure no handler saw is not in the handler-fed log"
     );
 
     // 3. No dialog, since nothing raised: the reference answers an absent or unparseable file
@@ -933,12 +941,29 @@ fn an_addon_that_fails_to_load_without_raising_is_readable_in_the_error_log() {
          through `_ERRORMESSAGE` and through every addon handler that replaces it"
     );
 
-    // 4. Deviation: a chat line tells the player to look, where the reference stays silent,
-    // because an unannounced log goes unread.
+    // 4. Nothing in chat, and the reference's lines in `benilla-config/Logs/FrameXML.log`, each
+    // stamped `M/D HH:MM:SS.mmm` and ended `\r\n`: the add-on's banner, its toc's, then each
+    // miss by its arm (`0x6edaa0`, `0x704bc0`). The clean core and probe add nothing.
+    let lines = world.resource::<crate::ui_chat::ChatLog>().pending_lines();
+    assert!(
+        !lines.iter().any(|l| l.contains("AaMissing")),
+        "no chat line names the failure: {lines:?}"
+    );
+    let log = std::fs::read_to_string(tmp.join("benilla-config/Logs/FrameXML.log"))
+        .expect("the load wrote FrameXML.log");
+    let texts: Vec<&str> = log
+        .split_terminator("\r\n")
+        .map(|l| l.split_once("  ").expect("a stamp, then two spaces").1)
+        .collect();
     assert_eq!(
-        world.resource::<crate::ui_chat::ChatLog>().pending_len(),
-        1,
-        "world entry queued the 'N addon load failures — type /errors' line"
+        texts,
+        [
+            "Loading add-on AaMissing",
+            "** Loading table of contents Interface\\AddOns\\AaMissing\\AaMissing.toc",
+            "Couldn't open Interface\\AddOns\\AaMissing\\Bossnames\\BossNames.xml",
+            "Error loading Interface\\AddOns\\AaMissing\\Database\\hash.lua",
+        ],
+        "{log}"
     );
 
     drop(world);
@@ -1179,10 +1204,7 @@ fn a_clean_world_entry_raises_only_the_warnings_we_have_named() {
 
     // Deviation: the `OnInputLanguageChanged` script slot (`ChatFrame.xml:121`, the IME language
     // indicator) is refused, because benilla has no IME to fire it.
-    // Deviation: `gxRefresh`, read by stock `OptionsFrameRefreshDropDown_OnLoad`
-    // (`OptionsFrame.lua:300`), is not registered, because no target offers the exclusive mode-set
-    // a refresh rate needs; `GetRefreshRates` answers the reference's no-rates sentinel.
-    const KNOWN: [&str; 2] = ["OnInputLanguageChanged", "unknown CVar 'gxRefresh'"];
+    const KNOWN: [&str; 1] = ["OnInputLanguageChanged"];
 
     let unexpected: Vec<String> = script
         .diagnostics()
@@ -1300,8 +1322,8 @@ MapProbeZones = table.getn({ GetMapZones(1) })
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// Stock `ActionButton_OnLoad` paints its hotkey from `GetBindingKey` at load, and an addon that
-/// rebinds a stock command at file scope needs the command to exist.
+/// Stock `ActionButton_OnLoad` paints its hotkey from `GetBindingKey` at load, so the key table,
+/// the install's defaults, is seeded before any file runs; an addon's rebind takes at file scope.
 #[test]
 fn an_addon_reads_the_keybinding_table_at_file_scope() {
     const TOC: &str = "\
@@ -1324,13 +1346,14 @@ BindProbeSet = SetBinding(\"J\", \"TOGGLEWORLDMAP\")
     let script = world
         .get_non_send_resource::<benilla_ui::script::UiScript>()
         .expect("VM");
+    // The defaults are the install's `WTF\DefaultBindings.wtf`: none without one.
     assert_eq!(
         script
             .eval::<Option<String>>("BindProbeKey")
             .ok()
             .flatten()
             .as_deref(),
-        Some("M"),
+        benilla_formats::wow_data().map(|_| "M"),
         "an addon's file scope must read the stock binding — `M` is TOGGLEWORLDMAP's own default"
     );
     assert_eq!(

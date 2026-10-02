@@ -23,6 +23,7 @@ use benilla_assets::AssetSet;
 use benilla_world::interact::{WorldClick, WorldRightClick};
 use benilla_world::schedule::WorldStage;
 
+mod approach;
 mod arc;
 mod net;
 // Writes the frame onto the body we drive: pose, `MovementState`, the counter-twist gap.
@@ -30,6 +31,7 @@ mod body_pose;
 pub(crate) mod camera;
 mod camera_channel;
 pub(crate) mod camera_dynamics;
+pub(crate) mod camera_zoom;
 mod controller;
 mod world_focus;
 // The remembered camera pose, inside `player/` to read the rig's `pub(super)` fields.
@@ -70,13 +72,17 @@ pub(crate) use camera::apply_self_model_fade;
 use controller::control;
 // The private camera and `state` items are re-imported for the modules beside this one, which
 // name them `super::X`.
-use camera::{
-    apply_zoom_scroll, model_pivot_height, run_look_session, FlyCam, LookButton, CAM_DIST_DEFAULT,
-};
 pub(crate) use camera::{head_height, CameraControl, CameraPivot};
+use camera::{model_pivot_height, run_look_session, FlyCam, LookButton};
+use camera_zoom::{apply_zoom_scroll, CAM_DIST_DEFAULT};
 // `/follow`: chat sends the request, `crate::target` resolves the subject into the state, and
 // `follow` owns the motion.
 pub(crate) use follow::{FollowRequest, FollowState};
+// Click to Move: `crate::target`'s dispatchers start it and run the verb it owes on arrival.
+pub(crate) use approach::{
+    can_auto_interact, Approach, ApproachVerb, AutoMove, Refused, Subject, RANGE_STOP_FRACTION,
+    TALK_STOP,
+};
 use state::{
     MoveSpeed, PlayerRide, AIR_NUDGE_SPEED, FALL_FAR_DROP, FALL_FAR_TIME, FOOT_CONE_HEIGHT,
     GROUND_COS, GROUND_PROBE, JUMP_SPEED, LAND_PROBE, MOUSELOOK_PITCH_CLAMP, RUN_BACK_RATIO,
@@ -205,6 +211,7 @@ impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
         follow::plugin(app);
+        approach::plugin(app);
         camera_saved::plugin(app);
         camera_view::plugin(app);
         // The stream focus is published after `control`'s teleport snap and before the stream
@@ -228,7 +235,7 @@ impl Plugin for PlayerPlugin {
         app.add_observer(camera::on_cvar);
         app.add_observer(camera_dynamics::on_cvar);
         app.init_resource::<camera::LookConfig>();
-        app.init_resource::<camera::ZoomLimit>();
+        app.init_resource::<camera_zoom::ZoomLimit>();
         app.init_resource::<camera::FollowConfig>();
         app.init_resource::<camera_dynamics::CameraOptions>();
         // Far sight resolves `PLAYER_FARSIGHT` to a pose before `control` seats the camera: a
@@ -343,11 +350,12 @@ impl Plugin for PlayerPlugin {
                 .run_if(not(resource_exists::<crate::run_mode::CaptureMode>))
                 .in_set(crate::char_select::InWorldGated),
         )
-        // `/follow` steers before `control`, so the player's own turn input lands after it and
-        // wins over the follow's steering.
+        // `/follow` and Click to Move steer before `control`, so the player's own turn input
+        // lands after them and wins over their steering.
         .add_systems(
             Update,
-            follow::steer_follow
+            (follow::steer_follow, approach::steer_approach)
+                .chain()
                 .in_set(WorldStage::Input)
                 .before(control)
                 .in_set(crate::char_select::InWorldGated),

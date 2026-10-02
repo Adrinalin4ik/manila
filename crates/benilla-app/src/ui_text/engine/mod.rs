@@ -654,6 +654,18 @@ pub(super) fn test_engine(dpi: f32) -> Option<TextEngine> {
 pub(super) const TEST_FACES: &[&str] = CLIENT_FONTS;
 
 #[cfg(test)]
+impl UiFontAtlas {
+    /// [`test_engine`] as the app holds it, for a host test that draws text; `None` as there.
+    pub(crate) fn for_test(dpi: f32) -> Option<Self> {
+        Some(UiFontAtlas {
+            engine: Arc::new(Mutex::new(test_engine(dpi)?)),
+            generation: 0,
+            ellipsis: crate::ui_text::EllipsisMemo::default(),
+        })
+    }
+}
+
+#[cfg(test)]
 mod differential_tests {
     use super::*;
 
@@ -816,7 +828,7 @@ mod ppem_tests {
         assert_eq!(e.ppem(12.0), 12, "an exact size is itself");
         assert_eq!(e.ppem(12.48), 12, "…and a fractional one rounds, not snaps");
         assert_eq!(e.ppem(12.5), 13);
-        // `ERA_WINDOW_SCALE` (0.78), which the Options window and the Game Menu wear.
+        // `BENILLA_ERA_WINDOW_SCALE` (0.78), which the Options window and the Game Menu wear.
         assert_eq!(e.ppem(16.0 * 0.78), 12);
         e.dpi = 2.0;
         assert_eq!(e.ppem(12.0), 24);

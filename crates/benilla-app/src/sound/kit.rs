@@ -145,6 +145,10 @@ pub(super) enum Latch {
     /// `0x62f880` has no such gate. It ends with the sound or when the emitter leaves
     /// `DistanceCutoff` (`0x457a50`).
     ObjectSound,
+    /// The unit's emote voice, `[unit+0xb28]` (`0x623c10`): it blocks nothing, a new emote voice
+    /// stops the sounding one (`0x623c68`-`0x623c70`, `Sound::Stop 0x7a5700`). Shared by the
+    /// text-emote voice and the `$CSD` anim event.
+    EmoteVoice,
 }
 
 /// The class-bark chance roll (`0x623520`): `r = MulHi32(101, rand32)` in 0..=100, pass iff
@@ -287,9 +291,9 @@ fn claim_voice(out: &mut SoundOutput, candidate_amp: f32) -> bool {
 
 /// Can the voice cap steal this channel? Never a loop, whose loss leaves a hole that stays open,
 /// and never a latch holder: its liveness is the unit's latch, so stealing it would let the unit
-/// fire again at once.
+/// fire again at once. The emote voice holds no latch, only a slot the next one stops.
 fn stealable(looping: bool, latch: Latch) -> bool {
-    !looping && latch == Latch::None
+    !looping && matches!(latch, Latch::None | Latch::EmoteVoice)
 }
 
 /// What [`claim_voice`] decided.
@@ -591,6 +595,25 @@ pub(super) fn occupies_voice_slot(source: Option<Entity>, latch: Latch, unit: En
     source == Some(unit) && matches!(latch, Latch::Voice(_))
 }
 
+/// Stop every emote voice of `unit` but the newest channel (`0x623c68`-`0x623c70`).
+pub(super) fn stop_older_emote_voices(out: &mut SoundOutput, unit: Entity) {
+    let newest = out.channels.len().saturating_sub(1);
+    let mut i = 0;
+    out.channels.retain_mut(|c| {
+        let stop = i != newest && occupies_emote_slot(c.source, c.latch, unit);
+        i += 1;
+        if stop {
+            c.handle.stop(mixer::declick());
+        }
+        !stop
+    });
+}
+
+/// Does this channel hold `unit`'s emote-voice slot (`[unit+0xb28]`)?
+pub(super) fn occupies_emote_slot(source: Option<Entity>, latch: Latch, unit: Entity) -> bool {
+    source == Some(unit) && latch == Latch::EmoteVoice
+}
+
 /// Does this channel hold `unit`'s greeting latch (`[unit+0xb1c]`)?
 pub(super) fn occupies_greeting_latch(source: Option<Entity>, latch: Latch, unit: Entity) -> bool {
     source == Some(unit) && latch == Latch::Greeting
@@ -732,10 +755,14 @@ fn near_field(d_sq: f32, cutoff: f32) -> f32 {
 }
 
 impl SoundKits {
-    /// A kit id by its `PlaySoundByName` key (the `0x458030` name registry), such as the ghost
-    /// tracks "Ghost" and "GhostMusic".
-    pub(crate) fn id_by_name(&self, name: &str) -> Option<u32> {
-        self.catalog.by_name(name).map(|k| k.id)
+    /// The ambience kit a ghost hears (`[0xb06d48]`, resolved at init by `0x4609b0`).
+    pub(super) fn ghost_bed(&self) -> Option<u32> {
+        self.catalog.ghost_bed()
+    }
+
+    /// The ambience kit a submerged listener hears (`[0xb06d4c]`, resolved at init by `0x4609b0`).
+    pub(super) fn underwater_bed(&self) -> Option<u32> {
+        self.catalog.underwater_bed()
     }
 
     pub(crate) fn new(catalog: SoundKitCatalog) -> Self {
@@ -1236,6 +1263,10 @@ mod tests {
         assert!(
             !stealable(false, Latch::Voice(0)),
             "a bark holds [unit+0xb20] — stealing it lets the unit re-bark at once"
+        );
+        assert!(
+            stealable(false, Latch::EmoteVoice),
+            "an emote voice blocks nothing, so losing it re-fires nothing"
         );
         assert!(
             !stealable(true, Latch::None),

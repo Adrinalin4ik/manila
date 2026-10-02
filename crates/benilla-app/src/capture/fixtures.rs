@@ -100,7 +100,6 @@ pub(super) fn seed_ui_fixture(
     mut names: ResMut<crate::names::NameCache>,
     icons: Option<Res<crate::entities::ItemDisplays>>,
     mut script: Option<NonSendMut<benilla_ui::script::UiScript>>,
-    mut vplates: ResMut<crate::vplates::VPlateMode>,
     mut selection: ResMut<crate::target::Selection>,
     mut player: ResMut<crate::player::Player>,
     // A nested tuple, one param under Bevy's 16-param cap.
@@ -1003,7 +1002,8 @@ pub(super) fn seed_ui_fixture(
                     Visibility::default(),
                 ))
                 .id();
-            vplates.enemies = true;
+            // As the V binding does, so FrameXML's replay at `PLAYER_ENTERING_WORLD` agrees.
+            set_enemy_plates(script.as_deref(), true);
             // The wolf is the target, so its plate draws lit with the target ring.
             selection.target = Some(wolf);
             selection.guid = Some(WOLF_GUID);
@@ -1095,17 +1095,17 @@ pub(super) fn seed_ui_fixture(
             }
         }
         UiFixture::KeyBindings => {
-            let Some(mut script) = script else {
+            let Some(script) = script else {
                 return;
             };
-            // The Keybindings page: the real command registry and CVar set first, then the live
-            // open path, with Movement expanded to show a header row and the default bindings.
+            // The Keybindings page over the commands the load registered: the real CVar set
+            // first, then the live open path, with Movement expanded to show a header row and the
+            // default bindings.
             script.register_cvars(crate::cvars::registered_pairs());
-            script.register_bindings(&crate::bindings::registry_commands());
             if let Err(e) = script.run(
                 "ShowUIPanel(BenillaOptionsFrame); \
                  BenillaOptionsFrameCategoryListRowKeybindings:Click(); \
-                 KeyBindings_ExpandSection(1, true); KeyBindingsPage_Update()",
+                 BenillaKeyBindings_ExpandSection(1, true); BenillaKeyBindingsPage_Update()",
             ) {
                 warn!("capture: ui-keybindings seed failed: {e}");
             }
@@ -1364,7 +1364,7 @@ pub(super) fn seed_ui_fixture(
                 Visibility::default(),
             ));
             // A plated unit draws no floating name, so enemy plates go off.
-            vplates.enemies = false;
+            set_enemy_plates(script.as_deref(), false);
         }
         // The lighting matrix: one spawn with a streamed entity's component set, anonymous and
         // with plates off, so no glyph rides over the body.
@@ -1408,7 +1408,7 @@ pub(super) fn seed_ui_fixture(
                     ));
                 }
             }
-            vplates.enemies = false;
+            set_enemy_plates(script.as_deref(), false);
         }
     }
 }
@@ -1429,9 +1429,7 @@ fn seed_cooldown_filmstrip(
 ) {
     // The clock first: `set_container` stores each triple against it, and
     // `GetContainerItemCooldown`'s expiry guard reads it.
-    if let Err(e) = script.run(&format!("__benilla_now = {COOLDOWN_NOW_S}")) {
-        warn!("capture: ui-cooldown failed to pin the session clock: {e}");
-    }
+    script.set_now(COOLDOWN_NOW_S);
     const DISP_STONE: u32 = 6418;
     let texture = icons
         .and_then(|i| i.catalog.get(DISP_STONE))
@@ -1745,5 +1743,18 @@ pub(super) fn seed_perf_crowd(
             },
             Visibility::default(),
         ));
+    }
+}
+
+/// Turn enemy plates on or off as the V binding does, the verb and FrameXML's global together,
+/// so FrameXML's own replay agrees.
+fn set_enemy_plates(script: Option<&benilla_ui::script::UiScript>, on: bool) {
+    let lua = if on {
+        "NAMEPLATES_ON = 1; ShowNameplates()"
+    } else {
+        "NAMEPLATES_ON = nil; HideNameplates()"
+    };
+    if let Some(Err(e)) = script.map(|s| s.run(lua)) {
+        warn!("nameplates: {e}");
     }
 }

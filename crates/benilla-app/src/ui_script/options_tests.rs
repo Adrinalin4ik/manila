@@ -10,44 +10,42 @@ fn harness() -> UiScript {
 
 /// Load the manifest slice onto `s`, so a page test can seed CVars before the XML loads, as the
 /// app does. GameTooltip.xml precedes UIDropDownMenu.xml for the kit's `TOOLTIP_DEFAULT_COLOR`.
-fn harness_on(mut s: UiScript) -> UiScript {
+fn harness_on(s: UiScript) -> UiScript {
+    harness_with(s, &[])
+}
+
+/// [`harness_on`] with a page's `definers` merged in: the files its rows read, each loaded once
+/// and in the production order.
+fn harness_with(mut s: UiScript, definers: &[&str]) -> UiScript {
     s.set_screen_size(1024.0, 768.0);
-    // Each file loads once: a page harness may have loaded it already, and a second load of the
-    // money kit's frames breaks `MoneyFrame_Update`, which writes through `getglobal(name)`.
-    let loaded = |s: &UiScript, file: &str| -> bool {
-        s.eval::<bool>(&format!(
-            "return (BENILLA_TEST_LOADED or {{}})[{file:?}] == true"
-        ))
-        .unwrap_or(false)
-    };
-    for file in [
+    const WINDOW: &[&str] = &[
+        "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\Fonts.xml",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
         // Before every window that names `parent="UIParent"`, which resolves at load.
         r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        r"Interface\FrameXML\UIPanelTemplates.lua",
-        r"Interface\FrameXML\UIPanelTemplates.xml",
-        "Interface\\FrameXML\\GlobalStrings.lua",
-        "Interface\\FrameXML\\BasicControls.xml",
-        "Interface\\FrameXML\\LocaleProperties.lua",
-        "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        // Before our files, as the core loads before the layer: it sources UIParent.lua again.
+        r"Interface\FrameXML\GameMenuFrame.xml",
         // The stock options kit, hidden: `UIOptionsFrame_Init` assigns the option globals our
         // rows capture at OnLoad, and these declare the tables the Graphics rows and census read.
         r"Interface\FrameXML\OptionsFrameTemplates.xml",
         r"Interface\FrameXML\OptionsFrame.lua",
         r"Interface\FrameXML\UIOptionsFrame.xml",
+        "Interface\\FrameXML\\StaticPopup.xml",
         "ScrollTemplates.xml", // the page scroll and the Keybindings list
         "KeyBindingsPage.xml", // the Keybindings page's templates and script
         "OptionsFrame.xml",
-        "GameMenuFrame.xml",
-    ] {
+        "GameMenuAdapters.xml",
+    ];
+    for file in super::test_ui::production_order(&[definers, WINDOW]) {
         // Our window loads strict: a missing template there fails instead of only warning.
-        if loaded(&s, file) {
-            continue;
-        }
         if file == "OptionsFrame.xml" {
             super::test_ui::load_ui_strict(&s, file);
         } else {
@@ -175,7 +173,7 @@ fn the_selected_row_wears_the_gold_wash_and_hover_runs_blue() {
     benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     // Scale 1, so rects and the pointer share coordinates; at 1024x768 the fit clamp stays above 1.
-    s.run("ERA_WINDOW_SCALE = 1").unwrap();
+    s.run("BENILLA_ERA_WINDOW_SCALE = 1").unwrap();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
     assert_eq!(
@@ -277,7 +275,7 @@ fn the_selected_row_wears_the_gold_wash_and_hover_runs_blue() {
 fn the_ground_dim_draws_over_the_tile_and_clear_of_the_rope() {
     benilla_formats::wow_data_or_skip!();
     let mut s = harness();
-    s.run("ERA_WINDOW_SCALE = 1").unwrap();
+    s.run("BENILLA_ERA_WINDOW_SCALE = 1").unwrap();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.resolve();
 
@@ -516,7 +514,7 @@ fn a_track_press_seats_the_thumb_and_keeps_dragging() {
     benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.set_cvar_host("MasterVolume", "0.1");
-    s.run("ERA_WINDOW_SCALE = 1").unwrap(); // pointer and rects share coordinates
+    s.run("BENILLA_ERA_WINDOW_SCALE = 1").unwrap(); // pointer and rects share coordinates
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
         .unwrap();
@@ -629,20 +627,8 @@ fn audio_harness() -> UiScript {
 fn combat_harness() -> UiScript {
     let mut s = audio_harness();
     s.set_screen_size(1024.0, 768.0);
-    load_definers(&s, &[r"Interface\FrameXML\UIParent.xml"]);
     super::test_ui::seat_chain_addon(&mut s, "Blizzard_CombatText");
     harness_on(s)
-}
-
-/// Load `files` ahead of the window, in order, each recorded so `harness_on` loads it only once.
-fn load_definers(s: &UiScript, files: &[&str]) {
-    for file in files {
-        super::test_ui::load_ui(s, file);
-        s.run(&format!(
-            "BENILLA_TEST_LOADED = BENILLA_TEST_LOADED or {{}} BENILLA_TEST_LOADED[{file:?}] = true"
-        ))
-        .unwrap();
-    }
 }
 
 /// The Interface page's harness, with its rows' consumers loaded ahead of the window: the unit
@@ -650,62 +636,56 @@ fn load_definers(s: &UiScript, files: &[&str]) {
 fn interface_harness() -> UiScript {
     let mut s = audio_harness();
     s.set_screen_size(1024.0, 768.0);
-    load_definers(
-        &s,
+    harness_with(
+        s,
         &[
+            "Interface\\FrameXML\\GlobalStrings.lua",
             "Interface\\FrameXML\\Fonts.xml",
+            "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua calls at load
+            "Interface\\FrameXML\\LocaleProperties.lua",
+            r"Interface\FrameXML\UIParent.xml",
             r"Interface\FrameXML\MoneyFrame.lua",
             r"Interface\FrameXML\MoneyFrame.xml",
-            "Interface\\FrameXML\\GlobalStrings.lua",
-            r"Interface\FrameXML\UIParent.xml",
-            r"Interface\FrameXML\UIPanelTemplates.lua",
-            r"Interface\FrameXML\UIPanelTemplates.xml",
-            "Interface\\FrameXML\\BasicControls.xml",
-            "Interface\\FrameXML\\LocaleProperties.lua",
-            "Interface\\FrameXML\\StaticPopup.xml",
             // The unit frames and the kits ahead of them: their dropdowns initialize at load, and
             // the dropdown kit reads `GameTooltip`'s `TOOLTIP_DEFAULT_COLOR`.
             "Interface\\FrameXML\\GameTooltip.xml",
             "Interface\\FrameXML\\UIDropDownMenu.xml",
-            "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua calls at load
-            "Interface\\FrameXML\\UnitPopup.xml",
+            r"Interface\FrameXML\UIPanelTemplates.lua",
+            r"Interface\FrameXML\UIPanelTemplates.xml",
+            r"Interface\FrameXML\OptionsFrameTemplates.xml",
+            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+            "Interface\\FrameXML\\StaticPopup.xml",
             "Interface\\FrameXML\\TextStatusBar.lua",
             "Interface\\FrameXML\\TextStatusBar.xml",
+            "Interface\\FrameXML\\MainMenuBar.xml",
+            r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
+            "Interface\\FrameXML\\Cooldown.xml",
+            "Interface\\FrameXML\\ActionButtonTemplate.xml",
+            "Interface\\FrameXML\\ActionBarFrame.xml",
             "Interface\\FrameXML\\BuffFrame.xml",
-            "Interface\\FrameXML\\UnitFrame.xml",
             "Interface\\FrameXML\\CombatFeedback.xml",
+            "Interface\\FrameXML\\UnitPopup.xml",
+            "Interface\\FrameXML\\UnitFrame.xml",
             "Interface\\FrameXML\\PlayerFrame.xml",
             "Interface\\FrameXML\\PartyFrame.xml",
             "Interface\\FrameXML\\TargetFrame.xml",
             "Interface\\FrameXML\\PetFrame.xml",
-            // For `OpacityFrameSlider`, which `PartyMemberBackground` sets on `VARIABLES_LOADED`.
-            "Interface\\FrameXML\\ColorPickerFrame.xml",
-            "Interface\\FrameXML\\Cooldown.xml",
-            "Interface\\FrameXML\\ActionButtonTemplate.xml",
-            "Interface\\FrameXML\\MainMenuBar.xml",
-            "Interface\\FrameXML\\ActionBarFrame.xml",
-            "Interface\\FrameXML\\BonusActionBarFrame.xml",
+            "Interface\\FrameXML\\ItemButtonTemplate.xml",
             // `ExhaustionTick_Update` reads `ReputationWatchBar`, which `ReputationFrame.xml`
             // declares, after the templates its check boxes inherit.
-            r"Interface\FrameXML\UIPanelTemplates.lua",
-            r"Interface\FrameXML\UIPanelTemplates.xml",
-            r"Interface\FrameXML\OptionsFrameTemplates.xml",
             r"Interface\FrameXML\ReputationFrame.xml",
-            "ScrollTemplates.xml",
-            "Interface\\FrameXML\\CharacterFrameTemplates.xml",
-            "Interface\\FrameXML\\MerchantFrame.xml",
-            "Interface\\FrameXML\\GlobalStrings.lua",
-            "Interface\\FrameXML\\BasicControls.xml",
-            "Interface\\FrameXML\\ItemButtonTemplate.xml",
             "Interface\\FrameXML\\QuestFrame.xml",
-            r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
             "Interface\\FrameXML\\QuestLogFrame.xml",
+            "Interface\\FrameXML\\MerchantFrame.xml",
+            "Interface\\FrameXML\\BonusActionBarFrame.xml",
             // The Show Tutorials setter, like the reference's Save arm, reaches
             // `TutorialFrameCheckButton` and `TutorialFrame_HideAllAlerts` unguarded.
             "Interface\\FrameXML\\TutorialFrame.xml",
+            // For `OpacityFrameSlider`, which `PartyMemberBackground` sets on `VARIABLES_LOADED`.
+            "Interface\\FrameXML\\ColorPickerFrame.xml",
+            "ScrollTemplates.xml",
         ],
-    );
-    harness_on(s)
+    )
 }
 
 /// The Chat page's harness: the chat frames ahead of the window, for `SetChatMouseOverDelay` and
@@ -713,31 +693,26 @@ fn interface_harness() -> UiScript {
 fn chat_harness() -> UiScript {
     let mut s = audio_harness();
     s.set_screen_size(1024.0, 768.0);
-    load_definers(
-        &s,
+    harness_with(
+        s,
         &[
+            "Interface\\FrameXML\\GlobalStrings.lua",
             "Interface\\FrameXML\\Fonts.xml",
+            "Interface\\FrameXML\\BasicControls.xml",
+            "Interface\\FrameXML\\LocaleProperties.lua",
+            r"Interface\FrameXML\UIParent.xml",
             r"Interface\FrameXML\MoneyFrame.lua",
             r"Interface\FrameXML\MoneyFrame.xml",
-            r"Interface\FrameXML\UIParent.xml",
+            "Interface\\FrameXML\\GameTooltip.xml",
+            "Interface\\FrameXML\\UIMenu.xml", // the kit the chat and emote menus build on
+            "Interface\\FrameXML\\UIDropDownMenu.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",
             r"Interface\FrameXML\UIPanelTemplates.xml",
-            "Interface\\FrameXML\\LocaleProperties.lua",
-            "Interface\\FrameXML\\GlobalStrings.lua",
-            "Interface\\FrameXML\\BasicControls.xml",
             "Interface\\FrameXML\\StaticPopup.xml",
-            "Interface\\FrameXML\\GameTooltip.xml",
-            "Interface\\FrameXML\\UIDropDownMenu.xml",
-            "Interface\\FrameXML\\UIMenu.xml", // the kit the chat and emote menus build on
-            "Interface\\FrameXML\\GlobalStrings.lua",
-            "Interface\\FrameXML\\BasicControls.xml",
             "Interface\\FrameXML\\ChatFrame.xml",
-            "Interface\\FrameXML\\UIPanelTemplates.lua",
-            "Interface\\FrameXML\\UIPanelTemplates.xml",
             "Interface\\FrameXML\\FloatingChatFrame.xml",
         ],
-    );
-    harness_on(s)
+    )
 }
 
 /// The Action Bars page's harness: the stock bars its rows move, and the options windows ahead of
@@ -745,46 +720,42 @@ fn chat_harness() -> UiScript {
 fn actionbars_harness() -> UiScript {
     let mut s = audio_harness();
     s.set_screen_size(1024.0, 768.0);
-    load_definers(
-        &s,
+    harness_with(
+        s,
         &[
-            "Interface\\FrameXML\\Fonts.xml",
-            r"Interface\FrameXML\UIParent.xml",
-            "Interface\\FrameXML\\Cooldown.xml",
-            "Interface\\FrameXML\\ActionButtonTemplate.xml",
-            "Interface\\FrameXML\\TextStatusBar.lua",
-            "Interface\\FrameXML\\TextStatusBar.xml",
             "Interface\\FrameXML\\GlobalStrings.lua",
-            "Interface\\FrameXML\\MainMenuBar.xml",
+            "Interface\\FrameXML\\Fonts.xml",
+            "Interface\\FrameXML\\BasicControls.xml",
+            "Interface\\FrameXML\\LocaleProperties.lua",
+            r"Interface\FrameXML\UIParent.xml",
             r"Interface\FrameXML\MoneyFrame.lua",
             r"Interface\FrameXML\MoneyFrame.xml",
             "Interface\\FrameXML\\GameTooltip.xml",
-            "Interface\\FrameXML\\ActionBarFrame.xml",
-            "Interface\\FrameXML\\BonusActionBarFrame.xml",
-            // `ExhaustionTick_Update` reads `ReputationWatchBar`, which `ReputationFrame.xml`
-            // declares, after the templates its check boxes inherit.
+            "Interface\\FrameXML\\UIDropDownMenu.xml",
             r"Interface\FrameXML\UIPanelTemplates.lua",
             r"Interface\FrameXML\UIPanelTemplates.xml",
             r"Interface\FrameXML\OptionsFrameTemplates.xml",
-            r"Interface\FrameXML\ReputationFrame.xml",
-            "Interface\\FrameXML\\ActionBarFrame.xml",
-            "Interface\\FrameXML\\UIDropDownMenu.xml",
-            "ScrollTemplates.xml",
-            r"Interface\FrameXML\UIPanelTemplates.lua",
-            r"Interface\FrameXML\UIPanelTemplates.xml",
-            "Interface\\FrameXML\\BasicControls.xml",
-            "Interface\\FrameXML\\LocaleProperties.lua",
-            "Interface\\FrameXML\\StaticPopup.xml",
-            "KeyBindingsPage.xml",
             // `UIOptionsFrame_Init` assigns the globals these rows capture at OnLoad as their
             // default, and `MultiActionBars.xml` writes into `UIOptionsFrameCheckButtons` at load.
             r"Interface\FrameXML\OptionsFrame.lua",
             r"Interface\FrameXML\UIOptionsFrame.xml",
-            "OptionsFrame.xml",
+            "Interface\\FrameXML\\StaticPopup.xml",
+            "Interface\\FrameXML\\TextStatusBar.lua",
+            "Interface\\FrameXML\\TextStatusBar.xml",
+            "Interface\\FrameXML\\MainMenuBar.xml",
+            "Interface\\FrameXML\\Cooldown.xml",
+            "Interface\\FrameXML\\ActionButtonTemplate.xml",
+            "Interface\\FrameXML\\ActionBarFrame.xml",
             "Interface\\FrameXML\\MultiActionBars.xml",
+            // `ExhaustionTick_Update` reads `ReputationWatchBar`, which `ReputationFrame.xml`
+            // declares, after the templates its check boxes inherit.
+            r"Interface\FrameXML\ReputationFrame.xml",
+            "Interface\\FrameXML\\BonusActionBarFrame.xml",
+            "ScrollTemplates.xml",
+            "KeyBindingsPage.xml",
+            "OptionsFrame.xml",
         ],
-    );
-    harness_on(s)
+    )
 }
 
 /// Sliders read the stored value with the era's rounded-percent readout; checkboxes read the flag.
@@ -1301,87 +1272,54 @@ fn the_world_detail_slider_writes_the_cvar_and_the_readout_names_its_stop() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// On the real manifest and CVar table: `UIParent_OnEvent` calls `UpdateNameplates()` on
-/// `VARIABLES_LOADED` and `PLAYER_ENTERING_WORLD` (`UIParent.lua:234`, `:367`), and here its verbs
-/// write the CVar pair that is the store. The setting survives only with both the host seeding
-/// `NAMEPLATES_ON`/`FRIENDNAMEPLATES_ON` first and our `UpdateNameplates` without the stock
-/// friendly show-then-hide (`UIOptionsFrame.lua:775-776`).
+/// 1.12's slider 8, Spell Detail Level (`OptionsFrame.lua:32`), over `spellEffectLevel` on its
+/// 0..2 grid, labelled and tipped from the stock GlobalStrings.
 #[test]
-fn a_world_entry_leaves_the_saved_nameplate_setting_alone() {
-    let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
-    s.set_screen_size(1024.0, 768.0);
-    // The client never loads the manifest without a player.
-    s.set_unit(
-        "player",
-        Some(benilla_ui::script::UnitState {
-            exists: true,
-            name: Some("Probefour".into()),
-            level: 60,
-            ..Default::default()
-        }),
-    );
-    let failures = super::load_default_ui(&s);
-    assert!(failures.is_empty(), "loader errors: {failures:?}");
-    let _ = s.errors();
-
-    // Both halves on, restored from `config.toml`: a host write, which queues nothing.
-    let plates = crate::vplates::VPlateMode {
-        enemies: true,
-        friends: true,
-    };
-    let saved = |s: &mut UiScript| {
-        s.set_cvar_host(crate::vplates::CVAR_ENEMIES, "1");
-        s.set_cvar_host(crate::vplates::CVAR_FRIENDS, "1");
-        assert!(s.take_cvar_changes().is_empty(), "the host write is silent");
-    };
-
-    // The control: with the globals nil, the entry writes both halves off.
-    saved(&mut s);
-    s.fire_event("VARIABLES_LOADED", vec![]);
-    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
-    assert_eq!(
-        (
-            s.cvar(crate::vplates::CVAR_ENEMIES),
-            s.cvar(crate::vplates::CVAR_FRIENDS)
-        ),
-        (Some("0".into()), Some("0".into())),
-        "nil globals ⇒ the replay writes the store off — this is what the report saw"
-    );
-    let _ = s.take_cvar_changes();
-
-    // With the globals seeded by the host, the entry changes nothing.
-    saved(&mut s);
-    crate::vplates::push_plate_globals(&s, plates);
-    assert_eq!(
-        s.eval::<i64>("return NAMEPLATES_ON").unwrap(),
-        1,
-        "the reference's own truthiness — the NUMBER 1, never the truthy `0`"
-    );
-    s.fire_event("VARIABLES_LOADED", vec![]);
-    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
-    assert_eq!(
-        (
-            s.cvar(crate::vplates::CVAR_ENEMIES),
-            s.cvar(crate::vplates::CVAR_FRIENDS)
-        ),
-        (Some("1".into()), Some("1".into())),
-        "the player's setting survives the entry"
-    );
-    assert!(
-        s.take_cvar_changes().is_empty(),
-        "and queues nothing, so `config.toml` is never dirtied by a world entry"
-    );
-    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-
-    // An addon that moves a global and calls the verb still writes the CVar.
-    s.run("FRIENDNAMEPLATES_ON = nil UpdateNameplates()")
+fn the_spell_detail_slider_reads_and_writes_the_spell_effect_level() {
+    benilla_formats::wow_data_or_skip!();
+    const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowSpellDetail";
+    let mut s = audio_harness();
+    s.set_cvar_host("spellEffectLevel", "1");
+    let mut s = harness_on(s);
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
     assert_eq!(
-        s.take_cvar_changes(),
-        vec![(crate::vplates::CVAR_FRIENDS.to_string(), "0".to_string())],
-        "UpdateNameplates keeps its contract — it is adapted, not stubbed"
+        s.eval::<String>(&format!("return {ROW}Label:GetText()"))
+            .unwrap(),
+        s.eval::<String>("return SPELL_DETAIL").unwrap()
     );
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}.tip")).unwrap(),
+        "OPTION_TOOLTIP_SPELL_DETAIL"
+    );
+    assert!(s
+        .eval::<bool>(&format!(
+            "return {ROW}ControlSlider:GetValue() == 1 and {ROW}ControlValue:GetText() == \"Medium\""
+        ))
+        .unwrap());
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "reading the CVar on select must not write it back"
+    );
+    // The reference's grid (`OptionsFrameSliders[8]`): 0 to 2, one apart.
+    assert!(s
+        .eval::<bool>(&format!(
+            "local lo, hi = {ROW}ControlSlider:GetMinMaxValues() \
+             return lo == 0 and hi == 2 and {ROW}ControlSlider:GetValueStep() == 1"
+        ))
+        .unwrap());
+    s.run(&format!("{ROW}ControlSlider:SetValue(0)")).unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("spellEffectLevel".to_string(), "0".to_string())]
+    );
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
+            .unwrap(),
+        "Low"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
 #[test]
@@ -1427,19 +1365,46 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
     }
     let _ = s.take_sounds();
 
-    // The CVars the V and Shift-V bindings write, so the window and the keys agree.
+    // The plate rows move the verbs and FrameXML's globals together, as the V and Shift-V
+    // bindings do, so the window and the keys agree and the saved variables carry it; no CVar.
+    use benilla_ui::script::{PLATE_BIT_ENEMY, PLATE_BIT_FRIEND};
+    let _ = s.take_nameplate_bit_writes();
+    let globals = |s: &UiScript| {
+        s.eval::<(Option<i64>, Option<i64>)>("return NAMEPLATES_ON, FRIENDNAMEPLATES_ON")
+            .unwrap()
+    };
+    s.run("BenillaOptionsFrameContainerBodyNameplatesRowFriendlyPlatesCheck:Click()")
+        .unwrap();
+    assert_eq!(s.take_nameplate_bit_writes().apply(0), PLATE_BIT_FRIEND);
+    assert_eq!(globals(&s), (None, Some(1)));
+    s.run("BenillaOptionsFrameContainerBodyNameplatesRowEnemyPlatesCheck:Click()")
+        .unwrap();
+    assert_eq!(s.take_nameplate_bit_writes().apply(0), PLATE_BIT_ENEMY);
+    assert_eq!(globals(&s), (Some(1), Some(1)));
     s.run("BenillaOptionsFrameContainerBodyNameplatesRowFriendlyPlatesCheck:Click()")
         .unwrap();
     assert_eq!(
-        s.take_cvar_changes(),
-        vec![(crate::vplates::CVAR_FRIENDS.to_string(), "1".to_string())]
+        s.take_nameplate_bit_writes()
+            .apply(PLATE_BIT_ENEMY | PLATE_BIT_FRIEND),
+        PLATE_BIT_ENEMY,
+        "unticking hides"
     );
-    s.run("BenillaOptionsFrameContainerBodyNameplatesRowEnemyPlatesCheck:Click()")
-        .unwrap();
     assert_eq!(
-        s.take_cvar_changes(),
-        vec![(crate::vplates::CVAR_ENEMIES.to_string(), "1".to_string())]
+        globals(&s),
+        (Some(1), None),
+        "the number 1 or nil, never a truthy \"0\""
     );
+    assert!(s.take_cvar_changes().is_empty(), "no plate CVar");
+    // A key moved the global behind the window's back: the rows read it.
+    s.run("FRIENDNAMEPLATES_ON = 1 BenillaOptionsFrameCategoryListRowNameplates:Click()")
+        .unwrap();
+    assert!(s
+        .eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyNameplatesRowFriendlyPlatesCheck:GetChecked()"
+        )
+        .unwrap());
+    s.run("FRIENDNAMEPLATES_ON = nil").unwrap();
+    let _ = s.take_nameplate_bit_writes();
     let _ = s.take_sounds();
 
     // The interface panel's click kit (`PlayClickSound`, `OptionsFrame.lua:509-515`), not the
@@ -1758,7 +1723,7 @@ fn volumetric_fog_dropdown_is_localised_and_live() {
     // data-free checkout; the complete window additionally needs stock FrameXML.
     let xml = include_str!("../../assets/ui/OptionsFrame.xml");
     let strings = &xml[xml.find("BENILLA_ADVGFX_STRINGS = {").unwrap()
-        ..xml.find("OPTIONS_PAGE_ROWS = {").unwrap()];
+        ..xml.find("BENILLA_OPTIONS_PAGE_ROWS = {").unwrap()];
     let row = xml.split("<Frame name=\"$parentRowVolumetricFog\"").nth(1).unwrap();
     let on_load = row.split("<OnLoad>").nth(1).unwrap().split("</OnLoad>").next().unwrap();
     for (locale, title, labels) in [
@@ -1769,19 +1734,19 @@ fn volumetric_fog_dropdown_is_localised_and_live() {
         s.run(&format!("function GetLocale() return '{locale}' end")).unwrap();
         s.run(strings).unwrap();
         s.run(r#"
-            self = {}
-            function OptionsRow_OnLoad(row, cvar, title, tip)
+            this = {}
+            function BenillaOptionsRow_OnLoad(row, cvar, title, tip)
                 row.cvar, row.title, row.tip = cvar, title, tip
             end
-            function OptionsDropdownRow_Setup(row, choices) row.choices = choices end
+            function BenillaOptionsDropdownRow_Setup(row, choices) row.choices = choices end
         "#).unwrap();
         s.run(on_load).unwrap();
-        assert_eq!(s.eval::<String>("return self.title").unwrap(), title);
-        assert!(s.eval::<bool>("return getglobal(self.tip) == BENILLA_ADVGFX.tips.VOLUMETRIC_FOG and string.len(getglobal(self.tip)) > 80").unwrap());
+        assert_eq!(s.eval::<String>("return this.title").unwrap(), title);
+        assert!(s.eval::<bool>("return getglobal(this.tip) == BENILLA_ADVGFX.tips.VOLUMETRIC_FOG and string.len(getglobal(this.tip)) > 80").unwrap());
         for (tier, label) in labels.iter().enumerate() {
-            assert_eq!(s.eval::<String>(&format!("return self.choices[{}].text", tier + 1)).unwrap(), *label);
+            assert_eq!(s.eval::<String>(&format!("return this.choices[{}].text", tier + 1)).unwrap(), *label);
             let _ = s.take_cvar_changes();
-            s.run(&format!("SetCVar(self.cvar, self.choices[{}].value)", tier + 1)).unwrap();
+            s.run(&format!("SetCVar(this.cvar, this.choices[{}].value)", tier + 1)).unwrap();
             assert_eq!(s.take_cvar_changes(), vec![("volumetricFog".to_string(), tier.to_string())]);
         }
         if benilla_formats::wow_data().is_none() {
@@ -1792,12 +1757,12 @@ fn volumetric_fog_dropdown_is_localised_and_live() {
         s.run(&format!("function GetLocale() return '{locale}' end")).unwrap();
         let mut s = harness_on(s);
         s.run("ShowUIPanel(BenillaOptionsFrame) BenillaOptionsFrameCategoryListRowAdvancedGraphics:Click()").unwrap();
-        assert_eq!(s.eval::<String>("return OPTIONS_PAGE_ROWS.AdvancedGraphics[5]").unwrap(), "RowVolumetricFog");
+        assert_eq!(s.eval::<String>("return BENILLA_OPTIONS_PAGE_ROWS.AdvancedGraphics[5]").unwrap(), "RowVolumetricFog");
         assert_eq!(s.eval::<String>(&format!("return {ADVGFX}RowVolumetricFogLabel:GetText()")).unwrap(), title);
         assert_eq!(s.eval::<String>(&format!("return {ADVGFX}RowVolumetricFogDropdownText:GetText()")).unwrap(), labels[1]);
         let _ = s.take_cvar_changes();
         for (tier, label) in labels.iter().enumerate() {
-            s.run(&format!("OptionsRow_Set({ADVGFX}RowVolumetricFog, '{tier}') OptionsDropdown_ShowValue({ADVGFX}RowVolumetricFog)")).unwrap();
+            s.run(&format!("BenillaOptionsRow_Set({ADVGFX}RowVolumetricFog, '{tier}') BenillaOptionsDropdown_ShowValue({ADVGFX}RowVolumetricFog)")).unwrap();
             assert_eq!(s.take_cvar_changes(), vec![("volumetricFog".to_string(), tier.to_string())]);
             assert_eq!(s.eval::<String>(&format!("return {ADVGFX}RowVolumetricFogDropdownText:GetText()")).unwrap(), *label);
         }
@@ -1811,7 +1776,7 @@ fn ambient_occlusion_dropdown_is_localised_and_live() {
     benilla_formats::wow_data_or_skip!();
     let xml = include_str!("../../assets/ui/OptionsFrame.xml");
     let strings = &xml[xml.find("BENILLA_ADVGFX_STRINGS = {").unwrap()
-        ..xml.find("OPTIONS_PAGE_ROWS = {").unwrap()];
+        ..xml.find("BENILLA_OPTIONS_PAGE_ROWS = {").unwrap()];
     let row = xml.split("<Frame name=\"$parentRowAmbientOcclusion\"").nth(1).unwrap();
     let on_load = row.split("<OnLoad>").nth(1).unwrap().split("</OnLoad>").next().unwrap();
     for (locale, title, labels) in [
@@ -1822,20 +1787,20 @@ fn ambient_occlusion_dropdown_is_localised_and_live() {
         s.run(&format!("function GetLocale() return '{locale}' end")).unwrap();
         s.run(strings).unwrap();
         s.run(r#"
-            self = {}
-            function OptionsRow_OnLoad(row, cvar, title, tip)
+            this = {}
+            function BenillaOptionsRow_OnLoad(row, cvar, title, tip)
                 row.cvar, row.title, row.tip = cvar, title, tip
             end
-            function OptionsDropdownRow_Setup(row, choices) row.choices = choices end
+            function BenillaOptionsDropdownRow_Setup(row, choices) row.choices = choices end
         "#).unwrap();
         s.run(on_load).unwrap();
-        assert_eq!(s.eval::<String>("return self.title").unwrap(), title);
-        assert!(s.eval::<bool>("return getglobal(self.tip) == BENILLA_ADVGFX.tips.AMBIENT_OCCLUSION and string.len(getglobal(self.tip)) > 80").unwrap());
+        assert_eq!(s.eval::<String>("return this.title").unwrap(), title);
+        assert!(s.eval::<bool>("return getglobal(this.tip) == BENILLA_ADVGFX.tips.AMBIENT_OCCLUSION and string.len(getglobal(this.tip)) > 80").unwrap());
         // High first: the registered default is Off, and rewriting the same value is no change.
         for (tier, label) in labels.iter().enumerate().rev() {
-            assert_eq!(s.eval::<String>(&format!("return self.choices[{}].text", tier + 1)).unwrap(), *label);
+            assert_eq!(s.eval::<String>(&format!("return this.choices[{}].text", tier + 1)).unwrap(), *label);
             let _ = s.take_cvar_changes();
-            s.run(&format!("SetCVar(self.cvar, self.choices[{}].value)", tier + 1)).unwrap();
+            s.run(&format!("SetCVar(this.cvar, this.choices[{}].value)", tier + 1)).unwrap();
             assert_eq!(s.take_cvar_changes(), vec![("ambientOcclusion".to_string(), tier.to_string())]);
         }
     }
@@ -1846,7 +1811,7 @@ fn ambient_occlusion_dropdown_is_localised_and_live() {
 fn lamp_fog_dropdown_is_localised_and_live() {
     let xml = include_str!("../../assets/ui/OptionsFrame.xml");
     let strings = &xml[xml.find("BENILLA_ADVGFX_STRINGS = {").unwrap()
-        ..xml.find("OPTIONS_PAGE_ROWS = {").unwrap()];
+        ..xml.find("BENILLA_OPTIONS_PAGE_ROWS = {").unwrap()];
     let row = xml.split("<Frame name=\"$parentRowLampFog\"").nth(1).unwrap();
     let on_load = row.split("<OnLoad>").nth(1).unwrap().split("</OnLoad>").next().unwrap();
     for (locale, title, labels) in [
@@ -1863,34 +1828,34 @@ fn lamp_fog_dropdown_is_localised_and_live() {
         s.run(strings).unwrap();
         s.run(
             r#"
-            self = {}
-            function OptionsRow_OnLoad(row, cvar, title, tip)
+            this = {}
+            function BenillaOptionsRow_OnLoad(row, cvar, title, tip)
                 row.cvar, row.title, row.tip = cvar, title, tip
             end
-            function OptionsDropdownRow_Setup(row, choices) row.choices = choices end
+            function BenillaOptionsDropdownRow_Setup(row, choices) row.choices = choices end
         "#,
         )
         .unwrap();
         s.run(on_load).unwrap();
-        assert_eq!(s.eval::<String>("return self.title").unwrap(), title);
+        assert_eq!(s.eval::<String>("return this.title").unwrap(), title);
         assert!(s
             .eval::<bool>(
-                "return getglobal(self.tip) == BENILLA_ADVGFX.tips.LAMP_FOG and string.len(getglobal(self.tip)) > 80",
+                "return getglobal(this.tip) == BENILLA_ADVGFX.tips.LAMP_FOG and string.len(getglobal(this.tip)) > 80",
             )
             .unwrap());
         // `lampFog` registers at Off, so seed away from the first choice before asserting that
         // every selection produces the expected live write (the CVar layer suppresses no-ops).
-        s.run("SetCVar(self.cvar, '2')").unwrap();
+        s.run("SetCVar(this.cvar, '2')").unwrap();
         let _ = s.take_cvar_changes();
         for (tier, label) in labels.iter().enumerate() {
             assert_eq!(
-                s.eval::<String>(&format!("return self.choices[{}].text", tier + 1))
+                s.eval::<String>(&format!("return this.choices[{}].text", tier + 1))
                     .unwrap(),
                 *label
             );
             let _ = s.take_cvar_changes();
             s.run(&format!(
-                "SetCVar(self.cvar, self.choices[{}].value)",
+                "SetCVar(this.cvar, this.choices[{}].value)",
                 tier + 1
             ))
             .unwrap();
@@ -1915,15 +1880,15 @@ fn water_quality_writes_numeric_tiers_with_localised_labels() {
         s.run("ShowUIPanel(BenillaOptionsFrame) BenillaOptionsFrameCategoryListRowAdvancedGraphics:Click()").unwrap();
         // MONKEY (volumetric fog): account for the atmosphere row after water.
         // MONKEY (integration): Graphics Preset + Render Distance lead the page, then every programme row (sky, post, dither, fog, wet, wind, ao, lamp fog, window split, zone skyboxes): 33.
-        assert_eq!(s.eval::<usize>("return table.getn(OPTIONS_PAGE_ROWS.AdvancedGraphics)").unwrap(), 33);
-        assert_eq!(s.eval::<String>("return OPTIONS_PAGE_ROWS.AdvancedGraphics[4]").unwrap(), "RowWaterQuality");
-        assert_eq!(s.eval::<String>("return OPTIONS_PAGE_ROWS.AdvancedGraphics[23]").unwrap(), "RowLavaGlow");
+        assert_eq!(s.eval::<usize>("return table.getn(BENILLA_OPTIONS_PAGE_ROWS.AdvancedGraphics)").unwrap(), 33);
+        assert_eq!(s.eval::<String>("return BENILLA_OPTIONS_PAGE_ROWS.AdvancedGraphics[4]").unwrap(), "RowWaterQuality");
+        assert_eq!(s.eval::<String>("return BENILLA_OPTIONS_PAGE_ROWS.AdvancedGraphics[23]").unwrap(), "RowLavaGlow");
         assert_eq!(s.eval::<String>(&format!("return {ADVGFX}RowWaterQualityDropdownText:GetText()")).unwrap(), labels[1]);
         assert_eq!(s.eval::<String>(&format!("return {ADVGFX}RowLavaGlowLabel:GetText()")).unwrap(), lava_label);
         assert!(s.eval::<bool>("return BENILLA_TOOLTIP_WATER_QUALITY == BENILLA_ADVGFX.tips.WATER_QUALITY and BENILLA_TOOLTIP_LAVA_GLOW == BENILLA_ADVGFX.tips.LAVA_GLOW").unwrap());
         let _ = s.take_cvar_changes();
         for (tier, label) in labels.iter().enumerate() {
-            s.run(&format!("OptionsRow_Set({ADVGFX}RowWaterQuality, '{tier}') OptionsDropdown_ShowValue({ADVGFX}RowWaterQuality)")).unwrap();
+            s.run(&format!("BenillaOptionsRow_Set({ADVGFX}RowWaterQuality, '{tier}') BenillaOptionsDropdown_ShowValue({ADVGFX}RowWaterQuality)")).unwrap();
             assert_eq!(s.take_cvar_changes(), vec![("waterQuality".to_string(), tier.to_string())]);
             assert_eq!(s.eval::<String>(&format!("return {ADVGFX}RowWaterQualityDropdownText:GetText()")).unwrap(), *label);
         }
@@ -2089,12 +2054,12 @@ fn the_lighting_quality_row_writes_one_cvar_and_leaves_the_members_to_the_host()
         .unwrap();
     let _ = s.take_cvar_changes();
 
-    // The entry click's own body (`OptionsDropdownEntry_OnClick`), which is the row's Set
+    // The entry click's own body (`BenillaOptionsDropdownEntry_OnClick`), which is the row's Set
     // followed by the capsule's redisplay — driven directly so the test does not depend on the
     // shared dropdown kit's list geometry.
     s.run(&format!(
-        "OptionsRow_Set({ADVGFX}RowLightingQuality, \"Low\") \
-         OptionsDropdown_ShowValue({ADVGFX}RowLightingQuality)"
+        "BenillaOptionsRow_Set({ADVGFX}RowLightingQuality, \"Low\") \
+         BenillaOptionsDropdown_ShowValue({ADVGFX}RowLightingQuality)"
     ))
     .unwrap();
     assert_eq!(
@@ -2167,7 +2132,7 @@ fn the_advanced_graphics_masters_grey_what_they_gate() {
     s.run("BenillaOptionsFrameCategoryListRowAdvancedGraphics:Click()")
         .unwrap();
 
-    // A greyed row wears the DISABLE font — 1.12's own signal, and the one `OptionsRow_SetEnabled`
+    // A greyed row wears the DISABLE font — 1.12's own signal, and the one `BenillaOptionsRow_SetEnabled`
     // sets on every flavour of row whatever else it does to the control. Compared as an OBJECT,
     // not a name: `GetFontObject` answers the object (`script::font`).
     let live = |s: &UiScript, row: &str| -> bool {
@@ -2340,6 +2305,39 @@ fn the_controls_checkboxes_write_flags_with_the_interface_panel_kit() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// Click-to-Move (`UIOptionsFrame.lua:7`) moves `AutoInteract`, which boots off as 1.12's Western
+/// client registers it (`0x603374`).
+#[test]
+fn the_controls_page_offers_click_to_move_on_autointeract() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    let _ = s.take_cvar_changes();
+    let row = "BenillaOptionsFrameContainerBodyControlsRowClickToMove";
+    assert_eq!(
+        s.eval::<String>(&format!("return {row}Label:GetText()"))
+            .unwrap(),
+        "Click-to-Move"
+    );
+    assert!(
+        !s.eval::<bool>(&format!("return {row}Check:GetChecked()"))
+            .unwrap(),
+        "off by default"
+    );
+
+    s.run(&format!("{row}Check:Click()")).unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("AutoInteract".to_string(), "1".to_string())]
+    );
+    assert_eq!(
+        s.eval::<String>("return GetCVar(\"AutoInteract\")")
+            .unwrap(),
+        "1"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 #[test]
 fn defaults_resets_the_controls_page_to_registered_defaults() {
     benilla_formats::wow_data_or_skip!();
@@ -2377,7 +2375,7 @@ fn defaults_resets_the_controls_page_to_registered_defaults() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// Run a few frames so the page body's fit converges: `OptionsScroll_Fit` reads the previous
+/// Run a few frames so the page body's fit converges: `BenillaOptionsScroll_Fit` reads the previous
 /// frame's rects.
 fn settle(s: &mut UiScript) {
     for _ in 0..4 {
@@ -2480,11 +2478,14 @@ fn a_broad_search_scrolls_the_page_instead_of_overflowing_it() {
         clip.bottom
     );
 
-    // Widget coordinates here, not the extract's pixels: the window carries `ERA_WINDOW_SCALE`.
+    // Widget coordinates here, not the extract's pixels: the window carries `BENILLA_ERA_WINDOW_SCALE`.
     let sf_bottom: f32 = s
         .eval("return BenillaOptionsFrameContainerScroll:GetBottom()")
         .unwrap();
-    let tail = |s: &UiScript| -> f32 { s.eval("return OptionsScroll_ContentBottom()").unwrap() };
+    let tail = |s: &UiScript| -> f32 {
+        s.eval("return BenillaOptionsScroll_ContentBottom()")
+            .unwrap()
+    };
     assert!(
         tail(&s) < sf_bottom,
         "the tail starts below the fold ({} vs {sf_bottom})",
@@ -2606,7 +2607,7 @@ fn the_page_scroll_bar_wears_the_trough_with_its_arrows_in_the_sockets() {
 
 // ── The row tooltips ─────────────────────────────────────────────────────────────
 
-/// Hover a row's label half, 60 units in at mid-height. Callers pin `ERA_WINDOW_SCALE = 1` first,
+/// Hover a row's label half, 60 units in at mid-height. Callers pin `BENILLA_ERA_WINDOW_SCALE = 1` first,
 /// so the row's rect and the pointer share coordinates.
 fn hover_label(s: &mut UiScript, frame: &str) {
     s.resolve();
@@ -2650,7 +2651,7 @@ fn a_hovered_row_raises_its_1_12_description_on_the_era_seat() {
     s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     s.run("OPTION_TOOLTIP_GAMEFIELD_DESELECT = \"Checking this will prevent the deselection.\"")
         .unwrap();
-    s.run("ERA_WINDOW_SCALE = 1").unwrap();
+    s.run("BENILLA_ERA_WINDOW_SCALE = 1").unwrap();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
     let row = "BenillaOptionsFrameContainerBodyControlsRowStickyTarget";
@@ -2719,7 +2720,7 @@ fn a_row_with_no_1_12_string_raises_no_plate() {
     let mut s = harness_on(audio_harness());
     s.run("OPTION_TOOLTIP_GAMEFIELD_DESELECT = \"Sticky's own description.\"")
         .unwrap();
-    s.run("ERA_WINDOW_SCALE = 1").unwrap();
+    s.run("BENILLA_ERA_WINDOW_SCALE = 1").unwrap();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     hover_label(
         &mut s,
@@ -2739,10 +2740,10 @@ fn a_row_with_no_1_12_string_raises_no_plate() {
     );
 
     // Sticky's plate up, then straight into the mute row with no OnLeave in between.
-    s.run("OptionsRow_Hover(BenillaOptionsFrameContainerBodyControlsRowStickyTarget, 1)")
+    s.run("BenillaOptionsRow_Hover(BenillaOptionsFrameContainerBodyControlsRowStickyTarget, 1)")
         .unwrap();
     assert!(s.eval::<bool>("return GameTooltip:IsVisible()").unwrap());
-    s.run("OptionsRow_Hover(BenillaOptionsFrameContainerBodyControlsRowAutoLoot, 1)")
+    s.run("BenillaOptionsRow_Hover(BenillaOptionsFrameContainerBodyControlsRowAutoLoot, 1)")
         .unwrap();
     assert!(
         !s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
@@ -2770,7 +2771,7 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     let listing: String = s
         .eval(
             "local out = {} \
-             for page, rows in pairs(OPTIONS_PAGE_ROWS) do \
+             for page, rows in pairs(BENILLA_OPTIONS_PAGE_ROWS) do \
                for _, rkey in ipairs(rows) do \
                  local row = getglobal(\"BenillaOptionsFrameContainerBody\" .. page .. rkey) \
                  table.insert(out, page .. rkey .. \"=\" .. (row.tip or \"\")) \
@@ -2914,11 +2915,11 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
         );
         checked += 1;
     }
-    // 81 rows less the three untipped below; four of the 78 carry a `BENILLA_` key, and a dropdown
+    // 83 rows less the three untipped below; four of the 80 carry a `BENILLA_` key, and a dropdown
     // row is checked on the key it wears at rest.
     // MONKEY (graphics programme): the Advanced Graphics page's tipped rows (lighting, water,
-    // lava, fog, daylight, Graphics Preset, Render Distance, ...) add 20. 78 -> 98.
-    assert_eq!(checked, 98, "every tipped row carries a live key");
+    // lava, fog, daylight, Graphics Preset, Render Distance, ...) add 20. Upstream 80 -> 100.
+    assert_eq!(checked, 100, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2952,7 +2953,7 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
     let mut s = harness_on(audio_harness());
     // Stand-in strings for every key the rows name.
     s.run(
-        "for page, rows in pairs(OPTIONS_PAGE_ROWS) do \
+        "for page, rows in pairs(BENILLA_OPTIONS_PAGE_ROWS) do \
            for _, rkey in ipairs(rows) do \
              local row = getglobal(\"BenillaOptionsFrameContainerBody\" .. page .. rkey) \
              if row.tip then setglobal(row.tip, \"described: \" .. rkey) end \
@@ -2960,7 +2961,7 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
          end",
     )
     .unwrap();
-    s.run("ERA_WINDOW_SCALE = 1").unwrap();
+    s.run("BENILLA_ERA_WINDOW_SCALE = 1").unwrap();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
     let mut raised = 0;
@@ -2981,7 +2982,7 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             .unwrap();
         let rows: String = s
             .eval(&format!(
-                "return table.concat(OPTIONS_PAGE_ROWS.{page}, \",\")"
+                "return table.concat(BENILLA_OPTIONS_PAGE_ROWS.{page}, \",\")"
             ))
             .unwrap();
         for rkey in rows.split(',') {
@@ -3017,13 +3018,13 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             s.errors()
         );
     }
-    // Every tipped row: the same 78 the key census counts.
-    // MONKEY (graphics programme): the Advanced Graphics page's described rows add 19. 78 -> 97.
-    assert_eq!(raised, 97, "every row but Auto Loot raises a description");
+    // Every tipped row: the same 80 the key census counts.
+    // MONKEY (graphics programme): the Advanced Graphics page's described rows add 19. 80 -> 99.
+    assert_eq!(raised, 99, "every row but Auto Loot raises a description");
 }
 
 /// 1.12's AdvancedOptionsCombatText box as saved-global rows: a click writes the global, never a
-/// CVar, and runs the family's apply, `CombatText_UpdateOrLoad`.
+/// CVar, and runs the family's apply, `BenillaCombatText_UpdateOrLoad`.
 #[test]
 fn the_combat_page_writes_saved_variable_globals_and_applies_them() {
     benilla_formats::wow_data_or_skip!();
@@ -3872,7 +3873,7 @@ fn the_defaults_button_is_armed_by_rows_not_by_a_category() {
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
     let keys: Vec<String> = s
-        .eval::<String>("return table.concat(OPTIONS_CATEGORY_KEYS, \",\")")
+        .eval::<String>("return table.concat(BENILLA_OPTIONS_CATEGORY_KEYS, \",\")")
         .unwrap()
         .split(',')
         .map(str::to_string)
@@ -3885,8 +3886,8 @@ fn the_defaults_button_is_armed_by_rows_not_by_a_category() {
     for key in &keys {
         let has_rows = s
             .eval::<bool>(&format!(
-                "return OPTIONS_PAGE_ROWS[\"{key}\"] ~= nil and \
-                 getn(OPTIONS_PAGE_ROWS[\"{key}\"]) > 0"
+                "return BENILLA_OPTIONS_PAGE_ROWS[\"{key}\"] ~= nil and \
+                 getn(BENILLA_OPTIONS_PAGE_ROWS[\"{key}\"]) > 0"
             ))
             .unwrap();
         assert!(
@@ -4178,8 +4179,7 @@ fn the_status_bar_text_row_pins_the_numerals_the_moment_it_is_clicked() {
         s.take_cvar_changes(),
         vec![("statusBarText".to_string(), "1".to_string())]
     );
-    // No repaint and no XP tick: only the queued `CVAR_UPDATE`.
-    s.tick(0.0);
+    // No repaint, no XP tick and no frame: only the `CVAR_UPDATE` the click fired.
     assert!(
         s.eval::<bool>("return MainMenuBarExpText:IsShown()")
             .unwrap(),
@@ -4188,7 +4188,6 @@ fn the_status_bar_text_row_pins_the_numerals_the_moment_it_is_clicked() {
 
     s.run("BenillaOptionsFrameContainerBodyInterfaceRowStatusTextCheck:Click()")
         .unwrap();
-    s.tick(0.0);
     assert!(!s
         .eval::<bool>("return MainMenuBarExpText:IsShown()")
         .unwrap());
@@ -4608,7 +4607,7 @@ fn the_two_option_tabs_fit_their_labels_at_the_drawn_scale() {
     assert_eq!(
         num(&mut s, "BenillaOptionsFrame:GetScale()"),
         0.78,
-        "ERA_WINDOW_SCALE"
+        "BENILLA_ERA_WINDOW_SCALE"
     );
 
     for tab in ["BenillaOptionsFrameGameTab", "BenillaOptionsFrameAddOnsTab"] {
@@ -4681,17 +4680,6 @@ fn without_a_seated_measurer_the_same_fit_reads_zero() {
 // nothing and reads back nil, so its box would offer a setting benilla does not have. A CVar is
 // registered only once something reads it.
 const UNBACKED_REFERENCE_CVARS: &[(&str, &str)] = &[
-    (
-        "autointeract",
-        "click-to-move — the one row here that is a whole movement mode rather than a knob. \
-         `CanAutoInteract 0x60f900` gates the world-click pick mask's bit 0 and inverts \
-         `0x5ec110`'s interaction-distance refusal, so an out-of-range corpse/GO/NPC/cast click \
-         queues an approach (`0x60fed0`, move kinds 6/7/9/0xa) instead of refusing. The commit \
-         itself puts NOTHING on the wire — it stamps a local goal at `0x611130` — and the packets \
-         are its consequences (a stand, then the original verb on arrival). benilla has only the \
-         keyboard controller and /follow (mode 3). Registered default is \"0\" on every locale but \
-         koKR (`0x603374` selects on the locale index), so stock West ships it OFF",
-    ),
     (
         "UnitNamePlayerPVPTitle",
         "the PvP rank prefix on the overhead name line — slot a4 of `0x608f50`, bit `0x20` of the \
@@ -4798,7 +4786,7 @@ fn every_registered_reference_cvar_has_a_row_on_our_own_window() {
     let ours: std::collections::HashSet<String> = s
         .eval::<Vec<String>>(
             "local out = {} \
-             for page, rows in pairs(OPTIONS_PAGE_ROWS) do \
+             for page, rows in pairs(BENILLA_OPTIONS_PAGE_ROWS) do \
                  for _, rkey in ipairs(rows) do \
                      local row = getglobal(\"BenillaOptionsFrameContainerBody\" .. page .. rkey) \
                      if row.cvar then table.insert(out, row.cvar) end \
@@ -5038,7 +5026,7 @@ fn the_guild_line_greys_with_player_names_and_the_follow_speed_with_the_style() 
         .unwrap()
     };
     assert!(speed_thumb(&mut s));
-    s.run("SetCVar(\"cameraSmoothStyle\", \"0\") OptionsPage_Refresh(\"Controls\")")
+    s.run("SetCVar(\"cameraSmoothStyle\", \"0\") BenillaOptionsPage_Refresh(\"Controls\")")
         .unwrap();
     assert!(
         !speed_thumb(&mut s),
@@ -5052,7 +5040,7 @@ fn the_guild_line_greys_with_player_names_and_the_follow_speed_with_the_style() 
              :IsMouseEnabled()"
         )
         .unwrap());
-    s.run("SetCVar(\"cameraSmoothStyle\", \"1\") OptionsPage_Refresh(\"Controls\")")
+    s.run("SetCVar(\"cameraSmoothStyle\", \"1\") BenillaOptionsPage_Refresh(\"Controls\")")
         .unwrap();
     assert!(speed_thumb(&mut s));
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -5068,7 +5056,7 @@ fn farclip_slider_range_is_the_view_range() {
         .nth(1)
         .expect("the farclip row");
     let args = row
-        .split("OptionsSliderRow_Setup(self, ")
+        .split("BenillaOptionsSliderRow_Setup(this, ")
         .nth(1)
         .and_then(|rest| rest.split(')').next())
         .expect("the slider setup call");

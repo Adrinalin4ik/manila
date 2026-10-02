@@ -596,6 +596,17 @@ pub(super) struct SpeakerEffects<'w> {
     gestures: ResMut<'w, crate::creature_anim::GestureQueue>,
 }
 
+/// `UNIT_FIELD_FLAGS` bit `0x20000000` (`PREVENT_ANIM`: Polymorph, Kidney Shot, Gouge, Sleep).
+const UNIT_FLAG_PREVENT_ANIM: u32 = 0x2000_0000;
+
+/// Whether the speaker's flags suppress the chat talk gesture. Only the handler's own copy of
+/// the selector tests the bit (`0x49d7f7`, the one `0xa0` test of `0x20000000` in the image),
+/// which runs when the sender's name is already cached (`tries == 0`); a line held for the name
+/// query gestures from the deferred copies (`0x49cf2b`, `0x49d3bb`), which do not.
+pub(super) fn gesture_prevented(tries: u16, speaker_flags: Option<u32>) -> bool {
+    tries == 0 && speaker_flags.is_some_and(|f| f & UNIT_FLAG_PREVENT_ANIM != 0)
+}
+
 /// Drain [`ChatLog`]: resolve names (ask-once, bounded), build the events and [`route`] them.
 pub(super) fn feed_chat(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
@@ -758,6 +769,12 @@ pub(super) fn feed_chat(
                 // The gesture reads the raw type and `plain`, not the garbled text: the selector is
                 // in the parser (`0x49d560`, `0x49d820`-`0x49d8ae`) on the buffer `0x49dbc2` hands
                 // `0x49a870`, so a Horde `lol` laughs for every observer.
+                // The immediate path alone refuses a speaker that cannot animate (`0x49d7f7`).
+                let speaker_flags = guids
+                    .0
+                    .get(&msg.sender_guid)
+                    .and_then(|e| stores.get(*e).ok())
+                    .map(|s| s.0.unit_flags());
                 if let Some(gesture) =
                     crate::creature_anim::select_gesture(msg.chat_type, &plain, |n| {
                         script
@@ -766,6 +783,7 @@ pub(super) fn feed_chat(
                             .get::<String>(format!("LAUGH_WORD{n}"))
                             .ok()
                     })
+                    .filter(|_| !gesture_prevented(tries, speaker_flags))
                 {
                     speaker.gestures.push(msg.sender_guid, gesture);
                 }
@@ -793,17 +811,19 @@ pub(super) fn feed_chat(
                     });
                     continue;
                 }
-                // Not stamped: a guid-tail notice (a member joining or leaving, a kick, a
-                // moderation change) has arg7-arg9 empty, so the stock filter
-                // (`ChatFrame.lua:1374-1392`) finds no channel for it and it never prints; the
-                // reference stamps it as it stamps speech.
-                if let Some(event) = notice_event(
+                // Stamped against the channel list as it stands at delivery: the reference hands
+                // the composer `0x49a870` the notice's channel name, directly when the names are
+                // cached (`0x49c59f`-`0x49c5b0`), else from the queued line's node (`+0x2c`) in
+                // the name-query callback (`0x49cfb4`-`0x49cfc1`), and the composer looks it up
+                // among the joined channels (`0x49aa1e`-`0x49aa31`). Unstamped, arg7-arg9 are
+                // empty and the stock filter (`ChatFrame.lua:1374-1392`) drops the line.
+                if let Some(mut event) = notice_event(
                     notice,
                     channel,
                     Some(a.unwrap_or_else(|| "Unknown".into())),
                     b,
                 ) {
-                    route(&mut script, &mut windows, &event);
+                    deliver(&mut script, &mut windows, &mut channels, &mut event);
                 }
             }
             Pending::Addon {

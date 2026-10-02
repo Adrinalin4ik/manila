@@ -10,13 +10,15 @@
 //! - A failed cast clears the GCD armed at send (`0x6e1d83`, `0x6e1630`) and, unless the reason
 //!   is 0x3c, removes a cooldown-on-event spell's parked record (`0x6e73cc`).
 //!
-//! Every mutation bumps [`Cooldowns::generation`], the `ACTIONBAR_UPDATE_COOLDOWN` edge; a
-//! natural expiry does not, since the stock `Cooldown.lua` frame hides itself at the end.
+//! Every mutation the reference flushes bumps [`Cooldowns::generation`], the edge of the flush
+//! `0x4b31b0` makes (`ACTIONBAR_UPDATE_COOLDOWN`, `SPELL_UPDATE_COOLDOWN`); a natural expiry does
+//! not, since the stock `Cooldown.lua` frame hides itself at the end.
 
 use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 
+use super::{SpellModifiers, OP_GCD};
 use benilla_formats::SpellDisplay;
 use benilla_protocol::messages::ItemUseSpell;
 
@@ -91,12 +93,15 @@ impl CooldownInfo {
     }
 }
 
-/// The player's cooldown list (the client's `SpellHistory` at `0xcecaec`); the pet list has no
-/// consumer.
+/// One cooldown list, the client's `SpellHistory`: the player's is this resource (`0xcecaec`), the
+/// pet's is [`crate::ui_pet::PetBar::cooldowns`] (`0xcecb04`), which the pet bar, the pet book and
+/// the pet's `SMSG_SPELL_GO` leg read and write. Each list's edge feeds its own events: the
+/// player's `feed_action_state`, the pet's `ui_pet::bar::fire_pet_cooldown_events`.
 #[derive(Resource, Default)]
 pub(crate) struct Cooldowns {
     records: Vec<Record>,
-    /// Bumped on every mutation: the `ACTIONBAR_UPDATE_COOLDOWN` edge.
+    /// Bumped on every mutation the reference flushes (`0x4b31b0`), the flush's edge. Only counts
+    /// up, across [`Self::clear_silent`] too, so a watcher reads a reset as no mutation.
     pub(crate) generation: u64,
     /// Bumped when [`Self::prune`] removes records. Kept apart from [`Self::generation`]: gated
     /// feeds must see an expiry, but the reference never fires the event for one.
@@ -106,6 +111,12 @@ pub(crate) struct Cooldowns {
 impl Cooldowns {
     fn bump(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// How many records the list holds, elapsed ones included.
+    #[cfg(test)]
+    pub(crate) fn record_count(&self) -> usize {
+        self.records.len()
     }
 
     /// The counter a gated feed watches: moves on any mutation or pruned expiry.
@@ -127,8 +138,13 @@ impl Cooldowns {
     /// `AddCooldown 0x6e12c0`: always appends, never matching by id, so one spell holds separate
     /// nodes for its cast-send GCD and its SPELL_GO recovery. Replacing by id would let the GO
     /// insert wipe the running GCD.
+    ///
+    /// The list only grows here, so this is where it is bounded: the records that have run out by
+    /// `now` are dropped first ([`Self::prune`]), and a list holds its live records plus those
+    /// that ran out since its last insert. The pet's list has no other pruner.
     fn add(
         &mut self,
+        now: Instant,
         spell_id: u32,
         item_id: u32,
         recovery: Timer,
@@ -147,6 +163,7 @@ impl Cooldowns {
         {
             return;
         }
+        self.prune(now);
         self.records.push(Record {
             spell_id,
             item_id,
@@ -162,7 +179,9 @@ impl Cooldowns {
     }
 
     /// Drop fully elapsed records that are not on hold; invisible to reads, it stands in for the
-    /// client's event-driven sweeps. Bumps [`Self::expiry_epoch`], not [`Self::generation`].
+    /// client's event-driven sweeps. Bumps [`Self::expiry_epoch`], not [`Self::generation`], so it
+    /// flushes no event. [`Self::add`] runs it at every insert, and the player's feed each frame,
+    /// which the gated feeds need to see an expiry with no insert.
     pub(crate) fn prune(&mut self, now: Instant) {
         let before = self.records.len();
         self.records.retain(|r| {
@@ -180,28 +199,40 @@ impl Cooldowns {
     ///
     /// `ranged_attack_time_ms` is `UNIT_FIELD_RANGEDATTACKTIME` when
     /// [`SpellDisplay::ranged_speed_cooldown`], else 0, added to the category timer (`0x6e2b60`):
-    /// the Throw and wand Shoot sweep. Category 0 (Auto Shot) never surfaces it.
+    /// the Throw and wand Shoot sweep. Category 0 (Auto Shot) never surfaces it. `mods` applies
+    /// op 11 to both timers, as the self and pet legs do; `None` inserts the DBC values.
     pub(crate) fn start_spell(
         &mut self,
         spell_id: u32,
         spell: &SpellDisplay,
         ranged_attack_time_ms: u32,
         now: Instant,
+        mods: Option<&SpellModifiers>,
     ) {
+        let (recovery_ms, category_ms) = mods.map_or_else(
+            || {
+                (
+                    spell.recovery_ms,
+                    spell
+                        .category_recovery_ms
+                        .saturating_add(ranged_attack_time_ms),
+                )
+            },
+            |mods| mods.spell_cooldowns(spell, ranged_attack_time_ms),
+        );
         self.add(
+            now,
             spell_id,
             0,
             Timer {
                 start: now,
-                duration: Duration::from_millis(u64::from(spell.recovery_ms)),
+                duration: Duration::from_millis(u64::from(recovery_ms)),
             },
             spell.category,
             spell.category_wildcard,
             Timer {
                 start: now,
-                duration: Duration::from_millis(u64::from(
-                    spell.category_recovery_ms + ranged_attack_time_ms,
-                )),
+                duration: Duration::from_millis(u64::from(category_ms)),
             },
             spell.cooldown_on_event(),
             0,
@@ -229,6 +260,7 @@ impl Cooldowns {
             spell.map_or(0, |s| s.category_recovery_ms)
         };
         self.add(
+            now,
             use_spell.spell_id,
             item_entry,
             Timer {
@@ -248,11 +280,25 @@ impl Cooldowns {
         );
     }
 
-    /// Arm the GCD at cast send (`StartGlobalCooldown 0x6e2de0`, from `0x6e58fb`) for any cast,
-    /// item use or pet cast, only when `startRecoveryTime != 0` (`0x6e2e0f`). `on_hold` is
-    /// Attributes bit 25.
-    pub(crate) fn start_gcd(&mut self, spell_id: u32, spell: &SpellDisplay, now: Instant) {
-        if spell.start_recovery_ms == 0 {
+    /// Arm the GCD at cast send (`StartGlobalCooldown 0x6e2de0`, from `0x6e58fb`) for any cast or
+    /// item use, and at a pet-bar spell press (`0x4bd367`, into the pet's list), unless
+    /// `startRecoveryCategory` and `startRecoveryTime` are both 0
+    /// (`0x6e2e0f`-`0x6e2e21`), then with op 21 applied (`0x6e2e2c`) and nothing armed for a zero
+    /// result (`0x6e2e3d`). A negative one arms nothing either, where the reference inserts a
+    /// record no reader shows. `on_hold` is Attributes bit 25.
+    pub(crate) fn start_gcd(
+        &mut self,
+        spell_id: u32,
+        spell: &SpellDisplay,
+        now: Instant,
+        mods: &SpellModifiers,
+    ) {
+        if spell.start_recovery_category == 0 && spell.start_recovery_ms == 0 {
+            return;
+        }
+        // `StartGlobalCooldown 0x6e2de0`: op 21 before the zero-duration exit (`0x6e2e2c`).
+        let duration_ms = mods.apply(spell, OP_GCD, spell.start_recovery_ms as i32);
+        if duration_ms <= 0 {
             return;
         }
         if benilla_assets::trace::enabled() {
@@ -260,11 +306,12 @@ impl Cooldowns {
                 "cd",
                 &format!(
                     "arm-gcd spell={spell_id} gcdcat={} dur={}ms (cast-send)",
-                    spell.start_recovery_category, spell.start_recovery_ms
+                    spell.start_recovery_category, duration_ms
                 ),
             );
         }
         self.add(
+            now,
             spell_id,
             0,
             Timer::none(now),
@@ -275,7 +322,7 @@ impl Cooldowns {
             spell.start_recovery_category,
             Timer {
                 start: now,
-                duration: Duration::from_millis(u64::from(spell.start_recovery_ms)),
+                duration: Duration::from_millis(duration_ms as u64),
             },
         );
     }
@@ -336,6 +383,14 @@ impl Cooldowns {
         }
     }
 
+    /// Empty the list with no flush: `SMSG_PET_SPELLS` clears the pet's list (`0x6e9b60` →
+    /// `0x6e1880`) before it seeds it again, or for a teardown leaves it empty, and the packet
+    /// calls no `0x4b31b0`. The counters keep their place, so a watcher never reads the reset as
+    /// a mutation.
+    pub(crate) fn clear_silent(&mut self) {
+        self.records.clear();
+    }
+
     /// Session end ([`crate::net::session::disconnected`]): `SMSG_INITIAL_SPELLS` re-sends every
     /// running cooldown at world entry and [`Self::seed_initial`] appends, so a surviving record
     /// would outlive the fresh one.
@@ -371,6 +426,7 @@ impl Cooldowns {
             }
         };
         self.add(
+            now,
             spell_id,
             0,
             Timer {
@@ -400,6 +456,7 @@ impl Cooldowns {
         now: Instant,
     ) {
         self.add(
+            now,
             spell_id,
             item_entry,
             Timer {
@@ -423,6 +480,7 @@ impl Cooldowns {
         now: Instant,
     ) {
         self.add(
+            now,
             u32::from(cd.spell_id),
             u32::from(cd.item_id),
             Timer {
@@ -444,6 +502,9 @@ impl Cooldowns {
 
     /// One `SMSG_PET_SPELLS` cooldown: remainders, starting now. The category duration's
     /// [`PET_COOLDOWN_PERMANENT`] marker is stripped, or it would read as a 37-hour sweep.
+    ///
+    /// The handler seeds through `StartCooldown 0x6e2c60` (`0x4bdabf`), which calls no flush, so
+    /// the insert leaves [`Self::generation`] where it was.
     pub(crate) fn seed_pet(
         &mut self,
         cd: &benilla_protocol::messages::PetSpellCooldown,
@@ -452,7 +513,9 @@ impl Cooldowns {
     ) {
         use benilla_protocol::messages::PET_COOLDOWN_PERMANENT;
         let category_ms = cd.category_cd_ms & !PET_COOLDOWN_PERMANENT;
+        let generation = self.generation;
         self.add(
+            now,
             cd.spell_id,
             0,
             Timer {
@@ -470,6 +533,7 @@ impl Cooldowns {
             0,
             Timer::none(now),
         );
+        self.generation = generation;
     }
 
     /// The client's `IsSpellOnCooldown 0x6e1690`, which despite its name is true only for an
@@ -594,6 +658,56 @@ mod tests {
         spell(0, 0, 0, (133, 1500), 0x10000)
     }
 
+    #[test]
+    fn gcd_uses_op_21_before_arming() {
+        let mut d = fireball();
+        d.spell_family = 3;
+        d.spell_family_flags = 1 << 5;
+        let mut mods = SpellModifiers::default();
+        mods.set_class_family(3);
+        mods.set(false, 5, OP_GCD, -50);
+        let now = Instant::now();
+        let mut cds = Cooldowns::default();
+        cds.start_gcd(133, &d, now, &mods);
+        assert_eq!(cds.info(133, 0, Some(&d), now).duration_ms, 750);
+
+        d.start_recovery_ms = 0;
+        mods.set(true, 5, OP_GCD, 1000);
+        let mut cds = Cooldowns::default();
+        cds.start_gcd(133, &d, now, &mods);
+        assert_eq!(cds.info(133, 0, Some(&d), now).duration_ms, 500);
+    }
+
+    #[test]
+    fn spell_cooldown_applies_op_11_to_both_timers_after_the_ranged_pad() {
+        let mut d = spell(44, 8_000, 5_000, (0, 0), 0);
+        d.spell_family = 3;
+        d.spell_family_flags = 1 << 5;
+        let mut mods = SpellModifiers::default();
+        mods.set_class_family(3);
+        mods.set(true, 5, super::super::OP_COOLDOWN, -1_500);
+        assert_eq!(mods.spell_cooldowns(&d, 0), (6_500, 3_500));
+        assert_eq!(mods.spell_cooldowns(&d, 2_000), (6_500, 5_500));
+
+        let now = Instant::now();
+        let mut cds = Cooldowns::default();
+        cds.start_spell(2136, &d, 2_000, now, Some(&mods));
+        assert_eq!(cds.info(2136, 0, Some(&d), now).duration_ms, 6_500);
+        let sibling = spell(44, 0, 0, (0, 0), 0);
+        assert_eq!(cds.info(999, 0, Some(&sibling), now).duration_ms, 5_500);
+        let mut cds = Cooldowns::default();
+        cds.start_spell(2136, &d, 2_000, now, None);
+        assert_eq!(cds.info(2136, 0, Some(&d), now).duration_ms, 8_000);
+        assert_eq!(cds.info(999, 0, Some(&sibling), now).duration_ms, 7_000);
+
+        // Endurance 2/2: Sprint's five-minute recovery loses 30%.
+        d.recovery_ms = 300_000;
+        d.category_recovery_ms = 0;
+        mods.set(true, 5, super::super::OP_COOLDOWN, 0);
+        mods.set(false, 5, super::super::OP_COOLDOWN, -30);
+        assert_eq!(mods.spell_cooldowns(&d, 0), (210_000, 0));
+    }
+
     /// Charge-shaped: category 44, 15 s category cooldown, NO GCD pair.
     fn charge() -> SpellDisplay {
         spell(44, 0, 15_000, (0, 0), 0)
@@ -603,7 +717,7 @@ mod tests {
     fn the_gcd_spreads_to_every_spell_sharing_the_start_recovery_category() {
         let t0 = Instant::now();
         let mut cds = Cooldowns::default();
-        cds.start_gcd(133, &fireball(), t0);
+        cds.start_gcd(133, &fireball(), t0, &super::SpellModifiers::default());
 
         // Any spell with the same startRecoveryCategory reads the GCD; Charge has none.
         let mid = t0 + Duration::from_millis(500);
@@ -630,8 +744,8 @@ mod tests {
         let mut cds = Cooldowns::default();
         // Frost-Nova-shaped: own 25 s recovery, category 35, the ordinary 133/1500 GCD pair.
         let frost_nova = spell(35, 25_000, 0, (133, 1500), 0);
-        cds.start_gcd(122, &frost_nova, t0); // the cast-send arm
-        cds.start_spell(122, &frost_nova, 0, t0 + Duration::from_millis(100)); // the GO insert
+        cds.start_gcd(122, &frost_nova, t0, &super::SpellModifiers::default()); // the cast-send arm
+        cds.start_spell(122, &frost_nova, 0, t0 + Duration::from_millis(100), None); // the GO insert
 
         let mid = t0 + Duration::from_millis(200);
         // Every GCD sibling still reads the running GCD.
@@ -655,8 +769,8 @@ mod tests {
         let t0 = Instant::now();
         let mut cds = Cooldowns::default();
         let fd = spell(0, 30_000, 0, (133, 1500), 0); // Feign-Death-shaped minus on-event
-        cds.start_gcd(5384, &fd, t0);
-        cds.start_spell(5384, &fd, 0, t0);
+        cds.start_gcd(5384, &fd, t0, &super::SpellModifiers::default());
+        cds.start_spell(5384, &fd, 0, t0, None);
         let mid = t0 + Duration::from_millis(100);
         assert!(cds.not_ready(5384, 0, Some(&fd), mid));
 
@@ -671,7 +785,7 @@ mod tests {
     fn category_cooldowns_reach_category_siblings_but_not_others() {
         let t0 = Instant::now();
         let mut cds = Cooldowns::default();
-        cds.start_spell(100, &charge(), 0, t0); // Charge: category 44, 15 s
+        cds.start_spell(100, &charge(), 0, t0, None); // Charge: category 44, 15 s
 
         let mid = t0 + Duration::from_secs(5);
         // Another spell in category 44 reads the shared remainder.
@@ -692,7 +806,7 @@ mod tests {
         let mut cds = Cooldowns::default();
         // Feign Death: 30 s recovery, SPELL_ATTR_COOLDOWN_ON_EVENT (bit 25).
         let fd = spell(0, 30_000, 0, (0, 0), 0x0200_0000);
-        cds.start_spell(5384, &fd, 0, t0);
+        cds.start_spell(5384, &fd, 0, t0, None);
 
         // Parked: full duration, disabled, and still not ready.
         let parked = cds.info(5384, 0, Some(&fd), t0 + Duration::from_secs(60));
@@ -821,8 +935,8 @@ mod tests {
     fn prune_drops_only_fully_elapsed_records() {
         let t0 = Instant::now();
         let mut cds = Cooldowns::default();
-        cds.start_gcd(133, &fireball(), t0);
-        cds.start_spell(100, &charge(), 0, t0);
+        cds.start_gcd(133, &fireball(), t0, &super::SpellModifiers::default());
+        cds.start_spell(100, &charge(), 0, t0, None);
         assert_eq!(cds.records.len(), 2);
 
         // Past the 1.5 s GCD, inside Charge's 15 s.
@@ -834,6 +948,128 @@ mod tests {
         assert!(cds.records.is_empty());
     }
 
+    /// The list is bounded where it grows: whatever the inserts' spacing, it holds the records
+    /// live at the insert plus the insert itself, never every record ever added.
+    #[test]
+    fn an_insert_bounds_the_list_by_its_live_records_plus_itself() {
+        let t0 = Instant::now();
+        let mut cds = Cooldowns::default();
+        let mods = super::SpellModifiers::default();
+        // Charge's 15 s category timer, then a 1.5 s GCD every 2 s for a minute.
+        cds.start_spell(100, &charge(), 0, t0, None);
+        for i in 0..30u64 {
+            let now = t0 + Duration::from_secs(2 * i);
+            cds.start_gcd(133, &fireball(), now, &mods);
+            let charge_live = usize::from(2 * i < 15);
+            assert_eq!(
+                cds.record_count(),
+                1 + charge_live,
+                "insert {i}: Charge if it still runs, and the new GCD"
+            );
+        }
+    }
+
+    /// An insert drops the records that have run out and only those: a running timer and a parked
+    /// record survive, no read of what stays changes, and the insert is the one mutation.
+    #[test]
+    fn an_insert_keeps_a_running_and_a_parked_record_and_changes_no_read() {
+        let t0 = Instant::now();
+        let mut cds = Cooldowns::default();
+        let mods = super::SpellModifiers::default();
+        let brief = || spell(7, 2_000, 0, (0, 0), 0);
+        // Parked: `Attributes` bit 25, its timers wait for `SMSG_COOLDOWN_EVENT`.
+        let parked = || spell(9, 1_000, 0, (0, 0), 1 << 25);
+        cds.start_gcd(133, &fireball(), t0, &mods);
+        cds.start_spell(100, &brief(), 0, t0, None);
+        cds.start_spell(200, &charge(), 0, t0, None);
+        cds.start_spell(300, &parked(), 0, t0, None);
+        assert_eq!(cds.record_count(), 4);
+
+        let now = t0 + Duration::from_secs(5);
+        let asks = [
+            (133, fireball()),
+            (100, brief()),
+            (200, charge()),
+            (201, spell(44, 0, 0, (0, 0), 0)),
+            (300, parked()),
+            (301, spell(9, 0, 0, (0, 0), 0)),
+            (999, spell(0, 0, 0, (0, 0), 0)),
+        ];
+        let reads = |cds: &Cooldowns| {
+            asks.iter()
+                .map(|(id, d)| cds.info(*id, 0, Some(d), now))
+                .collect::<Vec<_>>()
+        };
+        let before = reads(&cds);
+        assert_eq!(before[2].remaining_ms, 10_000, "Charge runs");
+        assert!(!before[4].enabled, "and the parked spell reads disabled");
+        let generation = cds.generation;
+
+        // A spell of no category the others share.
+        cds.start_spell(500, &spell(99, 5_000, 0, (0, 0), 0), 0, now, None);
+
+        assert_eq!(
+            cds.record_count(),
+            3,
+            "Charge, the parked record and the new one"
+        );
+        assert!(!cds.sweep_pending(now), "nothing that ran out is left");
+        assert_eq!(
+            reads(&cds),
+            before,
+            "the records that stay read as they did"
+        );
+        assert_eq!(
+            cds.generation,
+            generation + 1,
+            "one mutation, the insert's own"
+        );
+    }
+
+    /// An elapsed record answers no read, so a prune cannot change one: what it keeps, a running
+    /// timer and a parked record whose own timers have run down, answers as before.
+    #[test]
+    fn a_prune_changes_no_read() {
+        let t0 = Instant::now();
+        let mut cds = Cooldowns::default();
+        let mods = super::SpellModifiers::default();
+        let brief = || spell(7, 2_000, 0, (0, 0), 0);
+        // Parked: `Attributes` bit 25, its timers wait for `SMSG_COOLDOWN_EVENT`.
+        let parked = || spell(9, 1_000, 0, (0, 0), 1 << 25);
+        cds.start_gcd(133, &fireball(), t0, &mods);
+        cds.start_spell(100, &brief(), 0, t0, None);
+        cds.start_spell(200, &charge(), 0, t0, None);
+        cds.start_spell(300, &parked(), 0, t0, None);
+        assert_eq!(cds.records.len(), 4);
+
+        let now = t0 + Duration::from_secs(5);
+        let asks = [
+            (133, fireball()),
+            (100, brief()),
+            (200, charge()),
+            // Another spell of Charge's category, and one of the parked spell's.
+            (201, spell(44, 0, 0, (0, 0), 0)),
+            (300, parked()),
+            (301, spell(9, 0, 0, (0, 0), 0)),
+            (999, spell(0, 0, 0, (0, 0), 0)),
+        ];
+        let reads = |cds: &Cooldowns| {
+            asks.iter()
+                .map(|(id, d)| cds.info(*id, 0, Some(d), now))
+                .collect::<Vec<_>>()
+        };
+        let before = reads(&cds);
+        assert!(cds.sweep_pending(now), "the GCD and Brief have run out");
+        assert_eq!(before[2].remaining_ms, 10_000, "Charge runs");
+        assert!(!before[4].enabled, "and the parked spell reads disabled");
+
+        cds.prune(now);
+
+        assert_eq!(cds.records.len(), 2, "the GCD and Brief are gone");
+        assert!(!cds.sweep_pending(now));
+        assert_eq!(reads(&cds), before);
+    }
+
     /// A prune that removes nothing must not move the epoch, or the per-frame prune would hold
     /// every gated feed open.
     #[test]
@@ -841,7 +1077,7 @@ mod tests {
         let t0 = Instant::now();
         let mut cds = Cooldowns::default();
         let e0 = cds.feed_epoch();
-        cds.start_gcd(133, &fireball(), t0);
+        cds.start_gcd(133, &fireball(), t0, &super::SpellModifiers::default());
         let armed = cds.feed_epoch();
         assert_ne!(e0, armed, "a mutation moves the epoch (generation)");
 
@@ -862,7 +1098,7 @@ mod tests {
             cds.generation,
             {
                 let mut probe = Cooldowns::default();
-                probe.start_gcd(133, &fireball(), t0);
+                probe.start_gcd(133, &fireball(), t0, &super::SpellModifiers::default());
                 probe.generation
             },
             "…but the event-edge generation never saw it (the reference is silent on expiry)"
@@ -877,7 +1113,7 @@ mod tests {
     fn the_ui_triple_is_stable_per_arm_and_distinct_across_arms() {
         let t0 = Instant::now();
         let mut cds = Cooldowns::default();
-        cds.start_gcd(772, &fireball(), t0);
+        cds.start_gcd(772, &fireball(), t0, &super::SpellModifiers::default());
 
         // Two reads of one arm, frames apart, with both clocks in lockstep.
         let read1 = cds
@@ -891,7 +1127,12 @@ mod tests {
 
         // The fail clears the GCD and a re-press re-arms 200 ms later, unseen by the feed.
         cds.clear_gcd(772, t0 + Duration::from_millis(200));
-        cds.start_gcd(772, &fireball(), t0 + Duration::from_millis(200));
+        cds.start_gcd(
+            772,
+            &fireball(),
+            t0 + Duration::from_millis(200),
+            &super::SpellModifiers::default(),
+        );
         let rearmed = cds
             .info(772, 0, Some(&fireball()), t0 + Duration::from_millis(216))
             .ui_triple(t0 + Duration::from_millis(216), 10.216);
@@ -907,7 +1148,12 @@ mod tests {
         let anchor0 = Instant::now();
         let mut cds = Cooldowns::default();
         // Armed 4 ms after this frame's anchor sample.
-        cds.start_gcd(133, &fireball(), anchor0 + Duration::from_millis(4));
+        cds.start_gcd(
+            133,
+            &fireball(),
+            anchor0 + Duration::from_millis(4),
+            &super::SpellModifiers::default(),
+        );
 
         // Frame 1 converts through the pre-arm pair, frame 2 through the next, 16 ms on.
         let read1 = cds
@@ -941,7 +1187,7 @@ mod tests {
             "no GCD running — nothing locks"
         );
 
-        cds.start_gcd(772, &fireball(), t0);
+        cds.start_gcd(772, &fireball(), t0, &super::SpellModifiers::default());
         let mid = t0 + Duration::from_millis(200);
         assert!(
             cds.not_ready(133, 0, Some(&fireball()), mid),
@@ -962,7 +1208,7 @@ mod tests {
     fn attack_and_tradeskill_reads_are_always_cold() {
         let t0 = Instant::now();
         let mut cds = Cooldowns::default();
-        cds.start_gcd(772, &fireball(), t0);
+        cds.start_gcd(772, &fireball(), t0, &super::SpellModifiers::default());
         let mid = t0 + Duration::from_millis(200);
         let attack = SpellDisplay {
             effects: [78, 0, 0], // SPELL_EFFECT_ATTACK
@@ -985,7 +1231,7 @@ mod tests {
             attributes: 0x50012,
             ..Default::default()
         };
-        cds.start_spell(5019, &shoot, 1500, t0);
+        cds.start_spell(5019, &shoot, 1500, t0, None);
         let mid = t0 + Duration::from_millis(500);
         // Unrelated Fireball reads the wand swing and is not ready for its duration.
         let fb = cds.info(133, 0, Some(&fireball()), mid);
@@ -1003,7 +1249,7 @@ mod tests {
         cds.wipe();
         assert_eq!(cds.generation, g0);
 
-        cds.start_gcd(133, &fireball(), t0);
+        cds.start_gcd(133, &fireball(), t0, &super::SpellModifiers::default());
         assert_ne!(cds.generation, g0);
         let g1 = cds.generation;
         cds.wipe();
@@ -1017,7 +1263,7 @@ mod tests {
         let t0 = Instant::now();
         let mut cds = Cooldowns::default();
         let throw = spell(76, 0, 0, (0, 0), 0x410012);
-        cds.start_spell(2764, &throw, 2200, t0);
+        cds.start_spell(2764, &throw, 2200, t0, None);
         let mid = t0 + Duration::from_millis(1000);
         let info = cds.info(2764, 0, Some(&throw), mid);
         assert_eq!(info.duration_ms, 2200, "the sweep is the weapon speed");
@@ -1036,7 +1282,7 @@ mod tests {
         let t0 = Instant::now();
         let mut cds = Cooldowns::default();
         let auto_shot = spell(0, 0, 0, (0, 0), 0x50012);
-        cds.start_spell(75, &auto_shot, 3200, t0);
+        cds.start_spell(75, &auto_shot, 3200, t0, None);
         let mid = t0 + Duration::from_millis(100);
         assert_eq!(
             cds.info(75, 0, Some(&auto_shot), mid).remaining_ms,

@@ -9,6 +9,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi::number_arg;
 use super::container::UiCursorMode;
 use super::cursor::CursorPayload;
 use super::Model;
@@ -33,13 +34,14 @@ pub struct MerchantItem {
     /// `GetMerchantItemLink`'s answer; `None` while in flight and on a buyback row, as 1.12 has no
     /// `GetBuybackItemLink` and the buyback click takes no modifier (`MerchantFrame.lua:358-361`).
     pub link: Option<String>,
-    /// `GetMerchantItemMaxStack`: the template's `stackable`, 1 if it does not stack; `None` while
-    /// in flight.
+    /// The template's `stackable`, `GetMerchantItemMaxStack`'s answer for a row sold singly;
+    /// `None` while in flight and on a buyback row.
     pub max_stack: Option<u32>,
 }
 
-/// An item template's tooltip stat head, resolved per row by the app. The reference's
-/// `GameTooltip:SetMerchantItem` reads these in C++; no 1.12 Lua API carries them.
+/// An item template's tooltip stat head, resolved per row by the app, which `SetMerchantItem` and
+/// `SetBuybackItem` draw while the VM's template is in flight. The reference reads the template in
+/// C++ (`0x534080`); no 1.12 Lua API carries these.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ItemStatsHead {
     /// 0 poor to 6 artifact; colours the tooltip's name line.
@@ -64,6 +66,15 @@ pub struct ItemStatsHead {
     pub block: u32,
     /// What a vendor pays per unit; 0 shows the tooltip's "No sell price" line.
     pub sell_price: u32,
+}
+
+/// Each damaged item's repair cost in copper after the vendor's discount (`0x4faf30`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RepairCosts {
+    /// Equipped items by live inventory id.
+    pub equipped: std::collections::HashMap<u32, u32>,
+    /// Container items by `(bag, slot)`: bags 0-4, the bank vault -1 and bank bags 5-10.
+    pub bags: std::collections::HashMap<(i64, u32), u32>,
 }
 
 /// One open merchant window, pushed whole by the app; `None` means no vendor is open.
@@ -92,6 +103,11 @@ impl super::UiScript {
     /// Push `GetRepairAllCost`'s total in copper, swept by the app ahead of the events that read it.
     pub fn set_repair_all_cost(&mut self, copper: u32) {
         self.model_mut().repair_all_cost = copper;
+    }
+
+    /// Push the repair costs the item tooltip bindings return.
+    pub fn set_repair_costs(&mut self, costs: RepairCosts) {
+        self.model_mut().repair_costs = costs;
     }
 
     /// Drain the `(row, quantity)` buys `BuyMerchantItem` queued, the row 1-based.
@@ -226,51 +242,24 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetMerchantItemMaxStack(index): nil while in flight or out of range. A right shift-click, or
-    // a left one with the chat box closed, asks it and opens the stack-split spinner only above 1
-    // (`MerchantFrame.lua:313`, `:340`).
+    // GetMerchantItemMaxStack(index) (`0x4fb670`): the template's stack size, or 1 for a row sold
+    // in bundles (`[row+0x18] > 1`) and for every miss: out of range, no vendor, a template in
+    // flight (`0x4fb739`). A right shift-click, or a left one with the chat box closed, asks it and
+    // opens the stack-split spinner only above 1 (`MerchantFrame.lua:313`, `:340`).
     g.set(
         "GetMerchantItemMaxStack",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, index: Value| {
+            let index = number_arg(lua, index, "Usage: GetMerchantItemMaxStack(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(model
-                .merchant
-                .as_ref()
-                .and_then(|m| index.checked_sub(1).and_then(|n| m.items.get(n)))
+            // Signed, as 1.12.1 reads both.
+            let max_stack = usize::try_from(index)
+                .ok()
+                .and_then(|i| i.checked_sub(1))
+                .and_then(|n| model.merchant.as_ref()?.items.get(n))
+                .filter(|it| it.quantity as i32 <= 1)
                 .and_then(|it| it.max_stack)
-                .map_or(Value::Nil, |n| Value::Integer(i64::from(n))))
-        })?,
-    )?;
-
-    // BenillaGetMerchantItemStats(index) → quality, invType, class, subclass, dmgMin, dmgMax,
-    // dmgType, delayMs, armor, block, or nil. Not a 1.12 verb: the reference's tooltip reads the
-    // template in C++ (`SetMerchantItem 0x534080`).
-    g.set(
-        "BenillaGetMerchantItemStats",
-        lua.create_function(|lua, index: usize| {
-            let stats = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model
-                    .merchant
-                    .as_ref()
-                    .and_then(|m| index.checked_sub(1).and_then(|n| m.items.get(n)))
-                    .and_then(|it| it.stats)
-            };
-            let Some(s) = stats else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
-            };
-            Ok(MultiValue::from_vec(vec![
-                Value::Integer(i64::from(s.quality)),
-                Value::Integer(i64::from(s.inventory_type)),
-                Value::Integer(i64::from(s.class)),
-                Value::Integer(i64::from(s.subclass)),
-                Value::Number(f64::from(s.dmg_min)),
-                Value::Number(f64::from(s.dmg_max)),
-                Value::Integer(i64::from(s.dmg_type)),
-                Value::Integer(i64::from(s.delay_ms)),
-                Value::Integer(i64::from(s.armor)),
-                Value::Integer(i64::from(s.block)),
-            ]))
+                .map_or(1, |n| n as i32);
+            Ok(i64::from(max_stack))
         })?,
     )?;
 
@@ -404,36 +393,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // BenillaGetBuybackItemStats(index): the buyback hover's stat head, as above.
-    g.set(
-        "BenillaGetBuybackItemStats",
-        lua.create_function(|lua, index: usize| {
-            let stats = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model
-                    .merchant
-                    .as_ref()
-                    .and_then(|m| index.checked_sub(1).and_then(|n| m.buyback.get(n)))
-                    .and_then(|it| it.stats)
-            };
-            let Some(s) = stats else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
-            };
-            Ok(MultiValue::from_vec(vec![
-                Value::Integer(i64::from(s.quality)),
-                Value::Integer(i64::from(s.inventory_type)),
-                Value::Integer(i64::from(s.class)),
-                Value::Integer(i64::from(s.subclass)),
-                Value::Number(f64::from(s.dmg_min)),
-                Value::Number(f64::from(s.dmg_max)),
-                Value::Integer(i64::from(s.dmg_type)),
-                Value::Integer(i64::from(s.delay_ms)),
-                Value::Integer(i64::from(s.armor)),
-                Value::Integer(i64::from(s.block)),
-            ]))
-        })?,
-    )?;
-
     g.set(
         "BuybackItem",
         lua.create_function(|lua, index: u32| {
@@ -478,7 +437,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "RepairAllItems",
         lua.create_function(|lua, ()| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.repair_all = true;
+            // `0x4fbff0`: nothing, not even the purse test, unless the open merchant repairs
+            // (`0x4fadb0`, `UNIT_NPC_FLAGS` bit 14).
+            if model.merchant.as_ref().is_some_and(|m| m.can_repair) {
+                model.repair_all = true;
+            }
             Ok(())
         })?,
     )?;
@@ -576,7 +539,7 @@ mod tests {
                     name: Some("Refreshing Spring Water".into()),
                     texture: Some("Interface\\Icons\\INV_Drink_18".into()),
                     price: 25,
-                    quantity: 1,
+                    quantity: 5,
                     num_available: -1, // unlimited
                     item_id: 159,
                     stats: Some(ItemStatsHead {
@@ -618,7 +581,7 @@ mod tests {
             .unwrap();
         assert_eq!(name, "Refreshing Spring Water");
         assert_eq!(texture, "Interface\\Icons\\INV_Drink_18");
-        assert_eq!((price, quantity, num), (25, 1, -1));
+        assert_eq!((price, quantity, num), (25, 5, -1));
         assert_eq!(usable, 1);
 
         // In flight: name and texture nil, and usable (the null-record skip).
@@ -645,17 +608,52 @@ mod tests {
         assert!(s
             .eval::<bool>("return GetMerchantItemLink(9) == nil")
             .unwrap());
+    }
 
-        assert_eq!(
-            s.eval::<i64>("return GetMerchantItemMaxStack(1)").unwrap(),
-            20
-        );
-        assert!(s
-            .eval::<bool>("return GetMerchantItemMaxStack(2) == nil")
-            .unwrap());
-        assert!(s
-            .eval::<bool>("return GetMerchantItemMaxStack(9) == nil")
-            .unwrap());
+    #[test]
+    fn merchant_max_stack_is_one_for_bundles_and_misses() {
+        let mut s = UiScript::new().unwrap();
+        let max = |s: &mut UiScript, arg: &str| {
+            s.eval::<i64>(&format!("return GetMerchantItemMaxStack({arg})"))
+                .unwrap()
+        };
+        assert_eq!(max(&mut s, "1"), 1, "no vendor open");
+
+        let mut state = stock();
+        let single = |quantity: u32, max_stack: u32| MerchantItem {
+            name: Some("Flask of Oil".into()),
+            price: 100,
+            quantity,
+            num_available: -1,
+            item_id: 814,
+            max_stack: Some(max_stack),
+            ..Default::default()
+        };
+        state.items.push(single(1, 20));
+        state.items.push(single(1, 0));
+        state.items.push(single(0x8000_0000, u32::MAX));
+        s.set_merchant(Some(state));
+
+        assert_eq!(max(&mut s, "1"), 1, "a bundle row takes no split");
+        assert_eq!(max(&mut s, "2"), 1, "a template in flight");
+        assert_eq!(max(&mut s, "3"), 20, "a single row answers its stack size");
+        assert_eq!(max(&mut s, "4"), 0, "the stack size is not floored");
+        assert_eq!(max(&mut s, "5"), -1, "both fields read signed");
+        for out_of_range in ["0", "-1", "6", "9"] {
+            assert_eq!(max(&mut s, out_of_range), 1, "index {out_of_range}");
+        }
+        assert_eq!(max(&mut s, "\"3\""), 20);
+        assert_eq!(max(&mut s, "3.9"), 20);
+        for bad in ["", "nil", "\"x\"", "{}"] {
+            let err = s
+                .eval::<i64>(&format!("return GetMerchantItemMaxStack({bad})"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("Usage: GetMerchantItemMaxStack(index)"),
+                "{bad:?}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -723,41 +721,6 @@ mod tests {
     }
 
     #[test]
-    fn merchant_stats_feed_reads_the_tooltip_head() {
-        let mut s = UiScript::new().unwrap();
-        let mut stock = stock();
-        // A sword, so every stat column is distinct.
-        stock.items[0].stats = Some(ItemStatsHead {
-            quality: 2,
-            inventory_type: 21,
-            class: 2,
-            subclass: 7,
-            dmg_min: 5.0,
-            dmg_max: 9.0,
-            dmg_type: 2,
-            delay_ms: 2600,
-            armor: 0,
-            block: 0,
-            sell_price: 0,
-        });
-        s.set_merchant(Some(stock));
-        let (quality, inv, class, sub, dmin, dmax, dtype, delay, armor, block) = s
-            .eval::<(i64, i64, i64, i64, f64, f64, i64, i64, i64, i64)>(
-                "return BenillaGetMerchantItemStats(1)",
-            )
-            .unwrap();
-        assert_eq!((quality, inv, class, sub), (2, 21, 2, 7));
-        assert_eq!((dmin, dmax, dtype, delay), (5.0, 9.0, 2, 2600));
-        assert_eq!((armor, block), (0, 0));
-        assert!(s
-            .eval::<bool>("return BenillaGetMerchantItemStats(2) == nil")
-            .unwrap());
-        assert!(s
-            .eval::<bool>("return BenillaGetMerchantItemStats(9) == nil")
-            .unwrap());
-    }
-
-    #[test]
     fn buy_merchant_item_queues_intents() {
         let mut s = UiScript::new().unwrap();
         s.set_merchant(Some(stock()));
@@ -805,9 +768,6 @@ mod tests {
         let (name, _tex, price): (String, String, i64) =
             s.eval("return GetBuybackItemInfo(1)").unwrap();
         assert_eq!((name.as_str(), price), ("Worn Dagger", 47));
-        assert!(s
-            .eval::<bool>("return BenillaGetBuybackItemStats(1) ~= nil")
-            .unwrap());
 
         s.run("BuybackItem(1)").unwrap();
         assert_eq!(s.take_merchant_buybacks(), vec![1]);
@@ -828,6 +788,19 @@ mod tests {
             s.eval::<bool>("return GetRepairAllCost() == 0").unwrap(),
             "a vendor that does not repair"
         );
+    }
+
+    /// `RepairAllItems` returns before anything else unless the open merchant repairs
+    /// (`0x4fadb0`, tested at `0x4fbfe9`–`0x4fbff0`): no vendor, or one without the repair flag,
+    /// queues nothing.
+    #[test]
+    fn repair_all_queues_nothing_away_from_a_repairer() {
+        let mut s = UiScript::new().unwrap();
+        s.run("RepairAllItems()").unwrap();
+        assert!(!s.take_repair_all(), "no vendor");
+        s.set_merchant(Some(stock()));
+        s.run("RepairAllItems()").unwrap();
+        assert!(!s.take_repair_all(), "a vendor that does not repair");
     }
 
     #[test]
@@ -998,10 +971,6 @@ mod tests {
             "CursorHasItem is nil for mode 5"
         );
         assert!(s.eval::<bool>("return not CursorHasSpell()").unwrap());
-        assert!(
-            s.eval::<bool>("return GetCursorInfo() == nil").unwrap(),
-            "GetCursorInfo reports nothing — no binding exposes mode 5"
-        );
 
         // Yet it is held: a second call toggles it off (`0x4fb818`), a third re-grabs.
         s.run("PickupMerchantItem(1)").unwrap();
@@ -1022,17 +991,14 @@ mod tests {
             s.run("PickupMerchantItem(1)").unwrap(); // hold something first
             s.run(bad)
                 .unwrap_or_else(|e| panic!("{bad} must not raise: {e}"));
-            assert!(
-                s.eval::<bool>("return GetCursorInfo() == nil").unwrap(),
-                "{bad} cleared the cursor"
-            );
+            assert!(s.cursor_payload().is_none(), "{bad} cleared the cursor");
         }
         // A missing argument is the same silent clear.
         s.run("PickupMerchantItem(1)").unwrap();
         s.run("PickupMerchantItem()").unwrap();
         // `2^32 + 1` narrows to row 0 on a naive cast.
         s.run("PickupMerchantItem(4294967297)").unwrap();
-        assert!(s.eval::<bool>("return GetCursorInfo() == nil").unwrap());
+        assert!(s.cursor_payload().is_none());
         s.run("PickupContainerItem(0, 3)").unwrap();
         assert!(
             s.take_merchant_slot_buys().is_empty(),
@@ -1041,7 +1007,7 @@ mod tests {
         // A numeric string is accepted, and 1.9 truncates to the held row 1, toggling it off.
         s.run(r#"PickupMerchantItem("1")"#).unwrap();
         s.run("PickupMerchantItem(1.9)").unwrap();
-        assert!(s.eval::<bool>("return GetCursorInfo() == nil").unwrap());
+        assert!(s.cursor_payload().is_none());
     }
 
     #[test]
@@ -1083,7 +1049,7 @@ mod tests {
             "the row's item entry, aimed at the dropped-on slot"
         );
         assert!(
-            s.eval::<bool>("return GetCursorInfo() == nil").unwrap(),
+            s.cursor_payload().is_none(),
             "the cursor clears on the drop"
         );
     }
@@ -1105,7 +1071,7 @@ mod tests {
             s.take_merchant_slot_buys().is_empty(),
             "no buy goes out for a row that no longer resolves"
         );
-        assert!(s.eval::<bool>("return GetCursorInfo() == nil").unwrap());
+        assert!(s.cursor_payload().is_none());
     }
 
     #[test]

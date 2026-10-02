@@ -30,8 +30,10 @@ mod input;
 /// The language gate: the exemptions and fluency lookup behind the chat garble.
 mod language;
 /// `LoggingChat`/`LoggingCombat`: the two log files `/chatlog` and `/combatlog` toggle.
-mod logging;
+pub(crate) mod logging;
 mod net;
+#[cfg(test)]
+mod notice_tests;
 /// The `AUTO_JOIN_GUILD_CHANNEL` cascade, the one place the client joins or leaves
 /// `GuildRecruitment - City` on its own.
 mod recruitment;
@@ -57,6 +59,11 @@ pub(crate) use feed::ChatLog;
 pub(crate) use settings::restore_chat_looks;
 
 pub(crate) struct UiChatPlugin;
+
+/// The chat line drain, whose `DoEmote` arm writes the local [`crate::creature_anim::EmoteAnim`]:
+/// the animation chain runs after it, so the same frame's driver sees the play.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ChatDrain;
 
 impl Plugin for UiChatPlugin {
     fn build(&self, app: &mut App) {
@@ -150,7 +157,7 @@ impl Plugin for UiChatPlugin {
                     // After the clears, so a press that stamps the clock and drops the flag is
                     // settled before the idle timer reads it.
                     idle::idle_handler,
-                    input::drain_chat_input,
+                    input::drain_chat_input.in_set(ChatDrain),
                     // After the box's drain, so a `SendChatMessage` or `SendAddonMessage` from a
                     // slash handler it just ran goes out this frame.
                     input::drain_addon_chat_sends,

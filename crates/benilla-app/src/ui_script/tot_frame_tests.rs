@@ -33,31 +33,29 @@ fn unit(name: &str, guid: u64, health: u32) -> UnitState {
 fn load_tot() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
     load_xml(&s, r"Interface\FrameXML\UIParent.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
-    load_xml(&s, "Interface\\FrameXML\\BasicControls.xml");
-    load_xml(&s, "Interface\\FrameXML\\UnitPopup.xml");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
+    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
+    load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
     load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionButtonTemplate.xml");
-    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
-    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
-    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
-    load_xml(&s, "Interface\\FrameXML\\MainMenuBar.xml");
     load_xml(&s, "Interface\\FrameXML\\ActionBarFrame.xml");
-    load_xml(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
-    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
-    load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
     load_xml(&s, "Interface\\FrameXML\\BuffFrame.xml");
-    load_xml(&s, "Interface\\FrameXML\\UnitFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\CombatFeedback.xml");
+    load_xml(&s, "Interface\\FrameXML\\UnitPopup.xml");
+    load_xml(&s, "Interface\\FrameXML\\UnitFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\PlayerFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\PartyFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\TargetFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\PetFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
     // The pair's defaults from stock `UIOptionsFrame_Init` (`UIOptionsFrame.lua:116-119`), which
     // this kit does not load.
     s.run(r#"SHOW_TARGET_OF_TARGET = "0" SHOW_TARGET_OF_TARGET_STATE = "5""#)
@@ -402,8 +400,9 @@ fn the_debuff_row_draws_what_the_unit_carries() {
     benilla_formats::wow_data_or_skip!();
     let mut s = load_tot();
     switch_on(&mut s);
-    s.set_auras(
-        "targettarget",
+    s.set_unit_guids(&unit_guids());
+    s.set_unit_auras(
+        TOT,
         Some(vec![
             debuff(1000, "Rend", None),
             debuff(1001, "Curse of Agony", Some("Curse")),
@@ -437,7 +436,8 @@ fn the_target_rows_wrap_short_while_the_frame_stands_beside_them() {
     benilla_formats::wow_data_or_skip!();
     let mut s = load_tot();
     // A hostile target, so the debuffs lead and the buffs hang off them.
-    s.set_auras("target", Some(vec![debuff(2000, "Sunder", None)]));
+    s.set_unit_guids(&unit_guids());
+    s.set_unit_auras(TARGET, Some(vec![debuff(2000, "Sunder", None)]));
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("target".into())]);
 
     let anchor = |s: &mut UiScript, frame: &str| -> String {
@@ -497,4 +497,18 @@ fn the_reconcile_takes_the_frame_down_when_the_token_goes_silent() {
     s.tick(0.016);
     assert!(shown(&mut s), "and brings it back");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+const TARGET: u64 = 0xF130_0000_0000_0001;
+const TOT: u64 = 0xF130_0000_0000_0002;
+
+/// The resolver's inputs: `"target"` is `TARGET`, held and targeting `TOT`, so `"targettarget"`
+/// is `TOT`.
+fn unit_guids() -> benilla_ui::script::UnitGuids {
+    benilla_ui::script::UnitGuids {
+        player: 1,
+        target: TARGET,
+        held: [(TARGET, TOT)].into_iter().collect(),
+        ..Default::default()
+    }
 }

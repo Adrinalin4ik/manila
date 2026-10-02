@@ -104,8 +104,7 @@ pub enum QuadContent {
         additive: bool,
         /// `None` is the full texture.
         tex_coords: Option<TexCoords>,
-        /// A portrait, masked to the inscribed circle; false with a `portrait_unit` is the square
-        /// booth pane (`BenillaSetBoothTexture`).
+        /// A portrait, masked to the inscribed circle.
         circular: bool,
         /// A live unit portrait's unit: the renderer samples the app's bake of it instead of
         /// `path` and `color`.
@@ -362,8 +361,7 @@ pub(crate) struct RegionData {
     /// drawn as `texel × colour` per channel, alpha included: a `<Color 1,1,1,0.2>` tinted
     /// `(0, 0, 0.75, 0.5)` draws at alpha 0.1, as `SkillFrame`'s row trough does.
     pub(crate) vertex_color: Option<[f32; 4]>,
-    /// A portrait (`SetPortraitToTexture`, `SetPortraitTexture`), masked to the inscribed circle;
-    /// false with a `portrait_unit` is the square booth pane (`BenillaSetBoothTexture`).
+    /// A portrait (`SetPortraitToTexture`, `SetPortraitTexture`), masked to the inscribed circle.
     pub(crate) circular: bool,
     /// A live unit portrait's unit, drawn from the app's bake instead of the texture or colour;
     /// cleared by `SetTexture` and `SetPortraitToTexture`.
@@ -472,11 +470,16 @@ impl RegionData {
     /// read treats a measure under another key as absent; the layout keeps the old box until the
     /// new one lands, except for empty text, which is never measured.
     pub(crate) fn measure_key(&self, scale: f32) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
         // By reference: `String` hashes as `str` does, and this runs for every FontString every
         // frame, so a clone would allocate for nothing.
-        self.text.as_deref().unwrap_or("").hash(&mut hasher);
+        self.measure_key_of(self.text.as_deref().unwrap_or(""), scale)
+    }
+
+    /// [`Self::measure_key`] with `text` in place of the region's own.
+    pub(crate) fn measure_key_of(&self, text: &str, scale: f32) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
         self.font_path.hash(&mut hasher);
         self.font_height.map(f32::to_bits).hash(&mut hasher);
         self.text_height.map(f32::to_bits).hash(&mut hasher);

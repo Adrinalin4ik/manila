@@ -170,16 +170,7 @@ fn rank(query: &str, name: &str, dist2: f32, mode: Match) -> Option<Rank> {
 #[allow(clippy::type_complexity)] // one bundled param, the app's convention for big query sets
 pub(crate) struct ByNameScan<'w, 's> {
     /// Every known unit, our own avatar included: the reference has no self-exclusion here.
-    units: Query<
-        'w,
-        's,
-        (
-            Entity,
-            &'static Guid,
-            &'static Transform,
-            Option<&'static ObjectStore>,
-        ),
-    >,
+    units: UnitQuery<'w, 's>,
     self_q: Query<
         'w,
         's,
@@ -255,8 +246,7 @@ impl ByNameScan<'_, '_> {
         )
     }
 
-    /// Resolve a name to a unit, logging one `by-name:` line per call, ungated since it runs per
-    /// command: the candidates counted, the winner and on what.
+    /// Resolve a name to a unit through [`scan_units`], the mode argument deciding the filter.
     fn resolve(
         &self,
         query: &str,
@@ -264,130 +254,198 @@ impl ByNameScan<'_, '_> {
         filter: Filter,
         mode: Match,
     ) -> Option<(Entity, u64, String)> {
-        let query = query.trim();
-        if query.is_empty() {
-            return None;
-        }
-        let Some(origin) = self.origin() else {
-            info!("by-name: \"{query}\" — no active player object; nothing resolves");
-            return None;
-        };
-        let mut considered = 0usize;
-        let mut nameless = 0usize;
-        let mut best: Option<(Entity, u64, Rank, String)> = None;
-        for (entity, guid, tf, store) in &self.units {
-            if !search.accepts(guid.0) {
-                continue;
-            }
-            if filter == Filter::AssistableAlive && !self.assistable_alive(store) {
-                continue;
-            }
-            let Some(name) = self.names.peek(guid.0) else {
-                nameless += 1;
-                continue;
-            };
-            considered += 1;
-            let dist2 = tf.translation.distance_squared(origin);
-            let Some(r) = rank(query, name, dist2, mode) else {
-                continue;
-            };
-            if best.as_ref().is_none_or(|(_, _, b, _)| r.beats(*b)) {
-                best = Some((entity, guid.0, r, name.to_string()));
-            }
-        }
-        match &best {
-            Some((_, guid, r, name)) => info!(
-                "by-name: \"{query}\" ({search:?}) -> \"{name}\" guid {guid:#x} \
-                 ({}, prefix {}, {:.1} yd) over {considered} named candidates ({nameless} unnamed)",
-                if r.exact { "exact" } else { "prefix" },
-                r.prefix,
-                r.dist2.sqrt(),
-            ),
-            None => info!(
-                "by-name: \"{query}\" ({search:?}) -> NO MATCH over {considered} named candidates \
-                 ({nameless} unnamed, {mode:?}); target left untouched"
-            ),
-        }
-        best.map(|(e, g, _, name)| (e, g, name))
+        scan_units(
+            self.units
+                .iter()
+                .map(|(e, g, tf, store)| (e, g.0, tf.translation, store)),
+            self.origin(),
+            &self.names,
+            query,
+            search,
+            mode,
+            |store| filter != Filter::AssistableAlive || self.assistable_alive(store),
+        )
     }
 }
 
-/// Drain `/target <name>` through [`scan::commit`], the stop, select, re-swing path a click takes.
-/// A miss leaves the target alone, as neither failure edge in `0x489db4` calls `SetSelection`, and
-/// prints nothing; the reference prints message `0x127` `ERR_UNIT_NOT_FOUND` there, or `0xb8`
+/// One unit query's candidates, shared by [`ByNameScan`] and [`PlayerLookup`].
+type UnitQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static Guid,
+        &'static Transform,
+        Option<&'static ObjectStore>,
+    ),
+>;
+
+/// The resolver's walk (`0x493aa0`): a name to a unit, logging one `by-name:` line per call,
+/// ungated since it runs per command: the candidates counted, the winner and on what. `keep` is
+/// the per-candidate filter mode; `origin` is the active player's position, without which the
+/// reference resolves nothing (`0x493ae0`).
+fn scan_units<'a>(
+    units: impl Iterator<Item = (Entity, u64, Vec3, Option<&'a ObjectStore>)>,
+    origin: Option<Vec3>,
+    names: &NameCache,
+    query: &str,
+    search: NameSearch,
+    mode: Match,
+    keep: impl Fn(Option<&ObjectStore>) -> bool,
+) -> Option<(Entity, u64, String)> {
+    let query = query.trim();
+    if query.is_empty() {
+        return None;
+    }
+    let Some(origin) = origin else {
+        info!("by-name: \"{query}\" — no active player object; nothing resolves");
+        return None;
+    };
+    let mut considered = 0usize;
+    let mut nameless = 0usize;
+    let mut best: Option<(Entity, u64, Rank, String)> = None;
+    for (entity, guid, pos, store) in units {
+        if !search.accepts(guid) || !keep(store) {
+            continue;
+        }
+        let Some(name) = names.peek(guid) else {
+            nameless += 1;
+            continue;
+        };
+        considered += 1;
+        let dist2 = pos.distance_squared(origin);
+        let Some(r) = rank(query, name, dist2, mode) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(_, _, b, _)| r.beats(*b)) {
+            best = Some((entity, guid, r, name.to_string()));
+        }
+    }
+    match &best {
+        Some((_, guid, r, name)) => info!(
+            "by-name: \"{query}\" ({search:?}) -> \"{name}\" guid {guid:#x} \
+             ({}, prefix {}, {:.1} yd) over {considered} named candidates ({nameless} unnamed)",
+            if r.exact { "exact" } else { "prefix" },
+            r.prefix,
+            r.dist2.sqrt(),
+        ),
+        None => info!(
+            "by-name: \"{query}\" ({search:?}) -> NO MATCH over {considered} named candidates \
+             ({nameless} unnamed, {mode:?}); target left untouched"
+        ),
+    }
+    best.map(|(e, g, _, name)| (e, g, name))
+}
+
+/// The player-only name search for a caller that holds the [`NameCache`] mutably and so cannot
+/// take [`ByNameScan`]: `DoEmote`'s target (`0x49fdb1`).
+#[derive(SystemParam)]
+pub(crate) struct PlayerLookup<'w, 's> {
+    /// World positions, [`GlobalTransform`]: the chat drain already reads it, where `Transform`
+    /// would put it in an undeclared order against every system that moves a unit.
+    units: Query<'w, 's, (Entity, &'static Guid, &'static GlobalTransform)>,
+    self_q: Query<'w, 's, &'static GlobalTransform, With<SelfPlayer>>,
+}
+
+impl PlayerLookup<'_, '_> {
+    /// `0x493aa0` with typemask `0x10`, filter mode 0 and no exact-only flag, as `/assist <name>`
+    /// calls it: any player in the object list, whole name or longest prefix. Selects nothing.
+    pub(crate) fn find(&self, names: &NameCache, name: &str) -> Option<(Entity, u64)> {
+        let origin = self.self_q.single().ok().map(|tf| tf.translation());
+        scan_units(
+            self.units
+                .iter()
+                .map(|(e, g, tf)| (e, g.0, tf.translation(), None)),
+            origin,
+            names,
+            name,
+            NameSearch::PlayerOnly,
+            Match::PrefixOk,
+            |_| true,
+        )
+        .map(|(e, g, _)| (e, g))
+    }
+}
+
+/// `/target <name>` and the Lua `TargetByName(name, exactMatch)` through [`scan::commit`], the
+/// stop, select, re-swing path a click takes. `exact` is the Lua second argument, which `0x489d8e`
+/// reads with default 0 as the resolver's exact-only flag (consumed at `0x493cab`). A miss leaves
+/// the target alone, as neither failure edge in `0x489db4` calls `SetSelection`, and prints
+/// nothing; the reference prints message `0x127` `ERR_UNIT_NOT_FOUND` there, or `0xb8`
 /// `ERR_GENERIC_NO_TARGET` for an empty name.
+pub(super) fn target_named(
+    scan_params: &ByNameScan,
+    commit: &mut SelectCommit,
+    name: &str,
+    exact: bool,
+) {
+    let Some((entity, guid, _)) = scan_params.resolve(
+        name,
+        NameSearch::AnyUnit,
+        Filter::AcceptAll,
+        if exact {
+            Match::ExactOnly
+        } else {
+            Match::PrefixOk
+        },
+    ) else {
+        return;
+    };
+    commit.commit(entity, guid);
+}
+
+/// `/assist [name]` and the Lua `AssistByName`: the basis is a named player, or bare the current
+/// selection (`AssistUnit("target")`, `ChatFrame.lua:744`), and [`SelectCommit::assist`] selects
+/// its target.
+pub(super) fn assist_named(
+    scan_params: &ByNameScan,
+    commit: &mut SelectCommit,
+    name: Option<&str>,
+    how: &str,
+) {
+    let basis = match name {
+        Some(name) => scan_params
+            .resolve(
+                name,
+                NameSearch::PlayerOnly,
+                Filter::AcceptAll,
+                Match::PrefixOk,
+            )
+            .map(|(e, _, _)| e),
+        None => commit.selection.target,
+    };
+    let Some(basis) = basis else {
+        info!("assist ({how}): no basis unit; nothing to assist");
+        return;
+    };
+    // From here on this is `AssistUnit`'s tail too, one function as in the reference.
+    commit.assist(basis, how);
+}
+
+/// Drain the chat layer's `/target <name>` asks.
 pub(super) fn target_by_name_requests(
     mut requests: MessageReader<TargetByNameRequest>,
     scan_params: ByNameScan,
     mut commit: SelectCommit,
 ) {
     for request in requests.read() {
-        let Some((entity, guid, _)) = scan_params.resolve(
-            &request.name,
-            NameSearch::AnyUnit,
-            Filter::AcceptAll,
-            Match::PrefixOk,
-        ) else {
-            continue;
-        };
-        commit.commit(entity, guid);
+        target_named(&scan_params, &mut commit, &request.name, false);
     }
 }
 
-/// Drain the Lua `TargetByName(name, exactMatch)` asks, the `/target` path plus the second
-/// argument, which `0x489d8e` reads with default 0 as the resolver's exact-only flag (consumed at
-/// `0x493cab`).
-pub(super) fn script_target_by_name_requests(
-    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
-    scan_params: ByNameScan,
-    mut commit: SelectCommit,
-) {
-    let Some(mut script) = script else {
-        return;
-    };
-    for (name, exact) in script.take_target_by_name_requests() {
-        let Some((entity, guid, _)) = scan_params.resolve(
-            &name,
-            NameSearch::AnyUnit,
-            Filter::AcceptAll,
-            if exact {
-                Match::ExactOnly
-            } else {
-                Match::PrefixOk
-            },
-        ) else {
-            continue;
-        };
-        commit.commit(entity, guid);
-    }
-}
-
-/// Drain `/assist [name]`: the basis is a named player, or bare the current selection
-/// (`AssistUnit("target")`, `ChatFrame.lua:744`), and [`SelectCommit::assist`] selects its target.
+/// Drain the chat layer's `/assist [name]` asks.
 pub(super) fn assist_requests(
     mut requests: MessageReader<AssistRequest>,
     scan_params: ByNameScan,
     mut commit: SelectCommit,
 ) {
     for request in requests.read() {
-        // The basis: a named player, or bare, whatever is selected.
-        let basis = match &request.name {
-            Some(name) => scan_params
-                .resolve(
-                    name,
-                    NameSearch::PlayerOnly,
-                    Filter::AcceptAll,
-                    Match::PrefixOk,
-                )
-                .map(|(e, _, _)| e),
-            None => commit.selection.target,
-        };
-        let Some(basis) = basis else {
-            info!("assist (/assist): no basis unit; nothing to assist");
-            continue;
-        };
-        // From here on this is `AssistUnit`'s tail too, one function as in the reference.
-        commit.assist(basis, "/assist");
+        assist_named(
+            &scan_params,
+            &mut commit,
+            request.name.as_deref(),
+            "/assist",
+        );
     }
 }
 
@@ -403,6 +461,7 @@ pub(super) fn follow_requests(
     cast: Res<crate::spell::PendingCast>,
     mut errors: ResMut<crate::ui_action::UiErrorKeys>,
     mut follow: ResMut<crate::player::FollowState>,
+    mut approach: ResMut<crate::player::Approach>,
 ) {
     for request in requests.read() {
         let resolved = match request {
@@ -445,6 +504,8 @@ pub(super) fn follow_requests(
         match resolved {
             Some((guid, name)) => {
                 info!("follow: now following \"{name}\" guid {guid:#x}");
+                // The arm `0x611130` cancels what runs first: one auto-move cell.
+                approach.stop();
                 follow.start(guid, name);
             }
             None => {
@@ -460,7 +521,7 @@ pub(super) fn follow_requests(
 #[allow(clippy::type_complexity)] // one bundled param, the app's convention for big query sets
 pub(crate) struct SelectCommit<'w, 's> {
     pub(super) selection: ResMut<'w, Selection>,
-    seam: crate::creature_anim::AttackSeam<'w, 's>,
+    pub(crate) seam: crate::creature_anim::AttackSeam<'w, 's>,
     // Our own body: the guid, the store `can_attack` reads, and whether we are mid-swing.
     me: Query<
         'w,
@@ -525,12 +586,33 @@ impl SelectCommit<'_, '_> {
         }
     }
 
+    /// Whether we are mid-swing, which a deselect stops.
+    pub(super) fn engaged(&self) -> bool {
+        self.me.single().is_ok_and(|(_, _, engaged)| engaged)
+    }
+
+    /// Deselect (`0x493540(0,0)`), a no-op with nothing selected; see [`super::click::clear`].
+    pub(super) fn clear(&mut self) {
+        let engaged = self.engaged();
+        super::click::deselect(&mut self.selection, &mut self.seam, engaged);
+    }
+
+    /// `0x48f3a0`'s select on a looted object, which tests `TYPEMASK_UNIT` first (`0x48f3af`).
+    pub(crate) fn select_unit(&mut self, guid: u64) {
+        let Some(&entity) = self.index.0.get(&guid) else {
+            return;
+        };
+        if self.stores.get(entity).is_ok_and(ObjectStore::is_unit) {
+            self.commit(entity, guid);
+        }
+    }
+
     /// Select a resolved guid, `0x489a40`'s arm 1, through [`scan::commit`].
     pub(super) fn commit(&mut self, entity: Entity, guid: u64) {
         let me = self.me.single().ok();
-        // `scan::commit` takes the new target's attackability from its caller: the same
-        // `can_attack` the cursor and TAB pass.
-        let attackable = super::relations::can_attack(
+        // The re-swing's gate is `StartAttack`'s on the new target (`0x5ecc16`): alive, then
+        // `CanAttack`, so a body is switched to and never swung at.
+        let attackable = scan::attack_target_valid(
             self.stores.get(entity).ok(),
             self.factions.as_deref(),
             &self.reputations,

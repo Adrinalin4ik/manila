@@ -4,8 +4,8 @@
 //!
 //! Resolution, in order, the same shape as [`benilla_formats::wow_data`]:
 //! 1. `$BENILLA_HOME`.
-//! 2. `<project folder>/benilla-config/`, dev builds only: a shipped binary must not carry the
-//!    build machine's source tree.
+//! 2. `<project folder>/benilla-config/`, dev builds only ([`benilla_formats::project_folder`], the
+//!    launcher's): a shipped binary must not carry the build machine's source tree.
 //! 3. `<exe dir>/benilla-config/`.
 //!
 //! With `$WOW_CAPTURE` set every path resolves to `None`: a capture neither reads nor writes
@@ -28,6 +28,14 @@ pub(crate) fn home() -> Option<PathBuf> {
     if let Some(over) = std::env::var_os("BENILLA_HOME") {
         return Some(PathBuf::from(over));
     }
+    if cfg!(test) {
+        return None; // a unit test reaches no real state folder unless it pins `$BENILLA_HOME`
+    }
+    resident_home()
+}
+
+/// Steps 2 and 3 of [`home`]: the folder the build itself lives in.
+fn resident_home() -> Option<PathBuf> {
     // 2 · the project folder, dev builds only.
     if let Some(root) = dev_project_root() {
         return Some(root.join(STATE_DIR));
@@ -39,11 +47,15 @@ pub(crate) fn home() -> Option<PathBuf> {
         .map(|dir| dir.join(STATE_DIR))
 }
 
-/// The project folder a dev build keeps its state in: the primary checkout, whichever worktree
-/// built the binary, so every worktree shares one settings folder. Anything unexpected falls back
-/// to the crate root's grandparent rather than `None`.
+/// The project folder a dev build keeps its state in ([`benilla_formats::project_folder`]), through
+/// [`shared_root`].
 fn dev_project_root() -> Option<PathBuf> {
-    let here = crate::run_mode::dev_source_dir()?.ancestors().nth(2)?;
+    Some(shared_root(benilla_formats::project_folder()?))
+}
+
+/// `here`, or for a linked worktree its primary checkout, whichever worktree built the binary, so
+/// every worktree shares one settings folder. Anything unexpected keeps `here`.
+fn shared_root(here: &Path) -> PathBuf {
     let dot_git = here.join(".git");
     // A linked worktree: `.git` is a file pointing at `<primary>/.git/worktrees/<name>`.
     if dot_git.is_file() {
@@ -59,12 +71,12 @@ fn dev_project_root() -> Option<PathBuf> {
                 .and_then(|d| d.parent())
             {
                 if primary.is_dir() {
-                    return Some(primary.to_path_buf());
+                    return primary.to_path_buf();
                 }
             }
         }
     }
-    Some(here.to_path_buf())
+    here.to_path_buf()
 }
 
 /// `benilla-config/config.toml`: the CVar overrides, the `Config.wtf` analog.
@@ -372,6 +384,19 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
+    /// A unit test that does not pin `$BENILLA_HOME` resolves no state folder, so no test can write
+    /// the real one.
+    #[test]
+    fn a_test_without_an_override_has_no_state_folder() {
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = EnvGuard::unset("WOW_CAPTURE");
+        let _h = EnvGuard::unset("BENILLA_HOME");
+        assert_eq!(home(), None);
+        assert_eq!(config_path(), None);
+    }
+
     /// A missing or wrong `$WOW_DATA` does not move or lose the state folder.
     #[test]
     fn the_state_folder_no_longer_depends_on_finding_the_install() {
@@ -381,7 +406,8 @@ mod tests {
         let _c = EnvGuard::unset("WOW_CAPTURE");
         let _h = EnvGuard::unset("BENILLA_HOME");
         let _d = EnvGuard::set("WOW_DATA", "/nonexistent/benilla-test/Data");
-        let h = home().expect("a broken install path must not cost the player their config");
+        let h =
+            resident_home().expect("a broken install path must not cost the player their config");
         assert!(
             !h.starts_with("/nonexistent"),
             "home() still reads $WOW_DATA: {}",
@@ -399,11 +425,10 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _c = EnvGuard::unset("WOW_CAPTURE");
         let _h = EnvGuard::unset("BENILLA_HOME");
-        let h = home().expect("home() always resolves outside a capture");
+        let h = resident_home().expect("the resident folder always resolves");
         assert!(h.ends_with(STATE_DIR), "{}", h.display());
 
-        let Some(here) = crate::run_mode::dev_source_dir().and_then(|d| d.ancestors().nth(2))
-        else {
+        let Some(here) = benilla_formats::project_folder() else {
             // Player build: beside the binary.
             let exe_dir = std::env::current_exe()
                 .unwrap()
@@ -428,6 +453,86 @@ mod tests {
         } else {
             assert_eq!(h, here.join(STATE_DIR));
         }
+    }
+
+    /// A project folder that is a linked worktree keeps its state in the primary checkout, so every
+    /// worktree shares one; any other folder, a crate on top of benilla's included, keeps its own.
+    #[test]
+    fn the_state_root_is_the_folder_or_its_primary_checkout() {
+        let tmp = std::env::temp_dir().join(format!("benilla-root-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let primary = tmp.join("benilla");
+        std::fs::create_dir_all(primary.join(".git/worktrees/pool-3")).unwrap();
+        let slot = tmp.join("pool-3");
+        std::fs::create_dir_all(&slot).unwrap();
+        let gitdir = primary.join(".git/worktrees/pool-3");
+        std::fs::write(slot.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+        assert_eq!(shared_root(&slot), primary);
+        assert_eq!(shared_root(&primary), primary);
+        let hello_mod = tmp.join("hello-mod");
+        std::fs::create_dir_all(hello_mod.join(".git")).unwrap();
+        assert_eq!(shared_root(&hello_mod), hello_mod);
+        let plain = tmp.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(shared_root(&plain), plain);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// A launcher's recorded folder is where a dev build keeps its state and reads its probe
+    /// identity; a player build resolves neither from it. Recording is process-wide, so the parent
+    /// runs this same test in a child process of the test binary, which records and resolves.
+    #[test]
+    fn a_recorded_launcher_folder_holds_the_state_and_the_identity() {
+        const CHILD: &str = "BENILLA_TEST_LAUNCHER_FOLDER";
+        if let Some(dir) = std::env::var_os(CHILD) {
+            let dir = PathBuf::from(dir);
+            benilla_formats::set_project_folder(dir.to_str().unwrap());
+            if crate::run_mode::dev_affordances() {
+                assert_eq!(resident_home(), Some(dir.join(STATE_DIR)));
+                assert_eq!(
+                    crate::run_mode::declared_identity(),
+                    Some(crate::run_mode::DeclaredIdentity {
+                        user: "probe9".into(),
+                        character: "Modchar".into()
+                    })
+                );
+            } else {
+                let exe_dir = std::env::current_exe().unwrap();
+                assert_eq!(
+                    resident_home(),
+                    Some(exe_dir.parent().unwrap().join(STATE_DIR))
+                );
+                assert_eq!(crate::run_mode::declared_identity(), None);
+            }
+            return;
+        }
+        let tmp = std::env::temp_dir().join(format!("benilla-launcher-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join(".probe-identity"),
+            "WOW_USER=probe9\nWOW_PASS=unused\nWOW_CHAR=Modchar\n",
+        )
+        .unwrap();
+        let name =
+            "local_state::tests::a_recorded_launcher_folder_holds_the_state_and_the_identity";
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env(CHILD, &tmp)
+            .env_remove("BENILLA_HOME")
+            .env_remove("WOW_CAPTURE")
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.status.success() && report.contains("1 passed"),
+            "the child run:\n{report}"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
