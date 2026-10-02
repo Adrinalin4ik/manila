@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,px_feedunits,gate_n,gate_open,rigs_live,rigs_park,arch,ent_alloc,px_vmtick,skf_n,skf_us,px_input,px_asstrk,px_uiload,px_auras,px_attach,px_drive,aev,wix_us\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,px_feedunits,gate_n,gate_open,rigs_live,rigs_park,arch,ent_alloc,px_vmtick,skf_n,skf_us,px_input,px_asstrk,px_uiload,px_auras,px_attach,px_drive,aev,wix_us,ui_ex_us\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -1283,6 +1283,19 @@ pub(crate) fn note_ui_micros(micros: u64) {
     UI_FRAMES.fetch_add(1, Relaxed);
 }
 
+/// **`ui_ex_us`: the UI's other half.** `ui_us` is tick + resolve + measure; the extract walk,
+/// its conversion to quads and the diff against last frame were never in it, so the 10.9 ms that
+/// `uiLua 0` took off the main schedule against `ui_us` 1.70 had nowhere to be named. Per UI frame,
+/// empty when no frame reported, as `ui_us`.
+static UI_EX_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static UI_EX_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn note_ui_extract_micros(micros: u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    UI_EX_US.fetch_add(micros, Relaxed);
+    UI_EX_FRAMES.fetch_add(1, Relaxed);
+}
+
 /// Called every frame with the message-sweep counter's delta (`UiScript::msg_lines_hashed`).
 pub(crate) fn note_msg_lines_hashed(delta: u64) {
     MSG_HASHED.fetch_add(delta, std::sync::atomic::Ordering::Relaxed);
@@ -1941,6 +1954,17 @@ vm {:.1}   ui {:.1}",
         ",{}",
         benilla_world::liquid::take_water_index_micros()
     );
+    // `ui_ex_us`, per UI frame; empty when unmeasured (see `UI_EX_US`).
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        let total = UI_EX_US.swap(0, Relaxed);
+        match UI_EX_FRAMES.swap(0, Relaxed) {
+            0 => line.push(','),
+            n => {
+                let _ = write!(line, ",{}", total / n);
+            }
+        }
+    }
     // **Every `#` line goes AFTER the last column, not before it.** Both blocks below used to sit
     // above the trailing columns, which was invisible while the systems one stayed empty and split
     // every row of journal 37 in half the moment the mats one started printing: the row ended at

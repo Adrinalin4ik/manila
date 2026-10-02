@@ -770,6 +770,7 @@ pub(super) fn paint_script(
         drop(extract_span);
         let us_cmp = lap();
         if cost_on {
+            crate::perf::journal::note_ui_extract_micros((us_exm + us_cmp) as u64);
             let solves = script.layout_solves() - solves_before.unwrap_or(0);
             *ui_cost = super::UiFrameCost {
                 measured: ui_cost.measured,
@@ -990,6 +991,7 @@ pub(super) fn paint_script(
         drop(extract_span);
         let us_spl = lap();
         if cost_on {
+            crate::perf::journal::note_ui_extract_micros((us_exm + us_spl) as u64);
             let solves = script.layout_solves() - solves_before.unwrap_or(0);
             *ui_cost = super::UiFrameCost {
                 measured: ui_cost.measured,
@@ -1114,6 +1116,7 @@ pub(super) fn paint_script(
     }
     if cost_on {
         let us_diff = lap();
+        crate::perf::journal::note_ui_extract_micros((us_exm + us_exa + us_diff) as u64);
         let solves = script.layout_solves() - solves_before.unwrap_or(0);
         *ui_cost = super::UiFrameCost {
             measured: ui_cost.measured,
