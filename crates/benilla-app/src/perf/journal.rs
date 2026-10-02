@@ -196,6 +196,11 @@ pub(crate) fn on_cvar(
         crate::ui_script::gate::set_trace(on);
         info!("feed gate trace: {on}");
     }
+    if ev.is("uploadBudgetMb") {
+        let mb = ev.num().max(0.0) as usize;
+        // Logged by the mirror when it lands, browser only.
+        super::upload_budget::set_mb(mb);
+    }
     if ev.is("skinCacheMb") {
         let mb = benilla_formats::set_skin_cache_mb(ev.num() as usize);
         info!("skin decode cache: {mb} MiB");
@@ -851,6 +856,7 @@ fn take_stream_us() -> [u64; 5] {
 
 impl Plugin for FpsJournalPlugin {
     fn build(&self, app: &mut App) {
+        super::upload_budget::plugin(app);
         // The page-side way back from `/console uiLua 0`; see `journal_web::install_ui_lua_hook`.
         #[cfg(target_arch = "wasm32")]
         web::install_ui_lua_hook();

@@ -843,6 +843,13 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "48",
         "benilla's own - 1.12 composites into a fixed slot and caches nothing",
     ),
+    // **bevy's per-frame GPU upload cap, in the browser** - `perf::upload_budget`. Keep the
+    // default in step with `upload_budget::DEFAULT_MB`; `0` is unlimited. Inert natively.
+    ours(
+        "uploadBudgetMb",
+        "8",
+        "benilla's own - a browser upload cap so an arriving crowd spreads over frames",
+    ),
     // **Upstream PR 438's `> 1700` rule, switchable** - `benilla_formats::set_unmanaged_geosets_visible`.
     // It makes every geoset above 1700 visible whatever the helm's hide-mask says. On 1.12.1 data
     // nothing is authored up there, so it costs upstream nothing and rescues Reforged's Night Elf
