@@ -259,6 +259,22 @@ pub(in crate::entities) fn resolve_equipment(
                     eq.tabard_preview = true;
                 }
             }
+            // wenilla carry: keep the emblem only where the composite paints it - the preview, or a
+            // worn tabard whose display takes it (`equip_blits`' own filter, sections.rs). It sits in
+            // `SkinKey` and in this component, so a guild query answering after arrival changed
+            // every guilded player's `Equipment` and re-dressed them with a forced main-thread
+            // composite (`redress.rs`, `forced_body_atlas`) that painted nothing new, and it split
+            // otherwise-identical looks across guilds. The query above still runs: its answer is
+            // the guild name the rest of the client reads.
+            #[cfg(not(target_os = "macos"))]
+            if !eq.tabard_preview
+                && !held
+                    .catalog
+                    .get(eq.bodyslots[7])
+                    .is_some_and(|d| d.takes_guild_emblem())
+            {
+                eq.emblem = None;
+            }
             if current_equipment != Some(&eq) {
                 commands.entity(entity).insert(eq);
             }
