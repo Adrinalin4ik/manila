@@ -52,6 +52,31 @@ pub const DEFAULT_TOLERANCE: f32 = 0.25;
 /// A parent turn past ~10 degrees re-seats its parts even without travel.
 const TURN_COS: f32 = 0.996;
 
+/// Microseconds both systems spent, for the journal's `flat_us` (read and cleared by
+/// [`take_micros`]): the lane's own cost, which the `p_*` tiles cannot isolate once its two
+/// systems sit at their boundaries.
+static MICROS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Read and clear [`MICROS`].
+pub fn take_micros() -> u64 {
+    MICROS.swap(0, Ordering::Relaxed)
+}
+
+/// Adds the elapsed time to [`MICROS`] on drop, early returns included.
+struct Span(bevy::platform::time::Instant);
+
+impl Span {
+    fn start() -> Self {
+        Self(bevy::platform::time::Instant::now())
+    }
+}
+
+impl Drop for Span {
+    fn drop(&mut self) {
+        MICROS.fetch_add(self.0.elapsed().as_micros() as u64, Ordering::Relaxed);
+    }
+}
+
 static TOLERANCE_BITS: AtomicU32 = AtomicU32::new(0x3e80_0000); // 0.25_f32
 
 /// The `flatParts` observer's write: yards of drift allowed, `0` exact, negative off.
@@ -84,6 +109,7 @@ fn flatten_parts(
     mut flat: Query<(Entity, &mut Transform), With<FlatPart>>,
     mut on: Local<bool>,
 ) {
+    let _span = Span::start();
     if tolerance() < 0.0 {
         if *on {
             for (e, mut t) in &mut flat {
@@ -121,6 +147,7 @@ fn seat_flat_parts(
     mut decided: Local<EntityHashMap<bool>>,
     mut frame: Local<u32>,
 ) {
+    let _span = Span::start();
     let tol = tolerance();
     if tol < 0.0 {
         seated.0.clear();

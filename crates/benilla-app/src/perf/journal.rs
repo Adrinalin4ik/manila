@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,px_feedunits,gate_n,gate_open,rigs_live,rigs_park,arch,ent_alloc,px_vmtick,skf_n,skf_us,px_input,px_asstrk,px_uiload,px_auras,px_attach,px_drive,aev,wix_us,ui_ex_us\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,px_feedunits,gate_n,gate_open,rigs_live,rigs_park,arch,ent_alloc,px_vmtick,skf_n,skf_us,px_input,px_asstrk,px_uiload,px_auras,px_attach,px_drive,aev,wix_us,ui_ex_us,fu_us,fu_open,au_us,flat_us\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -1290,6 +1290,36 @@ pub(crate) fn note_ui_micros(micros: u64) {
 static UI_EX_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static UI_EX_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// **`fu_us`/`fu_open`/`au_us`: `feed_units` and `feed_auras` timed from inside.** The
+/// `px_feedunits` bracket read ~4 ms a frame at 1,200 rigs in journal 99 after c0bb7ca6 narrowed
+/// the gate to four units - so either the gate still opens every frame, or the bracket floats over
+/// neighbours, which a `before`/`after` pair cannot rule out. A guard over the body answers the
+/// first; the open count says which. Per frame, like the tiles; `fu_open` is frames per second.
+pub(crate) static FU_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static FU_OPEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static AU_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Adds its own lifetime to a counter on drop, so every early return is timed too.
+pub(crate) struct SpanGuard(
+    &'static std::sync::atomic::AtomicU64,
+    bevy::platform::time::Instant,
+);
+
+impl SpanGuard {
+    pub(crate) fn new(counter: &'static std::sync::atomic::AtomicU64) -> Self {
+        Self(counter, bevy::platform::time::Instant::now())
+    }
+}
+
+impl Drop for SpanGuard {
+    fn drop(&mut self) {
+        self.0.fetch_add(
+            self.1.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
 pub(crate) fn note_ui_extract_micros(micros: u64) {
     use std::sync::atomic::Ordering::Relaxed;
     UI_EX_US.fetch_add(micros, Relaxed);
@@ -1964,6 +1994,23 @@ vm {:.1}   ui {:.1}",
                 let _ = write!(line, ",{}", total / n);
             }
         }
+    }
+    // `fu_us`, `fu_open`, `au_us` (see `FU_US`).
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        let per = frames.max(1);
+        let _ = write!(
+            line,
+            ",{},{},{}",
+            FU_US.swap(0, Relaxed) / per,
+            FU_OPEN.swap(0, Relaxed),
+            AU_US.swap(0, Relaxed) / per
+        );
+        // `flat_us`: `benilla_world::rig_flat`'s two systems, per frame.
+        #[cfg(not(target_os = "macos"))]
+        let _ = write!(line, ",{}", benilla_world::rig_flat::take_micros() / per);
+        #[cfg(target_os = "macos")]
+        line.push(',');
     }
     // **Every `#` line goes AFTER the last column, not before it.** Both blocks below used to sit
     // above the trailing columns, which was invisible while the systems one stayed empty and split

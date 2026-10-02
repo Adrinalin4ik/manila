@@ -1223,6 +1223,8 @@ pub(crate) fn feed_units(
     let Some(mut script) = script else {
         return;
     };
+    // wenilla carry: the `fu_us` meter, the whole body from here.
+    let _span = crate::perf::journal::SpanGuard::new(&crate::perf::journal::FU_US);
     // Ahead of the gate: a login edge, with no snapshot to diff.
     if let Some(entered) =
         entered_world.and_then(|mut r| r.read().last().map(|m| m.billing_time_rested))
@@ -1302,6 +1304,7 @@ pub(crate) fn feed_units(
     if gate.skip() {
         return;
     }
+    crate::perf::journal::FU_OPEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     // A missing unit is `None`, which `set_unit` clears; a name miss lands on a later frame.
     let self_pair = self_q.iter().next();

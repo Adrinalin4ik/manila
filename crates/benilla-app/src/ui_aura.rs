@@ -438,6 +438,8 @@ fn feed_auras(
     let Some(mut script) = script else {
         return;
     };
+    // wenilla carry: the `au_us` meter.
+    let _span = crate::perf::journal::SpanGuard::new(&crate::perf::journal::AU_US);
     let Ok((store, self_guid)) = self_q.single() else {
         // No avatar does not end the aura state: a worldport re-streams the avatar mid-session, and
         // vmangos re-sends durations only on apply, refresh and `Map::ExistingPlayerLogin`. The
