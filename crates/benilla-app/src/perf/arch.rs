@@ -76,7 +76,47 @@ pub(crate) fn arch_census(world: &mut World) {
         "[census] {listed} of {total} entities listed above ({} archetypes not shown)",
         rows.len().saturating_sub(60)
     );
+    archetype_spread_census(world, &short);
     character_draw_census(world);
+}
+
+/// **Which components multiply the archetypes** - every archetype, the empty ones included.
+///
+/// The `arch` column reached 9,106 in one 15-minute session standing in Stormwind (the owner's
+/// journal of 2026-10-02 17:26), and a reload at the same spot with the same crowd read 5,466 with
+/// the frame 78 -> 55 ms and every system slower in proportion. bevy never deletes an archetype,
+/// and each query walks every archetype or table it ever matched, empty or not, so the count is
+/// paid by every system on every frame. The non-empty list above cannot say why it grows: the
+/// empty archetypes are the residue of combinations visited and left. Counting, per component, how
+/// many archetypes carry it names the toggled markers - a component in about half of them is one
+/// that is inserted and removed across otherwise identical entities.
+fn archetype_spread_census(world: &World, short: &dyn Fn(&str) -> String) {
+    use std::collections::HashMap;
+    let archetypes = world.archetypes();
+    let total = archetypes.len();
+    let empty = archetypes.iter().filter(|a| a.is_empty()).count();
+    let tables = world.storages().tables.len();
+    let mut per: HashMap<bevy::ecs::component::ComponentId, u32> = HashMap::new();
+    for a in archetypes.iter() {
+        for &c in a.components() {
+            *per.entry(c).or_default() += 1;
+        }
+    }
+    let mut rows: Vec<(u32, String)> = per
+        .into_iter()
+        .map(|(c, n)| {
+            let name = world
+                .components()
+                .get_info(c)
+                .map_or_else(|| format!("{c:?}"), |i| short(&i.name().to_string()));
+            (n, name)
+        })
+        .collect();
+    rows.sort_by_key(|r| std::cmp::Reverse(r.0));
+    info!("[spread] {total} archetypes, {empty} of them empty, {tables} tables");
+    for (n, name) in rows.iter().take(50) {
+        info!("[spread] {n:>6} of {total}  {name}");
+    }
 }
 
 /// **Arming it twice in one session needs the two writes in different FRAMES.** A CVar write
