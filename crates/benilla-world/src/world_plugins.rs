@@ -127,6 +127,9 @@ struct WorldFoundation;
 
 impl Plugin for WorldFoundation {
     fn build(&self, app: &mut App) {
+        // wenilla carry: palette-skinned parts are seated by `rig_flat`, not propagated.
+        #[cfg(not(target_os = "macos"))]
+        crate::rig_flat::plugin(app);
         // One solver substep, not avian's 6: with no dynamic bodies, kinematic motion is exact at
         // any count. Revisit when a dynamic body enters the world.
         app.insert_resource(SubstepCount(1))

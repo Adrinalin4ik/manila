@@ -196,6 +196,12 @@ pub(crate) fn on_cvar(
         crate::ui_script::gate::set_trace(on);
         info!("feed gate trace: {on}");
     }
+    #[cfg(not(target_os = "macos"))]
+    if ev.is("flatParts") {
+        let yards = ev.num();
+        benilla_world::rig_flat::set_tolerance(yards);
+        info!("flat parts: {}", if yards < 0.0 { "off (bevy propagates)".to_string() } else { format!("{yards} yd") });
+    }
     if ev.is("uploadBudgetMb") {
         let mb = ev.num().max(0.0) as usize;
         // Logged by the mirror when it lands, browser only.

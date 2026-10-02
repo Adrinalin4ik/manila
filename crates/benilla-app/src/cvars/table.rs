@@ -845,6 +845,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ),
     // **bevy's per-frame GPU upload cap, in the browser** - `perf::upload_budget`. Keep the
     // default in step with `upload_budget::DEFAULT_MB`; `0` is unlimited. Inert natively.
+    // **Palette-skinned parts out of transform propagation** - `benilla_world::rig_flat`. Yards of
+    // drift allowed in a part's light anchor and sort key; `0` exact; negative hands them back to
+    // bevy. Keep the default in step with `rig_flat::DEFAULT_TOLERANCE`.
+    ours(
+        "flatParts",
+        "0.25",
+        "benilla's own - a skinned part draws from its palette, so bevy need not propagate it",
+    ),
     ours(
         "uploadBudgetMb",
         "8",

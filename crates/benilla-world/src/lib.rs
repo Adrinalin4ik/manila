@@ -143,6 +143,9 @@ pub mod ride_frame;
 pub mod rig_anim;
 pub mod rig_palette;
 pub mod rig_rider;
+// wenilla carry: palette-skinned parts leave transform propagation (see the file).
+#[cfg(not(target_os = "macos"))]
+pub mod rig_flat;
 pub mod schedule;
 mod shaders;
 pub mod sky;
