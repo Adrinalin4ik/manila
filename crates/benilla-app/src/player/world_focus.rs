@@ -140,12 +140,22 @@ pub(super) fn release_post_snap_hold(
     // stream advances, so only a stream with no progress for the whole budget times out.
     let now = time.elapsed_secs();
     let alive = player.world_stale || progressed || p.assets_in_flight;
+    let was_settling = player.settling;
     if p.presentable() && !player.world_stale && focus_matches {
         player.end_settle(true, now);
     } else if alive {
         player.settle_deadline = now + SETTLE_TIMEOUT;
     } else if now >= player.settle_deadline {
         player.end_settle(false, now);
+    }
+    // Once per settle, and only on the frame it ends: what still holds WASD, or `none`. Without
+    // this a character that comes out of a worldport unable to walk is a story, because nothing
+    // else in the log says whether the hold is the settle, a lost mover, or a pending reseat.
+    if was_settling && !player.settling {
+        info!(
+            "worldport: settle released — WASD held by: {}",
+            player.movement_suppressors()
+        );
     }
     // **Pay the worldport ack when the hold ends, or when its budget is spent — whichever is
     // first** (decision 1340, amended here). This is the real client's post-load `0xDC`
