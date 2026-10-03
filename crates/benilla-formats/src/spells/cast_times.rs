@@ -88,19 +88,18 @@ pub fn load_spell_cast_times(chain: &mut Chain) -> Result<SpellCastTimeCatalog> 
         }
     }
     let set = parse(&bytes, schema, "SpellCastTimes.dbc")?;
-    let mut times = HashMap::new();
-    for r in set.records() {
-        let Some(id) = u32_at(r, 0) else { continue };
-        times.insert(
+    let rows = set.records().iter().filter_map(|r| {
+        let id = u32_at(r, 0)?;
+        Some((
             id,
             SpellCastTime {
                 base_ms: i32_at(r, 1).unwrap_or(0),
                 per_level_ms: i32_at(r, 2).unwrap_or(0),
                 minimum_ms: i32_at(r, 3).unwrap_or(0),
             },
-        );
-    }
-    Ok(SpellCastTimeCatalog { times })
+        ))
+    });
+    Ok(SpellCastTimeCatalog::from_rows(rows))
 }
 
 #[cfg(test)]

@@ -809,33 +809,38 @@ fn spell_start(
             }
         }
     }
-    // SPELLCAST_START fires only on `cast_time > 0 && !(SpellRec+0x18 & 2)` (`0x6e7700`): a
-    // ranged-slot spell never opens a bar. vmangos pads a non-auto-repeat ranged cast by 500 ms
-    // (`SpellEntry::GetCastTime`), so Throw arrives as a 500 ms cast with no bar. An unknown spell
-    // keeps the bar.
-    let ranged_slot = spells
-        .and_then(|s| s.catalog.get(spell_id))
-        .is_some_and(|d| d.ranged_slot());
+    // Deviation from the reference's `0x6e7700` gate (`cast_time > 0 && !(SpellRec+0x18 & 2)`):
+    // the reference suppresses the bar for *every* `Attributes & 0x2` ranged spell, so Aimed Shot
+    // and Multi-Shot show none (a later client added `Force Display Castbar` to fix exactly this).
+    // Here a spell opens a bar on the wire cast time whenever it *has* one in `SpellCastTimes.dbc`
+    // — Aimed Shot's real 3 s cast does, while vmangos's +500 ms pad on an instant shot
+    // (`SpellEntry::GetCastTime`) does not, so Multi-Shot and Throw stay bar-free. Auto Shot and
+    // wand Shoot are instant rows too. An unknown spell, or a build without the cast-time table,
+    // keeps the reference's bar rather than losing every bar.
+    let has_cast_time = match (spells, spells.and_then(|s| s.catalog.get(spell_id))) {
+        (Some(s), Some(d)) if !s.cast_times.is_empty() => s.cast_time_ms(d, d.base_level) > 0,
+        _ => true,
+    };
     if *crate::net::CAST_TRACE && self_guid.0 == Some(caster) {
         info!(
             "cast-trace: RECV SPELL_START — spell {spell_id} cast_time={cast_time_ms}ms \
              (bar {})",
-            if ranged_slot {
-                "suppressed: ranged"
-            } else {
+            if has_cast_time {
                 "opens"
+            } else {
+                "suppressed: instant row"
             }
         );
     }
     // Our own timed cast opens the bar.
     if self_guid.0 == Some(caster) && cast_time_ms > 0 {
-        if !ranged_slot {
+        if has_cast_time {
             cast_bar.0.push(CastBarEdge::Start {
                 spell_id,
                 cast_time_ms,
             });
         }
-        // The real cast time replaces the guard's send-time deadline, ranged casts included.
+        // The real cast time replaces the guard's send-time deadline, every cast included.
         pending.refine(cast_time_ms, Instant::now());
     }
     if let Some(&e) = index.0.get(&caster) {
@@ -3420,5 +3425,138 @@ mod tests {
             None,
             "the save alone is not the in-flight slot"
         );
+    }
+
+    /// The shot cast bar is a deliberate deviation from the reference's `0x6e7700` gate: a ranged
+    /// spell with a real `SpellCastTimes.dbc` cast opens it, while the instant shots (and so
+    /// vmangos's +500 ms pad on them) and the auto-repeat shots do not.
+    #[test]
+    fn a_timed_ranged_cast_opens_the_shot_bar_but_an_instant_shot_does_not() {
+        use crate::net::{Guid, SelfPlayer};
+        use bevy::ecs::system::RunSystemOnce;
+
+        const AIMED_SHOT: u32 = 19434;
+        const MULTI_SHOT: u32 = 2643;
+        const AUTO_SHOT: u32 = 75;
+
+        // The real 1.12 rows: Aimed Shot is a 3 s cast (`SpellCastTimes` row 5); Multi-Shot and
+        // Auto Shot point at row 1, the instant sentinel.
+        let spells = || {
+            let mut s = Spells::empty_for_tests();
+            s.catalog = benilla_formats::SpellCatalog::from_displays(
+                [
+                    (
+                        AIMED_SHOT,
+                        benilla_formats::SpellDisplay {
+                            name: "Aimed Shot".into(),
+                            attributes: 0x0041_0012,
+                            casting_time_index: 5,
+                            base_level: 20,
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        MULTI_SHOT,
+                        benilla_formats::SpellDisplay {
+                            name: "Multi-Shot".into(),
+                            attributes: 0x0001_0002,
+                            casting_time_index: 1,
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        AUTO_SHOT,
+                        benilla_formats::SpellDisplay {
+                            name: "Auto Shot".into(),
+                            attributes: 0x0005_0012,
+                            attributes_ex2: 0x20,
+                            casting_time_index: 1,
+                            ..Default::default()
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            );
+            s.cast_times = benilla_formats::SpellCastTimeCatalog::from_rows([
+                (
+                    1,
+                    benilla_formats::SpellCastTime {
+                        base_ms: 0,
+                        per_level_ms: 0,
+                        minimum_ms: 0,
+                    },
+                ),
+                (
+                    5,
+                    benilla_formats::SpellCastTime {
+                        base_ms: 3000,
+                        per_level_ms: 0,
+                        minimum_ms: 3000,
+                    },
+                ),
+            ]);
+            s
+        };
+
+        // Whether our own wire START for `spell_id` left a Start edge in the feed.
+        let start_for =
+            |spell_id: u32, cast_ms: u32| {
+                let mut app = App::new();
+                app.add_message::<CastEvent>()
+                    .init_resource::<GuidIndex>()
+                    .init_resource::<SelfGuid>()
+                    .init_resource::<CastBarFeed>()
+                    .init_resource::<PendingCast>()
+                    .init_resource::<crate::spell::SpellModifiers>();
+                let self_e = app.world_mut().spawn((Guid(10), SelfPlayer)).id();
+                app.world_mut()
+                    .resource_mut::<GuidIndex>()
+                    .0
+                    .insert(10, self_e);
+                app.world_mut().resource_mut::<SelfGuid>().0 = Some(10);
+                let cat = spells();
+                app.world_mut()
+                    .run_system_once(
+                        move |mut commands: Commands,
+                              index: Res<GuidIndex>,
+                              self_guid: Res<SelfGuid>,
+                              mut cast_events: MessageWriter<CastEvent>,
+                              mut cast_bar: ResMut<CastBarFeed>,
+                              mut pending: ResMut<PendingCast>| {
+                            spell_start(
+                                10,
+                                spell_id,
+                                0,
+                                cast_ms,
+                                None,
+                                None,
+                                &mut commands,
+                                &index,
+                                &mut cast_events,
+                                &self_guid,
+                                &mut cast_bar,
+                                &mut pending,
+                                Some(&cat),
+                                1,
+                            );
+                        },
+                    )
+                    .unwrap();
+                app.world().resource::<CastBarFeed>().0.iter().any(
+                    |e| matches!(e, CastBarEdge::Start { spell_id: id, .. } if *id == spell_id),
+                )
+            };
+
+        assert!(
+            start_for(AIMED_SHOT, 3_500),
+            "Aimed Shot's real 3 s cast opens the shot bar"
+        );
+        assert!(
+            !start_for(MULTI_SHOT, 500),
+            "Multi-Shot is an instant row: vmangos's +500 ms pad must not open a bar"
+        );
+        assert!(!start_for(AUTO_SHOT, 0), "Auto Shot is instant: no bar");
+        assert!(!start_for(AUTO_SHOT, 500), "nor a padded instant one");
     }
 }
