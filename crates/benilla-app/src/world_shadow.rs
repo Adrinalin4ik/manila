@@ -2,7 +2,7 @@
 //! of [`super::character_shadow`].
 //!
 //! It owns the shadows cast by the WORLD: the retained `static_gx` geometry (trees + buildings, cast
-//! solid), the alpha-tested foliage (leaf canopies, one caster per leaf texture), and the per-frame
+//! solid), resident terrain, the alpha-tested foliage (one caster per leaf texture), and the per-frame
 //! ENTITY-resident environment (gameobjects, distance-faded doodads, WMO props). When `worldShadows`
 //! is on it declares demand to the shared rig and, while the rig is live, builds those casters using
 //! the rig's shared material + per-frame facts ([`ShadowFrame`]). It also drives the terrain
@@ -29,12 +29,16 @@ use bevy::render::render_resource::{
 use bevy::shader::ShaderRef;
 
 use benilla_assets::materials::WowModelMaterial;
+use benilla_assets::AdtTile;
 use benilla_world::billboard::BillboardCard;
 use benilla_world::interact::PickMesh;
 use benilla_world::lighting::WorldShadowActive;
 use benilla_world::model_render::{ModelPart, ShadowOccluder};
 use benilla_world::rig_palette::{RigPalettes, RigPart, RigSkin};
 use benilla_world::static_gx::StaticGx;
+use benilla_world::terrain_stream::{
+    append_terrain_torch_triangles, terrain_torch_generation, TerrainStreamer,
+};
 
 use crate::shadow_core::{
     collect_entity_geometry, empty_cutout_mesh, empty_shadow_mesh, restore_mesh_buffers,
@@ -58,19 +62,27 @@ impl Plugin for WorldShadowPlugin {
 
 /// MONKEY (followups): the static caster rebuilds on 16 yd of camera drift, so a standing camera
 /// never picks up trees and doodads that stream in later. Invalidate it whenever the retained
-/// scene's residency changes, while world shadows are on (Classic has them off, so it is inert).
+/// scene or terrain residency changes, while world shadows are on (Classic has them off).
 fn refresh_streamed_shadows(
     video: Res<VideoConfig>,
     gx: Option<Res<StaticGx>>,
+    terrain: Option<Res<TerrainStreamer>>,
+    tiles: Option<Res<Assets<AdtTile>>>,
     mut lane: ResMut<WorldLane>,
-    mut seen: Local<Option<u64>>,
+    mut seen: Local<Option<(u64, Option<u64>)>>,
 ) {
     if !video.world_shadows {
         *seen = None;
         return;
     }
     let Some(gx) = gx else { return };
-    let generation = gx.torch_residency_generation();
+    let generation = (
+        gx.torch_residency_generation(),
+        terrain
+            .as_deref()
+            .zip(tiles.as_deref())
+            .map(|(terrain, tiles)| terrain_torch_generation(terrain, tiles)),
+    );
     if *seen != Some(generation) {
         lane.invalidate_static();
         *seen = Some(generation);
@@ -167,6 +179,7 @@ fn update_world_shadows(
     mut cutout_materials: ResMut<Assets<CutoutShadowCasterMaterial>>,
     // The retained static world — `Option` because it exists only when the retained pass is armed.
     gx: Option<Res<StaticGx>>,
+    terrain: (Res<TerrainStreamer>, Res<Assets<AdtTile>>),
     // The terrain MCSH-suppression flag (this lane owns it).
     mut world_active: ResMut<WorldShadowActive>,
     parts: Query<
@@ -286,13 +299,22 @@ fn update_world_shadows(
                 &mut positions,
                 &mut indices,
             );
+            // MONKEY (gfx): the directional map also occludes volumetric shafts; hills must cast.
+            let terrain_tris = append_terrain_torch_triangles(
+                &terrain.0,
+                &terrain.1,
+                frame.light_position,
+                frame.tall_reach,
+                &mut positions,
+                &mut indices,
+            );
             let tris = (indices.len() / 3) as u32;
             restore_mesh_buffers(mesh, positions, indices);
             lane.static_rebuilt_at = Some(frame.light_position);
             if shadow_trace() {
                 info!(
-                    "shadow-trace: static rebuild — {} tris within {:.0}yd",
-                    tris, frame.tall_reach
+                    "shadow-trace: static rebuild — {} tris ({} terrain) within {:.0}yd",
+                    tris, terrain_tris, frame.tall_reach
                 );
             }
         }
@@ -403,6 +425,14 @@ mod streamed_refresh_tests {
         app.world_mut().run_schedule(Update);
         assert!(!app.world().resource_ref::<WorldLane>().is_changed());
         app.world_mut().resource_mut::<VideoConfig>().world_shadows = true;
+        app.world_mut().run_schedule(Update);
+        assert!(app.world().resource_ref::<WorldLane>().is_changed());
+        app.world_mut().clear_trackers();
+        app.world_mut().run_schedule(Update);
+        assert!(!app.world().resource_ref::<WorldLane>().is_changed());
+        // A terrain set arriving without any new retained models must invalidate the map too.
+        app.init_resource::<TerrainStreamer>()
+            .init_resource::<Assets<AdtTile>>();
         app.world_mut().run_schedule(Update);
         assert!(app.world().resource_ref::<WorldLane>().is_changed());
         app.world_mut().clear_trackers();
