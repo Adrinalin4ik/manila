@@ -350,6 +350,10 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     unpark_boot_vm(world);
     if !ui_wanted(world) {
         world.remove_resource::<PendingEntryUiLoad>();
+        // The world entry's own step still runs with no UI to load: upstream clears after
+        // `load_ingame_ui_on_world_entry` returns, and that function's own `!ui_wanted` arm is an
+        // early return, so the clear is reached on this route too.
+        crate::vplates::clear_at_world_entry(world);
         return;
     }
     if matches!(
@@ -361,6 +365,11 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     let Some(mut script) = world.remove_non_send_resource::<UiScript>() else {
         warn!("ui_script: entering the world with no VM — the in-game UI will not load");
         world.remove_resource::<PendingEntryUiLoad>();
+        // Same reason as the arm above: upstream's single call sits after a load that handles
+        // this case internally, so it runs here too. With no VM there are no bit writes to drop
+        // and this is only the `VPlateMode` reset — which is the half that would otherwise carry
+        // the previous session's mode into the new world.
+        crate::vplates::clear_at_world_entry(world);
         return;
     };
     let frame_start = bevy::platform::time::Instant::now();
@@ -497,6 +506,14 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 // the world because its load is one burst, and ours has the VM in hand here.
                 let session = script.session();
                 world.insert_non_send_resource(script);
+                // The world entry's own step after the UI load (`0x401570` runs it at `0x401639`,
+                // after the UI load at `0x401602`), which a `ReloadUI()` never takes — so it sits
+                // here and NOT in `load_ingame_ui_on_world_entry`, which the reload path shares.
+                //
+                // After the insert, not before: it drops the replay's nameplate bit writes
+                // through the VM, and the VM is out of the world for the whole slice. Called
+                // while it is out, the first half is a silent no-op and only the mode resets.
+                crate::vplates::clear_at_world_entry(world);
                 // The standing instrument for this edge: the one number that says whether the
                 // cover is still hiding it — over how many frames it was spread, and, since
                 // upstream's 2226, WHICH VM it came up on. The session is the load-bearing half
