@@ -777,6 +777,7 @@ dependencies = [
  "web-time",
  "wgpu",
  "windows-sys 0.59.0",
+ "winit",
 ]
 
 [[package]]

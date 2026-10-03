@@ -446,6 +446,7 @@ fn play_kit(
                 entity,
                 anim_id,
                 seq,
+                via_player: false,
             });
         }
     }

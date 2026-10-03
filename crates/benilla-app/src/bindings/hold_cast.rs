@@ -31,7 +31,7 @@ use bevy::prelude::*;
 use benilla_protocol::messages::ACTION_KIND_SPELL;
 use benilla_ui::script::{ActionUse, ScriptCall, UiScript};
 
-use super::{BindKey, BindingsState};
+use super::{BindingsState, Held};
 use crate::net::{ObjectStore, SelfPlayer};
 use crate::spell::{ActiveChannel, AutoRepeatActive, Cooldowns, PendingCast, SpellTargeting};
 use crate::ui_action::{PlayerActions, Spells, SPELL_ATTACK};
@@ -172,7 +172,7 @@ pub(super) fn tick(
         state
             .latched
             .iter()
-            .any(|(k, c)| *k == BindKey::Key(h.key) && *c == h.command)
+            .any(|(k, c)| *k == Held::Key(h.key) && *c == h.command)
     };
     // Released this pass: its up-half has queued the stock cast, which a latch that cast drops.
     for h in holds.iter().filter(|h| !held(h)) {
@@ -186,7 +186,7 @@ pub(super) fn tick(
         return;
     }
     for (k, command) in &state.latched {
-        let BindKey::Key(key) = *k else { continue };
+        let Held::Key(key) = *k else { continue };
         if is_action_command(command)
             && !holds.iter().any(|h| h.key == key && h.command == *command)
         {
