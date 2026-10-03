@@ -405,7 +405,7 @@ fn torch_face(d: vec3<f32>) -> u32 {
 }
 
 // This fixture's OWN cast shadow: correlate the `wow_light` fixture at `light_pos` to a
-// promoted torch (position match within 1 yd), pick the cube face facing the fragment, and sample
+// promoted torch (nearest position within 1 yd), pick the cube face facing the fragment, and sample
 // that layer. 1.0 (unshadowed) when no map matches, or when TORCH_SHADOWS is off (wow_model's copy
 // of the caller never sets it).
 //
@@ -426,11 +426,22 @@ fn torch_map_at(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>, fade_radius: f
     if (torch_table.count.x == 0u) {
         return 1.0;
     }
-    for (var i = 0u; i < torch_table.count.x; i = i + 1u) {
+    // MONKEY (gfx): a nearby spell light must not steal an earlier fixture's map.
+    var nearest = torch_table.count.x;
+    var nearest_d2 = 1.0;
+    for (var candidate = 0u; candidate < torch_table.count.x; candidate += 1u) {
         // MONKEY (static torch cache): holes and pending uploads never sample stale layers.
-        if (torch_table.positions[i].w <= 0.0) { continue; }
+        if (torch_table.positions[candidate].w <= 0.0) { continue; }
+        let delta = torch_table.positions[candidate].xyz - light_pos;
+        let d2 = dot(delta, delta);
+        if (d2 < nearest_d2) {
+            nearest = candidate;
+            nearest_d2 = d2;
+        }
+    }
+    if (nearest < torch_table.count.x) {
+        let i = nearest;
         let fixture = torch_table.positions[i].xyz;
-        if (distance(fixture, light_pos) < 1.0) {
             let face = torch_face(P - fixture);
             let layer = i * 6u + face;
             // MONKEY (live bank rank): count.z is CPU-ready-filtered; holes must not consume
@@ -457,7 +468,6 @@ fn torch_map_at(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>, fade_radius: f
             // into that same weight (see the function). `w * strength` rather than a second `mix`
             // because the two are the same expression.
             return mix(1.0, s, torch_table.positions[i].w * torch_strength());
-        }
     }
 #endif
     return 1.0;

@@ -248,7 +248,7 @@ fn torch_face(d: vec3<f32>) -> u32 {
 
 // MONKEY (torch shadows Phase 3A): this interior fixture's OWN cast shadow on an ENTITY fragment —
 // exactly static_gx.wgsl's `torch_surface_shadow` (keep in sync): correlate the `wow_light`
-// fixture at `light_pos` to a promoted torch (position match within 1 yd), pick the cube face
+// fixture at `light_pos` to a promoted torch (nearest position within 1 yd), pick the cube face
 // facing the fragment, and sample that layer through the shared projector. 1.0 (unshadowed) when
 // no map matches — the lane is off, or the fixture was not among the ≤4 promoted.
 //
@@ -263,11 +263,22 @@ fn torch_entity_shadow_at(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>, fade
     }
     // Normal-offset the sample point out of the body (see TORCH_NORMAL_OFFSET).
     let Ps = P + N * TORCH_NORMAL_OFFSET;
-    for (var i = 0u; i < torch_table.count.x; i = i + 1u) {
+    // MONKEY (gfx): mirror the retained receiver's nearest-fixture correlation.
+    var nearest = torch_table.count.x;
+    var nearest_d2 = 1.0;
+    for (var candidate = 0u; candidate < torch_table.count.x; candidate += 1u) {
         // MONKEY (static torch cache): holes and pending uploads never sample stale layers.
-        if (torch_table.positions[i].w <= 0.0) { continue; }
+        if (torch_table.positions[candidate].w <= 0.0) { continue; }
+        let delta = torch_table.positions[candidate].xyz - light_pos;
+        let d2 = dot(delta, delta);
+        if (d2 < nearest_d2) {
+            nearest = candidate;
+            nearest_d2 = d2;
+        }
+    }
+    if (nearest < torch_table.count.x) {
+        let i = nearest;
         let fixture = torch_table.positions[i].xyz;
-        if (distance(fixture, light_pos) < 1.0) {
             let face = torch_face(Ps - fixture);
             let layer = i * 6u + face;
             // MONKEY (live bank rank): count.z is CPU-ready-filtered; holes must not consume
@@ -293,7 +304,6 @@ fn torch_entity_shadow_at(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>, fade
             // into that same weight (see the function). `w * strength` rather than a second `mix`
             // because the two are the same expression.
             return mix(1.0, s, torch_table.positions[i].w * torch_strength());
-        }
     }
     return 1.0;
 }

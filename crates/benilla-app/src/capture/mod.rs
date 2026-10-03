@@ -78,6 +78,7 @@ mod probe_vendor_swap;
 mod probes;
 mod realm_list;
 mod scenarios;
+mod spell_light;
 use crate::run_mode::CaptureMode;
 pub(crate) use depth_probe::DepthProbePlugin;
 use fixtures::{seed_perf_crowd, seed_ui_fixture, seed_wind_player};
@@ -680,6 +681,11 @@ impl Plugin for CapturePlugin {
             })
             .add_systems(Update, pin_scene.in_set(WorldStage::Present))
             .add_systems(Update, seed_wind_player)
+            .add_systems(Update, spell_light::seed)
+            .add_systems(
+                Last,
+                spell_light::trace.after(crate::shadow_core::ShadowSet::Lanes),
+            )
             // MONKEY (perf): the probe crowd (`WOW_PERF_CROWD`).
             .add_systems(Update, seed_perf_crowd)
             // Before `UnitFeed`: the seed stands in for wire data live play delivers on earlier
