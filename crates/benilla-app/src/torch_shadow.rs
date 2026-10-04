@@ -172,13 +172,6 @@ const TORCH_MOVING_MAX: usize = TorchShadowViews::MAX_TORCH_MOVING;
 /// handed back to the cached path. Long enough to cover a walk cycle's pauses and a pet's
 /// stop-turn-start, short enough that a brazier dropped on the ground is cached within a second.
 const TORCH_MOVING_SETTLE: f64 = 0.75;
-/// MONKEY (moving fixture): how far (yd²) a fixture must shift between two frames to count as
-/// having MOVED at all. A hand-held flame on an idling NPC jitters by millimetres with the breathe
-/// animation; at 60 fps this threshold is ~1.2 yd/s, so an idle never registers and a walk always
-/// does. It is deliberately NOT [`TORCH_STALE_DRIFT_SQ`]: that one asks "is the cached map still
-/// valid" (a question about the map), this one asks "is the fixture in motion" (a question about
-/// the fixture), and a fixture creeping 0.09 yd a frame would answer the first "yes, forever".
-const TORCH_MOVING_EPS_SQ: f32 = 0.0004;
 /// MONKEY (moving fixture): the fade rate (weight per second) for a moving slot that could NOT get
 /// the moving budget — 0.15 s to nothing, five times the normal [`TORCH_FADE_RATE`]. The normal
 /// rate exists to keep a *correct* shadow on screen while it dissolves; this one is for a shadow
@@ -281,6 +274,15 @@ struct TorchSlot {
 }
 
 impl TorchSlot {
+    // MONKEY (gfx): the geometry key hashes the exact position. Even sub-centimetre hand sway
+    // therefore needs the live path's stable mesh handle, or each upload drops the ready bit.
+    fn monkey_track_motion(&mut self, now: f64) {
+        if self.pos != self.last_pos {
+            self.still_since = now;
+        }
+        self.last_pos = self.pos;
+    }
+
     /// MONKEY (moving fixture): has the fixture left the position its cached map was baked from?
     /// This is [`map_publishable`]'s complement with one extra condition — a slot that has NEVER
     /// built is not "drifted", it is simply new, and belongs to the promotion path rather than to
@@ -967,10 +969,7 @@ fn update_torch_shadows(
     // `score`) and the weight ramp below (which needs to know who fades fast), so every slot's
     // verdict is made from fresh positions and acted on in the same frame it is made.
     for slot in lane.slots.iter_mut() {
-        if slot.pos.distance_squared(slot.last_pos) > TORCH_MOVING_EPS_SQ {
-            slot.still_since = now;
-        }
-        slot.last_pos = slot.pos;
+        slot.monkey_track_motion(now);
     }
     let (live, dropped) = moving_budget(
         lane.slots
@@ -1814,6 +1813,25 @@ mod tests {
     }
 
     // MONKEY (moving fixture): WHO may be re-rendered every frame, and for HOW LONG after it stops.
+    #[test]
+    fn monkey_slow_hand_sway_keeps_the_live_shadow_path_at_every_frame_rate() {
+        for fps in [30, 60, 144, 240] {
+            let owner = Some(LightOwner::Instance(Entity::PLACEHOLDER));
+            let mut slot = moving_slot(owner, Vec3::ZERO, Vec3::ZERO, 0.0);
+            for frame in 1..=fps * 2 {
+                let now = 10.0 + f64::from(frame) / f64::from(fps);
+                slot.pos.x = (frame as f32 / fps as f32 * 3.0).sin() * 0.04;
+                slot.monkey_track_motion(now);
+                assert!(slot.moving(now), "{fps} fps, frame {frame}");
+                slot.built_at = Some(slot.pos);
+            }
+            slot.monkey_track_motion(12.5);
+            assert!(slot.moving(12.5));
+            slot.monkey_track_motion(13.0);
+            assert!(!slot.moving(13.0), "a stationary fixture returns to the cache");
+        }
+    }
+
     #[test]
     fn a_fixture_is_moving_only_while_it_is_actually_moving() {
         let pet = Some(LightOwner::Instance(Entity::PLACEHOLDER));
