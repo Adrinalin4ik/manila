@@ -418,17 +418,17 @@ fn torch_face(d: vec3<f32>) -> u32 {
 // MONKEY (slope bias): `N` rides along purely so the projector can bias against the RECEIVER'S
 // PLANE. `P` is the already-offset point, `N` the normal it was offset along, and this function
 // makes no other use of it - the correlation, the face pick and the fades are unchanged.
-fn torch_map_at(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>, fade_radius: f32) -> f32 {
+fn torch_map_at(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>, fade_radius: f32, strict: bool) -> f32 {
 #ifdef TORCH_SHADOWS
     // MONKEY (torch lane perf): the whole table is empty far more often than not (no promoted
     // fixture in range, or the lane switched off while the shader-def is still compiled in). Say so
     // once, up front, so the caller pays one uniform read rather than a loop set-up per fixture.
     if (torch_table.count.x == 0u) {
-        return 1.0;
+        return select(1.0, 0.0, strict);
     }
     // MONKEY (gfx): a nearby spell light must not steal an earlier fixture's map.
     var nearest = torch_table.count.x;
-    var nearest_d2 = 1.0;
+    var nearest_d2 = select(1.0, 0.010001, strict);
     for (var candidate = 0u; candidate < torch_table.count.x; candidate += 1u) {
         // MONKEY (static torch cache): holes and pending uploads never sample stale layers.
         if (torch_table.positions[candidate].w <= 0.0) { continue; }
@@ -467,10 +467,13 @@ fn torch_map_at(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>, fade_radius: f
             // MONKEY (shadow floor): and `torch_strength()` is the DIRECT-term floor folded
             // into that same weight (see the function). `w * strength` rather than a second `mix`
             // because the two are the same expression.
+            // MONKEY (gfx): an interior source reaching exterior geometry needs positive
+            // visibility. A room shadow's artistic floor and an unavailable map are not light.
+            if (strict) { return s * torch_table.positions[i].w; }
             return mix(1.0, s, torch_table.positions[i].w * torch_strength());
     }
 #endif
-    return 1.0;
+    return select(1.0, 0.0, strict);
 }
 
 // The INTERIOR lane's call — unchanged behaviour (`fade_radius 0` ⇒ the reverse-Z `ndc.z` fade).
@@ -480,7 +483,7 @@ fn torch_map_at(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>, fade_radius: f
 // BEFORE `torch_face`, so a fragment right on a cube-face boundary picks the same face its
 // neighbour does). See TORCH_NORMAL_OFFSET for the texel-vs-bias arithmetic this is the answer to.
 fn torch_surface_shadow(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>) -> f32 {
-    return torch_map_at(light_pos, P + N * TORCH_NORMAL_OFFSET, N, 0.0);
+    return torch_map_at(light_pos, P + N * TORCH_NORMAL_OFFSET, N, 0.0, false);
 }
 
 // MONKEY (outdoor torch shadows): the EXTERIOR lane's call — the campfire/brazier/lamppost pool on
@@ -489,7 +492,7 @@ fn torch_surface_shadow(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>) -> f32
 // terrain/entity receivers — an outdoor WMO floor under a low fire (a campfire on a porch) has the
 // same grazing-angle PCF acne as the imp's floor; see TORCH_NORMAL_OFFSET for the arithmetic.
 fn torch_exterior_shadow(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>) -> f32 {
-    return torch_map_at(light_pos, P + N * TORCH_NORMAL_OFFSET, N, TORCH_EXT_FADE_YD);
+    return torch_map_at(light_pos, P + N * TORCH_NORMAL_OFFSET, N, TORCH_EXT_FADE_YD, false);
 }
 
 // MONKEY (torch debug, interiorDebug 2): the MIN raw depth-map shadow factor over EVERY promoted map
@@ -1161,7 +1164,9 @@ fn interior_room_light(
         let direct_w = atten * nl * window;
         var s = 1.0;
         if (direct_w * w > TORCH_SKIP_EPS) {
-            s = torch_surface_shadow(pos_range.xyz, P, N);
+            s = torch_map_at(pos_range.xyz, P + N * TORCH_NORMAL_OFFSET, N, 0.0, strict);
+        } else if (strict) {
+            s = 0.0;
         }
         direct += c_norm * direct_w * s * w;
         // MONKEY (soft falloff): the fill's profile is UNCHANGED in FORM — `(1 − d/r)²`, which is
@@ -1174,12 +1179,14 @@ fn interior_room_light(
         // candle count, or a dense room (the inn's ~10 fixtures vs the smithy's 3) piles fill up
         // until the rolloff saturates every surface to a flat white. `max` keeps the nearest/
         // brightest fixture's glow and leaves the direct term to carry the per-fixture relief.
-        fill = max(fill, c_fill * (k_fill * interior_window(d, fill_yd, INTERIOR_FILL_POW) * w));
+        // MONKEY (gfx): room bounce has no occlusion/transport path through an exterior wall.
+        if (!strict) {
+            fill = max(fill, c_fill * (k_fill * interior_window(d, fill_yd, INTERIOR_FILL_POW) * w));
+        }
     }
     // Fill is INDIRECT bounce, so it is not shadowed; direct already carries each fixture's shadow.
-    // MONKEY (shell candle add): STRICT callers want only the claimed DIRECT + FILL. The shell
-    // already has sky ambient; returning the raw budget here also avoids adding then subtracting
-    // that floor (cancellation would lose weak fixtures). Non-strict room lighting is unchanged.
+    // MONKEY (gfx): STRICT exterior receivers get only visibility-proven direct light. Their
+    // sky supplies ambient; a room's unoccluded bounce must not cross the building shell.
     if (strict) {
         return direct + fill;
     }

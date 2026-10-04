@@ -174,10 +174,9 @@ fn lamp_haze_strength(sun_height: f32, weather: f32, indoors: bool) -> f32 {
 }
 
 // MONKEY (lampfog): pick from the exact CPU mirror of the packed point table. A sphere test keeps
-// off-screen fixtures whose halo can still cross the view. Both exterior and interior rows are
-// eligible: a street camera can see facade/room fixtures, and scene depth—not a camera-lane guess—
-// cuts the view segment. This pass is deliberately unshadowed, so the remaining leakage is the
-// documented tradeoff until point-light cube shadowing exists.
+// off-screen fixtures whose halo can still cross the view. MONKEY (gfx): interior sources are
+// excluded until this integral has room/occlusion data: camera depth cannot block the lateral
+// path from a fireplace through a wall to fog in front of it, even with the camera indoors.
 fn select_fog_lamps(
     points: &[ResolvedPointLight],
     camera_position: Vec3,
@@ -189,7 +188,7 @@ fn select_fog_lamps(
         .copied()
         .filter_map(|point| {
             let point_is_indoors = point.lane > 0.5;
-            if point.color.max_element() <= 0.0001 {
+            if point_is_indoors || point.color.max_element() <= 0.0001 {
                 return None;
             }
             let distance_squared = point.position.distance_squared(camera_position);
@@ -787,7 +786,7 @@ mod tests {
         assert!(lamp_haze_strength(-1.0, 0.0, true) < clear);
     }
     #[test]
-    fn lamp_picker_keeps_the_nearest_across_both_lanes_and_tier_limit() {
+    fn lamp_picker_excludes_interior_sources_and_keeps_the_exterior_tier_limit() {
         let mut points: Vec<_> = (1..=40)
             .rev()
             .map(|distance| ResolvedPointLight {
@@ -797,7 +796,8 @@ mod tests {
                 lane: 0.0,
             })
             .collect();
-        // Interior and exterior table rows compete by distance; black rows never consume a slot.
+        // A nearby fireplace must never scatter through its walls; neither it nor black rows
+        // consume an exterior lamp slot.
         points.push(ResolvedPointLight {
             position: Vec3::X * 0.25,
             range: 48.0,
@@ -812,11 +812,13 @@ mod tests {
         });
         let low = select_fog_lamps(&points, Vec3::ZERO, None, LOW_FOG_LAMPS);
         assert_eq!(low.count, LOW_FOG_LAMPS);
-        assert_eq!(low.positions[0], Vec4::new(0.25, 0.0, 0.0, 8.0));
-        assert_eq!(low.positions[1].x, 1.0);
-        assert_eq!(low.positions[LOW_FOG_LAMPS - 1].x, 15.0);
-        assert_eq!(low.colors[0].truncate(), Vec3::ONE);
-        assert_eq!(low.colors[1].truncate(), Vec3::new(0.8, 0.4, 0.1));
+        assert_eq!(low.positions[0], Vec4::new(1.0, 0.0, 0.0, 48.0));
+        assert_eq!(low.positions[LOW_FOG_LAMPS - 1].x, 16.0);
+        assert_eq!(low.colors[0].truncate(), Vec3::new(0.8, 0.4, 0.1));
+        assert_eq!(
+            select_fog_lamps(&points[40..41], Vec3::ZERO, None, LOW_FOG_LAMPS).count,
+            0
+        );
     }
     #[test]
     fn live_tiers_shadow_loss_inactive_camera_and_off() {
