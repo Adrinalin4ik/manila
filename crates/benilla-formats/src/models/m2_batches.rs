@@ -27,6 +27,21 @@ fn parent_dir(path: &str) -> &str {
     }
 }
 
+// MONKEY (gfx): converted character eye-glow cards can carry mode 2 despite using black-backed
+// glow art. Keep ordinary alpha materials intact; only named, unlit eye glows need additive RGB.
+fn monkey_alpha_eye_glow(texture: Option<&str>, flags: u16, mode: u16) -> bool {
+    mode == 2
+        && flags & 1 != 0
+        && texture.is_some_and(|path| {
+            let name = path
+                .rsplit(['\\', '/'])
+                .next()
+                .unwrap_or(path)
+                .to_ascii_lowercase();
+            name.contains("eyeglow") && name.ends_with(".blp")
+        })
+}
+
 /// A batch's `.blp`: `Monster1/2/3` come from the creature's skin variations
 /// (`<model-dir>\<name>.blp`), else the embedded filename.
 fn resolve_texture(
@@ -380,6 +395,9 @@ pub fn parse_m2_render_submeshes(
             .map(|t| resolve_texture(t, dir, skins))
             .unwrap_or((None, None, None, false));
         let material = model.materials.get(batch.material_index as usize);
+        let eye_glow = material.is_some_and(|m| {
+            monkey_alpha_eye_glow(texture.as_deref(), m.flags.bits(), m.blend_mode.bits())
+        });
         let blend = match material.map(|m| m.blend_mode.bits()) {
             Some(0) | None => ModelBlend::Opaque,
             Some(1) => ModelBlend::AlphaTest,
@@ -390,7 +408,8 @@ pub fn parse_m2_render_submeshes(
             Some(_) => ModelBlend::Blend,
         };
         // Blend modes 3 (NoAlphaAdd) and 4 (Add) add the batch's colour (glow cards, coronae).
-        let additive = matches!(material.map(|m| m.blend_mode.bits()), Some(3) | Some(4));
+        let additive =
+            eye_glow || matches!(material.map(|m| m.blend_mode.bits()), Some(3) | Some(4));
         // Render flag 0x04: two-sided; without it the reference culls back faces.
         let two_sided = material.is_some_and(|m| m.flags.bits() & 0x04 != 0);
         // `texCoordSet (+0x12) → texture_unit_lookup (0x9c)` above 2 is a generated environment
@@ -400,13 +419,14 @@ pub fn parse_m2_render_submeshes(
         let emissive = material.is_some_and(|m| m.flags.bits() & 0x01 != 0);
         // Render flags 0x10 (no depth write) and 0x08 (no depth test): the reference keys depth
         // state on these bits, not on the blend mode (`0x70c190`).
-        let no_depth_write = material.is_some_and(|m| m.flags.bits() & 0x10 != 0);
+        let no_depth_write = eye_glow || material.is_some_and(|m| m.flags.bits() & 0x10 != 0);
         let no_depth_test = material.is_some_and(|m| m.flags.bits() & 0x08 != 0);
         // Fog colour (setter `0x70baf0`): off under render flag 0x02 (`0x70bb24`), else by blend
         // mode from `DAT_811fc4 = {1,1,1,2,2,3,4}` (`0x70bddf`, jump table `0x70c17c`): modes
         // 0/1/2 the scene colour, 3/4 black, 5 white, 6 grey.
         let fog_policy = match material {
             Some(m) if m.flags.bits() & 0x02 != 0 => FogPolicy::Off,
+            Some(_) if eye_glow => FogPolicy::Black,
             Some(m) => match m.blend_mode.bits() {
                 3 | 4 => FogPolicy::Black,
                 5 => FogPolicy::White,
@@ -788,6 +808,48 @@ pub fn m2_sequence_visible_textures(bytes: &[u8], anim_id: u16) -> Option<Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monkey_only_unlit_alpha_eye_glows_are_repaired() {
+        let eye = Some("CHARACTER\\SCOURGE\\MALE\\NIGHTELFMALEEYEGLOW.BLP");
+        assert!(monkey_alpha_eye_glow(eye, 0x11, 2));
+        for mode in [0, 1, 3, 4, 5, 6] {
+            assert!(!monkey_alpha_eye_glow(eye, 0x11, mode));
+        }
+        assert!(!monkey_alpha_eye_glow(eye, 0x10, 2));
+        assert!(!monkey_alpha_eye_glow(
+            Some("Character/Tauren/Fur.blp"),
+            0x11,
+            2
+        ));
+        assert!(!monkey_alpha_eye_glow(None, 0x11, 2));
+    }
+
+    #[test]
+    fn monkey_scourge_eye_glows_add_without_scene_fog_or_depth_writes() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        for sex in ["Male", "Female"] {
+            let path = format!("Character\\Scourge\\{sex}\\Scourge{sex}.m2");
+            let subs = load_m2_mesh(&mut chain, &path).expect("parse Scourge");
+            let eyes: Vec<_> = subs
+                .iter()
+                .filter(|s| {
+                    s.texture
+                        .as_deref()
+                        .is_some_and(|t| t.to_ascii_lowercase().contains("eyeglow"))
+                })
+                .collect();
+            assert!(!eyes.is_empty(), "{path}: eye batches exist");
+            for eye in eyes {
+                assert!(eye.additive && eye.emissive && eye.no_depth_write, "{path}");
+                assert!(
+                    matches!(eye.fog_policy, FogPolicy::Black | FogPolicy::Off),
+                    "{path}"
+                );
+            }
+        }
+    }
 
     /// A bucket never sorts under the exact rung, which its sibling quad cloud keeps.
     #[test]
