@@ -118,6 +118,13 @@ does the same (`ln -s /path/to/WoW WoW`, or on Windows a junction, which needs n
 screen, which remembers it. Credentials go in at the login screen, or set `WOW_USER` and `WOW_PASS`
 to skip it.
 
+This fork's native Linux and Windows builds try stock vanilla login build 5875 first. If the
+server explicitly rejects the version, they retry with Turtle/Tortoise 1.18.1's build 7272,
+then 12340 for custom realms that accept that build. Turtle-derived servers mark a realm offline
+if the login build differs from its realm build. `WOW_REALMD_BUILD=<build>` pins a single login
+build and disables these retries; an empty value is treated as unset. World auth always uses
+build 5875. macOS and browser builds retain the upstream fixed login build 12340.
+
 Settings, screenshots and addons live in `benilla-config/` at the repo root: a 1.12 addon goes in
 `benilla-config/AddOns/`. [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) has the rest, from the
 player build to the tests.
