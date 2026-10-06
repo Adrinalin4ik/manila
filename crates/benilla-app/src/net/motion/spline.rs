@@ -482,22 +482,28 @@ pub(in crate::net) fn ground_clamp_creatures(
     // extents are not built.
     capsule: Res<crate::player::PlayerCapsule>,
     mut commands: Commands,
-    mut q: Query<(
-        Entity,
-        &NetEntity,
-        Option<&Spline>,
-        &mut Transform,
-        Option<&mut GroundClamped>,
-        Has<CreatureSwimming>,
-        // HOVER and WATERWALKING both move the answer.
-        Option<&crate::net::UnitMoveModes>,
-        // [`ground_derived`]'s other Z authorities: the controller and the relay's dead-reckoning.
-        Has<crate::net::Embodied>,
-        Has<crate::net::RemoteMotion>,
-        // The draw election's verdict: a hidden body casts on its stride turn only
-        // (`remote::HIDDEN_STRIDE`); its Y holds the seat in between, which nothing draws.
-        Option<&Visibility>,
-    )>,
+    mut q: Query<
+        (
+            Entity,
+            &NetEntity,
+            Option<&Spline>,
+            &mut Transform,
+            Option<&mut GroundClamped>,
+            Has<CreatureSwimming>,
+            // HOVER and WATERWALKING both move the answer.
+            Option<&crate::net::UnitMoveModes>,
+            // [`ground_derived`]'s other Z authorities: the controller and the relay's
+            // dead-reckoning.
+            Has<crate::net::Embodied>,
+            Has<crate::net::RemoteMotion>,
+            // The draw election's verdict: a hidden body casts on its stride turn only
+            // (`remote::HIDDEN_STRIDE`); its Y holds the seat in between, which nothing draws.
+            Option<&Visibility>,
+        ),
+        // A mount child is kind `Unit` but rides its host: its `Transform` is host-local, so a
+        // world ray from `(0, 0, 0)` would write the world origin's floor into its local Y.
+        Without<crate::entities::mount::MountBody>,
+    >,
     mut frame: Local<u32>,
 ) {
     *frame = frame.wrapping_add(1);
@@ -856,7 +862,9 @@ fn creature_swim_state(marked: bool, depth: f32, boundary: f32, unit_flags: u32)
 /// Chained before [`ground_clamp_creatures`] so a fresh mark exempts the clamp the same frame.
 pub(in crate::net) fn mark_swimming_creatures(
     mut commands: Commands,
-    units: Query<SwimMarkQuery, SwimMarkGate>,
+    // A mount child rides its host: a host-local `Transform` cannot answer a world water query, and
+    // the clamp beside this system must walk the same population.
+    units: Query<SwimMarkQuery, (SwimMarkGate, Without<crate::entities::mount::MountBody>)>,
     stamped: Query<Entity, With<SwimEvaluated>>,
     world: benilla_world::world_point::WorldPoint,
     epoch: Res<benilla_world::collision::ColliderEpoch>,
