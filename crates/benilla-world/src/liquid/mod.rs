@@ -31,11 +31,16 @@ use benilla_assets::materials::LiquidMaterial;
 use benilla_assets::AssetSet;
 
 mod drift;
+mod lod;
+mod scene_depth;
+// MONKEY (ao): the label orders the AO pass.
+pub use scene_depth::{WaterDepthLabel, WaterDepthPlugin};
 mod query;
 #[cfg(test)]
 mod real_data;
 mod spatial;
-mod surface;
+mod surface; // the against-real-client-files tests — they span both halves
+pub mod waves;
 
 // The submodules are private: this list is everything the rest of the client may name.
 pub use query::{
@@ -98,6 +103,9 @@ pub(crate) struct LiquidPlugin;
 impl Plugin for LiquidPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<LiquidMaterial>::default())
+            .init_resource::<benilla_assets::WaterQuality>()
+            .init_resource::<benilla_assets::WaterDepthImage>()
+            .init_resource::<benilla_assets::WaterColourImage>()
             .init_resource::<Underwater>()
             .init_resource::<SubmergedEye>()
             .init_resource::<WaterIndex>()
@@ -135,6 +143,7 @@ impl Plugin for LiquidPlugin {
             );
         }
         drift::register(app);
+        lod::register(app);
     }
 }
 

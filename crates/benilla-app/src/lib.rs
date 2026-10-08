@@ -55,6 +55,22 @@ mod debug_panel;
 /// is not.
 mod dev;
 mod doodad_events;
+/// MONKEY (dynamic interiors): the cvar → benilla-world bridge for the fixture-lit interior lane.
+mod dynamic_interior;
+// MONKEY (volumetric fog): optional near-field atmosphere plugin.
+mod volumetric_fog;
+// GFX (volumetric light): shadow-mapped sun/moon light shafts.
+mod volumetric_light;
+// MONKEY (p0 graphics programme): the programme's cvar bridges (skyDither, ...).
+mod monkey_gfx;
+// MONKEY (post): optional world-only HDR post-processing.
+mod post;
+// MONKEY (sky): the skyQuality cvar bridge.
+mod sky_quality;
+// MONKEY (ao): optional screen-space ambient occlusion plugin.
+mod ssao;
+// MONKEY (skybox): the zoneSkyboxes cvar bridge.
+mod zone_skybox;
 mod entities;
 mod fishing_line;
 mod footprints;
@@ -77,6 +93,7 @@ mod npc_text;
 mod pending_item_ops;
 /// Ships in part (the FPS journal and the clocks it reads); the rest is `dev`.
 mod perf;
+mod character_shadow;
 mod pipe_warm;
 mod player;
 mod player_distance;
@@ -97,6 +114,7 @@ mod screen_fade;
 mod screenshot;
 mod script_calls;
 mod shaders;
+mod shadow_core;
 
 mod game_tip;
 mod name_persist;
@@ -187,6 +205,7 @@ mod ui_unit;
 mod ui_world_map;
 mod video;
 mod vplates;
+mod torch_shadow;
 mod weapon_trail;
 mod webbridge;
 /// The web build's env-var stand-in (a browser tab has no process environment) — see the
@@ -196,6 +215,7 @@ mod webbridge;
 pub mod webenv;
 mod webprogress;
 mod world_backdrop;
+mod world_shadow;
 mod world_state;
 mod world_state_ui;
 
@@ -323,9 +343,12 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     let background = benilla_world::bgwin::background_run();
     if capturing {
         // Ground clutter scatters with per-run randomness, so captures turn it off for byte-stable
-        // baselines; set before plugins build so `ClutterConfig::from_env` reads it. The frame
-        // clock, frozen in `capture`, is the other source of drift.
-        std::env::set_var("WOW_CLUTTER_DENSITY", "0");
+        // baselines unless a capture asks for it (MONKEY wind does); set before plugins build so
+        // `ClutterConfig::default` reads it. The frame clock, frozen in `capture`, is the other
+        // source of drift.
+        if std::env::var_os("WOW_CLUTTER_DENSITY").is_none() {
+            std::env::set_var("WOW_CLUTTER_DENSITY", "0");
+        }
         // Anim-LOD park/wake (`creature_anim::lod::gate_rig_animation`) hangs on asset-load timing,
         // which the frozen clock does not control, so captures turn it off unless overridden. A rig
         // in frame should never be parked, so the shot keeps its subject.

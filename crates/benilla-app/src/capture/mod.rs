@@ -79,9 +79,10 @@ mod probe_vendor_swap;
 mod probes;
 mod realm_list;
 mod scenarios;
+mod spell_light;
 use crate::run_mode::CaptureMode;
 pub(crate) use depth_probe::DepthProbePlugin;
-use fixtures::seed_ui_fixture;
+use fixtures::{seed_perf_crowd, seed_ui_fixture, seed_wind_player};
 pub(crate) use live_shot::LiveShotPlugin;
 pub(crate) use phase_probe::PhaseProbePlugin;
 pub(crate) use pick_probe::PickProbePlugin;
@@ -655,6 +656,14 @@ impl Plugin for CapturePlugin {
         // sample, or it would measure a constant 16.67 ms ([`CaptureCtx::frozen_clock`]).
         app.insert_resource(TimeUpdateStrategy::ManualDuration(CAPTURE_FRAME_DT))
             .add_systems(Startup, hold_clock);
+        // MONKEY (perf): a probe window opens unfocused, and `WinitSettings::game()` runs an
+        // unfocused window at reactive 1/60 s — every probe read 16.7 ms whatever the scene cost.
+        if probe_frames > 0 {
+            app.insert_resource(bevy::winit::WinitSettings {
+                focused_mode: bevy::winit::UpdateMode::Continuous,
+                unfocused_mode: bevy::winit::UpdateMode::Continuous,
+            });
+        }
         app.insert_resource(CaptureMode)
             .init_resource::<FrameWatch>()
             .insert_resource(CaptureCtx {
@@ -674,6 +683,14 @@ impl Plugin for CapturePlugin {
                 bailed: false,
             })
             .add_systems(Update, pin_scene.in_set(WorldStage::Present))
+            .add_systems(Update, seed_wind_player)
+            .add_systems(Update, spell_light::seed)
+            .add_systems(
+                Last,
+                spell_light::trace.after(crate::shadow_core::ShadowSet::Lanes),
+            )
+            // MONKEY (perf): the probe crowd (`WOW_PERF_CROWD`).
+            .add_systems(Update, seed_perf_crowd)
             // Before `UnitFeed`: the seed stands in for wire data live play delivers on earlier
             // frames, so the same frame's feeds and the one-shot `MERCHANT_SHOW` paint must see it.
             .add_systems(Update, seed_ui_fixture.before(crate::ui_unit::UnitFeed))
