@@ -1346,14 +1346,17 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
             "{row} defaults unchecked"
         );
     }
-    // The name rows at the reference's registered defaults: player "1", NPC and own "0".
-    assert!(
-        s.eval::<bool>(
-            "return BenillaOptionsFrameContainerBodyNameplatesRowPlayerNamesCheck:GetChecked()"
-        )
-        .unwrap(),
-        "Player Names defaults checked"
-    );
+    // The name rows at the reference's registered defaults: player, guild and titles "1", NPC and
+    // own "0".
+    for row in ["RowPlayerNames", "RowGuildNames", "RowPlayerTitles"] {
+        assert!(
+            s.eval::<bool>(&format!(
+                "return BenillaOptionsFrameContainerBodyNameplates{row}Check:GetChecked()"
+            ))
+            .unwrap(),
+            "{row} defaults checked"
+        );
+    }
     for row in ["RowNpcNames", "RowOwnName"] {
         assert!(
             !s.eval::<bool>(&format!(
@@ -2320,16 +2323,15 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
         checked += 1;
     }
     // The loop above walks every entry of `BENILLA_OPTIONS_PAGE_ROWS`, so this number is that
-    // table's length less the untipped rows and nothing else: 87 rows in `OptionsFrame.xml` less
-    // the three below. Five of the 84 carry a `BENILLA_` key, and a dropdown row is checked on the
+    // table's length less the untipped rows and nothing else: 88 rows in `OptionsFrame.xml` less
+    // the three below. Five of the 85 carry a `BENILLA_` key, and a dropdown row is checked on the
     // key it wears at rest.
     //
-    // It read `80` against a table of 83 until this merge, which was upstream's own arithmetic and
-    // correct there; this fork had since added four Controls rows (Press and Hold Casting among
-    // them) and upstream a fifth, Click to Move, without either side's count following. Counted
-    // from the authored table, not observed: `cargo test -p benilla-app` does not build on this
-    // tree, so no run has confirmed it.
-    assert_eq!(checked, 84, "every tipped row carries a live key");
+    // Upstream's own figure is 81 of 84: the four extra rows here are this fork's Controls
+    // additions, and the fifth `BENILLA_` key is Press and Hold Casting's. Counted from the
+    // authored table, not observed - `cargo test -p benilla-app` does not build on this tree, so
+    // no run has confirmed it.
+    assert_eq!(checked, 85, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2425,8 +2427,8 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             s.errors()
         );
     }
-    // Every tipped row: the same 80 the key census counts.
-    assert_eq!(raised, 80, "every row but Auto Loot raises a description");
+    // Every tipped row: the same 81 the key census counts.
+    assert_eq!(raised, 81, "every row but Auto Loot raises a description");
 }
 
 /// 1.12's AdvancedOptionsCombatText box as saved-global rows: a click writes the global, never a
@@ -4082,13 +4084,6 @@ fn without_a_seated_measurer_the_same_fit_reads_zero() {
 // nothing and reads back nil, so its box would offer a setting benilla does not have. A CVar is
 // registered only once something reads it.
 const UNBACKED_REFERENCE_CVARS: &[(&str, &str)] = &[
-    (
-        "UnitNamePlayerPVPTitle",
-        "the PvP rank prefix on the overhead name line — slot a4 of `0x608f50`, bit `0x20` of the \
-         same mask, resolved by `0x609370` through the `PVP_RANK_%d_%d` GlobalStrings key. Blocked \
-         one step further back than its guild twin: the rank byte streams, but the key's second \
-         index is a FACTION SIDE that `ui_unit` does not resolve for an arbitrary player yet",
-    ),
     // No slider CVar may land here: `UIOptionsFrame_Load` hands `GetCVar` to `Slider:SetValue`
     // (`UIOptionsFrame.lua:271-275`), which raises on nil (`0x790980`) and stops the stock
     // window's load. A check button's `GetCVar(x) == "1"` is nil-safe.
@@ -4392,7 +4387,48 @@ fn show_target_damage_greys_its_own_pair_and_the_floating_text_master_leaves_it_
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The reference's rules: Player Guild Names is dead while player names are off
+/// The titles box is the guild row's twin: checked and live at the registered defaults (`"1"`),
+/// and a click survives closing and reopening the panel because the CVar is its store.
+#[test]
+fn the_titles_box_sticks_across_a_panel_reopen() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowNameplates:Click()")
+        .unwrap();
+    let checked = |s: &mut UiScript| -> bool {
+        s.eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyNameplatesRowPlayerTitlesCheck:GetChecked()",
+        )
+        .unwrap()
+    };
+    let cvar = |s: &mut UiScript| -> Option<String> {
+        s.eval::<Option<String>>(r#"return GetCVar("UnitNamePlayerPVPTitle")"#)
+            .unwrap()
+    };
+    assert!(checked(&mut s), "the registered default is \"1\"");
+    assert_eq!(cvar(&mut s).as_deref(), Some("1"));
+
+    // A click writes the CVar; the box and the mirror agree.
+    s.run("BenillaOptionsFrameContainerBodyNameplatesRowPlayerTitlesCheck:Click()")
+        .unwrap();
+    assert!(!checked(&mut s));
+    assert_eq!(cvar(&mut s).as_deref(), Some("0"));
+
+    // Closed and reopened, the row re-reads the CVar instead of a staged value.
+    s.run("HideUIPanel(BenillaOptionsFrame) ShowUIPanel(BenillaOptionsFrame)")
+        .unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowNameplates:Click()")
+        .unwrap();
+    assert!(!checked(&mut s), "the click stuck");
+    s.run("BenillaOptionsFrameContainerBodyNameplatesRowPlayerTitlesCheck:Click()")
+        .unwrap();
+    assert!(checked(&mut s));
+    assert_eq!(cvar(&mut s).as_deref(), Some("1"));
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The reference's rules: Player Guild Names and Player Titles are dead while player names are off
 /// (`UIOptionsFrame.lua:703-709`), Auto-Follow Speed while the style is Never (`:717-721`).
 #[test]
 fn the_guild_line_greys_with_player_names_and_the_follow_speed_with_the_style() {
@@ -4400,22 +4436,28 @@ fn the_guild_line_greys_with_player_names_and_the_follow_speed_with_the_style() 
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
-    // Nameplates: `UnitNamePlayer` ships "1", so the child arrives live.
+    // Nameplates: `UnitNamePlayer` ships "1", so both children arrive live.
     s.run("BenillaOptionsFrameCategoryListRowNameplates:Click()")
         .unwrap();
-    let guild_on = |s: &mut UiScript| -> bool {
-        s.eval::<bool>(
-            "return BenillaOptionsFrameContainerBodyNameplatesRowGuildNamesCheck:IsEnabled() ~= 0",
-        )
+    let child_on = |s: &mut UiScript, row: &str| -> bool {
+        s.eval::<bool>(&format!(
+            "return BenillaOptionsFrameContainerBodyNameplates{row}Check:IsEnabled() ~= 0"
+        ))
         .unwrap()
     };
-    assert!(guild_on(&mut s));
+    for row in ["RowGuildNames", "RowPlayerTitles"] {
+        assert!(child_on(&mut s, row), "{row} arrives live");
+    }
     s.run("BenillaOptionsFrameContainerBodyNameplatesRowPlayerNamesCheck:Click()")
         .unwrap();
-    assert!(!guild_on(&mut s), "no names, no guild line to gate");
+    for row in ["RowGuildNames", "RowPlayerTitles"] {
+        assert!(!child_on(&mut s, row), "no names, no {row} to gate");
+    }
     s.run("BenillaOptionsFrameContainerBodyNameplatesRowPlayerNamesCheck:Click()")
         .unwrap();
-    assert!(guild_on(&mut s));
+    for row in ["RowGuildNames", "RowPlayerTitles"] {
+        assert!(child_on(&mut s, row));
+    }
 
     // Controls: the style ships "1" (Smart), so the slider arrives live; "0" is Never.
     s.run("BenillaOptionsFrameCategoryListRowControls:Click()")

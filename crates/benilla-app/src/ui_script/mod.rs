@@ -300,6 +300,7 @@ impl Plugin for UiScriptPlugin {
             )
             // `init_` here and in `UiUnitPlugin`: either plugin may be built alone in a test.
             .init_resource::<LeavingWorldArmed>()
+            .add_message::<WorldLeaveSweepMessage>()
             .add_systems(Update, lifecycle::arm_leaving_world_on_self_create)
             // A queued `ReloadUI()` runs in `PreUpdate`, a frame after its drain (the reference's
             // deferral, `0x495590`) and before every `Update` seed or feed.
@@ -386,8 +387,8 @@ fn arbitrate_pointer_over_ui(
 /// The session lifecycle: the VM's birth, identity, death and reload.
 pub(crate) mod lifecycle;
 pub(crate) use lifecycle::{
-    end_ui_session, ingame_ui_up, run_pending_reload, setup_script, AddOnIdentity,
-    LeavingWorldArmed, PendingEntryUiLoad, ReloadUiPending,
+    end_ui_session, ingame_ui_up, run_pending_reload, setup_script, AddOnIdentity, LeaveWorldSweep,
+    LeavingWorldArmed, PendingEntryUiLoad, ReloadUiPending, WorldLeaveSweepMessage,
 };
 // Test-only: other modules' tests consume these, and a plain re-export would warn unused.
 #[cfg(test)]
@@ -803,7 +804,7 @@ mod loot_tests;
 mod group_loot_tests;
 
 #[cfg(test)]
-mod chat_tests;
+pub(crate) mod chat_tests;
 
 /// The chat bubble's `UIMenu` kit driven as a menu: the rows' label and shortcut anchoring.
 #[cfg(test)]

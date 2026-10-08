@@ -979,13 +979,52 @@ pub(crate) fn seat_from_roster(
 pub(crate) struct AddOnIdentity(pub(crate) Option<(String, String)>);
 
 /// The world latch, the reference's `[0xb4b424]`: set at `0x4908ce` in the world-enter cascade
-/// `0x4908c0` and cleared at `0x490a8d` as `PLAYER_LEAVING_WORLD` fires (`0x490b4d`, its one
-/// site), so the first departure in a world fires and the rest are no-ops until the next entry.
-/// Ours has two producers, [`shutdown_ui_state`]'s tail and `ui_unit`'s worldport fire. A
+/// `0x4908c0` and cleared at `0x490a8d` by the leave-world sweep `0x490a80`, which then fires
+/// `PLAYER_LEAVING_WORLD` (`0x490b4d`, its one site), so the first departure in a world sweeps
+/// and the rest are no-ops until the next entry. Ours is spent through [`LeaveWorldSweep`] or
+/// [`run_leave_world_sweep`], by [`shutdown_ui_state`]'s roots and `ui_unit`'s worldport fire. A
 /// cross-map worldport spends it without leaving `InWorld`, so a quit on its loading screen
 /// fires nothing; a `/reload` fires, and its rebuild re-arms.
 #[derive(Resource, Default)]
 pub(crate) struct LeavingWorldArmed(bool);
+
+/// The leave-world sweep `0x490a80` ran past its latch: a cross-map worldport (the local
+/// player's destructor, `0x5dd543`), a `/reload` (`0x490c20`) or leaving the world. Its legs
+/// past the clear read this, as the meeting stone's text drop (`0x490b2f` → `0x4c9f80`) does; a
+/// same-map teleport destroys nothing and never sweeps.
+#[derive(Message)]
+pub(crate) struct WorldLeaveSweepMessage;
+
+/// The latch and the sweep it gates, for a system: spending one writes the other.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct LeaveWorldSweep<'w> {
+    armed: ResMut<'w, LeavingWorldArmed>,
+    sweeps: MessageWriter<'w, WorldLeaveSweepMessage>,
+}
+
+impl LeaveWorldSweep<'_> {
+    /// Run the sweep: `true`, and [`WorldLeaveSweepMessage`] written, at most once per world.
+    pub(crate) fn run(&mut self) -> bool {
+        let swept = self.armed.spend();
+        if swept {
+            self.sweeps.write(WorldLeaveSweepMessage);
+        }
+        swept
+    }
+}
+
+/// [`LeaveWorldSweep::run`] for an exclusive edge; no latch is no world to leave.
+pub(crate) fn run_leave_world_sweep(world: &mut World) -> bool {
+    let swept = world
+        .get_resource_mut::<LeavingWorldArmed>()
+        .is_some_and(|mut l| l.spend());
+    if swept {
+        if let Some(mut sweeps) = world.get_resource_mut::<Messages<WorldLeaveSweepMessage>>() {
+            sweeps.write(WorldLeaveSweepMessage);
+        }
+    }
+    swept
+}
 
 impl LeavingWorldArmed {
     /// A world began. Idempotent, like the reference's `mov byte [0xb4b424],1`.
@@ -994,7 +1033,7 @@ impl LeavingWorldArmed {
     }
 
     /// Take the one-shot: `true` at most once per world, `0x490a8d`'s clear folded in.
-    pub(crate) fn spend(&mut self) -> bool {
+    fn spend(&mut self) -> bool {
         std::mem::take(&mut self.0)
     }
 
@@ -1060,9 +1099,7 @@ pub(crate) fn end_ui_session(world: &mut World) {
         .get_resource::<AddOnIdentity>()
         .and_then(|id| id.0.clone());
     // Spent at the root: of this edge and the worldport's, the first to a departure owns it.
-    let leaving_world = world
-        .get_resource_mut::<LeavingWorldArmed>()
-        .is_some_and(|mut l| l.spend());
+    let leaving_world = run_leave_world_sweep(world);
     if !ui_never_loaded {
         if let Some(mut script) = world.get_non_send_resource_mut::<UiScript>() {
             shutdown_ui_state(&mut script, identity.as_ref(), leaving_world);
@@ -1125,6 +1162,17 @@ pub(crate) fn run_pending_reload(world: &mut World) {
     info!("ui_script: ReloadUI — ending the UI session and building a new one");
     end_ui_session(world);
     load_ingame_ui_on_world_entry(world);
+    // `UI_Init` ends by re-entering the world-enter cascade (`0x490168`), its sends included, but
+    // only with the active player set (`0x490166 je`): our own player's entity exists. Not
+    // `SetActiveMover`, which only the player's create runs.
+    let seated = world
+        .query_filtered::<(), With<crate::net::SelfPlayer>>()
+        .iter(world)
+        .next()
+        .is_some();
+    if seated {
+        world.write_message(crate::net::WorldEnterCascadeMessage);
+    }
 }
 
 /// `AppExit`, the quit roots, read as a message because a quit from in-world never leaves
@@ -1134,7 +1182,7 @@ pub(crate) fn shutdown_on_exit(
     script: Option<NonSendMut<UiScript>>,
     id: Res<AddOnIdentity>,
     pending_entry: Option<Res<PendingEntryUiLoad>>,
-    mut armed: ResMut<LeavingWorldArmed>,
+    mut sweep: LeaveWorldSweep,
     mut exits: MessageReader<AppExit>,
 ) {
     if exits.read().next().is_none() {
@@ -1144,7 +1192,7 @@ pub(crate) fn shutdown_on_exit(
     if pending_entry.is_some() {
         return;
     }
-    let leaving_world = armed.spend();
+    let leaving_world = sweep.run();
     if let Some(mut script) = script {
         shutdown_ui_state(&mut script, id.0.as_ref(), leaving_world);
     }
@@ -1304,6 +1352,73 @@ mod tests {
             .expect("the parked VM is back");
         assert_eq!(vm.session(), session, "the same VM, no session moved");
         assert!(world.get_non_send_resource::<ParkedBootVm>().is_none());
+    }
+
+    /// The plate bits clear at the world entry (`0x401639`, in the entry setup `0x401570`) and
+    /// not at a `ReloadUI()`, which never runs that setup. A capture world, so no UI is built.
+    #[test]
+    fn the_world_entry_clears_the_plate_bits_and_a_reload_does_not() {
+        use crate::vplates::VPlateMode;
+        let on = VPlateMode {
+            enemies: true,
+            friends: true,
+        };
+        let world_with = |on: VPlateMode| {
+            let mut world = World::new();
+            world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+            world.insert_resource(crate::run_mode::CaptureMode);
+            world.insert_resource(on);
+            world
+        };
+
+        let mut world = world_with(on);
+        world.insert_resource(PendingEntryUiLoad::default());
+        run_pending_entry_load(&mut world);
+        assert_eq!(*world.resource::<VPlateMode>(), VPlateMode::default());
+
+        let mut world = world_with(on);
+        world.insert_resource(ReloadUiPending(true));
+        run_pending_reload(&mut world);
+        assert!(!world.resource::<ReloadUiPending>().0, "the reload ran");
+        assert_eq!(*world.resource::<VPlateMode>(), on, "a reload keeps them");
+    }
+
+    /// A `ReloadUI()` runs the leave-world sweep (`0x490c20`, past the armed latch) and then
+    /// re-enters the world-enter cascade (`0x490168`), whose readers re-send the time, mail,
+    /// battlefield and meeting-stone queries, only with the active player set (`0x490166 je`).
+    #[test]
+    fn a_reload_sweeps_and_reenters_the_world_enter_cascade_once_the_player_exists() {
+        use crate::net::WorldEnterCascadeMessage;
+        let reload = |seated: bool| {
+            let mut world = World::new();
+            world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+            world.insert_resource(crate::run_mode::CaptureMode);
+            world.init_resource::<Messages<WorldEnterCascadeMessage>>();
+            world.init_resource::<Messages<WorldLeaveSweepMessage>>();
+            world.init_resource::<LeavingWorldArmed>();
+            world.resource_mut::<LeavingWorldArmed>().arm();
+            if seated {
+                world.spawn(crate::net::SelfPlayer);
+            }
+            world.insert_resource(ReloadUiPending(true));
+            run_pending_reload(&mut world);
+            assert!(!world.resource::<ReloadUiPending>().0, "the reload ran");
+            let sweeps = world
+                .resource_mut::<Messages<WorldLeaveSweepMessage>>()
+                .drain()
+                .count();
+            let cascades = world
+                .resource_mut::<Messages<WorldEnterCascadeMessage>>()
+                .drain()
+                .count();
+            (sweeps, cascades)
+        };
+        assert_eq!(reload(true), (1, 1), "in the world");
+        assert_eq!(
+            reload(false).1,
+            0,
+            "no cascade before our own player's create"
+        );
     }
 
     /// The reference re-makes its Lua state inside `UI_Init` (`0x48fe97`).
