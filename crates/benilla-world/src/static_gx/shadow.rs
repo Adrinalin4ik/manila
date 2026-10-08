@@ -15,7 +15,32 @@ use bevy::image::Image;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
+use bevy::camera::primitives::Aabb;
+
 use super::{GxCell, StaticGx};
+
+/// MONKEY (B035 shadow pop): does a retained batch come within `reach` of `center`? Measured to
+/// the batch's TRANSFORMED bounding sphere, not to its placement anchor. A WMO batch's anchor is
+/// the placement ORIGIN — one point for the whole of Stormwind, ~230 yd from the Elwynn gate — so
+/// the old anchor test dropped the gate's walls from the caster set until the camera came within
+/// `reach` of the city centre, and then added the whole city at once: the gate shadow popped from
+/// absent to dense in one step (bug B035). Same law as the torch lane's `torch_bound_in_range`.
+/// A batch with no bounds keeps the anchor test (the old behaviour), so nothing is lost.
+pub fn caster_in_reach(
+    transform: &Transform,
+    local_aabb: Option<&Aabb>,
+    center: Vec3,
+    reach: f32,
+) -> bool {
+    match local_aabb {
+        Some(aabb) => {
+            let origin = transform.transform_point(Vec3::from(aabb.center));
+            let radius = (Vec3::from(aabb.half_extents) * transform.scale.abs()).length();
+            origin.distance_squared(center) <= (reach + radius) * (reach + radius)
+        }
+        None => transform.translation.distance_squared(center) <= reach * reach,
+    }
+}
 
 /// One alpha-tested foliage caster group: every resident cutout batch that shares a single leaf
 /// texture, merged into one world-space triangle list carrying UVs. The character-shadow system
@@ -38,7 +63,7 @@ pub struct CutoutBucket {
 
 impl StaticGx {
     /// Append world-space (Bevy) shadow-caster triangles for resident static geometry whose
-    /// placement anchor is within `reach` of `center`, onto the caller's buffers (the character
+    /// bounds come within `reach` of `center` ([`caster_in_reach`]), onto the caller's buffers (the character
     /// system recycles them across rebuilds). Whole triangles referencing out-of-range indices are
     /// dropped — a truncated submesh must never rewire a later triangle into garbage (mirrors
     /// `character_shadow::append_triangles`).
@@ -53,11 +78,10 @@ impl StaticGx {
         positions: &mut Vec<[f32; 3]>,
         indices: &mut Vec<u32>,
     ) {
-        let r2 = reach * reach;
         let mut push = |cell: &GxCell| {
             for item in &cell.items {
-                // Distance gate on the placement anchor BEFORE any vertex work.
-                if item.transform.translation.distance_squared(center) > r2 {
+                // Distance gate on the batch's own bounds BEFORE any vertex work (B035).
+                if !caster_in_reach(&item.transform, item.local_aabb.as_ref(), center, reach) {
                     continue;
                 }
                 // MONKEY (world shadows): the SOLID caster skips alpha-cutout foliage — a leaf card
@@ -101,12 +125,11 @@ impl StaticGx {
     /// layer-31 caster per bucket, so a canopy discards its transparent texels in the shadow pass
     /// and casts a leaf-SHAPED silhouette. Grouping by texture is what lets a single draw carry
     /// one sheet: a zone's canopies draw from only a handful of sheets, so this yields a handful
-    /// of buckets. Range-gates on the placement anchor exactly like [`Self::append_shadow_triangles`].
+    /// of buckets. Range-gates on the batch bounds exactly like [`Self::append_shadow_triangles`].
     ///
     /// A cutout batch without a texture handle, or whose UVs don't parallel its positions, is
     /// skipped (it can't be alpha-tested — better no shadow than a wrong solid box).
     pub fn collect_cutout_shadow_triangles(&self, center: Vec3, reach: f32) -> Vec<CutoutBucket> {
-        let r2 = reach * reach;
         let mut buckets: HashMap<AssetId<Image>, CutoutBucket> = HashMap::new();
         let mut push = |cell: &GxCell| {
             for item in &cell.items {
@@ -117,7 +140,7 @@ impl StaticGx {
                 else {
                     continue;
                 };
-                if item.transform.translation.distance_squared(center) > r2 {
+                if !caster_in_reach(&item.transform, item.local_aabb.as_ref(), center, reach) {
                     continue;
                 }
                 let geometry = &item.geometry;
@@ -160,5 +183,24 @@ impl StaticGx {
             push(cell);
         }
         buckets.into_values().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // MONKEY (B035): a big placement whose ORIGIN is far but whose batch stands near the camera
+    // casts; a batch whose bounds are wholly out of reach does not; no bounds = the anchor law.
+    #[test]
+    fn caster_reach_measures_the_batch_bounds_not_the_placement_origin() {
+        let city = Transform::from_translation(Vec3::new(230.0, 0.0, 0.0));
+        let gate = Aabb::from_min_max(Vec3::new(-235.0, 0.0, -10.0), Vec3::new(-225.0, 30.0, 10.0));
+        assert!(caster_in_reach(&city, Some(&gate), Vec3::ZERO, 130.0));
+        assert!(!caster_in_reach(&city, None, Vec3::ZERO, 130.0));
+        let far = Aabb::from_min_max(Vec3::new(200.0, 0.0, -5.0), Vec3::new(210.0, 10.0, 5.0));
+        assert!(!caster_in_reach(&city, Some(&far), Vec3::ZERO, 130.0));
+        let near = Transform::from_translation(Vec3::new(20.0, 0.0, 0.0));
+        assert!(caster_in_reach(&near, None, Vec3::ZERO, 130.0));
     }
 }

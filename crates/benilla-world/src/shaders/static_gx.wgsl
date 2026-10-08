@@ -1362,7 +1362,9 @@ fn vertex(v: GxVertex) -> GxVsOut {
         // still, not two — the sum was always `eval(pick(...))`, it is just no longer inlined.
         let sel = wmo_exterior_pick(world);
         out.ext_sel = sel;
-        out.point_lit = point_light_eval(sel, world, v.normal);
+        // MONKEY (B035 per-fragment wmo points): the SUM moved to the fragment stage (see there);
+        // only the pick stays per vertex, so this lane still walks the table once per vertex.
+        out.point_lit = vec3<f32>(0.0);
     } else {
         // MONKEY (ext light k12): `box = 0` — an exterior doodad/MODD prop is its own draw unit and
         // ranks from its baked PLACEMENT origin, exactly as it did before the widening.
@@ -1432,10 +1434,20 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // `torch_ext_on()` is the CPU's one-bit verdict (`exteriorShadows` && night && ≥1 promoted
     // exterior fixture), so with the cvar off the branch is dead too.
     var point_lit = in.point_lit;
+    // MONKEY (B035 per-fragment wmo points): an EXTERIOR WMO surface evaluates its picked lights
+    // PER FRAGMENT, day and night. Its triangles are paving-slab sized (the Valley of Heroes
+    // bridge: a few yards a side), and the `1/(0.7d + 0.03d^2)` falloff of a light hanging a
+    // fraction of a yard over them — a glowing mount's hooves, a spell — is all peak and no
+    // shoulder at that scale, so the Gouraud sum lit whichever slab corners happened to sit under
+    // the light: a pool cut along the tile edges that jumped as the light moved. The vertex pick
+    // (`in.ext_sel`, flat) is unchanged, so the SET of lights and its cell agreement are too.
+    if ((in.word & WORD_WMO) != 0u && (in.word & WORD_INTERIOR) == 0u) {
+        point_lit = point_light_eval(in.ext_sel, in.world_position.xyz, n_lit);
+    }
     let ext_night_w = select(0.0, clamp(1.0 - wow_light.fog_params.z, 0.0, 1.0), torch_ext_on());
     if (ext_night_w > 0.0) {
         point_lit = mix(
-            in.point_lit,
+            point_lit,
             point_light_eval_shadowed(in.ext_sel, in.world_position.xyz, n_lit),
             ext_night_w,
         );

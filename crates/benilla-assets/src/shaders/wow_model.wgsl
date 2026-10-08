@@ -1209,7 +1209,8 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
         // the sum was always `eval(pick(..))`, it is just no longer inlined.
         let sel = wmo_exterior_pick(out.world_position.xyz);
         out.ext_sel = sel;
-        out.point_lit = point_light_eval(sel, out.world_position.xyz, out.world_normal);
+        // MONKEY (B035 per-fragment wmo points): summed per FRAGMENT now, as in `static_gx.wgsl`.
+        out.point_lit = vec3<f32>(0.0);
     } else if (m.model_flags.x > 0.5 || m.model_flags.z > 0.5) {
         out.point_lit = vec3<f32>(0.0);
         out.ext_sel = EXT_SEL_NONE;
@@ -1635,10 +1636,15 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // normal every other lit term here uses, so the normal-offset sample leaves the skin the way
     // the interior entity lane's does.
     var point_diffuse = in.point_lit;
+    // MONKEY (B035 per-fragment wmo points): an EXTERIOR-class WMO batch sums its picked lights
+    // per fragment, day and night — MIRRORED from `static_gx.wgsl` (that file has the why).
+    if (m.model_flags.x > 0.5 && m.model_flags.z < 0.5) {
+        point_diffuse = point_light_eval(in.ext_sel, in.world_position.xyz, n_lit);
+    }
     let ext_night_w = select(0.0, clamp(1.0 - wow_light.fog_params.z, 0.0, 1.0), torch_ext_on());
     if (ext_night_w > 0.0) {
         point_diffuse = mix(
-            in.point_lit,
+            point_diffuse,
             point_light_eval_shadowed(in.ext_sel, in.world_position.xyz, n_lit),
             ext_night_w,
         );
