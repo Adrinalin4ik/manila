@@ -23,7 +23,7 @@ pub(crate) fn rigid_model(path: &str) -> bool {
         .next()
         .unwrap_or(path)
         .to_ascii_lowercase();
-    ["rock", "stone", "boulder", "pebble", "gravel", "rubble"]
+    ["rock", "stone", "boulder", "pebble", "gravel", "rubble", "cage", "prison"]
         .iter()
         .any(|term| name.contains(term))
 }
