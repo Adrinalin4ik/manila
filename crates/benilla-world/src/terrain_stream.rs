@@ -117,7 +117,7 @@ struct TileState {
     /// Every cell is up: the residency bit the loading screen counts.
     furnished: bool,
     /// The uniqueIds of the placements this tile references, released when it unloads.
-    placements: Vec<u32>,
+    placements: Vec<PlacementKey>,
     liquid: Vec<Entity>,
     /// The impassable-chunk wall collider, a body of its own since its audience differs.
     wall: Option<Entity>,
@@ -129,11 +129,18 @@ struct TileState {
     merged: Vec<Entity>,
 }
 
+// MDDF and MODF use independent IDs in the installed ADTs; retain the kind through release.
+type PlacementKey = u64;
+
+fn monkey_wmo_placement_key(uid: u32) -> PlacementKey {
+    (1_u64 << 32) | u64::from(uid)
+}
+
 /// Doodad and WMO placements, spawned once and refcounted across the tiles that list them.
 #[derive(Resource, Default)]
 pub(crate) struct Placements {
-    /// By MDDF/MODF uniqueId.
-    by_id: HashMap<u32, Placement>,
+    /// By placement kind and MDDF/MODF uniqueId.
+    by_id: HashMap<PlacementKey, Placement>,
     /// The material dedup, so submeshes sharing a look share one handle and batch.
     materials: MaterialCache,
     /// Placements awaiting their model plus WMO props awaiting their M2s; at zero the spawner skips
@@ -777,11 +784,11 @@ fn stream_terrain(
         // since a doodad's origin may lie on another tile.
         for d in &adt.doodads {
             register_doodad(placements, &asset_server, d, (tx, ty));
-            tile.placements.push(d.unique_id);
+            tile.placements.push(u64::from(d.unique_id));
         }
         for w in &adt.wmos {
             register_wmo(placements, &asset_server, w);
-            tile.placements.push(w.unique_id);
+            tile.placements.push(monkey_wmo_placement_key(w.unique_id));
         }
 
         let mut liquid_ents = Vec::new();
@@ -840,7 +847,7 @@ fn stream_terrain(
         if state.global_wmo {
             p.focus_resident &= placements
                 .by_id
-                .get(&GLOBAL_WMO_UID)
+                .get(&monkey_wmo_placement_key(GLOBAL_WMO_UID))
                 .is_some_and(|p| p.spawned);
         }
         // The counting below latches off once fully ready (`complete`); a focus on unfurnished
@@ -891,7 +898,7 @@ fn stream_terrain(
             if state.global_wmo {
                 let full = placements
                     .by_id
-                    .get(&GLOBAL_WMO_UID)
+                    .get(&monkey_wmo_placement_key(GLOBAL_WMO_UID))
                     .is_some_and(|p| p.spawned && p.doodads.iter().all(|d| d.spawned));
                 p.total += 1;
                 p.ready += usize::from(full);
@@ -932,13 +939,13 @@ fn register_doodad(
     d: &Doodad,
     tile: (i32, i32),
 ) {
-    if let Some(p) = placements.by_id.get_mut(&d.unique_id) {
+    if let Some(p) = placements.by_id.get_mut(&u64::from(d.unique_id)) {
         p.refs += 1;
         return;
     }
     let handle: Handle<M2Model> = asset_server.load(m2_url(&d.model));
     placements.by_id.insert(
-        d.unique_id,
+        u64::from(d.unique_id),
         Placement {
             model: ModelHandle::M2(handle),
             transform: Transform {
@@ -961,13 +968,16 @@ fn register_doodad(
 
 /// Register one WMO placement, or bump its refcount; a 1.12 WMO placement has no scale.
 fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &WmoInstance) {
-    if let Some(p) = placements.by_id.get_mut(&w.unique_id) {
+    if let Some(p) = placements
+        .by_id
+        .get_mut(&monkey_wmo_placement_key(w.unique_id))
+    {
         p.refs += 1;
         return;
     }
     let handle: Handle<WmoModel> = asset_server.load(wmo_url(&w.model));
     placements.by_id.insert(
-        w.unique_id,
+        monkey_wmo_placement_key(w.unique_id),
         Placement {
             model: ModelHandle::Wmo(handle),
             transform: Transform {
@@ -1007,7 +1017,12 @@ fn drop_streamed_world(
         }
     }
     if std::mem::take(&mut state.global_wmo) {
-        release_placement(commands, placements, GLOBAL_WMO_UID, activity);
+        release_placement(
+            commands,
+            placements,
+            monkey_wmo_placement_key(GLOBAL_WMO_UID),
+            activity,
+        );
     }
     placements.materials.clear();
     // Cleared here, not by the flush's dead-key discard: tile keys repeat across maps, and the
@@ -1159,14 +1174,14 @@ fn handoff_straddlers(
     tiles: &HashMap<(i32, i32), TileState>,
     placements: &mut Placements,
     dead: (i32, i32),
-    uids: &[u32],
+    uids: &[PlacementKey],
     merge_on: bool,
 ) {
     if !merge_on {
         return;
     }
     // The dead tile's M2 placements with refs left, then one pass over each neighbour's list.
-    let mut straddlers: HashMap<u32, Option<(i32, i32)>> = uids
+    let mut straddlers: HashMap<PlacementKey, Option<(i32, i32)>> = uids
         .iter()
         .copied()
         .filter(|uid| {
@@ -1243,7 +1258,7 @@ fn handoff_straddlers(
 fn release_placement(
     commands: &mut Commands,
     placements: &mut Placements,
-    uid: u32,
+    uid: PlacementKey,
     activity: &mut StreamActivity,
 ) {
     let drop_it = match placements.by_id.get_mut(&uid) {
@@ -1343,7 +1358,7 @@ mod straddler_tests {
             material: None,
             next_cell: 0,
             furnished: false,
-            placements: uids.to_vec(),
+            placements: uids.iter().copied().map(u64::from).collect(),
             liquid: Vec::new(),
             wall: None,
             clutter: Vec::new(),
@@ -1378,7 +1393,7 @@ mod straddler_tests {
                         &streamer.tiles,
                         &mut placements,
                         dead,
-                        &uids,
+                        &uids.iter().copied().map(u64::from).collect::<Vec<_>>(),
                         merge_on,
                     );
                 },

@@ -348,7 +348,10 @@ pub(super) fn flush_static_merge(
         });
     }
     merge.props.retain(|key, acc| {
-        let Some(p) = placements.by_id.get_mut(&key.0) else {
+        let Some(p) = placements
+            .by_id
+            .get_mut(&super::monkey_wmo_placement_key(key.0))
+        else {
             return false;
         };
         if !acc.ready(frame, idle) {
@@ -753,10 +756,10 @@ mod tests {
         let mut app = test_app();
         app.world_mut().resource_mut::<ViewFocus>().paced = false;
         let instance = app.world_mut().spawn_empty().id();
-        app.world_mut()
-            .resource_mut::<Placements>()
-            .by_id
-            .insert(7, blank_placement(Some(instance)));
+        app.world_mut().resource_mut::<Placements>().by_id.insert(
+            super::super::monkey_wmo_placement_key(7),
+            blank_placement(Some(instance)),
+        );
         let rooms: Arc<[u16]> = Arc::from([3u16, 5].as_slice());
         {
             let mut merge = app.world_mut().resource_mut::<StaticMerge>();
@@ -782,7 +785,12 @@ mod tests {
         app.world_mut().run_system_once(flush_static_merge).unwrap();
         app.world_mut().run_system_once(flush_static_merge).unwrap();
         let placements = app.world().resource::<Placements>();
-        let owned = placements.by_id.get(&7).unwrap().entities.clone();
+        let owned = placements
+            .by_id
+            .get(&super::super::monkey_wmo_placement_key(7))
+            .unwrap()
+            .entities
+            .clone();
         assert_eq!(owned.len(), 1);
         let blob = owned[0];
         let vis = app.world().get::<WmoGroupVis>(blob).unwrap();
@@ -808,10 +816,10 @@ mod tests {
     fn exterior_and_unnamed_prop_blobs_stay_plain() {
         let mut app = test_app();
         app.world_mut().resource_mut::<ViewFocus>().paced = false;
-        app.world_mut()
-            .resource_mut::<Placements>()
-            .by_id
-            .insert(9, blank_placement(None));
+        app.world_mut().resource_mut::<Placements>().by_id.insert(
+            super::super::monkey_wmo_placement_key(9),
+            blank_placement(None),
+        );
         let rooms: Arc<[u16]> = Arc::from([].as_slice());
         {
             let mut merge = app.world_mut().resource_mut::<StaticMerge>();
@@ -835,7 +843,12 @@ mod tests {
         app.world_mut().run_system_once(flush_static_merge).unwrap();
         app.world_mut().run_system_once(flush_static_merge).unwrap();
         let placements = app.world().resource::<Placements>();
-        let owned = placements.by_id.get(&9).unwrap().entities.clone();
+        let owned = placements
+            .by_id
+            .get(&super::super::monkey_wmo_placement_key(9))
+            .unwrap()
+            .entities
+            .clone();
         assert_eq!(owned.len(), 1);
         let blob = owned[0];
         assert!(app.world().get::<WmoGroupVis>(blob).is_none());

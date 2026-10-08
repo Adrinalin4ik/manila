@@ -161,7 +161,8 @@ pub(super) fn spawn_loaded_placements(
     // follows the work, so every frame spawns at least one.
     let deadline = Instant::now() + SPAWN_BUDGET;
 
-    'placements: for (&unique_id, p) in by_id.iter_mut() {
+    'placements: for (&key, p) in by_id.iter_mut() {
+        let unique_id = key as u32;
         // 1. The model's own geometry, once; a WMO also resolves its doodad props for step 2.
         if !p.spawned {
             let entities = match &p.model {
@@ -1135,6 +1136,106 @@ mod retire_tests {
         app
     }
 
+    #[test]
+    fn monkey_mddf_and_modf_with_the_same_uid_stream_independently() {
+        use super::super::{
+            monkey_wmo_placement_key, register_doodad, register_wmo, release_placement,
+            StreamActivity,
+        };
+        use benilla_formats::{Doodad, WmoInstance};
+        use bevy::ecs::system::RunSystemOnce;
+
+        for wmo_first in [false, true] {
+            let mut app = app();
+            let server = app.world().resource::<AssetServer>().clone();
+            let tree = Doodad {
+                model: "World/test/tree.m2".into(),
+                position: [0.0; 3],
+                rotation: [0.0; 3],
+                scale: 1.0,
+                unique_id: 54418,
+            };
+            let house = WmoInstance {
+                model: "World/test/farm.wmo".into(),
+                position: [1.0; 3],
+                rotation: [0.0; 3],
+                unique_id: 54418,
+                doodad_set: 2,
+                name_set: 0,
+            };
+            {
+                let mut pl = app.world_mut().resource_mut::<Placements>();
+                if wmo_first {
+                    register_wmo(&mut pl, &server, &house);
+                }
+                register_doodad(&mut pl, &server, &tree, (33, 48));
+                if !wmo_first {
+                    register_wmo(&mut pl, &server, &house);
+                }
+                register_wmo(&mut pl, &server, &house);
+                assert_eq!(
+                    pl.by_id.len(),
+                    2,
+                    "one ADT class must not suppress the other"
+                );
+                assert!(matches!(pl.by_id[&54418].model, ModelHandle::M2(_)));
+                assert!(matches!(
+                    pl.by_id[&monkey_wmo_placement_key(54418)].model,
+                    ModelHandle::Wmo(_)
+                ));
+                assert_eq!(pl.by_id[&54418].refs, 1);
+                assert_eq!(pl.by_id[&monkey_wmo_placement_key(54418)].refs, 2);
+                assert_eq!(pl.pending_spawns, 2);
+            }
+            app.world_mut()
+                .run_system_once(|mut commands: Commands, mut pl: ResMut<Placements>| {
+                    release_placement(
+                        &mut commands,
+                        &mut pl,
+                        54418,
+                        &mut StreamActivity::default(),
+                    );
+                })
+                .unwrap();
+            {
+                let mut pl = app.world_mut().resource_mut::<Placements>();
+                assert_eq!(pl.by_id.len(), 1);
+                assert_eq!(pl.by_id[&monkey_wmo_placement_key(54418)].refs, 2);
+                assert_eq!(pl.pending_spawns, 1);
+                register_doodad(&mut pl, &server, &tree, (33, 48));
+                assert_eq!(
+                    pl.by_id.len(),
+                    2,
+                    "returning M2 must not merge into the resident WMO"
+                );
+                assert_eq!(pl.pending_spawns, 2);
+            }
+            for _ in 0..2 {
+                app.world_mut()
+                    .run_system_once(|mut commands: Commands, mut pl: ResMut<Placements>| {
+                        release_placement(
+                            &mut commands,
+                            &mut pl,
+                            monkey_wmo_placement_key(54418),
+                            &mut StreamActivity::default(),
+                        );
+                    })
+                    .unwrap();
+            }
+            let mut pl = app.world_mut().resource_mut::<Placements>();
+            assert_eq!(pl.by_id.len(), 1);
+            assert_eq!(pl.by_id[&54418].refs, 1);
+            assert_eq!(pl.pending_spawns, 1);
+            register_wmo(&mut pl, &server, &house);
+            assert_eq!(
+                pl.by_id.len(),
+                2,
+                "returning WMO must not merge into the M2"
+            );
+            assert_eq!(pl.pending_spawns, 2);
+        }
+    }
+
     fn placement(model: ModelHandle, doodads: Vec<WmoDoodadInst>) -> Placement {
         Placement {
             model,
@@ -1185,7 +1286,10 @@ mod retire_tests {
         {
             let mut pl = app.world_mut().resource_mut::<Placements>();
             pl.by_id.insert(1, placement(ModelHandle::M2(m2), vec![]));
-            pl.by_id.insert(2, placement(ModelHandle::Wmo(wmo), vec![]));
+            pl.by_id.insert(
+                super::super::monkey_wmo_placement_key(2),
+                placement(ModelHandle::Wmo(wmo), vec![]),
+            );
             // A handle that was never loaded is not a failure: it keeps waiting.
             pl.by_id
                 .insert(3, placement(ModelHandle::M2(loading), vec![]));
@@ -1193,7 +1297,9 @@ mod retire_tests {
         }
         settle(&mut app, &ids);
         let pl = app.world().resource::<Placements>();
-        assert!(pl.by_id[&1].spawned && pl.by_id[&2].spawned);
+        assert!(
+            pl.by_id[&1].spawned && pl.by_id[&super::super::monkey_wmo_placement_key(2)].spawned
+        );
         assert!(!pl.by_id[&3].spawned);
         assert_eq!(pl.pending_spawns, 1);
     }
