@@ -2,10 +2,10 @@
 
 use anyhow::{bail, Context, Result};
 
-/// The first realmd login build on native non-macOS targets: stock 1.12.1 (5875).
+/// The first realmd login build on native targets: stock 1.12.1 (5875).
 ///
 /// Version rejection retries 7272, then 12340; a nonempty `WOW_REALMD_BUILD` pins one attempt.
-/// On macOS/wasm [`crate::REALMD_BUILD`] is instead the fixed upstream build 12340.
+/// On wasm [`crate::REALMD_BUILD`] is instead the fixed upstream build 12340.
 /// World auth always uses [`crate::CLIENT_BUILD`], independently of login build selection.
 pub const REALMD_BUILD: u16 = super::CLIENT_BUILD;
 

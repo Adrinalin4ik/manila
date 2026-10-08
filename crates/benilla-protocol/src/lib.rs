@@ -2,9 +2,9 @@
 //! [`world`] and [`events`] for the world server. SRP6 and the header crypto are `benilla-srp`'s.
 
 pub mod auth;
-#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 mod native_auth;
-#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 pub use native_auth::REALMD_BUILD;
 pub mod events;
 pub mod guid;
@@ -38,13 +38,13 @@ use crate::transport::Conn;
 pub const AUTH_PORT: u16 = 3724;
 /// The 1.12.1 client build we present to the **world server** (mangosd).
 pub const CLIENT_BUILD: u16 = 5875;
-/// The fixed **realmd** login build on macOS and wasm; world auth uses [`CLIENT_BUILD`].
+/// The fixed **realmd** login build on wasm; world auth uses [`CLIENT_BUILD`].
 ///
 /// Upstream measured 12340 against `logon.ravencraft.io`: build 5875 was refused by its custom
 /// strict integrity check, while 12340 was admitted because its stored integrity hash was empty.
-/// This compatibility choice diverges from stock 1.12.1 and remains the macOS/wasm policy.
+/// This compatibility choice diverges from stock 1.12.1 and remains the wasm policy.
 ///
-/// On native non-macOS targets the re-export of this name instead denotes the **first** login
+/// On native targets the re-export of this name instead denotes the **first** login
 /// build, 5875. Those targets retry 7272, then 12340 only on version rejection (0x09/0x0a);
 /// `WOW_REALMD_BUILD` pins one build. See [`logon_async`].
 ///
@@ -53,7 +53,7 @@ pub const CLIENT_BUILD: u16 = 5875;
 /// A native Linux login at 7272 was verified against a local Tortoise 1.18.1 realm. Acceptance
 /// at 7272 has not been verified against ravencraft; use an explicit override for custom realms
 /// whose accepted build still produces an offline list. Offline flags never trigger a retry.
-#[cfg(any(target_os = "macos", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 pub const REALMD_BUILD: u16 = 12340;
 /// How many logon challenges [`logon`] will ask for while looking for a `B` both serialization
 /// conventions read the same way (see the redial comment there). One dial in ~137 comes back
@@ -225,11 +225,11 @@ pub fn logon(host: &str, username: &str, password: &str) -> Result<Logon> {
 /// Flow: logon challenge → server challenge (B, g, N, salt) → SRP6 → logon proof → verify the
 /// server's proof (M2) → request + read the realm list.
 pub async fn logon_async(host: &str, username: &str, password: &str) -> Result<Logon> {
-    #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         native_auth::logon_async(host, username, password).await
     }
-    #[cfg(any(target_os = "macos", target_arch = "wasm32"))]
+    #[cfg(target_arch = "wasm32")]
     {
         logon_with_build(host, username, password, REALMD_BUILD).await
     }
