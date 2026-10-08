@@ -122,7 +122,7 @@ struct WowLight {
     // The dynamic point-light table (decision 0278), packed by `global_light::build_light_data`:
     // row 20 `.x` = live entry count; then TWO rows per light — `[pos.xyz, range]`, `[rgb, lane]`.
     // Rides this buffer (not bevy's clusterables) because the view layout exposes those to the
-    // fragment stage only, and the Gouraud term is evaluated in the VERTEX stage.
+    // fragment stage only; the vertex publishes a flat selection for fragment evaluation.
     //
     // MONKEY (light lanes): the colour row's `.w` splits the table into two DISJOINT halves.
     // `0` = an EXTERIOR light (nothing claims a room) — read only by `point_light_sum`. Anything
@@ -248,7 +248,7 @@ fn torch_face(d: vec3<f32>) -> u32 {
 
 // MONKEY (torch shadows Phase 3A): this interior fixture's OWN cast shadow on an ENTITY fragment —
 // exactly static_gx.wgsl's `torch_surface_shadow` (keep in sync): correlate the `wow_light`
-// fixture at `light_pos` to a promoted torch (nearest position within 1 yd), pick the cube face
+// fixture at `light_pos` to a promoted torch (nearest position within 0.1 yd), pick the cube face
 // facing the fragment, and sample that layer through the shared projector. 1.0 (unshadowed) when
 // no map matches — the lane is off, or the fixture was not among the ≤4 promoted.
 //
@@ -265,7 +265,9 @@ fn torch_entity_shadow_at(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>, fade
     let Ps = P + N * TORCH_NORMAL_OFFSET;
     // MONKEY (gfx): mirror the retained receiver's nearest-fixture correlation.
     var nearest = torch_table.count.x;
-    var nearest_d2 = 1.0;
+    // MONKEY (light identity): only the light's own map, not a nearby candle's. The 0.1 yd
+    // tolerance matches torch_shadow::TORCH_STALE_DRIFT_SQ's publishable-map limit.
+    var nearest_d2 = 0.010001;
     for (var candidate = 0u; candidate < torch_table.count.x; candidate += 1u) {
         // MONKEY (static torch cache): holes and pending uploads never sample stale layers.
         if (torch_table.positions[candidate].w <= 0.0) { continue; }
@@ -369,8 +371,6 @@ struct WowVsOut {
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     @location(6) @interpolate(flat) instance_index: u32,
 #endif
-    // The point-light sum `Σ att·sat(N·L)·colour`, per vertex like the reference FFP.
-    @location(8) point_lit: vec3<f32>,
 #ifdef WOW_MERGED_FADE
     // A merged blob's per-placement fade alpha, constant over the placement.
     @location(9) merged_fade: f32,
@@ -379,7 +379,7 @@ struct WowVsOut {
     @location(10) @interpolate(flat) merged_slot: u32,
 #endif
     // MONKEY (outdoor torch shadows; ext light k8): WHICH <=`EXT_SEL_K` exterior table entries
-    // `point_lit` was summed from, packed 8 bits each across FOUR u32s (see `EXT_SEL_NONE` /
+    // the fragment evaluates, packed 8 bits each across FOUR u32s (see `EXT_SEL_NONE` /
     // `ext_sel_get`). FLAT, because it is a choice and not a quantity - interpolating packed
     // indices would produce a different, meaningless one. `EXT_SEL_NONE` on every lane that takes
     // no exterior point term (interior WMO surfaces, interior props), which makes the night lane a
@@ -599,9 +599,7 @@ fn point_light_pick(anchor: vec3<f32>, box: f32) -> vec4<u32> {
 // The evaluation half — the byte-verified falloff `1/(0.7d + 0.03d²)` × `max(N·L, 0)` × the
 // committed colour, in rank order, stopping at the first empty rank exactly as the old
 // `sd[s] > 9.9e29` break did. Shared by both pickers (their sum loops were already identical).
-// MONKEY (ext light k12): up to `EXT_SEL_K` terms now, still Gouraud (per vertex) and still linear
-// in the falloff, so nothing about the day lane's FORM changed — a unit simply stops dropping the
-// fixtures its neighbour kept.
+// MONKEY (local-light consistency): evaluate the selected terms per fragment, without re-ranking.
 fn point_light_eval(sel: vec4<u32>, P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     for (var s = 0u; s < EXT_SEL_K; s = s + 1u) {
@@ -1210,9 +1208,7 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
         let sel = wmo_exterior_pick(out.world_position.xyz);
         out.ext_sel = sel;
         // MONKEY (B035 per-fragment wmo points): summed per FRAGMENT now, as in `static_gx.wgsl`.
-        out.point_lit = vec3<f32>(0.0);
     } else if (m.model_flags.x > 0.5 || m.model_flags.z > 0.5) {
-        out.point_lit = vec3<f32>(0.0);
         out.ext_sel = EXT_SEL_NONE;
     } else {
         var anchor = mesh_world_from_local[3].xyz;
@@ -1226,7 +1222,8 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
         }
         let sel = point_light_pick(anchor, box);
         out.ext_sel = sel;
-        out.point_lit = point_light_eval(sel, out.world_position.xyz, out.world_normal);
+        // MONKEY (local-light consistency): match terrain/WMO fragment evaluation. Sparse prop
+        // vertices otherwise spread a candle's near-field peak over the whole piece of furniture.
     }
     return out;
 }
@@ -1610,37 +1607,11 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         }
     }
     let sidn_e = m.sidn.rgb * (wow_light.grade.x * sidn_w);
-    // WoW dynamic point lights (decisions 0016/0273/0278, selection 0285) — exterior doodads,
-    // entities, clutter, and terrain receive their unit's committed lights: the ≤`EXT_SEL_K` NEAREST to the
-    // receiving unit's own position or AABB, never the whole scene (`point_light_sum`). INTERIOR WMO
-    // surfaces take ZERO (observed on every WMO surface batch in the abbey capture — an interior
-    // capture, hence the MONKEY split above) and interior props fold their group-MOLR lobes into
-    // the SH probe instead — both zeroed in the VERTEX stage; an EXTERIOR-class WMO group takes
-    // the exterior-lane term (`wmo_exterior_point_sum`) there instead, ranked from its MCNK cell
-    // like the terrain it adjoins, which is what puts a street torch on the cobbles. The term
-    // arrives GOURAUD-INTERPOLATED — per-vertex like the reference FFP, whose tessellation-scale
-    // smoothing is the authored look. Diffuse-only (committed ambient/specular are zero).
-    // MONKEY (outdoor torch shadows): ...and after dark that Gouraud term is CAST-SHADOWED.
-    //
-    // The same entries the vertex stage picked (`in.ext_sel`) are re-evaluated PER FRAGMENT
-    // with each fixture's own cube-map occlusion folded in, and the two results are blended by
-    // `night_w = 1 - sun_shadow_strength`. Written as a blend rather than a swap for two reasons:
-    //   - `fog_params.z` is EXACTLY 1.0 whenever the sun is above the daylight threshold
-    //     (`global_light::sun_shadow_strength` is a smoothstep that saturates), so `night_w` is
-    //     exactly 0 and the branch is not entered - DAYLIGHT IS THE SAME BITS, not "a mix that
-    //     ought to round back to b".
-    //   - at dusk the shadow, and the Gouraud->per-fragment change of the term itself, arrive on
-    //     the same clock the sun shadows leave on instead of snapping at some threshold.
-    // `torch_ext_on()` is the CPU's one-bit verdict (`exteriorShadows` AND night AND at least one
-    // promoted exterior fixture), so with the cvar off this is dead too. `n_lit` is the same
-    // normal every other lit term here uses, so the normal-offset sample leaves the skin the way
-    // the interior entity lane's does.
-    var point_diffuse = in.point_lit;
-    // MONKEY (B035 per-fragment wmo points): an EXTERIOR-class WMO batch sums its picked lights
-    // per fragment, day and night — MIRRORED from `static_gx.wgsl` (that file has the why).
-    if (m.model_flags.x > 0.5 && m.model_flags.z < 0.5) {
-        point_diffuse = point_light_eval(in.ext_sel, in.world_position.xyz, n_lit);
-    }
+    // MONKEY (local-light consistency): all exterior receivers sum their committed lights
+    // per fragment. Sparse prop vertices must not spread the near-field peak across
+    // furniture while the adjacent terrain and WMO evaluate a different pool.
+    // Interior receivers publish EXT_SEL_NONE and use the separate room-light lane.
+    var point_diffuse = point_light_eval(in.ext_sel, in.world_position.xyz, n_lit);
     let ext_night_w = select(0.0, clamp(1.0 - wow_light.fog_params.z, 0.0, 1.0), torch_ext_on());
     if (ext_night_w > 0.0) {
         point_diffuse = mix(

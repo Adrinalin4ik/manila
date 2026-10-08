@@ -1662,8 +1662,9 @@ fn build_light_data(
     for slot in claims.0[pts.len() * ROOM_CLAIM_STRIDE..].iter_mut() {
         *slot = 0;
     }
-    // `WOW_POINTS_DUMP=1` prints the nearest 8 packed lights once a second; `=frame` every frame,
-    // which a pool that changes frame to frame needs.
+    // `WOW_POINTS_DUMP=1` prints the nearest 8 packed lights once a second; `=frame` every frame.
+    // MONKEY (room diagnostics): `=all` prints every committed row once a second, including
+    // lane/claim/fade data. Eight nearest-to-camera rows can omit the hearth under investigation.
     static POINTS_DUMP: std::sync::OnceLock<Option<std::ffi::OsString>> =
         std::sync::OnceLock::new();
     if let Some(mode) = POINTS_DUMP.get_or_init(|| std::env::var_os("WOW_POINTS_DUMP")) {
@@ -1724,9 +1725,22 @@ fn build_light_data(
                 // one number away, and the two causes look identical on screen.
                 spell_gain.0,
             );
-            for (d2, p, _, rgb, synthetic, lane, claim, lit_n) in pts.iter().take(8) {
+            eprintln!(
+                "[MonkeyLightState] interior={} gate={} ambient={:.4} fill={:.4} exposure={:.3} bake={:.3} daylight={:.3}",
+                dynamic_interiors.enabled,
+                dynamic_interiors.room_gate,
+                fresh.rows[20][1],
+                fresh.rows[20][2],
+                fresh.rows[20][3],
+                dynamic_interiors.bake_floor,
+                dynamic_interiors.daylight,
+            );
+            let dump_count = if mode.as_os_str() == "all" { pts.len() } else { 8 };
+            for (row, (d2, p, _, rgb, synthetic, lane, claim, lit_n)) in
+                pts.iter().take(dump_count).enumerate()
+            {
                 eprintln!(
-                    "  d {:6.2}  at [{:8.2},{:7.2},{:8.2}]  rgb [{:.3},{:.3},{:.3}]  {}{}",
+                    "  row {row:3} d {:6.2}  at [{:8.2},{:7.2},{:8.2}]  rgb [{:.3},{:.3},{:.3}]  {}{}",
                     d2.sqrt(),
                     p.x,
                     p.y,
@@ -1753,6 +1767,21 @@ fn build_light_data(
                 // behind "why is this room dark" / "why does that wall still glow".
                 if *lane > 0.5 {
                     eprintln!("      rooms {claim}");
+                    if mode.as_os_str() == "all" {
+                        for (group, fade) in claim.groups[..usize::from(claim.n)]
+                            .iter().zip(&claim.fades[..usize::from(claim.n)])
+                        {
+                            eprintln!(
+                                "      group={} ext={} center={:.2?} radius={:.3} slack={:.3} entry={:.3}",
+                                group & !LIT_ROOM_EXT_DENY,
+                                group & LIT_ROOM_EXT_DENY == 0,
+                                fade.center,
+                                fade.radius,
+                                fade.slack,
+                                fade.entry,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1873,6 +1902,24 @@ pub fn classify_light_lanes(
         // Always re-stamped when the generation moved, even if the verdict didn't — the stamp is
         // what stops the next frame re-raying the same light.
         if lane != Some(&want) {
+            // MONKEY (room diagnostics): expose the physical lane decision behind fireplace
+            // bleed. Runs only on classification changes, not another ray or an idle-frame log.
+            static MONKEY_LIGHT_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *MONKEY_LIGHT_TRACE.get_or_init(|| {
+                std::env::var("WOW_POINTS_DUMP").is_ok_and(|mode| mode == "all")
+            }) {
+                let verdict_name = match verdict {
+                    crate::wmo_portal::IndoorVerdict::Outdoors => "outdoors",
+                    crate::wmo_portal::IndoorVerdict::OutdoorsOnWmo => "outdoors-wmo",
+                    crate::wmo_portal::IndoorVerdict::DayNight => "interior-matte",
+                    crate::wmo_portal::IndoorVerdict::Baked { .. } => "interior-baked",
+                };
+                eprintln!(
+                    "[MonkeyLightLane] light={light:?} wow={:.3?} verdict={verdict_name} terrain={terrain_hit} room_refs={} interior={interior} generation={generation}",
+                    benilla_assets::coords::bevy_to_wow(gt.translation()),
+                    rooms.is_some(),
+                );
+            }
             commands.entity(light).insert(want);
         }
     }

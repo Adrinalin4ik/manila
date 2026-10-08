@@ -1,7 +1,8 @@
 // Terrain splat shader: a custom vertex and fragment stage on Bevy's StandardMaterial. Blends up to
 // four tiled layers by a per-chunk alpha map, lit as the reference's fixed-function terrain:
 //   diffuse  = clamp(ambient (row 1) + diffuse (row 0)·max(N·L, 0) + Σ point·att·N·L), evaluated
-//     and clamped per vertex (GL T&L), Gouraud-interpolated, modulated 1× into the texture;
+//     sun/ambient interpolates from the vertices; local points evaluate per pixel, then the sum
+//     clamps and modulates the texture. Deviation: sparse MCNK geometry must not miss candle pools;
 //   specular = clamp(row 9 · max(N·H, 0)^20) per vertex (local viewer), times the sheen mask (the
 //     `_s` texture's per-texel alpha, blended like the colour), added after the modulate.
 // Evaluated per pixel, or unmasked, the near-white row 9 would wash lit ground to cream.
@@ -165,7 +166,7 @@ fn torch_face(d: vec3<f32>) -> u32 {
 // `wow_model.wgsl`'s `torch_entity_shadow_at` with the exterior fade already chosen, because terrain
 // has no interior lane to share the body with (an MCNK cell is outdoors by definition, and the
 // interior half of the light table is skipped before ranking). Correlate the `wow_light` fixture at
-// `light_pos` to a promoted torch (position match within 1 yd), pick the cube face facing the
+// `light_pos` to its promoted torch (nearest position within 0.1 yd), pick the cube face facing the
 // fragment, and sample that layer through the shared projector. 1.0 (unshadowed) when no map matches
 // - the lane is off, or the fixture was not among the promoted slots.
 fn torch_terrain_shadow(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>) -> f32 {
@@ -176,11 +177,23 @@ fn torch_terrain_shadow(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>) -> f32
     }
     // Normal-offset the sample point off the ground (see TORCH_NORMAL_OFFSET).
     let Ps = P + N * TORCH_NORMAL_OFFSET;
-    for (var i = 0u; i < torch_table.count.x; i = i + 1u) {
+    // MONKEY (light identity): nearby spell lights must not borrow a candle's map. The small
+    // tolerance matches torch_shadow::TORCH_STALE_DRIFT_SQ; nearest agrees with both model paths.
+    var nearest = torch_table.count.x;
+    var nearest_d2 = 0.010001;
+    for (var candidate = 0u; candidate < torch_table.count.x; candidate += 1u) {
         // MONKEY (static torch cache): holes and pending uploads never sample stale layers.
-        if (torch_table.positions[i].w <= 0.0) { continue; }
-        let fixture = torch_table.positions[i].xyz;
-        if (distance(fixture, light_pos) < 1.0) {
+        if (torch_table.positions[candidate].w <= 0.0) { continue; }
+        let delta = torch_table.positions[candidate].xyz - light_pos;
+        let d2 = dot(delta, delta);
+        if (d2 < nearest_d2) {
+            nearest = candidate;
+            nearest_d2 = d2;
+        }
+    }
+    if (nearest < torch_table.count.x) {
+            let i = nearest;
+            let fixture = torch_table.positions[i].xyz;
             let face = torch_face(Ps - fixture);
             let layer = i * 6u + face;
             // MONKEY (live bank rank): count.z is CPU-ready-filtered; holes must not consume live
@@ -204,7 +217,6 @@ fn torch_terrain_shadow(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>) -> f32
             // into that same weight (see the function). `w * strength` rather than a second `mix`
             // because the two are the same expression.
             return mix(1.0, s, torch_table.positions[i].w * torch_strength());
-        }
     }
     return 1.0;
 }
@@ -245,15 +257,13 @@ struct TerrainVsOut {
     @location(3) uv_b: vec2<f32>,
     @location(4) color: vec4<f32>,
     @location(5) specular: vec3<f32>,
-    // The Gouraud diffuse, summed and clamped per vertex as GL T&L does: an over-gamut light (a
-    // carried torch is (1.4, 0.87, 0.40)) saturates one vertex and falls off linearly from it,
-    // where clamping per pixel would pin a wide plateau at white.
+    // Preserve the reference's clamped sun/ambient interpolation when no point was selected.
     @location(6) primary: vec3<f32>,
     // The receiver normal is carried so the real cascaded shadow lookup can apply a slope-aware
     // bias. This is forward-pass data only; the terrain shadow caster is a stock Bevy proxy.
     @location(7) world_normal: vec3<f32>,
     // MONKEY (outdoor torch shadows: terrain; ext light k8): WHICH <=`EXT_SEL_K` exterior table
-    // entries `primary`'s point term was summed from, packed 8 bits each across FOUR u32s (see
+    // entries the fragment evaluates, packed 8 bits each across FOUR u32s (see
     // `EXT_SEL_EMPTY` / `ext_sel_get`). FLAT, because it is a CHOICE and not a quantity -
     // interpolating packed indices across a triangle would produce a different, meaningless one. It
     // lets the fragment stage re-shadow the VERTEX's own selection instead of re-ranking, which is
@@ -263,17 +273,8 @@ struct TerrainVsOut {
     // for this struct, against a 60-component limit) - see `EXT_SEL_K` for why three, and then
     // eight, stopped being enough.
     @location(8) @interpolate(flat) ext_sel: vec4<u32>,
-    // MONKEY (outdoor torch shadows: terrain): `primary` WITHOUT the point term and WITHOUT the
-    // clamp - just `ambient + sun*max(N.L,0)`. `primary` is clamped per VERTEX (the GL T&L locus,
-    // see its note above) and that clamp is lossy: once a hot torch has saturated a vertex there is
-    // no way to subtract the point term back out in the fragment stage. So the sun/ambient half
-    // rides its own slot and the night lane rebuilds `clamp(base + shadowed_points)` from it. This
-    // costs 3 interstage components and is read ONLY inside the night branch; the day path still
-    // reads `primary` and is therefore bit-identical. Unclamped is safe to interpolate: it is
-    // linear in `N.L` and the clamp that used to bound it is re-applied per fragment.
+    // Unclamped sun/ambient interpolates separately; local lights are evaluated per pixel.
     @location(9) base_lit: vec3<f32>,
-    // MONKEY (moon shadows): preserve the point sum BEFORE saturation; primary cannot recover it.
-    @location(10) point_lit: vec3<f32>,
 }
 
 // Terrain's point-light candidacy half-width (yd): `w + 10`, `w` being the chunk's bounding-sphere
@@ -479,9 +480,8 @@ fn point_light_pick(anchor: vec3<f32>, box: f32) -> vec4<u32> {
 // The EVALUATION half - the byte-verified falloff `1/(0.7d + 0.03d^2)` x `max(N.L, 0)` x the
 // committed colour, in rank order, stopping at the first empty rank exactly as the old
 // `sd[s] > 9.9e29` break did (an unfilled rank packs as `EXT_SEL_EMPTY`, and no real index can
-// collide with it: the live table caps at 255). MONKEY (ext light k12): up to `EXT_SEL_K` terms now,
-// still Gouraud (per vertex) and still linear in the falloff, so nothing about the day lane's FORM
-// changed - a chunk simply stops dropping the fixtures its neighbour kept.
+// collide with it: the live table caps at 255). MONKEY (local-light consistency): evaluate the
+// selected terms per fragment, without re-ranking.
 fn point_light_eval(sel: vec4<u32>, P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     for (var s = 0u; s < EXT_SEL_K; s = s + 1u) {
@@ -591,17 +591,11 @@ fn vertex(in: Vertex) -> TerrainVsOut {
     // the sum was always `eval(pick(..))`, it is just no longer inlined.
     let sel = point_light_pick(mcnk_cell_anchor(out.world_position.xyz), MCNK_CELL_HALF);
     out.ext_sel = sel;
-    let points = point_light_eval(sel, out.world_position.xyz, n);
-    out.point_lit = points;
+    // MONKEY (local-light consistency): pick once per draw unit; sum per fragment.
+    // Sparse MCNK vertices otherwise miss a candle between them.
     let sun_lighting = wow_light.light_diffuse.rgb * ndotl;
-    // The sun/ambient half on its own slot, UNCLAMPED (see `base_lit`) - the night lane's only way
-    // back to a `primary` that does not already have the unshadowed point term baked into it.
     out.base_lit = wow_light.light_ambient.rgb + sun_lighting;
-    out.primary = clamp(
-        wow_light.light_ambient.rgb + sun_lighting + points,
-        vec3<f32>(0.0),
-        vec3<f32>(1.0),
-    );
+    out.primary = clamp(out.base_lit, vec3<f32>(0.0), vec3<f32>(1.0));
     return out;
 }
 
@@ -646,11 +640,8 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     specmask = mix(specmask, s2.a, a.g);
     specmask = mix(specmask, s3.a, a.b);
 
-    // STEP 3 (diffuse) arrives from the vertex stage, ALREADY summed (ambient + sun N·L + the
-    // chunk's committed point lights) and ALREADY clamped — Gouraud of the clamped vertex
-    // colour, byte-faithful to GL T&L (see the `primary` struct note; the MCNR normal and the
-    // DayNight sun share a space per the Phase-0 validation). The MCSH ×(0.3·s + 0.7) factor below
-    // still scales the whole modulate, as the traced combine does.
+    // Sun/ambient arrives unclamped from the vertex stage; selected local lights join per
+    // fragment before the light sum clamps and modulates the texture.
     // Fetch the character coverage here, but apply it as a NEUTRAL scalar after the terrain's
     // authored lighting below. Subtracting the warm sun RGB left only Elwynn's green ambient and
     // produced a green silhouette on yellow morning ground. The era-style projected shadow is a
@@ -684,45 +675,24 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
         wow_light.monkey.misc.w,
     );
     let world_shadow = shadow_terms.x;
-    // MONKEY (outdoor torch shadows: terrain): the exterior point term, CAST-SHADOWED at night.
-    //
-    // `in.primary` is the Gouraud (per-vertex, per-vertex-CLAMPED) diffuse, and it stays the only
-    // thing this lane reads by day. After dark the same entries the vertex picked
-    // (`in.ext_sel`) are re-evaluated PER FRAGMENT with each fixture's own cube-map occlusion folded
-    // in, re-summed onto the sun/ambient half (`in.base_lit`) and re-clamped here - the clamp has to
-    // move to the fragment because the shadow is a per-fragment quantity, and clamping the sum is
-    // still the faithful GL order (saturate the light sum, then modulate the texture).
-    //
-    // Written as a BLEND rather than a swap, for the same two reasons the model and WMO lanes are:
-    //   - `fog_params.z` is EXACTLY 1.0 whenever the sun is above the daylight threshold
-    //     (`global_light::sun_shadow_strength` is a smoothstep that saturates), so `ext_night_w` is
-    //     exactly 0, the branch is not entered, and DAYTIME IS THE SAME BITS - not "a mix that ought
-    //     to round back to `in.primary`". Nothing here is evaluated by day at any cost.
-    //   - at dusk the shadow, and the Gouraud->per-fragment change of the term itself, arrive on the
-    //     same clock the sun shadows leave on instead of snapping at a threshold.
-    // `torch_ext_on()` is the CPU's one-bit verdict (`exteriorShadows` AND night AND at least one
-    // promoted exterior fixture), so with the cvar off this is dead too.
-    var primary = in.primary;
+    // MONKEY (local-light consistency): per-pixel falloff on terrain, as on WMO and props.
+    // Night adds each selected fixture's own occlusion on the existing smooth dusk clock.
+    var points = point_light_eval(in.ext_sel, in.world_position.xyz, n_lit);
     let ext_night_w = select(0.0, clamp(1.0 - sun_shadow_strength, 0.0, 1.0), torch_ext_on());
     if (ext_night_w > 0.0) {
-        let primary_night = clamp(
-            in.base_lit + point_light_eval_shadowed(in.ext_sel, in.world_position.xyz, n_lit),
-            vec3<f32>(0.0),
-            vec3<f32>(1.0),
-        );
-        primary = mix(in.primary, primary_night, ext_night_w);
+        points = mix(points,
+            point_light_eval_shadowed(in.ext_sel, in.world_position.xyz, n_lit), ext_night_w);
+    }
+    var primary = in.primary;
+    if (ext_sel_get(in.ext_sel, 0u) != EXT_SEL_EMPTY) {
+        primary = clamp(in.base_lit + points, vec3<f32>(0.0), vec3<f32>(1.0));
     }
 
     // MONKEY (moon shadows): attenuate the SKY (ambient AND directional) BEFORE adding points
     // and saturating. Subtracting from primary loses over-gamut torch energy: sky .2 + point 1
-    // must remain 1 under a .35 moon shadow, not .93. Keep the entire off arm above untouched;
-    // neither a zero weight nor a fully lit fragment earns a different Gouraud/clamp path.
+    // must remain 1 under a .35 moon shadow, not .93. Point lights keep their energy;
+    // only the sky is attenuated before the final light-sum clamp.
     if (shadow_terms.y < 1.0) {
-        var points = in.point_lit;
-        if (ext_night_w > 0.0) {
-            points = mix(points,
-                point_light_eval_shadowed(in.ext_sel, in.world_position.xyz, n_lit), ext_night_w);
-        }
         primary = clamp(in.base_lit * shadow_terms.y + points, vec3<f32>(0.0), vec3<f32>(1.0));
     }
     // GFX (moonlight): ADD the moon (cool, N·L, shadowed by the moon's own map) onto the stock

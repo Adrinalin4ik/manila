@@ -405,7 +405,7 @@ fn torch_face(d: vec3<f32>) -> u32 {
 }
 
 // This fixture's OWN cast shadow: correlate the `wow_light` fixture at `light_pos` to a
-// promoted torch (nearest position within 1 yd), pick the cube face facing the fragment, and sample
+// promoted torch (nearest position within 0.1 yd), pick the cube face facing the fragment, and sample
 // that layer. 1.0 (unshadowed) when no map matches, or when TORCH_SHADOWS is off (wow_model's copy
 // of the caller never sets it).
 //
@@ -428,7 +428,9 @@ fn torch_map_at(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>, fade_radius: f
     }
     // MONKEY (gfx): a nearby spell light must not steal an earlier fixture's map.
     var nearest = torch_table.count.x;
-    var nearest_d2 = select(1.0, 0.010001, strict);
+    // MONKEY (light identity): an unrelated spell light within a yard must not steal a map.
+    // 0.1 yd also matches torch_shadow::TORCH_STALE_DRIFT_SQ's publishable-map limit.
+    var nearest_d2 = 0.010001;
     for (var candidate = 0u; candidate < torch_table.count.x; candidate += 1u) {
         // MONKEY (static torch cache): holes and pending uploads never sample stale layers.
         if (torch_table.positions[candidate].w <= 0.0) { continue; }
@@ -713,9 +715,7 @@ fn point_light_pick(anchor: vec3<f32>, box: f32) -> vec4<u32> {
 // The evaluation half — the byte-verified falloff `1/(0.7d + 0.03d²)` × `max(N·L, 0)` × the
 // committed colour, in rank order, stopping at the first empty rank exactly as the old
 // `sd[s] > 9.9e29` break did. Shared by both pickers (their sum loops were already identical).
-// MONKEY (ext light k12): up to `EXT_SEL_K` terms now, still Gouraud (per vertex) and still linear
-// in the falloff, so nothing about the day lane's FORM changed — a unit simply stops dropping the
-// fixtures its neighbour kept.
+// MONKEY (local-light consistency): evaluate the selected terms per fragment, without re-ranking.
 fn point_light_eval(sel: vec4<u32>, P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     for (var s = 0u; s < EXT_SEL_K; s = s + 1u) {
@@ -1283,10 +1283,9 @@ struct GxVsOut {
     @location(1) world_normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) @interpolate(flat) word: u32,
-    @location(4) point_lit: vec3<f32>,
     @location(5) color: vec4<f32>,
     // MONKEY (outdoor torch shadows; ext light k8): WHICH ≤`EXT_SEL_K` exterior table entries
-    // `point_lit` was summed from, packed 8 bits each across FOUR u32s (see `EXT_SEL_NONE` /
+    // the fragment evaluates, packed 8 bits each across FOUR u32s (see `EXT_SEL_NONE` /
     // `ext_sel_get`). FLAT, because it is a choice, not a quantity — interpolating packed indices
     // would produce a different, meaningless one. `EXT_SEL_NONE` on every lane that takes no
     // exterior point term (interior WMO surfaces, interior props, the collapsed exile vertex),
@@ -1308,7 +1307,6 @@ fn vertex(v: GxVertex) -> GxVsOut {
         out.world_normal = vec3<f32>(0.0, 1.0, 0.0);
         out.uv = vec2<f32>(0.0);
         out.word = v.word;
-        out.point_lit = vec3<f32>(0.0);
         out.color = vec4<f32>(1.0);
         out.ext_sel = EXT_SEL_NONE;
         return out;
@@ -1343,20 +1341,21 @@ fn vertex(v: GxVertex) -> GxVsOut {
     // (wow-re trace-forensics-abbey-interior-d3d §2: zero on every observed WMO surface) —
     // and so do interior M2 props (B4): their group-MOLR point lobes are folded into the
     // per-item SH probe at spawn, the entity path's own vertex-stage zeroing.
-    if ((v.word & WORD_WMO) != 0u && (v.word & WORD_INTERIOR) != 0u) {
-        // INTERIOR WMO surfaces stay zero here, the reference's own vertex-stage zeroing. MONKEY
+    if ((v.word & WORD_INTERIOR) != 0u) {
+        // MONKEY (interior prop parity): interior props also publish no exterior selection,
+        // matching wow_model.wgsl. A prop's baked probe already contains its fixture lighting;
+        // adding the outside table only to retained furniture made it brighter than its walls.
+        // INTERIOR receivers stay zero here, the reference's own vertex-stage zeroing. MONKEY
         // (dynamic interiors): they light from the live torches PER-FRAGMENT in the fragment
         // stage (`interior_room_light`) — a per-vertex sum on a WMO's huge floor triangles is
         // Gouraud: straight-edged wedges, and a torch mid-triangle lights nothing.
-        out.point_lit = vec3<f32>(0.0);
         out.ext_sel = EXT_SEL_NONE;
     } else if ((v.word & WORD_WMO) != 0u) {
         // MONKEY (wmo exterior points): an EXTERIOR-class group (MOGP `& 0x48`) is a street, a
         // courtyard, a porch — drawn by the exterior law, so it takes the exterior point term the
         // terrain beside it takes. Its own anchor is the placement origin (one point for all of
         // Stormwind), so `wmo_exterior_point_sum` re-anchors on the MCNK cell; see its comment.
-        // Per-vertex like terrain's, not per-fragment: WMO surfaces are MOCV-baked per vertex, so
-        // they carry the tessellation a Gouraud term needs, and this stays one bounded walk.
+        // Selection stays per vertex; light falloff is evaluated per fragment.
         // MONKEY (outdoor torch shadows): the pick is published so the fragment stage can shadow
         // this same selection at night without re-ranking (see `EXT_SEL_NONE`). One table walk
         // still, not two — the sum was always `eval(pick(...))`, it is just no longer inlined.
@@ -1364,13 +1363,12 @@ fn vertex(v: GxVertex) -> GxVsOut {
         out.ext_sel = sel;
         // MONKEY (B035 per-fragment wmo points): the SUM moved to the fragment stage (see there);
         // only the pick stays per vertex, so this lane still walks the table once per vertex.
-        out.point_lit = vec3<f32>(0.0);
     } else {
         // MONKEY (ext light k12): `box = 0` — an exterior doodad/MODD prop is its own draw unit and
         // ranks from its baked PLACEMENT origin, exactly as it did before the widening.
         let sel = point_light_pick(v.anchor, 0.0);
         out.ext_sel = sel;
-        out.point_lit = point_light_eval(sel, world, v.normal);
+        // MONKEY (local-light consistency): sum at the fragment, matching terrain and entities.
     }
     return out;
 }
@@ -1418,32 +1416,10 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // Both faces light from the submitted normal (no GL_LIGHT_MODEL_TWO_SIDE in the reference);
     // this pipeline never negates back faces, so it has no front-face select like wow_model.wgsl.
     let n_lit = wow_normalize(in.world_normal);
-    // MONKEY (outdoor torch shadows): the EXTERIOR point term, cast-shadowed at night.
-    //
-    // `in.point_lit` is the Gouraud (per-vertex) exterior sum, and it stays the ONLY thing this
-    // lane reads by day. After dark the same entries are re-evaluated PER FRAGMENT with each
-    // one's own cube-map occlusion folded in (`point_light_eval_shadowed`), and the two are blended
-    // by `night_w = 1 − sun_shadow_strength`. Two things fall out of writing it as a blend rather
-    // than a swap:
-    //   · `fog_params.z` is EXACTLY 1.0 whenever the sun is above the daylight threshold
-    //     (`global_light::sun_shadow_strength`, a smoothstep that saturates), so `night_w` is
-    //     exactly 0 and the `if` is not entered at all — daylight is the same instructions and the
-    //     same bits it was, not "a mix that ought to round back".
-    //   · at dusk the shadow arrives on the same clock the sun shadows leave on, and the
-    //     Gouraud→per-fragment change of the term itself arrives with it instead of snapping.
-    // `torch_ext_on()` is the CPU's one-bit verdict (`exteriorShadows` && night && ≥1 promoted
-    // exterior fixture), so with the cvar off the branch is dead too.
-    var point_lit = in.point_lit;
-    // MONKEY (B035 per-fragment wmo points): an EXTERIOR WMO surface evaluates its picked lights
-    // PER FRAGMENT, day and night. Its triangles are paving-slab sized (the Valley of Heroes
-    // bridge: a few yards a side), and the `1/(0.7d + 0.03d^2)` falloff of a light hanging a
-    // fraction of a yard over them — a glowing mount's hooves, a spell — is all peak and no
-    // shoulder at that scale, so the Gouraud sum lit whichever slab corners happened to sit under
-    // the light: a pool cut along the tile edges that jumped as the light moved. The vertex pick
-    // (`in.ext_sel`, flat) is unchanged, so the SET of lights and its cell agreement are too.
-    if ((in.word & WORD_WMO) != 0u && (in.word & WORD_INTERIOR) == 0u) {
-        point_lit = point_light_eval(in.ext_sel, in.world_position.xyz, n_lit);
-    }
+    // MONKEY (local-light consistency): the same per-fragment falloff for WMO and props.
+    // The vertex still ranks once and publishes its flat selection. Interior receivers
+    // publish EXT_SEL_NONE and keep their room-light lane.
+    var point_lit = point_light_eval(in.ext_sel, in.world_position.xyz, n_lit);
     let ext_night_w = select(0.0, clamp(1.0 - wow_light.fog_params.z, 0.0, 1.0), torch_ext_on());
     if (ext_night_w > 0.0) {
         point_lit = mix(
@@ -1660,8 +1636,8 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             ext_room_far = 1.0 - smoothstep(EXT_ROOM_FADE_START, EXT_ROOM_FADE_END, ext_room_d);
         }
         // GL_COLOR_MATERIAL: MOCV multiplies the lit terms INSIDE the clamp, emission adds
-        // beside. MONKEY (wmo exterior points): `in.point_lit` is zero on INTERIOR groups (the
-        // reference's own vertex-stage zeroing — they light per fragment below) and carries the
+        // beside. MONKEY (wmo exterior points): `point_lit` is zero on INTERIOR groups (their
+        // EXT_SEL_NONE — they light from the room lane below) and carries the
         // exterior nearest-3 point term on EXTERIOR-class ones, which is what makes a street
         // torch reach the cobbles. The clamp is why it costs nothing in daylight.
         let primary = clamp(
@@ -1735,8 +1711,8 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             // every interior group is bit-for-bit unchanged.
             let sun_w = clamp(wow_light.fog_params.z, 0.0, 1.0);
             day_w = day_w * sun_w;
-            // MONKEY (ext-class night law): `in.point_lit` joins the rolloff. It is a HARD ZERO on
-            // every interior batch (the vertex stage zeroes it for `WORD_INTERIOR`), so this is an
+            // MONKEY (ext-class night law): `point_lit` joins the rolloff. It is a HARD ZERO on
+            // every interior batch (EXT_SEL_NONE for `WORD_INTERIOR`), so this is an
             // exact no-op for the lane that already ran here — and on an ext-class batch it is the
             // exterior point term, i.e. the street torch hanging on the wall being lit. Without it
             // the blend would take that torch away from every building facade the moment it swapped
