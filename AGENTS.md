@@ -58,6 +58,10 @@ google-chrome --user-data-dir=/tmp/wenilla-chrome --enable-unsafe-webgpu --remot
 - **Carries are `#[cfg]`-gated or in our own files.** A change inside an upstream file goes
   under `#[cfg(target_arch = "wasm32")]` or `cfg(not(target_os = "macos"))`, or into a new
   file. The next upstream merge conflicts on every upstream line a carry touches, so touch few.
+  `not(macos)` keeps upstream's own platform on upstream's behaviour; a fix every native target
+  needs may instead go under `cfg(not(target_arch = "wasm32"))` or ungated. The login footer
+  (`login/screen.rs`) and login-build negotiation (`benilla-protocol/src/native_auth.rs`) are
+  the precedent.
 - **Upstream is merged, never copied.** A sync is a real merge commit with `upstream/main` as
   its second parent. A single-parent content copy loses the ancestry and re-raises every
   conflict at the next sync. See docs/UPSTREAM.md.

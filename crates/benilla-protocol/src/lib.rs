@@ -2,6 +2,10 @@
 //! [`world`] and [`events`] for the world server. SRP6 and the header crypto are `benilla-srp`'s.
 
 pub mod auth;
+#[cfg(not(target_arch = "wasm32"))]
+mod native_auth;
+#[cfg(not(target_arch = "wasm32"))]
+pub use native_auth::REALMD_BUILD;
 pub mod events;
 pub mod guid;
 pub mod messages;
@@ -34,30 +38,22 @@ use crate::transport::Conn;
 pub const AUTH_PORT: u16 = 3724;
 /// The 1.12.1 client build we present to the **world server** (mangosd).
 pub const CLIENT_BUILD: u16 = 5875;
-/// The build presented to **realmd only** — the world server still gets [`CLIENT_BUILD`].
+/// The fixed **realmd** login build on wasm; world auth uses [`CLIENT_BUILD`].
 ///
-/// Measured against `logon.ravencraft.io` (2026-09-14): that realmd runs with `StrictVersionCheck`
-/// on, and its build table has 5875 filled in with the hash of its own custom client, so every
-/// digest we can compute — the published 5875 constant and one derived from a local install alike —
-/// is answered `00 00 09` (`CMD_AUTH_LOGON_CHALLENGE` opcode carrying `WOW_FAIL_VERSION_INVALID`,
-/// the shape `examples/version_check_probe.rs` documents). A sweep found 8606, 11801 and 12340
-/// accepted with *any* `crc_hash`, including zeros: mangos's `VerifyVersion` returns true outright
-/// for a build whose hash the operator left unfilled. 12340 is the one picked here.
+/// Upstream measured 12340 against `logon.ravencraft.io`: build 5875 was refused by its custom
+/// strict integrity check, while 12340 was admitted because its stored integrity hash was empty.
+/// This compatibility choice diverges from stock 1.12.1 and remains the wasm policy.
 ///
-/// **This is a divergence from the reference and it is not a protocol fact.** It only affects the
-/// realmd challenge because the two servers read the build independently — the same run reached
-/// `SMSG_AUTH_SESSION` on the world at 5875 and was admitted. Reverting to `CLIENT_BUILD` restores
-/// stock behaviour and costs nothing on a server that is not in strict mode.
+/// On native targets the re-export of this name instead denotes the **first** login
+/// build, 5875. Those targets retry 7272, then 12340 only on version rejection (0x09/0x0a);
+/// `WOW_REALMD_BUILD` pins one build. See [`logon_async`].
 ///
-/// **`benilla-twow` reached a different number here — 7272 — and it is kept out on purpose.** Its
-/// reasoning is sound and worth recording: a Turtle-derived realmd gates the *proof* stage on the
-/// build (`AuthSocket::_HandleLogonProof` → `FindBuildInfo`) and accepts only builds ≥ its own,
-/// which for that fork is 7272; a stock vanilla realmd accepts anything ≥ 5875 through the same
-/// path, so 7272 is safe on both in theory. The reason it does not land is evidentiary rather than
-/// technical: 12340 was *measured* against a live Turtle-derived realmd, by a sweep that found
-/// 8606, 11801 and 12340 all admitted and 5875 refused, and it is what logs in today. 7272 has not
-/// been dialed from here. Swapping a working measured value for an unmeasured reasoned one is the
-/// wrong direction of trade — if 7272 is dialed and answers, this comment is the place it changes.
+/// Turtle/Tortoise 1.18.1 requires login build 7272 for an online realm list: its proof stage
+/// accepts builds >= 7272, but `AuthSocket::LoadRealmlist` sets OFFLINE on a build mismatch.
+/// A native Linux login at 7272 was verified against a local Tortoise 1.18.1 realm. Acceptance
+/// at 7272 has not been verified against ravencraft; use an explicit override for custom realms
+/// whose accepted build still produces an offline list. Offline flags never trigger a retry.
+#[cfg(target_arch = "wasm32")]
 pub const REALMD_BUILD: u16 = 12340;
 /// How many logon challenges [`logon`] will ask for while looking for a `B` both serialization
 /// conventions read the same way (see the redial comment there). One dial in ~137 comes back
@@ -229,6 +225,17 @@ pub fn logon(host: &str, username: &str, password: &str) -> Result<Logon> {
 /// Flow: logon challenge → server challenge (B, g, N, salt) → SRP6 → logon proof → verify the
 /// server's proof (M2) → request + read the realm list.
 pub async fn logon_async(host: &str, username: &str, password: &str) -> Result<Logon> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        native_auth::logon_async(host, username, password).await
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        logon_with_build(host, username, password, REALMD_BUILD).await
+    }
+}
+
+async fn logon_with_build(host: &str, username: &str, password: &str, build: u16) -> Result<Logon> {
     // `host` may carry an explicit `:port` (`WOW_HOST=play.example.com:3724`); bare hosts get
     // [`AUTH_PORT`].
     let (host, port) = host_port(host, AUTH_PORT);
@@ -245,7 +252,7 @@ pub async fn logon_async(host: &str, username: &str, password: &str) -> Result<L
         let mut dialed = None;
         for _ in 0..MAX_CHALLENGE_DIALS {
             let mut stream = dial(host, port).await?;
-            auth::write_logon_challenge(&mut stream, &username.to_uppercase(), REALMD_BUILD)
+            auth::write_logon_challenge(&mut stream, &username.to_uppercase(), build)
                 .context("sending logon challenge")?;
             let reply = auth::read_challenge_reply(&mut stream)
                 .await

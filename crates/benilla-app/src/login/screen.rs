@@ -11,8 +11,8 @@ use bevy::window::PrimaryWindow;
 use crate::char_select::wow_font;
 use crate::glue::art::{GlueArt, BACKDROP, GOLD};
 use crate::glue::widgets::{
-    abs, glue_button, glue_edit_box, outlined_text, overlay, paint_glue_field, ArtSwap,
-    GlueBtnKind, GlueFieldPart, GlueText, Hilight,
+    abs, glue_button, glue_edit_box, outlined_text, outlined_text_centered, overlay,
+    paint_glue_field, ArtSwap, GlueBtnKind, GlueFieldPart, GlueText, Hilight,
 };
 use crate::glue_strings::GlueStrings;
 use crate::portrait::{PortraitImages, PortraitSource, GLUE_SLOT};
@@ -194,7 +194,10 @@ fn spawn_screen(
                     ));
                 });
         }
-        outlined_text(
+        // AccountLogin's footer strings carry authored hard breaks, so both opt into the shared
+        // renderer's multiline mode. The disclaimer keeps FontString's default CENTER; the
+        // version below sets LEFT explicitly.
+        outlined_text_centered(
             ui,
             Node {
                 position_type: PositionType::Absolute,
@@ -212,7 +215,7 @@ fn spawn_screen(
                 ),
                 size: 12.0, // GlueFontNormalSmall
                 color: GOLD,
-                wrap: false,
+                wrap: true,
             },
             &font,
             s,
@@ -249,7 +252,7 @@ fn spawn_screen(
                 text: &version,
                 size: 12.0,
                 color: GOLD,
-                wrap: false,
+                wrap: true,
             },
             &font,
             s,
