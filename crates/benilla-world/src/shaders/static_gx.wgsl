@@ -446,6 +446,16 @@ fn torch_map_at(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>, fade_radius: f
         let fixture = torch_table.positions[i].xyz;
             let face = torch_face(P - fixture);
             let layer = i * 6u + face;
+            // MONKEY (room visibility): the shell needs proven visibility; the shared shadow
+            // helper fails open outside its projection because ordinary shadows fade away there.
+            if (strict) {
+                let clip = torch_table.view_projs[layer] * vec4<f32>(P, 1.0);
+                if (clip.w <= 0.0) { return 0.0; }
+                let ndc = clip.xyz / clip.w;
+                if (any(abs(ndc.xy) > vec2<f32>(1.0)) || ndc.z < 0.0 || ndc.z > 1.0) {
+                    return 0.0;
+                }
+            }
             // MONKEY (live bank rank): count.z is CPU-ready-filtered; holes must not consume
             // live cubes. Keep the projection on the static slot while compacting depth only.
             let rank = countOneBits(torch_table.count.z & ((1u << i) - 1u));
@@ -460,7 +470,9 @@ fn torch_map_at(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>, fade_radius: f
             );
             let s = shadow_hook::torch_map_shadow(
                 torch_table.view_projs[layer], i32(depth_layer), P, N, torch_depth, torch_samp,
-                TORCH_BIAS, torch_soft(), fade);
+                // MONKEY (room visibility): a shadow's artistic fade restores blocked light;
+                // a visibility test must use raw PCF, even far from the hearth behind a wall.
+                TORCH_BIAS, torch_soft(), select(fade, 1.0, strict));
             // MONKEY (torch caster selection): `.w` is the slot's FADE WEIGHT. A slot ramps 0 -> 1
             // over ~1/3 s when it is promoted and 1 -> 0 before it is reused, and `mix` turns that
             // into the shadow appearing/dissolving instead of switching. Without it the selection
