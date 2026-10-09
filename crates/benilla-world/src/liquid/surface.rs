@@ -368,6 +368,7 @@ pub(super) fn setup_liquid(
     mut materials: ResMut<Assets<LiquidMaterial>>,
     water_depth: Res<benilla_assets::WaterDepthImage>,
     water_colour: Res<benilla_assets::WaterColourImage>,
+    water_mirror: Res<benilla_assets::WaterMirrorImage>,
     water_quality: Res<benilla_assets::WaterQuality>,
 ) {
     let (Some(_config), Some(mut world_assets)) = (config, world_assets) else {
@@ -484,6 +485,7 @@ pub(super) fn setup_liquid(
                     },
                     water_light: world_assets.shared_light.clone(),
                     scene_colour: water_colour.0.clone(),
+                    mirror_colour: water_mirror.0.clone(),
                     light_buf: world_assets.shared_light.clone(),
                 },
             });

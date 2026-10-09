@@ -1880,9 +1880,10 @@ fn water_quality_writes_numeric_tiers_with_localised_labels() {
         s.run("ShowUIPanel(BenillaOptionsFrame) BenillaOptionsFrameCategoryListRowAdvancedGraphics:Click()").unwrap();
         // MONKEY (volumetric fog): account for the atmosphere row after water.
         // MONKEY (integration): Graphics Preset + Render Distance lead the page, then every programme row (sky, post, dither, fog, wet, wind, ao, lamp fog, window split, zone skyboxes): 33.
-        assert_eq!(s.eval::<usize>("return table.getn(BENILLA_OPTIONS_PAGE_ROWS.AdvancedGraphics)").unwrap(), 33);
+        // MONKEY (planar water): + the Water Reflections row after Water Quality: 34.
+        assert_eq!(s.eval::<usize>("return table.getn(BENILLA_OPTIONS_PAGE_ROWS.AdvancedGraphics)").unwrap(), 34);
         assert_eq!(s.eval::<String>("return BENILLA_OPTIONS_PAGE_ROWS.AdvancedGraphics[4]").unwrap(), "RowWaterQuality");
-        assert_eq!(s.eval::<String>("return BENILLA_OPTIONS_PAGE_ROWS.AdvancedGraphics[23]").unwrap(), "RowLavaGlow");
+        assert_eq!(s.eval::<String>("return BENILLA_OPTIONS_PAGE_ROWS.AdvancedGraphics[24]").unwrap(), "RowLavaGlow");
         assert_eq!(s.eval::<String>(&format!("return {ADVGFX}RowWaterQualityDropdownText:GetText()")).unwrap(), labels[1]);
         assert_eq!(s.eval::<String>(&format!("return {ADVGFX}RowLavaGlowLabel:GetText()")).unwrap(), lava_label);
         assert!(s.eval::<bool>("return BENILLA_TOOLTIP_WATER_QUALITY == BENILLA_ADVGFX.tips.WATER_QUALITY and BENILLA_TOOLTIP_LAVA_GLOW == BENILLA_ADVGFX.tips.LAVA_GLOW").unwrap());

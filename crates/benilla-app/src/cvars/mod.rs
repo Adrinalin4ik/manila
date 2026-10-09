@@ -704,6 +704,8 @@ pub(crate) const LIGHTING_PRESETS: &[(&str, &[(&str, &str)])] = &[
             ("exteriorShadows", "0"),
             ("spellLightGain", "1"),
             ("waterQuality", "1"),
+            // MONKEY (planar water): the mirrored view is the High/Ultra presets' alone.
+            ("waterReflections", "0"),
             // MONKEY (volumetric fog): preset atmosphere uses the default cheap tier.
             ("volumetricFog", "1"),
             // MONKEY (post): quarter-resolution halo.
@@ -736,6 +738,8 @@ pub(crate) const LIGHTING_PRESETS: &[(&str, &[(&str, &str)])] = &[
             ("exteriorShadows", "0"),
             ("spellLightGain", "1"),
             ("waterQuality", "1"),
+            // MONKEY (planar water): the mirrored view is the High/Ultra presets' alone.
+            ("waterReflections", "0"),
             // MONKEY (volumetric fog): preset atmosphere uses the default cheap tier.
             ("volumetricFog", "1"),
             // MONKEY (post): quarter-resolution halo.
@@ -767,8 +771,11 @@ pub(crate) const LIGHTING_PRESETS: &[(&str, &[(&str, &str)])] = &[
             ("interiorShadowDynamic", "4"),
             ("exteriorShadows", "1"),
             ("spellLightGain", "1"),
-            // Mirror reflections stay opt-in until their cost is measured.
-            ("waterQuality", "1"),
+            // MONKEY (planar water): High water on the High preset, measured (~1 ms with planar).
+            ("waterQuality", "2"),
+            // MONKEY (planar water): planar is the High and Ultra presets' reflection (it acts on the
+            // High water tier; measured cost in the gfx-1009 water report).
+            ("waterReflections", "1"),
             // MONKEY (volumetric fog): preset atmosphere uses the default cheap tier.
             ("volumetricFog", "1"),
             // MONKEY (post): half-resolution halo.
@@ -801,6 +808,7 @@ pub(crate) const LIGHTING_PRESETS: &[(&str, &[(&str, &str)])] = &[
             ("exteriorShadows", "1"),
             ("spellLightGain", "1"),
             ("waterQuality", "2"),
+            ("waterReflections", "1"),
             ("volumetricFog", "2"),
             ("bloom", "2"),
             ("sunShafts", "1"),
@@ -1602,12 +1610,14 @@ mod tests {
         let shadows = VideoConfig::default();
         let flag = |b: bool| if b { 1.0 } else { 0.0 };
         // MONKEY (volumetric fog): include the atmospheric tier in this fixed-size default table.
-        let lighting: [(&str, f32); 41] = [
+        let lighting: [(&str, f32); 42] = [
             // GFX (volumetric light) / (moonlight): the three new rows.
             ("volumetricLight", shadows.volumetric_light as f32),
             ("volumetricLightStrength", shadows.volumetric_light_strength),
             ("moonLight", shadows.moon_light),
             ("waterQuality", shadows.water_quality as f32),
+            // MONKEY (planar water): weld registry and renderer defaults.
+            ("waterReflections", shadows.water_reflections as f32),
             // MONKEY (volumetric fog): weld registry and renderer defaults.
             ("volumetricFog", shadows.volumetric_fog as f32),
             // MONKEY (lampfog): opt-in point-light fog.
@@ -1674,7 +1684,7 @@ mod tests {
         // VideoConfig rows, 38 welds (MONKEY lampfog: + lampFog). MONKEY (wind): `foliageWind` is a world resource bridge.
         let welded: std::collections::BTreeSet<&str> = lighting.iter().map(|(n, _)| *n).collect();
         // MONKEY (volumetric fog): the atmospheric tier joins the default-consumer weld.
-        assert_eq!(welded.len(), 41, "the lighting lane welds 41 distinct rows");
+        assert_eq!(welded.len(), 42, "the lighting lane welds 42 distinct rows");
         for name in &welded {
             assert!(
                 REGISTERED.iter().any(|r| r.name == *name),
@@ -1689,7 +1699,8 @@ mod tests {
         // candle-lit surfaces moving under +10 % — only true at this number.
         assert_eq!(d["interiorBakeFloor"], 0.12);
         assert_eq!(d["spellLightGain"], 1.0, "the spell lane ships neutral");
-        assert_eq!(d["waterQuality"], 1.0, "mirror reflections stay opt-in");
+        // MONKEY (planar water): High water ships on (the High preset IS the defaults).
+        assert_eq!(d["waterQuality"], 2.0, "High water carries the planar mirror");
         assert_eq!(d["lavaLightGain"], 1.0);
         // MONKEY (ao): registry and renderer agree, and the lane ships Off.
         assert_eq!(d["ambientOcclusion"], shadows.ambient_occlusion as f32);
@@ -1734,6 +1745,8 @@ mod tests {
                         if matches!(member, "fireLightGain" | "waterQuality" | "volumetricFog" | "lavaLightGain") { "0" } else { "1.0" }
                     } else if *name == "Ultra" && matches!(member, "waterQuality" | "volumetricFog") {
                         "2" // MONKEY (presets): Ultra's two maxima over the defaults.
+                    } else if matches!(*name, "Low" | "Medium") && member == "waterQuality" {
+                        "1" // MONKEY (planar water): below High, Enhanced water without the mirror.
                     } else {
                         cvars.default_of(member).unwrap()
                     };
@@ -2171,6 +2184,7 @@ mod tests {
                     "interiorShadowDynamic" => video.interior_shadow_dynamic as f32,
                     "spellLightGain" => video.spell_light_gain,
                     "waterQuality" => video.water_quality as f32,
+                    "waterReflections" => video.water_reflections as f32,
                     // MONKEY (volumetric fog): verify presets reach the renderer.
                     "volumetricFog" => video.volumetric_fog as f32,
                     // MONKEY (post): the post lane's live tier.
@@ -2251,10 +2265,11 @@ mod tests {
             assert_eq!(res::<VideoConfig>(&app).lava_light_gain, lava);
         }
         let mut cvars = fresh_registry();
-        cvars.set("waterQuality", "2");
+        // MONKEY (planar water): High water is the High preset's; Enhanced makes the row Custom.
+        cvars.set("waterQuality", "1");
         assert_eq!(derive_lighting_quality(&cvars), LIGHTING_CUSTOM);
         apply_lighting_preset(&mut cvars, "High");
-        assert_eq!(cvars.get("waterQuality"), Some("1"));
+        assert_eq!(cvars.get("waterQuality"), Some("2"));
     }
 
     /// The FFX pass's three switches reach it one by one (`ffx`, `ffxGlow`, `ffxDeath`).

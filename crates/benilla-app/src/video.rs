@@ -137,6 +137,9 @@ pub(crate) struct VideoConfig {
     /// Water tier: 0 Classic, 1 Enhanced (default), 2 High with opt-in mirror reflections.
     /// Published to the water renderer by `dynamic_interior::bridge`.
     pub(crate) water_quality: u8,
+    /// MONKEY (planar water): High water's scenery reflection, 0 Screen Space / 1 Planar.
+    /// Published to `benilla_assets::WaterReflections` by `dynamic_interior::bridge`.
+    pub(crate) water_reflections: u8,
     // MONKEY (volumetric fog): live camera raymarch tier: 0 Off, 1 Low, 2 High.
     pub(crate) volumetric_fog: u8,
     // MONKEY (post): emissive HDR + bloom quality, 0 Off / 1 Low / 2 High.
@@ -413,7 +416,11 @@ impl Default for VideoConfig {
             interior_bake_floor: 0.12,
             fire_light_gain: 1.0,
             spell_light_gain: 1.0,
-            water_quality: 1,
+            // MONKEY (planar water): High water (the planar mirror's tier) is the shipped High
+            // preset's, measured ~1 ms (gfx-1009 water report).
+            water_quality: 2,
+            // MONKEY (planar water): Planar, as the shipped High preset sets it.
+            water_reflections: 1,
             // MONKEY (volumetric fog): default to the inexpensive atmosphere.
             volumetric_fog: 1,
             // MONKEY (post): the shipped High graphics preset uses the full-resolution tier.
@@ -503,6 +510,8 @@ pub(crate) fn on_cvar(
         // the `ours(...)` entries in `cvars::REGISTERED` carry the matching defaults, and
         // MONKEY (lampfog): the two atmospheric tiers bring the defaults weld to 34 pairs.
         "waterquality" => cfg.water_quality = v.clamp(0.0, 2.0) as u8,
+        // MONKEY (planar water): binary, Screen Space or Planar.
+        "waterreflections" => cfg.water_reflections = v.clamp(0.0, 1.0) as u8,
         // MONKEY (volumetric fog): constrain UI/console writes to supported tiers.
         "volumetricfog" => cfg.volumetric_fog = v.clamp(0.0, 2.0) as u8,
         // MONKEY (post): constrain UI/console writes to the supported bloom tiers.

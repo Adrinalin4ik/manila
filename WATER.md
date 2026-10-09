@@ -33,7 +33,7 @@ fork. Do not remove any of them.
 | Shore surf limited by the TERRAIN column, so objects in the water never foam | shipped (authored depth gate, `on_bed`) | principle from `sea/Shore.hpp` |
 | Per-channel extinction + scene-copy refraction | shipped (`enhanced_water.wgsl` DEPTH LOOK; bent samples landing on anything in front of the water are refused via the scene depth) | ported from `shaders/Surface.ps.hlsl`, `render/Refraction.cpp` |
 | Caustics, two layers at incommensurate scales/rates | shipped (floor web; built from animated cell edges, not value noise) | ported from `shaders/Surface.ps.hlsl`, `render/Noise.cpp` |
-| Screen-space reflection of the scenery | shipped on `High` (a bisected march against the scene depth, not WXL's single probe) | principle from `shaders/Surface.ps.hlsl` |
+| Screen-space reflection of the scenery | shipped on `High` with Water Reflections = Screen Space, and as the planar mirror's fallback (a bisected march against the scene depth, not WXL's single probe; a bisected hit still deep behind the depth is a ray passing behind an occluder and marches on) | principle from `shaders/Surface.ps.hlsl` |
 | Gerstner trains + breaker index, crest-fold foam | planned | `sea/Spectrum.*`, `sea/Shore.hpp`, `shaders/Wave.hlsli` |
 | Specular lobe widened by the normal's screen derivative, distance glints | shipped / planned | `shaders/Surface.ps.hlsl` |
 
@@ -42,6 +42,7 @@ fork. Do not remove any of them.
 | Lane | What you see | Main switch |
 |---|---|---|
 | Quality tiers | `Classic` = the reference water, `Enhanced`, `High` (= Enhanced + scenery reflections) | Video options → Water Quality, cvar `waterQuality`, env `WOW_WATER=0\|1\|2` |
+| Planar reflections | High only: the scene drawn a second time from the eye mirrored in the water plane the view looks at (half resolution, clipped at the plane by an oblique near plane, no water, no sun shadow cascades), so docks reflect their undersides and anything above the frame reflects; water at another height falls back to the screen-space march. About +1 ms CPU per frame, GPU about even (the march is skipped where the mirror covers) | Advanced Graphics → Water Reflections (Screen Space / Planar; Planar on the High and Ultra presets), cvar `waterReflections`, env `WOW_WATER_REFLECT=0\|1` |
 | Procedural waves | multi-band analytic waves with exact normals; the long swell moves ocean vertices | tier |
 | Open-sea whitecaps | High adds Gerstner crest gathering and fold-thresholded foam; calm canals remain clear. The fold mask adds the next two wave bands, a slow domain-warped gust field moves the break threshold and calms patches, and ~6 yd segments break each crest into short runs, so the caps do not form a lattice (`whitecap_fold`, `enhanced_water.wgsl`) | tier |
 | Near mesh refinement | High builds a transient 4x liquid lattice within 64 yd, with an 80 yd release ring | tier |
@@ -62,15 +63,17 @@ request. If it ever returns it should read the authored MCLQ flow records, not d
 - **Shader**: `crates/benilla-assets/src/shaders/enhanced_water.wgsl` - the whole module on the GPU
   side, an importable library (`benilla::enhanced_water`) with its own bindings: 103 scene depth,
   104 `WaterParams` (`benilla_assets::WaterUniform`), 105 the shared light buffer (a second
-  read-only view of upstream's binding 90), 106 the scene colour (for refraction and reflection). Upstream's `liquid.wgsl` carries three hooks only: the
+  read-only view of upstream's binding 90), 106 the scene colour (for refraction and reflection), 107 the planar mirror (`liquid/mirror.rs`). Upstream's `liquid.wgsl` carries three hooks only: the
   `#import`, `water_swell` in its vertex stage, and the `water_active()` branch at the top of its
   fragment stage, which returns the module's result as-is (the module fogs its own surface terms
   only: the scene it refracts and reflects is already fogged). Keep it that way: new
   water code goes in the module, not in `liquid.wgsl`.
 - **Assets** (`crates/benilla-assets/src`): `water_depth.rs` (`WaterUniform`, the scene-depth image),
-  `materials.rs` (`LiquidExt` fields 103-106, shader registration), `lib.rs` (`WaterQuality`).
+  `materials.rs` (`LiquidExt` fields 103-107, shader registration), `lib.rs` (`WaterQuality`,
+  `WaterReflections`).
 - **World** (`crates/benilla-world/src`): `liquid/scene_depth.rs` (copies the opaque depth AND colour after
-  the main opaque pass), `liquid/waves.rs` (the CPU mirror of the vertex swell), `liquid/surface.rs`
+  the main opaque pass), `liquid/mirror.rs` (the planar mirror camera, its plane vote and binding 107),
+  `liquid/waves.rs` (the CPU mirror of the vertex swell), `liquid/surface.rs`
   (per-kind material parameters and the opt-in `WOW_WATER_PROBE` WMO classification/depth log),
   `liquid/lod.rs` (High-only 4x near-grid swap),
   `water_fx/bob.rs` (swimmer bob), `lighting/lava_light.rs`.
@@ -90,3 +93,8 @@ request. If it ever returns it should read the authored MCLQ flow records, not d
 - The temporary water wind is `WATER_WIND_DIR`; all wind-aligned shader terms derive from it until
   the weather lane supplies shared wind.
 - Run one GPU capture at a time, and run `cargo test` in a shell WITHOUT `WOW_DATA` exported.
+- The planar mirror is read at the water pixel's own screen position, flipped vertically: the mirror
+  camera is the reflected eye rolled half a turn (a proper rotation, so culling and winding stay as they
+  are). It must keep the world camera's view key (HDR, MSAA, perspective, shadow filter) or every
+  pipeline compiles a second time; it never draws water (`drop_water_from_mirror`).
+- `WOW_WATER_MIRROR_LOG=1` prints the mirror's verdict once a second (plane, votes, active).

@@ -484,6 +484,10 @@
                 waterClassic = "Classic",
                 waterEnhanced = "Enhanced",
                 waterHigh = "High",
+                -- MONKEY (planar water): the reflection row.
+                waterReflections = "Water Reflections",
+                reflScreen = "Screen Space",
+                reflPlanar = "Planar",
                 lavaGlow = "Lava Glow",
                 qOff = "Off",
                 qLow = "Low",
@@ -584,6 +588,12 @@
                         "Classic is the original client's water. Enhanced adds soft shorelines, "
                         .. "animated foam around shores and objects, moving wave highlights, sky reflection "
                         .. "and light glints. High also adds mirror reflections and costs the most.",
+                    -- MONKEY (planar water): what the reflection row changes.
+                    WATER_REFLECTIONS =
+                        "How High water mirrors the scenery. Screen Space reflects only what is already "
+                        .. "on screen, so the undersides of docks and boats and anything above the view are missing. "
+                        .. "Planar draws the scene a second time, mirrored in the water: true reflections, "
+                        .. "at a higher cost. Has no effect below High water quality.",
                     LAVA_GLOW =
                         "How strongly lava lights its surroundings. 0 turns the glow off.",
                     CHARACTER_SHADOWS =
@@ -748,6 +758,10 @@
                 waterClassic = "Классическое",
                 waterEnhanced = "Улучшенное",
                 waterHigh = "Высокое",
+                -- MONKEY (planar water): the reflection row.
+                waterReflections = "Отражения в воде",
+                reflScreen = "Экранные",
+                reflPlanar = "Плоскостные",
                 lavaGlow = "Свечение лавы",
                 qOff = "Выкл.",
                 qLow = "Низкое",
@@ -850,6 +864,12 @@
                         "«Классическое» — вода оригинального клиента. «Улучшенное» добавляет плавные переходы у берегов, "
                         .. "анимированную пену у берегов и вокруг объектов, подвижные блики на волнах, отражение неба "
                         .. "и блики от источников света. «Высокое» также добавляет зеркальные отражения и требует больше всего ресурсов.",
+                    -- MONKEY (planar water): what the reflection row changes.
+                    WATER_REFLECTIONS =
+                        "Как вода «Высокого» качества отражает окружение. «Экранные» отражают только то, что уже "
+                        .. "есть на экране, поэтому нижней стороны причалов и лодок и всего, что выше кадра, в них нет. "
+                        .. "«Плоскостные» рисуют сцену ещё раз, зеркально в воде: настоящие отражения, "
+                        .. "но дороже. Не действует ниже «Высокого» качества воды.",
                     LAVA_GLOW =
                         "Насколько сильно лава освещает всё вокруг. При 0 свечение отключено.",
                     CHARACTER_SHADOWS =
@@ -1049,7 +1069,7 @@
                 -- MONKEY (presets): the ladder over every row below, then the view distance.
                 "RowGraphicsQuality", "RowRenderDistance",
                 -- MONKEY (volumetric fog): include in refresh, defaults and search.
-                "RowLightingQuality", "RowWaterQuality", "RowVolumetricFog",
+                "RowLightingQuality", "RowWaterQuality", "RowWaterReflections", "RowVolumetricFog",
                 -- MONKEY (sky): the sky tier row.
                 "RowSkyQuality",
                 -- MONKEY (post): the world-only screen effects.
@@ -2865,11 +2885,27 @@
                                                 })
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <!-- MONKEY (volumetric fog): live numeric tiers use the existing localised dropdown. -->
-                                        <Frame name="$parentRowVolumetricFog" inherits="BenillaOptionsDropdownRowTemplate">
+                                        <!-- MONKEY (planar water): High water's scenery reflection, Screen Space / Planar. -->
+                                        <Frame name="$parentRowWaterReflections" inherits="BenillaOptionsDropdownRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowWaterQuality" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowWaterQuality" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "waterReflections",
+                                                    BENILLA_ADVGFX.waterReflections,
+                                                    "BENILLA_TOOLTIP_WATER_REFLECTIONS")
+                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                    { text = BENILLA_ADVGFX.reflScreen, value = "0" },
+                                                    { text = BENILLA_ADVGFX.reflPlanar, value = "1" },
+                                                })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- MONKEY (volumetric fog): live numeric tiers use the existing localised dropdown. -->
+                                        <Frame name="$parentRowVolumetricFog" inherits="BenillaOptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWaterReflections" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWaterReflections" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 BenillaOptionsRow_OnLoad(this, "volumetricFog", BENILLA_ADVGFX.volumetricFog,

@@ -26,6 +26,7 @@ mod shadow; // MONKEY (world shadows): CPU triangle collection for the static-wo
 mod torch_depth; // MONKEY (torch shadows Phase 1): the per-fixture depth-map render + its targets
 pub use shadow::caster_in_reach; // MONKEY (B035): bounds-based caster reach, shared with the entity lane
 pub use shadow::CutoutBucket; // MONKEY (world shadows): per-leaf-texture alpha-cutout caster group
+pub use render::StaticGxMirror; // MONKEY (planar water): the water mirror's view draws the retained set too
 pub use torch_depth::TorchShadowViews; // MONKEY (torch shadows Phase 1): the app→render publication
                                        // MONKEY (torch owner exclusion): the light→caster ownership key, written at the light spawn
                                        // sites (`terrain_stream::spawn`, `benilla_app::entities::carried_light`) and read by both

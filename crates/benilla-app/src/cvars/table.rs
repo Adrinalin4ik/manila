@@ -600,8 +600,17 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ),
     ours(
         "waterQuality",
+        // MONKEY (planar water): High is the shipped High preset's tier (planar mirror ~1 ms).
+        "2",
+        "benilla's own: water quality, 0 Classic / 1 Enhanced / 2 High; High adds mirror reflections",
+    ),
+    // MONKEY (planar water): how the High tier reflects the scenery; the High and Ultra presets
+    // set Planar, Low and Medium Screen Space.
+    ours(
+        "waterReflections",
         "1",
-        "benilla's own: water quality, 0 Classic / 1 Enhanced / 2 High; mirror reflections are opt-in",
+        "benilla's own: High water's scenery reflection, 0 Screen Space / 1 Planar (the scene drawn \
+         again, mirrored in the water: undersides and off-screen scenery reflect, costs more)",
     ),
     ours(
         "lavaLightGain",

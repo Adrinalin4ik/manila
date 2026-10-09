@@ -423,6 +423,15 @@ impl WaterChunkInfo {
         }
     }
 
+    /// MONKEY (planar water): the surface height at a WoW XY for the water kinds only (the mirror's
+    /// plane vote); `None` where dry and on magma and slime, which do not reflect.
+    pub(crate) fn water_z_at(&self, x: f32, y: f32) -> Option<f32> {
+        if self.kind.is_fullbright() {
+            return None;
+        }
+        self.surface_z_at(x, y)
+    }
+
     /// The ambient loop's emitter target: the XY clamped into the footprint's box, at the surface's
     /// height there, or the highest wet vertex over a hole. The reference uses the nearest liquid
     /// cell; this clamp approximates it.
