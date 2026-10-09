@@ -2033,10 +2033,16 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         // Deviation: the `min(I, 1)` cap, as in wow_model.wgsl, since lifting it takes sun-facing
         // surfaces past 1.0; Matte keeps its own bit so it stays 1.0 if the cap goes.
         let shade_t = select(1.0, 0.0, (in.word & WORD_SHADE_LIT) != 0u);
-        let intensity = min(
+        let intensity_ref = min(
             select(mix(2.5, 0.5, shade_t), 1.0, (in.word & WORD_MATTE) != 0u),
             1.0,
         );
+        // MONKEY (mcsh model shade): the MCSH 0.5 steps aside with terrain's MCSH while the world
+        // shadow lane is on; see `wow_model.wgsl` (same expression, same gate).
+        let mcsh_suppress = select(0.0, shadow_hook::sun_shadow_w(wow_light.fog_params.z),
+            wow_light.sh_c16.w > 0.5);
+        let intensity = select(intensity_ref, mix(intensity_ref, 1.0, mcsh_suppress),
+            mcsh_suppress > 0.0);
         let sun_dc = wow_light.grade.yzw * intensity;
         let sun_lobe = vec3<f32>(
             wow_light.sh_c10_r.w + sun_dc.x

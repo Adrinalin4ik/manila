@@ -1417,7 +1417,17 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     let mat_shade = select(0.0, 1.0, m.sun_scale.x < 0.5);
     let shade_t = max(mat_shade, inst_shade);
     let mid_band = m.sun_scale.x >= 0.5 && m.sun_scale.x < 0.85;
-    let intensity = min(select(mix(2.5, 0.5, shade_t), 1.0, mid_band), 1.0);
+    let intensity_ref = min(select(mix(2.5, 0.5, shade_t), 1.0, mid_band), 1.0);
+    // MONKEY (mcsh model shade): the 0.5 band is the MCSH bit under the model, the same baked
+    // shadow `terrain.wgsl` drops while the realtime world lane is on (`sh_c16.w > 0.5`, weighted
+    // by the sun lane so the bake returns at night). Keeping it here left a doodad standing on its
+    // own baked shadow (Lakeshire's gryphon roosts) dimmed twice, by the bake AND the realtime map,
+    // on ground that no longer shows the bake. Only that band is < 1, so lit, matte, interior and
+    // rig lanes are untouched; with the lane off this is the reference value bit for bit.
+    let mcsh_suppress = select(0.0, shadow_hook::sun_shadow_w(wow_light.fog_params.z),
+        wow_light.sh_c16.w > 0.5);
+    let intensity = select(intensity_ref, mix(intensity_ref, 1.0, mcsh_suppress),
+        mcsh_suppress > 0.0);
     // One `intensity` multiply covers every sun band (never I²); the c10 `.w` ambient does not
     // scale. `pack_model_core_rows` packs the same closed form.
     let sun_dc = wow_light.grade.yzw * intensity;
