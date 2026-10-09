@@ -1424,18 +1424,12 @@ fn vertex(v: GxVertex) -> GxVsOut {
         // Gouraud: straight-edged wedges, and a torch mid-triangle lights nothing.
         out.ext_sel = EXT_SEL_NONE;
     } else if ((v.word & WORD_WMO) != 0u) {
-        // MONKEY (wmo exterior points): an EXTERIOR-class group (MOGP `& 0x48`) is a street, a
-        // courtyard, a porch — drawn by the exterior law, so it takes the exterior point term the
-        // terrain beside it takes. Its own anchor is the placement origin (one point for all of
-        // Stormwind), so `wmo_exterior_point_sum` re-anchors on the MCNK cell; see its comment.
-        // Selection stays per vertex; light falloff is evaluated per fragment.
-        // MONKEY (outdoor torch shadows): the pick is published so the fragment stage can shadow
-        // this same selection at night without re-ranking (see `EXT_SEL_NONE`). One table walk
-        // still, not two — the sum was always `eval(pick(...))`, it is just no longer inlined.
-        let sel = wmo_exterior_pick(world);
-        out.ext_sel = sel;
-        // MONKEY (B035 per-fragment wmo points): the SUM moved to the fragment stage (see there);
-        // only the pick stays per vertex, so this lane still walks the table once per vertex.
+        // MONKEY (wmo surface lights): Classic retains its MCNK vertex pick. Enhanced WMO
+        // picks once at the fragment instead; no per-vertex table walk on that lane.
+        out.ext_sel = EXT_SEL_NONE;
+        if (fract(wow_light.monkey.misc.x) == 0.0) {
+            out.ext_sel = wmo_exterior_pick(world);
+        }
     } else {
         // MONKEY (ext light k12): `box = 0` — an exterior doodad/MODD prop is its own draw unit and
         // ranks from its baked PLACEMENT origin, exactly as it did before the widening.
@@ -1489,15 +1483,20 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // Both faces light from the submitted normal (no GL_LIGHT_MODEL_TWO_SIDE in the reference);
     // this pipeline never negates back faces, so it has no front-face select like wow_model.wgsl.
     let n_lit = wow_normalize(in.world_normal);
-    // MONKEY (local-light consistency): the same per-fragment falloff for WMO and props.
-    // The vertex still ranks once and publishes its flat selection. Interior receivers
-    // publish EXT_SEL_NONE and keep their room-light lane.
-    var point_lit = point_light_eval(in.ext_sel, in.world_position.xyz, n_lit);
+    // MONKEY (wmo surface lights): a city WMO spans many terrain cells. A flat vertex pick
+    // draws its lamp pool on whole triangles; a snapped cell pick moves the seam to the grid.
+    // Enhanced exterior WMO ranks at the receiving fragment, within the existing 48 yd reach.
+    // Props keep their placement pick, interior receivers their room lane, Classic its old pick.
+    var exterior_selection = in.ext_sel;
+    if ((in.word & WORD_WMO) != 0u && (in.word & WORD_INTERIOR) == 0u && fract(wow_light.monkey.misc.x) > 0.0) {
+        exterior_selection = point_light_pick(in.world_position.xyz, 0.0);
+    }
+    var point_lit = point_light_eval(exterior_selection, in.world_position.xyz, n_lit);
     let ext_night_w = select(0.0, clamp(1.0 - wow_light.fog_params.z, 0.0, 1.0), torch_ext_on());
     if (ext_night_w > 0.0) {
         point_lit = mix(
             point_lit,
-            point_light_eval_shadowed(in.ext_sel, in.world_position.xyz, n_lit),
+            point_light_eval_shadowed(exterior_selection, in.world_position.xyz, n_lit),
             ext_night_w,
         );
     }

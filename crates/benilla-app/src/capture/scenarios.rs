@@ -287,6 +287,55 @@ pub(super) const SUBJECT_INDOOR: [f32; 3] = [-9469.4, 31.9, 57.9];
 
 /// Every other named viewpoint, capturable by name (`WOW_CAPTURE=<name>`) but not in the sweep.
 pub(super) const ON_DEMAND: &[Scenario] = &[
+    // MONKEY (wmo surface lights): the portcullis/archery yard and lamp-lined gate ramp.
+    Scenario {
+        name: "stormwind-training-yard-day",
+        map: Some(MAP_AZEROTH),
+        eye: [-8728.0, 341.0, 104.0],
+        look: [-8517.4951, 792.4295, 147.57787],
+        minute: 720,
+        ui: None,
+    },
+    Scenario {
+        name: "stormwind-training-yard-dusk",
+        map: Some(MAP_AZEROTH),
+        eye: [-8728.0, 341.0, 104.0],
+        look: [-8517.4951, 792.4295, 147.57787],
+        minute: 1110,
+        ui: None,
+    },
+    Scenario {
+        name: "stormwind-training-yard-night",
+        map: Some(MAP_AZEROTH),
+        eye: [-8728.0, 341.0, 104.0],
+        look: [-8517.4951, 792.4295, 147.57787],
+        minute: 0,
+        ui: None,
+    },
+    Scenario {
+        name: "stormwind-gate-ramp-day",
+        map: Some(MAP_AZEROTH),
+        eye: [-9095.0, 412.0, 124.0],
+        look: [-8818.3066, 632.09216, -229.55338],
+        minute: 720,
+        ui: None,
+    },
+    Scenario {
+        name: "stormwind-gate-ramp-dusk",
+        map: Some(MAP_AZEROTH),
+        eye: [-9095.0, 412.0, 124.0],
+        look: [-8818.3066, 632.09216, -229.55338],
+        minute: 1110,
+        ui: None,
+    },
+    Scenario {
+        name: "stormwind-gate-ramp-night",
+        map: Some(MAP_AZEROTH),
+        eye: [-9095.0, 412.0, 124.0],
+        look: [-8818.3066, 632.09216, -229.55338],
+        minute: 0,
+        ui: None,
+    },
     // MONKEY (volumetric fog): UI proof uses the same live page selection as a player.
     Scenario {
         name: "ui-options-advanced", map: Some(MAP_AZEROTH),
