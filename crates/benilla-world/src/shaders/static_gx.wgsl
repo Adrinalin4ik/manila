@@ -405,7 +405,7 @@ fn torch_face(d: vec3<f32>) -> u32 {
 }
 
 // This fixture's OWN cast shadow: correlate the `wow_light` fixture at `light_pos` to a
-// promoted torch (nearest position within 1 yd), pick the cube face facing the fragment, and sample
+// promoted torch (nearest position within 0.1 yd), pick the cube face facing the fragment, and sample
 // that layer. 1.0 (unshadowed) when no map matches, or when TORCH_SHADOWS is off (wow_model's copy
 // of the caller never sets it).
 //
@@ -428,7 +428,9 @@ fn torch_map_at(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>, fade_radius: f
     }
     // MONKEY (gfx): a nearby spell light must not steal an earlier fixture's map.
     var nearest = torch_table.count.x;
-    var nearest_d2 = select(1.0, 0.010001, strict);
+    // MONKEY (light identity): an unrelated spell light within a yard must not steal a map.
+    // 0.1 yd also matches torch_shadow::TORCH_STALE_DRIFT_SQ's publishable-map limit.
+    var nearest_d2 = 0.010001;
     for (var candidate = 0u; candidate < torch_table.count.x; candidate += 1u) {
         // MONKEY (static torch cache): holes and pending uploads never sample stale layers.
         if (torch_table.positions[candidate].w <= 0.0) { continue; }
@@ -444,6 +446,16 @@ fn torch_map_at(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>, fade_radius: f
         let fixture = torch_table.positions[i].xyz;
             let face = torch_face(P - fixture);
             let layer = i * 6u + face;
+            // MONKEY (room visibility): the shell needs proven visibility; the shared shadow
+            // helper fails open outside its projection because ordinary shadows fade away there.
+            if (strict) {
+                let clip = torch_table.view_projs[layer] * vec4<f32>(P, 1.0);
+                if (clip.w <= 0.0) { return 0.0; }
+                let ndc = clip.xyz / clip.w;
+                if (any(abs(ndc.xy) > vec2<f32>(1.0)) || ndc.z < 0.0 || ndc.z > 1.0) {
+                    return 0.0;
+                }
+            }
             // MONKEY (live bank rank): count.z is CPU-ready-filtered; holes must not consume
             // live cubes. Keep the projection on the static slot while compacting depth only.
             let rank = countOneBits(torch_table.count.z & ((1u << i) - 1u));
@@ -458,7 +470,9 @@ fn torch_map_at(light_pos: vec3<f32>, P: vec3<f32>, N: vec3<f32>, fade_radius: f
             );
             let s = shadow_hook::torch_map_shadow(
                 torch_table.view_projs[layer], i32(depth_layer), P, N, torch_depth, torch_samp,
-                TORCH_BIAS, torch_soft(), fade);
+                // MONKEY (room visibility): a shadow's artistic fade restores blocked light;
+                // a visibility test must use raw PCF, even far from the hearth behind a wall.
+                TORCH_BIAS, torch_soft(), select(fade, 1.0, strict));
             // MONKEY (torch caster selection): `.w` is the slot's FADE WEIGHT. A slot ramps 0 -> 1
             // over ~1/3 s when it is promoted and 1 -> 0 before it is reused, and `mix` turns that
             // into the shadow appearing/dissolving instead of switching. Without it the selection
@@ -713,9 +727,7 @@ fn point_light_pick(anchor: vec3<f32>, box: f32) -> vec4<u32> {
 // The evaluation half — the byte-verified falloff `1/(0.7d + 0.03d²)` × `max(N·L, 0)` × the
 // committed colour, in rank order, stopping at the first empty rank exactly as the old
 // `sd[s] > 9.9e29` break did. Shared by both pickers (their sum loops were already identical).
-// MONKEY (ext light k12): up to `EXT_SEL_K` terms now, still Gouraud (per vertex) and still linear
-// in the falloff, so nothing about the day lane's FORM changed — a unit simply stops dropping the
-// fixtures its neighbour kept.
+// MONKEY (local-light consistency): evaluate the selected terms per fragment, without re-ranking.
 fn point_light_eval(sel: vec4<u32>, P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     for (var s = 0u; s < EXT_SEL_K; s = s + 1u) {
@@ -1073,6 +1085,50 @@ fn gx_room_inst() -> u32 {
 fn gx_room_group(word: u32) -> u32 {
     return (recs[word & 0xffffu].w >> RECORD_ROOM_SHIFT) & RECORD_ROOM_MASK;
 }
+// MONKEY: the claim prefix is unchanged. The appended hash table shortlists lights by room;
+// flags and portal weights remain authoritative in interior_room_admits. Mirror monkey_room_index.rs.
+const MONKEY_CLAIM_WORDS: u32 = ROOM_CLAIM_STRIDE * 256u;
+const MONKEY_MASK_WORDS: u32 = 8u;
+const MONKEY_INDEX_SLOTS: u32 = 4096u;
+const MONKEY_INDEX_STRIDE: u32 = 2u + MONKEY_MASK_WORDS;
+const MONKEY_UNGATED: u32 = MONKEY_CLAIM_WORDS + 1u;
+const MONKEY_INDEX_START: u32 = MONKEY_UNGATED + MONKEY_MASK_WORDS;
+
+fn monkey_room_index(room_inst: u32, room_group: u32) -> u32 {
+    if (room_claims[MONKEY_CLAIM_WORDS] == 0u || room_group == 0u) {
+        return 0u;
+    }
+    var slot = ((room_inst * 0x9e3779b9u) ^ (room_group * 0x85ebca6bu)) & (MONKEY_INDEX_SLOTS - 1u);
+    for (var probe = 0u; probe < MONKEY_INDEX_SLOTS; probe = probe + 1u) {
+        let at = MONKEY_INDEX_START + slot * MONKEY_INDEX_STRIDE;
+        if (room_claims[at + 1u] == 0u) {
+            return 0u;
+        }
+        if (room_claims[at] == room_inst && room_claims[at + 1u] == room_group) {
+            return at;
+        }
+        slot = (slot + 1u) & (MONKEY_INDEX_SLOTS - 1u);
+    }
+    return 0u;
+}
+
+fn monkey_room_mask(at: u32, room_group: u32, strict: bool, word: u32) -> u32 {
+    // A zero header falls back to the original full table walk, including its exact lane gate.
+    if (room_claims[MONKEY_CLAIM_WORDS] == 0u) {
+        return 0xffffffffu;
+    }
+    if (room_group == 0u) {
+        return select(0xffffffffu, 0u, strict);
+    }
+    var bits = 0u;
+    if (!strict) {
+        bits = room_claims[MONKEY_UNGATED + word];
+    }
+    if (at != 0u) {
+        bits = bits | room_claims[at + 2u + word];
+    }
+    return bits;
+}
 // MONKEY (room gate): `room_inst`/`room_group` are the RECEIVING surface's room (see
 // `interior_room_admits`). `wow_model.wgsl`'s copy takes the same room arguments and stubs the
 // predicate to `true` — it has neither the claim binding nor a per-fragment room key, which is
@@ -1089,7 +1145,24 @@ fn interior_room_light(
     let k_fill = wow_light.point_count.z;
     var direct = vec3<f32>(0.0);
     var fill = vec3<f32>(0.0);
-    for (var i = 0u; i < count; i = i + 1u) {
+    let monkey_at = monkey_room_index(room_inst, room_group);
+    // Ascending words and least-significant bits preserve the original floating-point sum order.
+    var monkey_word = 0u;
+    var monkey_bits = monkey_room_mask(monkey_at, room_group, strict, monkey_word);
+    loop {
+        if (monkey_bits == 0u) {
+            monkey_word = monkey_word + 1u;
+            if (monkey_word >= MONKEY_MASK_WORDS || monkey_word * 32u >= count) {
+                break;
+            }
+            monkey_bits = monkey_room_mask(monkey_at, room_group, strict, monkey_word);
+            continue;
+        }
+        let i = monkey_word * 32u + firstTrailingBit(monkey_bits);
+        monkey_bits = monkey_bits & (monkey_bits - 1u);
+        if (i >= count) {
+            break;
+        }
         let color_lane = wow_light.points[2u * i + 1u];
         // MONKEY (light lanes): only a fixture that CLAIMS a room lights this room (keep in sync
         // with wow_model.wgsl). `.w` is 0 on every exterior source, so a campfire burning just
@@ -1283,10 +1356,9 @@ struct GxVsOut {
     @location(1) world_normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) @interpolate(flat) word: u32,
-    @location(4) point_lit: vec3<f32>,
     @location(5) color: vec4<f32>,
     // MONKEY (outdoor torch shadows; ext light k8): WHICH ≤`EXT_SEL_K` exterior table entries
-    // `point_lit` was summed from, packed 8 bits each across FOUR u32s (see `EXT_SEL_NONE` /
+    // the fragment evaluates, packed 8 bits each across FOUR u32s (see `EXT_SEL_NONE` /
     // `ext_sel_get`). FLAT, because it is a choice, not a quantity — interpolating packed indices
     // would produce a different, meaningless one. `EXT_SEL_NONE` on every lane that takes no
     // exterior point term (interior WMO surfaces, interior props, the collapsed exile vertex),
@@ -1308,7 +1380,6 @@ fn vertex(v: GxVertex) -> GxVsOut {
         out.world_normal = vec3<f32>(0.0, 1.0, 0.0);
         out.uv = vec2<f32>(0.0);
         out.word = v.word;
-        out.point_lit = vec3<f32>(0.0);
         out.color = vec4<f32>(1.0);
         out.ext_sel = EXT_SEL_NONE;
         return out;
@@ -1343,32 +1414,28 @@ fn vertex(v: GxVertex) -> GxVsOut {
     // (wow-re trace-forensics-abbey-interior-d3d §2: zero on every observed WMO surface) —
     // and so do interior M2 props (B4): their group-MOLR point lobes are folded into the
     // per-item SH probe at spawn, the entity path's own vertex-stage zeroing.
-    if ((v.word & WORD_WMO) != 0u && (v.word & WORD_INTERIOR) != 0u) {
-        // INTERIOR WMO surfaces stay zero here, the reference's own vertex-stage zeroing. MONKEY
+    if ((v.word & WORD_INTERIOR) != 0u) {
+        // MONKEY (interior prop parity): interior props also publish no exterior selection,
+        // matching wow_model.wgsl. A prop's baked probe already contains its fixture lighting;
+        // adding the outside table only to retained furniture made it brighter than its walls.
+        // INTERIOR receivers stay zero here, the reference's own vertex-stage zeroing. MONKEY
         // (dynamic interiors): they light from the live torches PER-FRAGMENT in the fragment
         // stage (`interior_room_light`) — a per-vertex sum on a WMO's huge floor triangles is
         // Gouraud: straight-edged wedges, and a torch mid-triangle lights nothing.
-        out.point_lit = vec3<f32>(0.0);
         out.ext_sel = EXT_SEL_NONE;
     } else if ((v.word & WORD_WMO) != 0u) {
-        // MONKEY (wmo exterior points): an EXTERIOR-class group (MOGP `& 0x48`) is a street, a
-        // courtyard, a porch — drawn by the exterior law, so it takes the exterior point term the
-        // terrain beside it takes. Its own anchor is the placement origin (one point for all of
-        // Stormwind), so `wmo_exterior_point_sum` re-anchors on the MCNK cell; see its comment.
-        // Per-vertex like terrain's, not per-fragment: WMO surfaces are MOCV-baked per vertex, so
-        // they carry the tessellation a Gouraud term needs, and this stays one bounded walk.
-        // MONKEY (outdoor torch shadows): the pick is published so the fragment stage can shadow
-        // this same selection at night without re-ranking (see `EXT_SEL_NONE`). One table walk
-        // still, not two — the sum was always `eval(pick(...))`, it is just no longer inlined.
-        let sel = wmo_exterior_pick(world);
-        out.ext_sel = sel;
-        out.point_lit = point_light_eval(sel, world, v.normal);
+        // MONKEY (wmo surface lights): Classic retains its MCNK vertex pick. Enhanced WMO
+        // picks once at the fragment instead; no per-vertex table walk on that lane.
+        out.ext_sel = EXT_SEL_NONE;
+        if (fract(wow_light.monkey.misc.x) == 0.0) {
+            out.ext_sel = wmo_exterior_pick(world);
+        }
     } else {
         // MONKEY (ext light k12): `box = 0` — an exterior doodad/MODD prop is its own draw unit and
         // ranks from its baked PLACEMENT origin, exactly as it did before the widening.
         let sel = point_light_pick(v.anchor, 0.0);
         out.ext_sel = sel;
-        out.point_lit = point_light_eval(sel, world, v.normal);
+        // MONKEY (local-light consistency): sum at the fragment, matching terrain and entities.
     }
     return out;
 }
@@ -1428,27 +1495,20 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // Both faces light from the submitted normal (no GL_LIGHT_MODEL_TWO_SIDE in the reference);
     // this pipeline never negates back faces, so it has no front-face select like wow_model.wgsl.
     let n_lit = wow_normalize(in.world_normal);
-    // MONKEY (outdoor torch shadows): the EXTERIOR point term, cast-shadowed at night.
-    //
-    // `in.point_lit` is the Gouraud (per-vertex) exterior sum, and it stays the ONLY thing this
-    // lane reads by day. After dark the same entries are re-evaluated PER FRAGMENT with each
-    // one's own cube-map occlusion folded in (`point_light_eval_shadowed`), and the two are blended
-    // by `night_w = 1 − sun_shadow_strength`. Two things fall out of writing it as a blend rather
-    // than a swap:
-    //   · `fog_params.z` is EXACTLY 1.0 whenever the sun is above the daylight threshold
-    //     (`global_light::sun_shadow_strength`, a smoothstep that saturates), so `night_w` is
-    //     exactly 0 and the `if` is not entered at all — daylight is the same instructions and the
-    //     same bits it was, not "a mix that ought to round back".
-    //   · at dusk the shadow arrives on the same clock the sun shadows leave on, and the
-    //     Gouraud→per-fragment change of the term itself arrives with it instead of snapping.
-    // `torch_ext_on()` is the CPU's one-bit verdict (`exteriorShadows` && night && ≥1 promoted
-    // exterior fixture), so with the cvar off the branch is dead too.
-    var point_lit = in.point_lit;
+    // MONKEY (wmo surface lights): a city WMO spans many terrain cells. A flat vertex pick
+    // draws its lamp pool on whole triangles; a snapped cell pick moves the seam to the grid.
+    // Enhanced exterior WMO ranks at the receiving fragment, within the existing 48 yd reach.
+    // Props keep their placement pick, interior receivers their room lane, Classic its old pick.
+    var exterior_selection = in.ext_sel;
+    if ((in.word & WORD_WMO) != 0u && (in.word & WORD_INTERIOR) == 0u && fract(wow_light.monkey.misc.x) > 0.0) {
+        exterior_selection = point_light_pick(in.world_position.xyz, 0.0);
+    }
+    var point_lit = point_light_eval(exterior_selection, in.world_position.xyz, n_lit);
     let ext_night_w = select(0.0, clamp(1.0 - wow_light.fog_params.z, 0.0, 1.0), torch_ext_on());
     if (ext_night_w > 0.0) {
         point_lit = mix(
-            in.point_lit,
-            point_light_eval_shadowed(in.ext_sel, in.world_position.xyz, n_lit),
+            point_lit,
+            point_light_eval_shadowed(exterior_selection, in.world_position.xyz, n_lit),
             ext_night_w,
         );
     }
@@ -1660,8 +1720,8 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             ext_room_far = 1.0 - smoothstep(EXT_ROOM_FADE_START, EXT_ROOM_FADE_END, ext_room_d);
         }
         // GL_COLOR_MATERIAL: MOCV multiplies the lit terms INSIDE the clamp, emission adds
-        // beside. MONKEY (wmo exterior points): `in.point_lit` is zero on INTERIOR groups (the
-        // reference's own vertex-stage zeroing — they light per fragment below) and carries the
+        // beside. MONKEY (wmo exterior points): `point_lit` is zero on INTERIOR groups (their
+        // EXT_SEL_NONE — they light from the room lane below) and carries the
         // exterior nearest-3 point term on EXTERIOR-class ones, which is what makes a street
         // torch reach the cobbles. The clamp is why it costs nothing in daylight.
         let primary = clamp(
@@ -1735,8 +1795,8 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             // every interior group is bit-for-bit unchanged.
             let sun_w = clamp(wow_light.fog_params.z, 0.0, 1.0);
             day_w = day_w * sun_w;
-            // MONKEY (ext-class night law): `in.point_lit` joins the rolloff. It is a HARD ZERO on
-            // every interior batch (the vertex stage zeroes it for `WORD_INTERIOR`), so this is an
+            // MONKEY (ext-class night law): `point_lit` joins the rolloff. It is a HARD ZERO on
+            // every interior batch (EXT_SEL_NONE for `WORD_INTERIOR`), so this is an
             // exact no-op for the lane that already ran here — and on an ext-class batch it is the
             // exterior point term, i.e. the street torch hanging on the wall being lit. Without it
             // the blend would take that torch away from every building facade the moment it swapped
@@ -1985,10 +2045,16 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         // Deviation: the `min(I, 1)` cap, as in wow_model.wgsl, since lifting it takes sun-facing
         // surfaces past 1.0; Matte keeps its own bit so it stays 1.0 if the cap goes.
         let shade_t = select(1.0, 0.0, (in.word & WORD_SHADE_LIT) != 0u);
-        let intensity = min(
+        let intensity_ref = min(
             select(mix(2.5, 0.5, shade_t), 1.0, (in.word & WORD_MATTE) != 0u),
             1.0,
         );
+        // MONKEY (mcsh model shade): the MCSH 0.5 steps aside with terrain's MCSH while the world
+        // shadow lane is on; see `wow_model.wgsl` (same expression, same gate).
+        let mcsh_suppress = select(0.0, shadow_hook::sun_shadow_w(wow_light.fog_params.z),
+            wow_light.sh_c16.w > 0.5);
+        let intensity = select(intensity_ref, mix(intensity_ref, 1.0, mcsh_suppress),
+            mcsh_suppress > 0.0);
         let sun_dc = wow_light.grade.yzw * intensity;
         let sun_lobe = vec3<f32>(
             wow_light.sh_c10_r.w + sun_dc.x

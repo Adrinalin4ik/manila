@@ -20,6 +20,10 @@ use crate::dev_state::DebugState;
 use crate::view::ViewDistance;
 use crate::view::WorldCamera;
 
+#[path = "monkey_room_index.rs"]
+mod monkey_room_index;
+use monkey_room_index::{monkey_build_index, MONKEY_CLAIM_WORDS, MONKEY_TABLE_WORDS};
+
 /// The shared light, std430-packed as `vec4<f32>` rows (all `vec4`, so std430 equals std140). Every
 /// shader that binds the buffer (`wow_model`, `terrain`, `liquid`, `wdl`, `wow_effect`,
 /// `static_gx`) mirrors this row order as a prefix; keep them in sync.
@@ -322,19 +326,19 @@ pub const CLAIM_ENTRY_SHIFT: u32 = 17;
 /// three shaders plus the portrait booth and must never be resized, and only `static_gx` reads
 /// this. `static_gx::render` owns the buffer and the binding.
 #[derive(Resource, Clone, ExtractResource)]
-pub struct RoomClaimTable(pub Box<[u32; ROOM_CLAIM_STRIDE * MAX_POINT_LIGHTS]>);
+pub struct RoomClaimTable(pub Box<[u32; MONKEY_TABLE_WORDS]>);
 
 /// MONKEY (room gate): the claim table's byte size — the one place `static_gx::render` sizes its
 /// GPU buffer from, so the table cannot grow here and leave the binding short (a bound storage
 /// buffer smaller than the shader's runtime-sized array fails validation at draw time, which
 /// vanishes every building).
 pub fn room_claim_bytes() -> u64 {
-    (ROOM_CLAIM_STRIDE * MAX_POINT_LIGHTS * std::mem::size_of::<u32>()) as u64
+    (MONKEY_TABLE_WORDS * std::mem::size_of::<u32>()) as u64
 }
 
 impl Default for RoomClaimTable {
     fn default() -> Self {
-        Self(Box::new([0; ROOM_CLAIM_STRIDE * MAX_POINT_LIGHTS]))
+        Self(Box::new([0; MONKEY_TABLE_WORDS]))
     }
 }
 
@@ -752,10 +756,18 @@ fn pack_monkey_frame(
     frame: Res<super::MonkeyFrame>,
     clock: Res<super::GameClock>,
     light: Res<WowLighting>,
+    fire_gain: Res<FireLightGain>,
+    spell_gain: Res<SpellLightGain>,
+    lava_gain: Option<Res<super::LavaLightGain>>,
     mut data: ResMut<WowLightData>,
 ) {
     let night = 1.0 - sun_shadow_strength(light.celestial_dir.y);
-    let packed = frame.pack(clock.minute as f32 / 1440.0, night);
+    let mut packed = frame.pack(clock.minute as f32 / 1440.0, night);
+    // MONKEY (wmo surface lights): wind truncates misc.x to u32, leaving its fraction free.
+    // All enhanced point gains zero (Classic) preserves the old pick and frame bits.
+    if fire_gain.0 > 0.0 || spell_gain.0 > 0.0 || lava_gain.is_some_and(|gain| gain.0 > 0.0) {
+        packed[7][0] += 0.5;
+    }
     if data.0.monkey != packed {
         data.0.monkey = packed;
     }
@@ -1659,11 +1671,23 @@ fn build_light_data(
     // Entries past the count are stale in the point table by design (the count row guards every
     // reader) — but the claim table is read at the SAME index, so a stale head there would gate a
     // live light with a dead building's identity. Clear the tail instead of trusting the count.
-    for slot in claims.0[pts.len() * ROOM_CLAIM_STRIDE..].iter_mut() {
+    for slot in claims.0[pts.len() * ROOM_CLAIM_STRIDE..MONKEY_CLAIM_WORDS].iter_mut() {
         *slot = 0;
     }
-    // `WOW_POINTS_DUMP=1` prints the nearest 8 packed lights once a second; `=frame` every frame,
-    // which a pool that changes frame to frame needs.
+    // The appended room bitmap is a conservative shortlist; the shader still applies every
+    // selected light's exact claim/fade predicate, in the original ascending light order.
+    static MONKEY_ROOM_INDEX_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *MONKEY_ROOM_INDEX_ENABLED
+        .get_or_init(|| std::env::var("WOW_MONKEY_ROOM_INDEX").as_deref() != Ok("0"))
+    {
+        monkey_build_index(&mut claims.0[..], &fresh.points, pts.len());
+    } else {
+        // Zero header selects the unchanged full-scan shader path for same-build measurement.
+        claims.0[MONKEY_CLAIM_WORDS..].fill(0);
+    }
+    // `WOW_POINTS_DUMP=1` prints the nearest 8 packed lights once a second; `=frame` every frame.
+    // MONKEY (room diagnostics): `=all` prints every committed row once a second, including
+    // lane/claim/fade data. Eight nearest-to-camera rows can omit the hearth under investigation.
     static POINTS_DUMP: std::sync::OnceLock<Option<std::ffi::OsString>> =
         std::sync::OnceLock::new();
     if let Some(mode) = POINTS_DUMP.get_or_init(|| std::env::var_os("WOW_POINTS_DUMP")) {
@@ -1724,9 +1748,22 @@ fn build_light_data(
                 // one number away, and the two causes look identical on screen.
                 spell_gain.0,
             );
-            for (d2, p, _, rgb, synthetic, lane, claim, lit_n) in pts.iter().take(8) {
+            eprintln!(
+                "[MonkeyLightState] interior={} gate={} ambient={:.4} fill={:.4} exposure={:.3} bake={:.3} daylight={:.3}",
+                dynamic_interiors.enabled,
+                dynamic_interiors.room_gate,
+                fresh.rows[20][1],
+                fresh.rows[20][2],
+                fresh.rows[20][3],
+                dynamic_interiors.bake_floor,
+                dynamic_interiors.daylight,
+            );
+            let dump_count = if mode.as_os_str() == "all" { pts.len() } else { 8 };
+            for (row, (d2, p, _, rgb, synthetic, lane, claim, lit_n)) in
+                pts.iter().take(dump_count).enumerate()
+            {
                 eprintln!(
-                    "  d {:6.2}  at [{:8.2},{:7.2},{:8.2}]  rgb [{:.3},{:.3},{:.3}]  {}{}",
+                    "  row {row:3} d {:6.2}  at [{:8.2},{:7.2},{:8.2}]  rgb [{:.3},{:.3},{:.3}]  {}{}",
                     d2.sqrt(),
                     p.x,
                     p.y,
@@ -1753,6 +1790,21 @@ fn build_light_data(
                 // behind "why is this room dark" / "why does that wall still glow".
                 if *lane > 0.5 {
                     eprintln!("      rooms {claim}");
+                    if mode.as_os_str() == "all" {
+                        for (group, fade) in claim.groups[..usize::from(claim.n)]
+                            .iter().zip(&claim.fades[..usize::from(claim.n)])
+                        {
+                            eprintln!(
+                                "      group={} ext={} center={:.2?} radius={:.3} slack={:.3} entry={:.3}",
+                                group & !LIT_ROOM_EXT_DENY,
+                                group & LIT_ROOM_EXT_DENY == 0,
+                                fade.center,
+                                fade.radius,
+                                fade.slack,
+                                fade.entry,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1873,6 +1925,24 @@ pub fn classify_light_lanes(
         // Always re-stamped when the generation moved, even if the verdict didn't — the stamp is
         // what stops the next frame re-raying the same light.
         if lane != Some(&want) {
+            // MONKEY (room diagnostics): expose the physical lane decision behind fireplace
+            // bleed. Runs only on classification changes, not another ray or an idle-frame log.
+            static MONKEY_LIGHT_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *MONKEY_LIGHT_TRACE.get_or_init(|| {
+                std::env::var("WOW_POINTS_DUMP").is_ok_and(|mode| mode == "all")
+            }) {
+                let verdict_name = match verdict {
+                    crate::wmo_portal::IndoorVerdict::Outdoors => "outdoors",
+                    crate::wmo_portal::IndoorVerdict::OutdoorsOnWmo => "outdoors-wmo",
+                    crate::wmo_portal::IndoorVerdict::DayNight => "interior-matte",
+                    crate::wmo_portal::IndoorVerdict::Baked { .. } => "interior-baked",
+                };
+                eprintln!(
+                    "[MonkeyLightLane] light={light:?} wow={:.3?} verdict={verdict_name} terrain={terrain_hit} room_refs={} interior={interior} generation={generation}",
+                    benilla_assets::coords::bevy_to_wow(gt.translation()),
+                    rooms.is_some(),
+                );
+            }
             commands.entity(light).insert(want);
         }
     }
@@ -2317,6 +2387,53 @@ mod tests {
         // Every slot past the count is literally empty — a stale fade would follow a live light.
         assert!(gpu[ROOM_CLAIM_FADE + 8..].iter().all(|w| *w == 0));
         assert_eq!(gpu.len(), ROOM_CLAIM_STRIDE, "2 head + 6 ids + 6 x 4 fade");
+    }
+
+    /// MONKEY (wmo surface lights): Classic keeps all frame bits, and the enhanced gate must
+    /// never alter the wind shader's integer bender count or any other programme row.
+    #[test]
+    fn the_wmo_surface_gate_preserves_classic_and_wind_counts() {
+        let mut app = App::new();
+        app.init_resource::<super::super::MonkeyFrame>()
+            .init_resource::<super::super::GameClock>()
+            .init_resource::<WowLighting>()
+            .init_resource::<WowLightData>()
+            .insert_resource(FireLightGain(0.0))
+            .insert_resource(SpellLightGain(0.0))
+            .insert_resource(super::super::LavaLightGain(0.0))
+            .add_systems(Update, pack_monkey_frame);
+        for count in 0..=8 {
+            app.world_mut()
+                .resource_mut::<super::super::MonkeyFrame>()
+                .bender_count = count;
+            let frame = app.world().resource::<super::super::MonkeyFrame>();
+            let classic = frame.pack(0.0, 1.0);
+            for gains in [
+                [0.0, 0.0, 0.0],
+                [0.25, 0.0, 0.0],
+                [0.0, 0.25, 0.0],
+                [0.0, 0.0, 0.25],
+                [1.0, 1.0, 1.0],
+                [0.0, 0.0, 0.0],
+            ] {
+                app.world_mut().resource_mut::<FireLightGain>().0 = gains[0];
+                app.world_mut().resource_mut::<SpellLightGain>().0 = gains[1];
+                app.world_mut()
+                    .resource_mut::<super::super::LavaLightGain>()
+                    .0 = gains[2];
+                app.update();
+                let packed = app.world().resource::<WowLightData>().0.monkey;
+                assert_eq!(
+                    packed[7][0] as u32, count,
+                    "wind count must truncate unchanged"
+                );
+                let mut expected = classic;
+                if gains.iter().any(|gain| *gain > 0.0) {
+                    expected[7][0] += 0.5;
+                }
+                assert_eq!(packed, expected, "only the enhanced gate may move");
+            }
+        }
     }
 
     /// GOLDEN — MONKEY (fire GO lights): `fireLightGain` scales SYNTHESISED sources and **only**
@@ -2771,6 +2888,30 @@ mod tests {
                 shader.contains(&declaration),
                 "{name} shelter length must equal shelter::GRID squared"
             );
+        }
+    }
+
+    /// MONKEY (mcsh model shade): the model receivers drop the MCSH 0.5 sun band on exactly the
+    /// gate terrain drops its MCSH on (`sh_c16.w > 0.5`, weighted by the sun lane), so a doodad on
+    /// its own baked shadow is not dimmed twice once the realtime world lane has replaced the bake.
+    #[test]
+    fn model_receivers_drop_the_mcsh_band_on_terrains_gate() {
+        const TERRAIN: &str = include_str!("../../../benilla-assets/src/shaders/terrain.wgsl");
+        const MODEL: &str = include_str!("../../../benilla-assets/src/shaders/wow_model.wgsl");
+        const STATIC_GX: &str = include_str!("../shaders/static_gx.wgsl");
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
+        assert!(squash(TERRAIN).contains("letworld_shadow_lane=wow_light.sh_c16.w>0.5;"));
+        let gate = "letmcsh_suppress=select(0.0,shadow_hook::sun_shadow_w(wow_light.fog_params.z),\
+                    wow_light.sh_c16.w>0.5);";
+        let apply = "letintensity=select(intensity_ref,mix(intensity_ref,1.0,mcsh_suppress),\
+                     mcsh_suppress>0.0);";
+        for (name, shader) in [("wow_model.wgsl", MODEL), ("static_gx.wgsl", STATIC_GX)] {
+            let s = squash(shader);
+            assert!(
+                s.contains(gate),
+                "{name} must gate the MCSH band like terrain"
+            );
+            assert!(s.contains(apply), "{name} must lift only through the gate");
         }
     }
 

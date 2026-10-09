@@ -15,7 +15,7 @@ behind each constant.
 | Lane | What you see | Main switch |
 |---|---|---|
 | Sun shadows, characters | real silhouettes for units instead of the oval blob | `characterShadows` |
-| Sun shadows, world | trees, buildings and alpha-tested foliage cast; baked terrain shadows step aside; the static caster cache also refreshes when streamed geometry arrives, so a standing camera picks up late trees (`world_shadow.rs::refresh_streamed_shadows`, independent of volumetric fog) | `worldShadows` |
+| Sun shadows, world | trees, buildings and alpha-tested foliage cast; baked terrain shadows step aside, and so does the MCSH 0.5 sun dim on models standing on them (`wow_model.wgsl` / `static_gx.wgsl`, terrain's gate and dusk weight); the static caster cache also refreshes when streamed geometry arrives, so a standing camera picks up late trees (`world_shadow.rs::refresh_streamed_shadows`, independent of volumetric fog) | `worldShadows` |
 | Dynamic interiors | WMO rooms are lit per fragment by their own fixtures with a soft falloff, gated per room so light does not leak through walls | `interiorLight`, `interiorRoomGate` |
 | Synthesised lights | torches, braziers, lanterns, campfires and lampposts emit a light in the colour of their flame, with flicker | `fireLightGain`, `fireFlicker` |
 | Torch shadows | cube-map shadows from point lights onto buildings, models and terrain, with a contact-hardening penumbra and a shadow floor | `interiorShadows`, `exteriorShadows`, `torchShadowStrength`, `interiorShadowSoft` |

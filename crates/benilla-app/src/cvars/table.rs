@@ -635,8 +635,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ),
     ours(
         "waterQuality",
-        "1",
-        "benilla's own: water quality, 0 Classic / 1 Enhanced / 2 High; mirror reflections are opt-in",
+        // MONKEY (planar water): High is the shipped High preset's tier (planar mirror ~1 ms).
+        "2",
+        "benilla's own: water quality, 0 Classic / 1 Enhanced / 2 High; High adds mirror reflections",
     ),
     ours(
         "lavaLightGain",

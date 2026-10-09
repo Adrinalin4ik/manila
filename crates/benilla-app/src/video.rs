@@ -413,7 +413,9 @@ impl Default for VideoConfig {
             interior_bake_floor: 0.12,
             fire_light_gain: 1.0,
             spell_light_gain: 1.0,
-            water_quality: 1,
+            // MONKEY (planar water): High water (the planar mirror's tier) is the shipped High
+            // preset's, measured ~1 ms (gfx-1009 water report).
+            water_quality: 2,
             // MONKEY (volumetric fog): default to the inexpensive atmosphere.
             volumetric_fog: 1,
             // MONKEY (post): the shipped High graphics preset uses the full-resolution tier.

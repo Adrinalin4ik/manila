@@ -772,8 +772,8 @@ pub(crate) const LIGHTING_PRESETS: &[(&str, &[(&str, &str)])] = &[
             ("interiorShadowDynamic", "4"),
             ("exteriorShadows", "1"),
             ("spellLightGain", "1"),
-            // Mirror reflections stay opt-in until their cost is measured.
-            ("waterQuality", "1"),
+            // MONKEY (planar water): High water on the High preset, measured (~1 ms with planar).
+            ("waterQuality", "2"),
             // MONKEY (volumetric fog): preset atmosphere uses the default cheap tier.
             ("volumetricFog", "1"),
             // MONKEY (post): half-resolution halo.
@@ -1727,7 +1727,8 @@ mod tests {
         // candle-lit surfaces moving under +10 % — only true at this number.
         assert_eq!(d["interiorBakeFloor"], 0.12);
         assert_eq!(d["spellLightGain"], 1.0, "the spell lane ships neutral");
-        assert_eq!(d["waterQuality"], 1.0, "mirror reflections stay opt-in");
+        // MONKEY (planar water): High water ships on (the High preset IS the defaults).
+        assert_eq!(d["waterQuality"], 2.0, "High water carries the planar mirror");
         assert_eq!(d["lavaLightGain"], 1.0);
         // MONKEY (ao): registry and renderer agree, and the lane ships Off.
         assert_eq!(d["ambientOcclusion"], shadows.ambient_occlusion as f32);
@@ -1772,6 +1773,8 @@ mod tests {
                         if matches!(member, "fireLightGain" | "waterQuality" | "volumetricFog" | "lavaLightGain") { "0" } else { "1.0" }
                     } else if *name == "Ultra" && matches!(member, "waterQuality" | "volumetricFog") {
                         "2" // MONKEY (presets): Ultra's two maxima over the defaults.
+                    } else if matches!(*name, "Low" | "Medium") && member == "waterQuality" {
+                        "1" // MONKEY (planar water): below High, Enhanced water without the mirror.
                     } else {
                         cvars.default_of(member).unwrap()
                     };
@@ -2289,10 +2292,11 @@ mod tests {
             assert_eq!(res::<VideoConfig>(&app).lava_light_gain, lava);
         }
         let mut cvars = fresh_registry();
-        cvars.set("waterQuality", "2");
+        // MONKEY (planar water): High water is the High preset's; Enhanced makes the row Custom.
+        cvars.set("waterQuality", "1");
         assert_eq!(derive_lighting_quality(&cvars), LIGHTING_CUSTOM);
         apply_lighting_preset(&mut cvars, "High");
-        assert_eq!(cvars.get("waterQuality"), Some("1"));
+        assert_eq!(cvars.get("waterQuality"), Some("2"));
     }
 
     /// The FFX pass's three switches reach it one by one (`ffx`, `ffxGlow`, `ffxDeath`).

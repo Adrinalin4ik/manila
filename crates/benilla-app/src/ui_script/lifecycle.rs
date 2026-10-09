@@ -347,6 +347,8 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     // out of the park the arm put it in (1978) for the duration of the slice and goes straight
     // back at the end of it, so no feed ever sees the half-built interface — 1978's window is the
     // whole load, which for a sliced load is many frames rather than the old single burst.
+
+
     unpark_boot_vm(world);
     if !ui_wanted(world) {
         world.remove_resource::<PendingEntryUiLoad>();
@@ -383,7 +385,8 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
         let step_start = bevy::platform::time::Instant::now();
         match stage {
             EntryStage::Armed => {
-                let (identity, roster, version_check) = entry_prepare(world, &mut script);
+                let (identity, roster, version_check) =
+                    entry_prepare(world, &mut script, LoadSeat::Roster);
                 // **The whole load edge is silent** — the TOC walk, every addon, the saved
                 // variables and `PLAYER_LOGIN`, the span `0x48fbf0` brackets itself across
                 // (`0x48fbfa` → `0x49016d`). Upstream writes it as `silenced_ui_load`, a closure
@@ -558,9 +561,25 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
 /// there — upstream's 2226/2241 rewrite inlined its own copy, so the two now run the same steps
 /// from two places. Anything added to one belongs in the other: a step left on upstream's path
 /// alone simply does not happen in this fork, and the keybinding table is what proved it.
+/// Which `"player"` a UI load runs its files under, by the edge that runs it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoadSeat {
+    /// World entry: `UI_Init` runs before `CMSG_PLAYER_LOGIN` goes out (the load at `0x46c236`,
+    /// the send in a later step at `0x46c272`), so no player object exists and the roster's
+    /// record stands in ([`seat_from_roster`]).
+    Roster,
+    /// `/reload`: the player object stays in the world through the teardown and the load, so the
+    /// live one is seated ([`crate::ui_unit::live_player_seat`]), the roster's if none exists.
+    Live,
+}
+
 fn entry_prepare(
     world: &mut World,
     script: &mut UiScript,
+    // Which `"player"` this load seats (#840). The sliced world entry is always `Roster` - it
+    // runs before `CMSG_PLAYER_LOGIN` goes out, so there is no player object yet - and a
+    // `/reload` is `Live`.
+    seat: LoadSeat,
 ) -> (Option<(String, String)>, Vec<String>, bool) {
     // The character whose AddOn enable state applies. Resolved before the load because the
     // enable file gates which addons run at all.
@@ -610,19 +629,31 @@ fn entry_prepare(
     }
     // The player too, before the addon walk. The record first: the reference's
     // `UnitName`/`UnitRace`/`UnitClass`/`UnitSex` read only a copy of the char-enum row made at the
-    // Enter World commit (`0x5abd9e`) and never cleared, and each rebuilt VM is told once. The
-    // snapshot stands in for the descriptor until that streams in.
+    // Enter World commit (`0x5abd9e`) and never cleared, and each rebuilt VM is told once. Then
+    // the unit: the live player on a `/reload`, else the roster's stand-in until the descriptor
+    // streams in.
     if let Some(record) = world
         .get_resource::<crate::char_select::Roster>()
         .and_then(record_from_roster)
     {
         script.set_player_record(record);
     }
-    if let Some(seat) = world
-        .get_resource::<crate::char_select::Roster>()
-        .and_then(seat_from_roster)
+    match (seat == LoadSeat::Live)
+        .then(|| live_player_seat(world))
+        .flatten()
     {
-        script.set_unit("player", Some(seat));
+        Some(live) => {
+            script.set_unit("player", Some(live.state));
+            script.set_player_xp(live.xp.0, live.xp.1);
+        }
+        None => {
+            if let Some(seat) = world
+                .get_resource::<crate::char_select::Roster>()
+                .and_then(seat_from_roster)
+            {
+                script.set_unit("player", Some(seat));
+            }
+        }
     }
     // The addon version gate, read from the persisted base the fold above just made current, so a
     // character-screen "Load out of date AddOns" click counts. A bare test world is check on.
@@ -748,15 +779,14 @@ fn entry_finish(world: &mut World, script: &mut UiScript, identity: Option<(Stri
 /// exactly as before. The screen size goes in either way, and only when the window has a real size
 /// — a bare test world has none, and `0` would be worse than the default it already carries.
 fn seat_raster_seam_for_load(world: &mut World, script: &mut UiScript) {
-    let ui_scale = world
-        .get_resource::<super::UiScaleCvar>()
-        .map_or(1.0, |c| c.0);
     let (w, h) = {
         let mut q = world.query_filtered::<&Window, With<bevy::window::PrimaryWindow>>();
         q.single(world)
             .map_or((0.0, 0.0), |win| (win.width(), win.height()))
     };
-    let s = super::seam_scale(h, ui_scale);
+    // One argument since #841: the dial is no longer folded into the seam, it is seated through
+    // `seat_ui_scale` below.
+    let s = super::seam_scale(h);
     if w > 0.0 && h > 0.0 {
         // `tick_script`'s own line, with its own units: the VM lives in 768-tall virtual space
         // (decision 0582), so the window's logical size divided by the seam scale IS the screen
@@ -803,6 +833,13 @@ fn seat_raster_seam_for_load(world: &mut World, script: &mut UiScript) {
 /// capture boots straight into `InWorld`, so before that this would have run ahead of
 /// [`benilla_assets::AssetSet::Open`] and loaded against no patch chain.
 pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
+    load_ingame_ui_seated(world, LoadSeat::Roster);
+}
+
+/// [`load_ingame_ui_on_world_entry`] under the `"player"` its edge has (#840). On this tree the
+/// sliced loader covers the world entry, so the caller that matters here is the `/reload`, which
+/// passes [`LoadSeat::Live`]: its player object survives the teardown.
+fn load_ingame_ui_seated(world: &mut World, seat: LoadSeat) {
     // The VM the entry edge parked (1978); the live slot is the fallback for a caller that did
     // not go through the arm. It goes back in the world because the fold below reads it there.
     unpark_boot_vm(world);
@@ -814,7 +851,11 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
         warn!("ui_script: entering the world with no VM — the in-game UI will not load");
         return;
     };
-    let (identity, roster, version_check) = entry_prepare(world, &mut script);
+    let (identity, roster, version_check) = entry_prepare(world, &mut script, seat);
+    // Read out of the world before the bracket below borrows it (#841).
+    let ui_scale = world
+        .get_resource::<super::UiScaleCvar>()
+        .map_or(1.0, |c| c.0);
     // The minimap zoom pair and the plate pair are read out of the world FIRST: the bracket's
     // body borrows `world` for the chat-cache restore, and two `Copy` pairs cost nothing next to
     // fighting that borrow. The seat itself happens inside, beside the load it has to precede.
@@ -867,6 +908,21 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
             |script| crate::vplates::seat_legacy_settings(script, &legacy_plates),
             |script| {
                 crate::ui_chat::restore_chat_looks(world, script);
+                // The UI scale lands on `UIParent` once the files, the addons and
+                // `VARIABLES_LOADED` are done, after the chat reader (`0x4900d6`) and before the
+                // `PLAYER_LOGIN` arm (`0x49011d`), through the display handler (`0x49010e` →
+                // `0x492e90`). So every `OnLoad` sees `UIParent` at scale 1 and the root's size.
+                let display = {
+                    let mut q =
+                        world.query_filtered::<&Window, With<bevy::window::PrimaryWindow>>();
+                    q.single(world).map_or((0, 0), |w| {
+                        (w.width().round() as u32, w.height().round() as u32)
+                    })
+                };
+                let mut none = None;
+                let mut cache = world.get_resource_mut::<super::UiAutoScaleCache>();
+                let cache = cache.as_deref_mut().map_or(&mut none, |c| &mut c.0);
+                script.seat_ui_scale(ui_scale, display, cache);
             },
         );
     });
@@ -909,6 +965,17 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     if let Some(mut armed) = world.get_resource_mut::<LeavingWorldArmed>() {
         armed.arm();
     }
+}
+
+/// The live player's seat off the world, through the unit feed's own builder; `None` before our
+/// own create. A world without the feed's resources (a bare test world) has none to read.
+fn live_player_seat(world: &mut World) -> Option<crate::ui_unit::LivePlayerSeat> {
+    world
+        .run_system_cached(crate::ui_unit::live_player_seat)
+        .unwrap_or_else(|e| {
+            warn!("ui_script: no live player to seat for the load ({e}); the roster stands in");
+            None
+        })
 }
 
 /// The wire's gender byte (0 male, 1 female) on `UnitSex`'s 2/3 scale, as `ui_unit::snapshot`
@@ -1142,11 +1209,13 @@ pub(crate) fn end_ui_session(world: &mut World) {
 pub(crate) struct ReloadUiPending(pub(crate) bool);
 
 /// Run a pending `ReloadUI()`: the reference's teardown and rebuild (`0x495664 call 0x490bd0`,
-/// `0x495669 call 0x48fbf0`), for us [`end_ui_session`] then [`load_ingame_ui_on_world_entry`]
-/// without leaving the world, so a `DisableAddOn` staged in the dying VM reaches `AddOns.txt`
-/// before the rebuild reads it. `PLAYER_ENTERING_WORLD` then refires from [`crate::ui_unit`]'s
-/// feed on the new VM. In-world only, as the reference's gate (`0x494a50(0xa)`) is; elsewhere the
-/// request is dropped.
+/// `0x495669 call 0x48fbf0`), for us [`end_ui_session`] then the load without leaving the world,
+/// so a `DisableAddOn` staged in the dying VM reaches `AddOns.txt` before the rebuild reads it.
+/// The load runs under the live player, which never left. `UI_Init` then enters the world-enter
+/// cascade itself (`0x490168`), firing the `PLAYER_LOGIN` it armed and `PLAYER_ENTERING_WORLD`;
+/// ours fire from [`crate::ui_unit`]'s feed on the new VM's first `Update`, once it has re-seated
+/// the player. In-world only, as the reference's gate (`0x494a50(0xa)`) is; elsewhere the request
+/// is dropped.
 pub(crate) fn run_pending_reload(world: &mut World) {
     if !std::mem::take(&mut world.resource_mut::<ReloadUiPending>().0) {
         return;
@@ -1161,7 +1230,7 @@ pub(crate) fn run_pending_reload(world: &mut World) {
     }
     info!("ui_script: ReloadUI — ending the UI session and building a new one");
     end_ui_session(world);
-    load_ingame_ui_on_world_entry(world);
+    load_ingame_ui_seated(world, LoadSeat::Live);
     // `UI_Init` ends by re-entering the world-enter cascade (`0x490168`), its sends included, but
     // only with the active player set (`0x490166 je`): our own player's entity exists. Not
     // `SetActiveMover`, which only the player's create runs.
@@ -1204,23 +1273,24 @@ pub(crate) fn shutdown_on_exit(
 /// saved file and fires `VARIABLES_LOADED` (`0x4900b2` → `0x4913b0`), and arms `PLAYER_LOGIN`
 /// (`[0xb4e260]`, set at `0x49011d`). The world-enter cascade `0x4908c0` fires `PLAYER_LOGIN` if
 /// armed (read at `0x49094b`, fired at `0x490959`, disarmed at `0x49095e`), then
-/// `PLAYER_ENTERING_WORLD` (`0x49096a`).
+/// `PLAYER_ENTERING_WORLD` (`0x49096a`): [`UiScript::fire_world_enter`].
 ///
 /// On a `/reload`, `UI_Init` enters the cascade itself (`0x490168`). On a fresh login that call is
 /// skipped (`0x490166 je`, the active-player GUID still 0) and the cascade runs from the local
-/// player's own create (`0x5deb60 call 0x4908c0`). This fires `PLAYER_LOGIN` at the end of the
-/// load on both, the `/reload` shape; `PLAYER_ENTERING_WORLD` fires from [`crate::ui_unit`] once
-/// the self descriptor lands.
+/// player's own create (`0x5deb60 call 0x4908c0`). Either way the player object exists when it
+/// runs, so this only arms, and [`crate::ui_unit`]'s feed fires both once it has seated the
+/// player.
 #[cfg(test)]
 pub(crate) fn finish_ui_load(script: &mut UiScript) {
     finish_ui_load_with(script, |_| {}, |_| {});
 }
 
 /// [`finish_ui_load`] with its two host seams. `host_settings` runs between the saved-variables
-/// chunk and `VARIABLES_LOADED`, pushing the settings benilla keeps in `config.toml`. `between`
-/// is the chat-cache restore's `UPDATE_CHAT_WINDOWS` + `UPDATE_CHAT_COLOR` burst, after
-/// `VARIABLES_LOADED` and before `PLAYER_LOGIN`, where the reference registers its reader
-/// (`0x4900d6` → `0x498a20`). On a fresh login the reference's cache (`0x5afe50`) defers that
+/// chunk and `VARIABLES_LOADED`, carrying over a setting `config.toml` held before it moved into
+/// the saved variables. `between` runs after `VARIABLES_LOADED` and before the `PLAYER_LOGIN` arm
+/// (so before the event too): the chat-cache restore's `UPDATE_CHAT_WINDOWS` +
+/// `UPDATE_CHAT_COLOR` burst, where the reference registers its reader (`0x4900d6` → `0x498a20`),
+/// then the UI scale (`0x49010e`). On a fresh login the reference's cache (`0x5afe50`) defers that
 /// reader until the server's account data reconciles (`0x5afa42`/`0x5afd01`), after `UI_Init` has
 /// returned. Either way a `VARIABLES_LOADED` handler sees the boot chat colours, not the file's.
 pub(crate) fn finish_ui_load_with(
@@ -1229,11 +1299,12 @@ pub(crate) fn finish_ui_load_with(
     between: impl FnOnce(&mut UiScript),
 ) {
     // Still the load edge, so still bounded: re-armed so the saved variables and every
-    // `PLAYER_LOGIN` handler get the full allowance; the entry edge disarms it after.
+    // `VARIABLES_LOADED` handler get the full allowance; the entry edge disarms it after. The
+    // world-enter events fire later, unbounded, as every event the feeds fire is.
     script.set_instruction_budget(addons::LOAD_INSTRUCTION_BUDGET);
     crate::ui_saved::load_saved_variables(script, host_settings);
     between(script);
-    script.fire_event("PLAYER_LOGIN", vec![]);
+    script.arm_player_login();
 }
 
 /// Run the patch chain's `Interface\FrameXML\GlobalStrings.lua`, the first file in the reference's

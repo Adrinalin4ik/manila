@@ -436,6 +436,9 @@ pub struct LiquidExt {
     /// refraction looks through. Loaded, never sampled, so no sampler.
     #[texture(106, sample_type = "float", filterable = false, visibility(fragment))]
     pub scene_colour: Handle<Image>,
+    /// MONKEY (planar water): the mirrored view (`liquid/mirror.rs`), loaded and filtered by hand.
+    #[texture(107, sample_type = "float", filterable = false, visibility(fragment))]
+    pub mirror_colour: Handle<Image>,
     /// The kind's animated frames (`lake_a`/`fast_a`/`ocean_h`), stacked as `2d_array` layers
     /// (`Rgba8Unorm`, repeat-sampled). RGB near-black; alpha = the ripple/wave → transparency.
     #[texture(100, dimension = "2d_array", visibility(fragment))]

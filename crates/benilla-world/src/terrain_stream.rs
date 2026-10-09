@@ -79,6 +79,8 @@ pub struct TerrainStreamer {
     map_dir: Option<String>,
     /// The focus tile last streamed around, the furnisher's nearest-first key.
     focus: (i32, i32),
+    /// The preload window moves at chunk boundaries, including inside the same tile.
+    focus_chunk: Option<(i32, i32)>,
     /// The window's `(inner, outer)` half-widths last frame, logged once per change.
     reach: Option<(i32, i32)>,
     /// The map's WDT tile index: ADT requests wait for it and consult its `MAIN` grid.
@@ -106,6 +108,9 @@ pub struct TerrainStreamer {
 const GLOBAL_WMO_UID: u32 = u32::MAX;
 
 impl TerrainStreamer {
+    fn monkey_same_window(&self, window: StreamWindow) -> bool {
+        self.focus_chunk == Some(window.focus) && self.reach == Some((window.inner, window.outer))
+    }
     /// `(spawned, requested)` tiles for the debug panel: furnished, and all in the window.
     pub fn residency(&self) -> (usize, usize) {
         let spawned = self.tiles.values().filter(|t| t.furnished).count();
@@ -125,7 +130,7 @@ struct TileState {
     /// Every cell is up: the residency bit the loading screen counts.
     furnished: bool,
     /// The uniqueIds of the placements this tile references, released when it unloads.
-    placements: Vec<u32>,
+    placements: Vec<PlacementKey>,
     liquid: Vec<Entity>,
     /// The impassable-chunk wall collider, a body of its own since its audience differs.
     wall: Option<Entity>,
@@ -137,11 +142,18 @@ struct TileState {
     merged: Vec<Entity>,
 }
 
+// MDDF and MODF use independent IDs in the installed ADTs; retain the kind through release.
+type PlacementKey = u64;
+
+fn monkey_wmo_placement_key(uid: u32) -> PlacementKey {
+    (1_u64 << 32) | u64::from(uid)
+}
+
 /// Doodad and WMO placements, spawned once and refcounted across the tiles that list them.
 #[derive(Resource, Default)]
 pub(crate) struct Placements {
-    /// By MDDF/MODF uniqueId.
-    by_id: HashMap<u32, Placement>,
+    /// By placement kind and MDDF/MODF uniqueId.
+    by_id: HashMap<PlacementKey, Placement>,
     /// The material dedup, so submeshes sharing a look share one handle and batch.
     materials: MaterialCache,
     /// Placements awaiting their model plus WMO props awaiting their M2s; at zero the spawner skips
@@ -437,6 +449,7 @@ impl Plugin for TerrainPlugin {
                 Update,
                 (
                     finish_colliders,
+                    monkey_repair_wmo_residency,
                     stream_terrain,
                     furnish_tile_cells,
                     spawn_loaded_placements,
@@ -478,6 +491,13 @@ impl Plugin for TerrainPlugin {
             .add_systems(Update, scope_placement_art)
             // Ungated, so the density tracker never misses a boot-time config apply.
             .add_systems(Update, rescatter_clutter)
+            .add_systems(
+                PostUpdate,
+                monkey_watch_wmo_residency
+                    .after(crate::static_gx::MonkeyStaticGxCullSet)
+                    .after(bevy::transform::TransformSystems::Propagate)
+                    .run_if(crate::schedule::world_is_live),
+            )
             .add_systems(
                 Update,
                 // After the interior claim: the reference resolves leaf, indoor and names from one
@@ -705,7 +725,7 @@ fn stream_terrain(
     let center = focus.resolve(camera.single().ok().map(|c| c.translation));
     let window = StreamWindow::at(view.farclip, center[0], center[1]);
     let (cx, cy) = window.focus_tile();
-    let same_window = state.focus == (cx, cy) && state.reach == Some((window.inner, window.outer));
+    let same_window = state.monkey_same_window(window);
     // Skip an unchanged frame only in a paced, complete, presentable world, since the tail it
     // bypasses releases a load; even then the undrawn count stays fresh, so a rebake un-skips it.
     if same_window
@@ -723,6 +743,7 @@ fn stream_terrain(
         return;
     }
     state.focus = (cx, cy);
+    state.focus_chunk = Some(window.focus);
     if state.reach != Some((window.inner, window.outer)) {
         state.reach = Some((window.inner, window.outer));
         info!(
@@ -845,10 +866,15 @@ fn stream_terrain(
     // Spawn loaded tiles within the frame's budget. The material binds the shared light buffer,
     // so a new tile is lit and fogged on its first frame.
     let tile_deadline = Instant::now() + SPAWN_BUDGET;
-    for (&(tx, ty), tile) in state.tiles.iter_mut() {
-        if tile.entity.is_some() {
-            continue;
-        }
+    let mut landed: Vec<_> = state
+        .tiles
+        .iter()
+        .filter(|(_, t)| t.entity.is_none() && tiles.get(&t.handle).is_some())
+        .map(|(&key, _)| key)
+        .collect();
+    landed.sort_unstable_by_key(|&(tx, ty)| ((tx - cx).abs().max((ty - cy).abs()), tx, ty));
+    for (tx, ty) in landed {
+        let tile = state.tiles.get_mut(&(tx, ty)).unwrap();
         let Some(adt) = tiles.get(&tile.handle) else {
             continue; // not loaded yet, or missing
         };
@@ -925,11 +951,11 @@ fn stream_terrain(
         // since a doodad's origin may lie on another tile.
         for d in &adt.doodads {
             register_doodad(placements, &asset_server, d, (tx, ty));
-            tile.placements.push(d.unique_id);
+            tile.placements.push(u64::from(d.unique_id));
         }
         for w in &adt.wmos {
             register_wmo(placements, &asset_server, w);
-            tile.placements.push(w.unique_id);
+            tile.placements.push(monkey_wmo_placement_key(w.unique_id));
         }
 
         let mut liquid_ents = Vec::new();
@@ -988,12 +1014,12 @@ fn stream_terrain(
         if state.global_wmo {
             p.focus_resident &= placements
                 .by_id
-                .get(&GLOBAL_WMO_UID)
+                .get(&monkey_wmo_placement_key(GLOBAL_WMO_UID))
                 .is_some_and(|p| p.spawned);
         }
         // The counting below latches off once fully ready (`complete`); a focus on unfurnished
         // ground is a new load and re-arms it.
-        if !p.focus_resident {
+        if !p.focus_resident || !same_window {
             p.complete = false;
         }
         // So does a snap onto furnished ground, whose buildings may still be arriving; on the edge
@@ -1060,7 +1086,7 @@ fn stream_terrain(
             if state.global_wmo {
                 let full = placements
                     .by_id
-                    .get(&GLOBAL_WMO_UID)
+                    .get(&monkey_wmo_placement_key(GLOBAL_WMO_UID))
                     .is_some_and(|p| p.spawned && p.doodads.iter().all(|d| d.spawned));
                 p.total += 1;
                 p.ready += usize::from(full);
@@ -1094,6 +1120,92 @@ fn tile_drop_disabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("WOW_NO_TILE_DROP").is_some())
 }
 
+/// A resident building whose instance was lost must re-enter the ordinary spawn path. Inspect
+/// once per 64 stream ticks; a failed asset has no instance and is deliberately not retried.
+fn monkey_repair_wmo_residency(
+    mut commands: Commands,
+    mut state: ResMut<TerrainStreamer>,
+    placements: ResMut<Placements>,
+    instances: Query<(), With<crate::wmo_portal::WmoPortalInstance>>,
+    mut progress: ResMut<WorldLoadProgress>,
+    mut tick: Local<u32>,
+) {
+    let scan = tick.is_multiple_of(64);
+    *tick = tick.wrapping_add(1);
+    if !scan {
+        return;
+    }
+    let placements = placements.into_inner();
+    for (&key, p) in &mut placements.by_id {
+        let Some(instance) = p.portal_instance else {
+            continue;
+        };
+        if !p.spawned || instances.contains(instance) {
+            continue;
+        }
+        warn!("MONKEY_WMO_RESIDENCY: uid={} instance={instance} lost with refs={}, re-registering building at {:?}",
+            key as u32, p.refs, bevy_to_wow(p.transform.translation));
+        placements.pending_spawns -= p.doodads.iter().filter(|d| !d.spawned).count();
+        for e in p.entities.drain(..) {
+            commands.entity(e).try_despawn();
+        }
+        p.doodads.clear();
+        p.portal_instance = None;
+        p.spawned = false;
+        placements.pending_spawns += 1;
+        state.settled = false;
+        progress.complete = false;
+        progress.scene_ready = false;
+    }
+}
+
+/// Record the three disappearance stages for the two reported buildings, only on a state edge.
+#[allow(clippy::type_complexity)]
+fn monkey_watch_wmo_residency(
+    placements: Res<Placements>,
+    instances: Query<&crate::wmo_portal::WmoPortalInstance>,
+    gx: Option<Res<crate::static_gx::StaticGx>>,
+    focus: Res<ViewFocus>,
+    camera: Query<&GlobalTransform, With<WorldCamera>>,
+    progress: Res<WorldLoadProgress>,
+    mut last: Local<HashMap<u32, (bool, bool, usize, usize, usize)>>,
+) {
+    for uid in [71414, 54893] {
+        let placement = placements.by_id.get(&monkey_wmo_placement_key(uid));
+        let instance = placement.and_then(|p| p.portal_instance);
+        let portal = instance.and_then(|e| instances.get(e).ok());
+        let pvs = portal.map_or(0, |i| i.visible.iter().filter(|&&v| v).count());
+        let region = gx
+            .as_deref()
+            .and_then(|g| instance.and_then(|e| g.world.wmos.get(&e)));
+        let retained = region.map_or(0, |r| r.groups.len());
+        let admitted = gx
+            .as_deref()
+            .and_then(|g| {
+                instance.and_then(|e| {
+                    g.world
+                        .visible_wmos
+                        .iter()
+                        .find(|(i, _)| *i == e)
+                        .map(|(_, s)| s)
+                })
+            })
+            .map_or(0, |s| s.drawn.iter().filter(|&&v| v).count());
+        let facts = (
+            placement.is_some(),
+            portal.is_some(),
+            pvs,
+            retained,
+            admitted,
+        );
+        if last.insert(uid, facts) != Some(facts) {
+            info!("MONKEY_WMO_WATCH: uid={uid} registered={} instance={instance:?} portal={} pvs={pvs} retained={retained} admitted={admitted} body={:?} eye={:?} focus={:?} resident={} presentable={}",
+                facts.0, facts.1, focus.body_pos(), camera.iter().next().map(|c| bevy_to_wow(c.translation())),
+                progress.focus_tile, progress.focus_resident, progress.presentable());
+        }
+    }
+}
+
 /// Register one M2 doodad placement, or bump its refcount if already known.
 fn register_doodad(
     placements: &mut Placements,
@@ -1101,13 +1213,13 @@ fn register_doodad(
     d: &Doodad,
     tile: (i32, i32),
 ) {
-    if let Some(p) = placements.by_id.get_mut(&d.unique_id) {
+    if let Some(p) = placements.by_id.get_mut(&u64::from(d.unique_id)) {
         p.refs += 1;
         return;
     }
     let handle: Handle<M2Model> = asset_server.load(m2_url(&d.model));
     placements.by_id.insert(
-        d.unique_id,
+        u64::from(d.unique_id),
         Placement {
             model: ModelHandle::M2(handle),
             transform: Transform {
@@ -1130,13 +1242,16 @@ fn register_doodad(
 
 /// Register one WMO placement, or bump its refcount; a 1.12 WMO placement has no scale.
 fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &WmoInstance) {
-    if let Some(p) = placements.by_id.get_mut(&w.unique_id) {
+    if let Some(p) = placements
+        .by_id
+        .get_mut(&monkey_wmo_placement_key(w.unique_id))
+    {
         p.refs += 1;
         return;
     }
     let handle: Handle<WmoModel> = asset_server.load(wmo_url(&w.model));
     placements.by_id.insert(
-        w.unique_id,
+        monkey_wmo_placement_key(w.unique_id),
         Placement {
             model: ModelHandle::Wmo(handle),
             transform: Transform {
@@ -1168,6 +1283,7 @@ fn drop_streamed_world(
     staticgx: Option<&mut crate::static_gx::StaticGx>,
     activity: &mut StreamActivity,
 ) {
+    state.focus_chunk = None;
     for ((_tx, _ty), t) in state.tiles.drain() {
         despawn_tile_owned(commands, &t);
         activity.tiles_dropped += 1;
@@ -1176,7 +1292,12 @@ fn drop_streamed_world(
         }
     }
     if std::mem::take(&mut state.global_wmo) {
-        release_placement(commands, placements, GLOBAL_WMO_UID, activity);
+        release_placement(
+            commands,
+            placements,
+            monkey_wmo_placement_key(GLOBAL_WMO_UID),
+            activity,
+        );
     }
     placements.materials.clear();
     // Cleared here, not by the flush's dead-key discard: tile keys repeat across maps, and the
@@ -1328,14 +1449,14 @@ fn handoff_straddlers(
     tiles: &HashMap<(i32, i32), TileState>,
     placements: &mut Placements,
     dead: (i32, i32),
-    uids: &[u32],
+    uids: &[PlacementKey],
     merge_on: bool,
 ) {
     if !merge_on {
         return;
     }
     // The dead tile's M2 placements with refs left, then one pass over each neighbour's list.
-    let mut straddlers: HashMap<u32, Option<(i32, i32)>> = uids
+    let mut straddlers: HashMap<PlacementKey, Option<(i32, i32)>> = uids
         .iter()
         .copied()
         .filter(|uid| {
@@ -1412,7 +1533,7 @@ fn handoff_straddlers(
 fn release_placement(
     commands: &mut Commands,
     placements: &mut Placements,
-    uid: u32,
+    uid: PlacementKey,
     activity: &mut StreamActivity,
 ) {
     let drop_it = match placements.by_id.get_mut(&uid) {
@@ -1459,6 +1580,35 @@ mod focus_tests {
     const PICK: (u32, [f32; 3]) = (329, [3398.9, -3381.8, 142.7]);
     fn cam_at_northshire() -> Option<Vec3> {
         Some(wow_to_bevy([SPAWN_XY.0, SPAWN_XY.1, 100.0]))
+    }
+
+    #[test]
+    fn monkey_a_chunk_crossing_inside_one_tile_reopens_the_preload_window() {
+        // Default farclip reaches 13 chunks. Advancing from chunk 2 to 3 reaches tile +1.
+        let before = StreamWindow {
+            focus: (32 * 16 + 2, 44 * 16 + 2),
+            inner: 11,
+            outer: 13,
+        };
+        let after = StreamWindow {
+            focus: (32 * 16 + 3, 44 * 16 + 2),
+            ..before
+        };
+        assert_eq!(before.focus_tile(), after.focus_tile());
+        assert!(!before.wanted_tiles().contains(&(33, 44)));
+        assert!(after.wanted_tiles().contains(&(33, 44)));
+        let state = TerrainStreamer {
+            focus: before.focus_tile(),
+            focus_chunk: Some(before.focus),
+            reach: Some((before.inner, before.outer)),
+            settled: true,
+            ..Default::default()
+        };
+        assert!(state.monkey_same_window(before));
+        assert!(
+            !state.monkey_same_window(after),
+            "same tile must not suppress an incoming row"
+        );
     }
 
     #[test]
@@ -1512,7 +1662,7 @@ mod straddler_tests {
             material: None,
             next_cell: 0,
             furnished: false,
-            placements: uids.to_vec(),
+            placements: uids.iter().copied().map(u64::from).collect(),
             liquid: Vec::new(),
             wall: None,
             clutter: Vec::new(),
@@ -1536,6 +1686,51 @@ mod straddler_tests {
         }
     }
 
+    #[test]
+    fn monkey_a_resident_wmo_with_a_lost_instance_is_requeued_without_losing_its_refs() {
+        let mut app = App::new();
+        app.init_resource::<TerrainStreamer>()
+            .init_resource::<Placements>()
+            .init_resource::<WorldLoadProgress>();
+        let missing = app.world_mut().spawn_empty().id();
+        app.world_mut().despawn(missing);
+        let orphan = app.world_mut().spawn_empty().id();
+        let mut p = straddler((0, 0), vec![orphan]);
+        p.model = ModelHandle::Wmo(Default::default());
+        p.portal_instance = Some(missing);
+        p.refs = 3;
+        let key = monkey_wmo_placement_key(71414);
+        app.world_mut()
+            .resource_mut::<Placements>()
+            .by_id
+            .insert(key, p);
+        app.world_mut().resource_mut::<TerrainStreamer>().settled = true;
+        app.world_mut().resource_mut::<WorldLoadProgress>().complete = true;
+        app.world_mut()
+            .run_system_once(monkey_repair_wmo_residency)
+            .unwrap();
+        let placements = app.world().resource::<Placements>();
+        let p = &placements.by_id[&key];
+        assert_eq!(p.refs, 3);
+        assert!(!p.spawned && p.portal_instance.is_none());
+        assert_eq!(placements.pending_spawns, 1);
+        assert!(!app.world().resource::<TerrainStreamer>().settled);
+        assert!(!app.world().resource::<WorldLoadProgress>().complete);
+        assert!(app.world().get_entity(orphan).is_err());
+        // A retired missing asset has no recorded instance: don't retry it forever.
+        app.world_mut()
+            .resource_mut::<Placements>()
+            .by_id
+            .get_mut(&key)
+            .unwrap()
+            .spawned = true;
+        app.world_mut().resource_mut::<Placements>().pending_spawns = 0;
+        app.world_mut()
+            .run_system_once(monkey_repair_wmo_residency)
+            .unwrap();
+        assert_eq!(app.world().resource::<Placements>().pending_spawns, 0);
+    }
+
     fn run_handoff(world: &mut World, dead: (i32, i32), uids: Vec<u32>, merge_on: bool) {
         world
             .run_system_once(
@@ -1547,7 +1742,7 @@ mod straddler_tests {
                         &streamer.tiles,
                         &mut placements,
                         dead,
-                        &uids,
+                        &uids.iter().copied().map(u64::from).collect::<Vec<_>>(),
                         merge_on,
                     );
                 },

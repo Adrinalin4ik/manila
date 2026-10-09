@@ -135,7 +135,10 @@ pub(super) fn flush_hull_welds(
         false
     });
     welds.props.retain(|&uid, acc| {
-        let Some(p) = placements.by_id.get_mut(&uid) else {
+        let Some(p) = placements
+            .by_id
+            .get_mut(&super::monkey_wmo_placement_key(uid))
+        else {
             return false;
         };
         if !acc.ready(frame, idle) {
@@ -298,7 +301,7 @@ mod tests {
         app.world_mut()
             .resource_mut::<Placements>()
             .by_id
-            .insert(7, blank_placement());
+            .insert(super::super::monkey_wmo_placement_key(7), blank_placement());
         {
             let mut welds = app.world_mut().resource_mut::<HullWelds>();
             for _ in 0..WELD_MAX_HULLS {
@@ -308,7 +311,11 @@ mod tests {
         }
         app.world_mut().run_system_once(flush_hull_welds).unwrap();
         let placements = app.world().resource::<Placements>();
-        let owned = &placements.by_id.get(&7).unwrap().entities;
+        let owned = &placements
+            .by_id
+            .get(&super::super::monkey_wmo_placement_key(7))
+            .unwrap()
+            .entities;
         assert_eq!(owned.len(), 1);
         assert!(app.world().get::<PendingCollider>(owned[0]).is_some());
     }

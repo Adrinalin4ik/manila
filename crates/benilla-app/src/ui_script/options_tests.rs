@@ -2928,9 +2928,9 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // 37, Nameplates 7, Interface 13, Chat 6, ActionBars 6, Combat 17 - counted per page and as
     // one sweep, both 125) less the three below. 34 of the 122 carry a `BENILLA_` key.
     //
-    // **UNVERIFIED, AND THE ONE NUMBER IN THIS MERGE I COULD NOT SETTLE.** The graphics fork
-    // this page comes from asserts 100 against a table of 120 rows and the same three-entry
-    // untipped list, which its own loop cannot produce - 120 - 3 is 117, not 100. So either that
+    // **UNVERIFIED, AND THE ONE NUMBER IN THESE MERGES I COULD NOT SETTLE.** The graphics fork
+    // this page comes from asserts 101 against a table of 121 rows and the same three-entry
+    // untipped list, which its own loop cannot produce - 121 - 3 is not 101. So either that
     // figure is stale there or a row in the table does not reach the loop, and this 122 is
     // derived from the same model their number contradicts. `cargo test -p benilla-app` does not
     // build on this tree (14 pre-existing errors elsewhere), so no run has judged either. First

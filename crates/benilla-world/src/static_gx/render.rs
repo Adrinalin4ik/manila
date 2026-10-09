@@ -89,6 +89,13 @@ pub(crate) struct GxCellDraw {
 #[derive(Component, Clone, Copy, Default, ExtractComponent)]
 pub(crate) struct StaticGxView;
 
+/// MONKEY (planar water): the water mirror's view (`liquid/mirror.rs`) draws the same retained
+/// set as the world camera - the cull is the world camera's, a superset of what the mirror needs
+/// bar the rare object above the frame. Apart from [`StaticGxView`], so the per-view torch depth
+/// pass and the pipeline key stay the world camera's alone.
+#[derive(Component, Clone, Copy, Default, ExtractComponent)]
+pub struct StaticGxMirror;
+
 /// Mark the world camera, again whenever it respawns.
 fn mark_world_camera(
     mut commands: Commands,
@@ -1003,8 +1010,9 @@ impl ViewNode for StaticGxNode {
         &'static ViewEnvironmentMapUniformOffset,
         Option<&'static OrderIndependentTransparencySettingsOffset>,
         &'static MeshViewBindGroup,
-        // The world camera only — a booth bake must never receive world cells (see the marker).
-        &'static StaticGxView,
+        // The world camera only — a booth bake must never receive world cells (see the marker) —
+        // and MONKEY (planar water) the water mirror's view.
+        AnyOf<(&'static StaticGxView, &'static StaticGxMirror)>,
     );
 
     fn run<'w>(
@@ -1155,6 +1163,7 @@ pub(super) fn build(app: &mut App) {
     app.add_plugins((
         ExtractResourcePlugin::<GxWorld>::default(),
         ExtractComponentPlugin::<StaticGxView>::default(),
+        ExtractComponentPlugin::<StaticGxMirror>::default(),
     ));
     app.init_resource::<GxWorld>();
     app.add_systems(Update, mark_world_camera);

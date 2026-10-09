@@ -191,6 +191,8 @@ fn update_world_shadows(
             Option<&RigPart>,
             &ShadowOccluder,
             Option<&MeshMaterial3d<WowModelMaterial>>,
+            // MONKEY (B035): the part's mesh bound, for the WMO/doodad caster reach.
+            Option<&bevy::camera::primitives::Aabb>,
         ),
         Without<BillboardCard>,
     >,

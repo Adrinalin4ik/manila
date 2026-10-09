@@ -739,6 +739,8 @@ pub(crate) fn collect_entity_geometry(
             Option<&RigPart>,
             &ShadowOccluder,
             Option<&MeshMaterial3d<WowModelMaterial>>,
+            // MONKEY (B035): the part's mesh bound, for the WMO/doodad caster reach.
+            Option<&bevy::camera::primitives::Aabb>,
         ),
         Without<BillboardCard>,
     >,
@@ -754,7 +756,7 @@ pub(crate) fn collect_entity_geometry(
     mut built_parts: Option<&mut EntityHashSet>,
 ) -> (u32, u32) {
     let (mut admitted, mut rejected) = (0u32, 0u32);
-    for (entity, pick, part, global, rig_part, occluder, _material) in parts.iter() {
+    for (entity, pick, part, global, rig_part, occluder, _material, aabb) in parts.iter() {
         if !casts_realtime_shadow(part.kind, part.blend, want_creatures, want_environment) {
             continue;
         }
@@ -775,7 +777,22 @@ pub(crate) fn collect_entity_geometry(
                 .and_then(|rig| palettes.slot_origin(rig.slot))
         });
         let Some(anchor) = anchor else { continue };
-        if anchor.distance_squared(light_position) > reach * reach {
+        // MONKEY (B035 shadow pop): a WMO/doodad part's anchor is its PLACEMENT origin (one point
+        // for a whole city), so reach is measured to its transformed bound instead — the same
+        // law the retained lane uses ([`benilla_world::static_gx::caster_in_reach`]). Creatures
+        // and unbounded parts keep the anchor test.
+        let in_reach = match (part.kind, global, aabb, rig_part) {
+            (ModelKind::Doodad | ModelKind::Wmo, Some(global), Some(aabb), None) => {
+                benilla_world::static_gx::caster_in_reach(
+                    &global.compute_transform(),
+                    Some(aabb),
+                    light_position,
+                    reach,
+                )
+            }
+            _ => anchor.distance_squared(light_position) <= reach * reach,
+        };
+        if !in_reach {
             continue;
         }
         admitted += 1;

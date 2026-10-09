@@ -311,6 +311,55 @@ pub(super) const SUBJECT_INDOOR: [f32; 3] = [-9469.4, 31.9, 57.9];
 
 /// Every other named viewpoint, capturable by name (`WOW_CAPTURE=<name>`) but not in the sweep.
 pub(super) const ON_DEMAND: &[Scenario] = &[
+    // MONKEY (wmo surface lights): the portcullis/archery yard and lamp-lined gate ramp.
+    Scenario {
+        name: "stormwind-training-yard-day",
+        map: Some(MAP_AZEROTH),
+        eye: [-8728.0, 341.0, 104.0],
+        look: [-8517.4951, 792.4295, 147.57787],
+        minute: 720,
+        ui: None,
+    },
+    Scenario {
+        name: "stormwind-training-yard-dusk",
+        map: Some(MAP_AZEROTH),
+        eye: [-8728.0, 341.0, 104.0],
+        look: [-8517.4951, 792.4295, 147.57787],
+        minute: 1110,
+        ui: None,
+    },
+    Scenario {
+        name: "stormwind-training-yard-night",
+        map: Some(MAP_AZEROTH),
+        eye: [-8728.0, 341.0, 104.0],
+        look: [-8517.4951, 792.4295, 147.57787],
+        minute: 0,
+        ui: None,
+    },
+    Scenario {
+        name: "stormwind-gate-ramp-day",
+        map: Some(MAP_AZEROTH),
+        eye: [-9095.0, 412.0, 124.0],
+        look: [-8818.3066, 632.09216, -229.55338],
+        minute: 720,
+        ui: None,
+    },
+    Scenario {
+        name: "stormwind-gate-ramp-dusk",
+        map: Some(MAP_AZEROTH),
+        eye: [-9095.0, 412.0, 124.0],
+        look: [-8818.3066, 632.09216, -229.55338],
+        minute: 1110,
+        ui: None,
+    },
+    Scenario {
+        name: "stormwind-gate-ramp-night",
+        map: Some(MAP_AZEROTH),
+        eye: [-9095.0, 412.0, 124.0],
+        look: [-8818.3066, 632.09216, -229.55338],
+        minute: 0,
+        ui: None,
+    },
     // MONKEY (volumetric fog): UI proof uses the same live page selection as a player.
     Scenario {
         name: "ui-options-advanced", map: Some(MAP_AZEROTH),
@@ -345,6 +394,17 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         map: Some(MAP_AZEROTH),
         eye: [-9350.0, -2340.0, 82.0],
         look: [-9367.0, -2436.0, 57.1],
+        minute: 720,
+        ui: None,
+    },
+    // MONKEY (planar water): Lakeshire's small dock from the boardwalk, looking down at the deck
+    // and its reflection (the owner's stretched-reflection screenshot); the `vista` instrument at
+    // feet -9297,-2170,67, facing 205, pitch -30.
+    Scenario {
+        name: "water-lakeshire-dock",
+        map: Some(MAP_AZEROTH),
+        eye: [-9297.0, -2170.0, 69.0],
+        look: [-9689.4, -2353.0, -181.0],
         minute: 720,
         ui: None,
     },
@@ -1270,6 +1330,29 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         name: "redridge-lake", map: Some(MAP_AZEROTH),
         eye: [-9350.0, -2340.0, 82.0], look: [-9500.0, -2650.0, 50.0], minute: 720, ui: None,
     },
+    // MONKEY (gfx-1009 unlit): Lakeshire's report sites. The sunken `lionstatue.mdx` (MDDF uid
+    // 83242, (-9355.5, -2246.1, 47.9), ~8 yd under the 56.16 surface) seen from the water surface
+    // and from under it, and the gryphon master's two `gryphonroost01.mdx` (uids 325784/325785).
+    Scenario {
+        name: "lakeshire-statue", map: Some(MAP_AZEROTH),
+        eye: [-9318.0, -2238.0, 59.0], look: [-9356.0, -2247.0, 49.0], minute: 720, ui: None,
+    },
+    Scenario {
+        name: "lakeshire-statue-dusk", map: Some(MAP_AZEROTH),
+        eye: [-9318.0, -2238.0, 59.0], look: [-9356.0, -2247.0, 49.0], minute: 1170, ui: None,
+    },
+    Scenario {
+        name: "lakeshire-statue-under", map: Some(MAP_AZEROTH),
+        eye: [-9343.0, -2254.0, 52.0], look: [-9356.0, -2246.0, 48.5], minute: 720, ui: None,
+    },
+    Scenario {
+        name: "lakeshire-gryphons", map: Some(MAP_AZEROTH),
+        eye: [-9407.0, -2250.0, 72.5], look: [-9422.5, -2237.0, 69.5], minute: 720, ui: None,
+    },
+    Scenario {
+        name: "lakeshire-gryphons-dusk", map: Some(MAP_AZEROTH),
+        eye: [-9407.0, -2250.0, 72.5], look: [-9422.5, -2237.0, 69.5], minute: 1170, ui: None,
+    },
     // Duskwood: the road into Darkshire, the zone's short dark fog.
     Scenario {
         name: "duskwood-road", map: Some(MAP_AZEROTH),
@@ -1642,6 +1725,45 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         look: [-9488.5, -258.5, 72.0],
         minute: 1380,
         ui: None,
+    },
+    // The ranked player's name line at the fixture's subject spot, 5 yd out level with it on the
+    // `vplates` camera's horizontal bearing, so the body and its name line fill the frame.
+    Scenario {
+        name: "name-rank",
+        map: Some(MAP_AZEROTH),
+        eye: [-8953.92, -135.53, 85.5],
+        look: [-8949.95, -132.49, 85.5],
+        minute: 720,
+        ui: Some(UiFixture::NameRank),
+    },
+    // The warrior trainer's window over the noon ground view, a learnable service selected.
+    Scenario {
+        name: "ui-trainer",
+        map: Some(MAP_AZEROTH),
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::Trainer(TrainerList::Warrior)),
+    },
+    // A shaman trainer's window: the one shipped service whose description carries `$z`, over a
+    // bind point, so the shot pins the token against `AreaTable`.
+    Scenario {
+        name: "ui-trainer-astral",
+        map: Some(MAP_AZEROTH),
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::Trainer(TrainerList::Shaman)),
+    },
+    // A blacksmithing trainer's window: the profession-learn row, whose text is the taught
+    // profession's, with a recipe row beneath it.
+    Scenario {
+        name: "ui-trainer-blacksmith",
+        map: Some(MAP_AZEROTH),
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::Trainer(TrainerList::Blacksmith)),
     },
 ];
 
