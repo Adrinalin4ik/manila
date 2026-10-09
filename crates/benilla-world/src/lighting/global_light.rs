@@ -20,6 +20,10 @@ use crate::dev_state::DebugState;
 use crate::view::ViewDistance;
 use crate::view::WorldCamera;
 
+#[path = "monkey_room_index.rs"]
+mod monkey_room_index;
+use monkey_room_index::{monkey_build_index, MONKEY_CLAIM_WORDS, MONKEY_TABLE_WORDS};
+
 /// The shared light, std430-packed as `vec4<f32>` rows (all `vec4`, so std430 equals std140). Every
 /// shader that binds the buffer (`wow_model`, `terrain`, `liquid`, `wdl`, `wow_effect`,
 /// `static_gx`) mirrors this row order as a prefix; keep them in sync.
@@ -322,19 +326,19 @@ pub const CLAIM_ENTRY_SHIFT: u32 = 17;
 /// three shaders plus the portrait booth and must never be resized, and only `static_gx` reads
 /// this. `static_gx::render` owns the buffer and the binding.
 #[derive(Resource, Clone, ExtractResource)]
-pub struct RoomClaimTable(pub Box<[u32; ROOM_CLAIM_STRIDE * MAX_POINT_LIGHTS]>);
+pub struct RoomClaimTable(pub Box<[u32; MONKEY_TABLE_WORDS]>);
 
 /// MONKEY (room gate): the claim table's byte size — the one place `static_gx::render` sizes its
 /// GPU buffer from, so the table cannot grow here and leave the binding short (a bound storage
 /// buffer smaller than the shader's runtime-sized array fails validation at draw time, which
 /// vanishes every building).
 pub fn room_claim_bytes() -> u64 {
-    (ROOM_CLAIM_STRIDE * MAX_POINT_LIGHTS * std::mem::size_of::<u32>()) as u64
+    (MONKEY_TABLE_WORDS * std::mem::size_of::<u32>()) as u64
 }
 
 impl Default for RoomClaimTable {
     fn default() -> Self {
-        Self(Box::new([0; ROOM_CLAIM_STRIDE * MAX_POINT_LIGHTS]))
+        Self(Box::new([0; MONKEY_TABLE_WORDS]))
     }
 }
 
@@ -1659,8 +1663,19 @@ fn build_light_data(
     // Entries past the count are stale in the point table by design (the count row guards every
     // reader) — but the claim table is read at the SAME index, so a stale head there would gate a
     // live light with a dead building's identity. Clear the tail instead of trusting the count.
-    for slot in claims.0[pts.len() * ROOM_CLAIM_STRIDE..].iter_mut() {
+    for slot in claims.0[pts.len() * ROOM_CLAIM_STRIDE..MONKEY_CLAIM_WORDS].iter_mut() {
         *slot = 0;
+    }
+    // The appended room bitmap is a conservative shortlist; the shader still applies every
+    // selected light's exact claim/fade predicate, in the original ascending light order.
+    static MONKEY_ROOM_INDEX_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *MONKEY_ROOM_INDEX_ENABLED
+        .get_or_init(|| std::env::var("WOW_MONKEY_ROOM_INDEX").as_deref() != Ok("0"))
+    {
+        monkey_build_index(&mut claims.0[..], &fresh.points, pts.len());
+    } else {
+        // Zero header selects the unchanged full-scan shader path for same-build measurement.
+        claims.0[MONKEY_CLAIM_WORDS..].fill(0);
     }
     // `WOW_POINTS_DUMP=1` prints the nearest 8 packed lights once a second; `=frame` every frame.
     // MONKEY (room diagnostics): `=all` prints every committed row once a second, including

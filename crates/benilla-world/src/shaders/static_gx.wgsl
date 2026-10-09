@@ -1085,6 +1085,50 @@ fn gx_room_inst() -> u32 {
 fn gx_room_group(word: u32) -> u32 {
     return (recs[word & 0xffffu].w >> RECORD_ROOM_SHIFT) & RECORD_ROOM_MASK;
 }
+// MONKEY: the claim prefix is unchanged. The appended hash table shortlists lights by room;
+// flags and portal weights remain authoritative in interior_room_admits. Mirror monkey_room_index.rs.
+const MONKEY_CLAIM_WORDS: u32 = ROOM_CLAIM_STRIDE * 256u;
+const MONKEY_MASK_WORDS: u32 = 8u;
+const MONKEY_INDEX_SLOTS: u32 = 4096u;
+const MONKEY_INDEX_STRIDE: u32 = 2u + MONKEY_MASK_WORDS;
+const MONKEY_UNGATED: u32 = MONKEY_CLAIM_WORDS + 1u;
+const MONKEY_INDEX_START: u32 = MONKEY_UNGATED + MONKEY_MASK_WORDS;
+
+fn monkey_room_index(room_inst: u32, room_group: u32) -> u32 {
+    if (room_claims[MONKEY_CLAIM_WORDS] == 0u || room_group == 0u) {
+        return 0u;
+    }
+    var slot = ((room_inst * 0x9e3779b9u) ^ (room_group * 0x85ebca6bu)) & (MONKEY_INDEX_SLOTS - 1u);
+    for (var probe = 0u; probe < MONKEY_INDEX_SLOTS; probe = probe + 1u) {
+        let at = MONKEY_INDEX_START + slot * MONKEY_INDEX_STRIDE;
+        if (room_claims[at + 1u] == 0u) {
+            return 0u;
+        }
+        if (room_claims[at] == room_inst && room_claims[at + 1u] == room_group) {
+            return at;
+        }
+        slot = (slot + 1u) & (MONKEY_INDEX_SLOTS - 1u);
+    }
+    return 0u;
+}
+
+fn monkey_room_mask(at: u32, room_group: u32, strict: bool, word: u32) -> u32 {
+    // A zero header falls back to the original full table walk, including its exact lane gate.
+    if (room_claims[MONKEY_CLAIM_WORDS] == 0u) {
+        return 0xffffffffu;
+    }
+    if (room_group == 0u) {
+        return select(0xffffffffu, 0u, strict);
+    }
+    var bits = 0u;
+    if (!strict) {
+        bits = room_claims[MONKEY_UNGATED + word];
+    }
+    if (at != 0u) {
+        bits = bits | room_claims[at + 2u + word];
+    }
+    return bits;
+}
 // MONKEY (room gate): `room_inst`/`room_group` are the RECEIVING surface's room (see
 // `interior_room_admits`). `wow_model.wgsl`'s copy takes the same room arguments and stubs the
 // predicate to `true` — it has neither the claim binding nor a per-fragment room key, which is
@@ -1101,7 +1145,24 @@ fn interior_room_light(
     let k_fill = wow_light.point_count.z;
     var direct = vec3<f32>(0.0);
     var fill = vec3<f32>(0.0);
-    for (var i = 0u; i < count; i = i + 1u) {
+    let monkey_at = monkey_room_index(room_inst, room_group);
+    // Ascending words and least-significant bits preserve the original floating-point sum order.
+    var monkey_word = 0u;
+    var monkey_bits = monkey_room_mask(monkey_at, room_group, strict, monkey_word);
+    loop {
+        if (monkey_bits == 0u) {
+            monkey_word = monkey_word + 1u;
+            if (monkey_word >= MONKEY_MASK_WORDS || monkey_word * 32u >= count) {
+                break;
+            }
+            monkey_bits = monkey_room_mask(monkey_at, room_group, strict, monkey_word);
+            continue;
+        }
+        let i = monkey_word * 32u + firstTrailingBit(monkey_bits);
+        monkey_bits = monkey_bits & (monkey_bits - 1u);
+        if (i >= count) {
+            break;
+        }
         let color_lane = wow_light.points[2u * i + 1u];
         // MONKEY (light lanes): only a fixture that CLAIMS a room lights this room (keep in sync
         // with wow_model.wgsl). `.w` is 0 on every exterior source, so a campfire burning just
