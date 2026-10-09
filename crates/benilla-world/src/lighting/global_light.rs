@@ -2836,6 +2836,30 @@ mod tests {
         }
     }
 
+    /// MONKEY (mcsh model shade): the model receivers drop the MCSH 0.5 sun band on exactly the
+    /// gate terrain drops its MCSH on (`sh_c16.w > 0.5`, weighted by the sun lane), so a doodad on
+    /// its own baked shadow is not dimmed twice once the realtime world lane has replaced the bake.
+    #[test]
+    fn model_receivers_drop_the_mcsh_band_on_terrains_gate() {
+        const TERRAIN: &str = include_str!("../../../benilla-assets/src/shaders/terrain.wgsl");
+        const MODEL: &str = include_str!("../../../benilla-assets/src/shaders/wow_model.wgsl");
+        const STATIC_GX: &str = include_str!("../shaders/static_gx.wgsl");
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
+        assert!(squash(TERRAIN).contains("letworld_shadow_lane=wow_light.sh_c16.w>0.5;"));
+        let gate = "letmcsh_suppress=select(0.0,shadow_hook::sun_shadow_w(wow_light.fog_params.z),\
+                    wow_light.sh_c16.w>0.5);";
+        let apply = "letintensity=select(intensity_ref,mix(intensity_ref,1.0,mcsh_suppress),\
+                     mcsh_suppress>0.0);";
+        for (name, shader) in [("wow_model.wgsl", MODEL), ("static_gx.wgsl", STATIC_GX)] {
+            let s = squash(shader);
+            assert!(
+                s.contains(gate),
+                "{name} must gate the MCSH band like terrain"
+            );
+            assert!(s.contains(apply), "{name} must lift only through the gate");
+        }
+    }
+
     /// MONKEY (enclosed day floor): `interiorDaylight` rides the FRACTION of the interior lane's
     /// on/off word, and every existing decode of that word must be blind to it.
     ///

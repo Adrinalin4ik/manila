@@ -1198,6 +1198,29 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         name: "redridge-lake", map: Some(MAP_AZEROTH),
         eye: [-9350.0, -2340.0, 82.0], look: [-9500.0, -2650.0, 50.0], minute: 720, ui: None,
     },
+    // MONKEY (gfx-1009 unlit): Lakeshire's report sites. The sunken `lionstatue.mdx` (MDDF uid
+    // 83242, (-9355.5, -2246.1, 47.9), ~8 yd under the 56.16 surface) seen from the water surface
+    // and from under it, and the gryphon master's two `gryphonroost01.mdx` (uids 325784/325785).
+    Scenario {
+        name: "lakeshire-statue", map: Some(MAP_AZEROTH),
+        eye: [-9318.0, -2238.0, 59.0], look: [-9356.0, -2247.0, 49.0], minute: 720, ui: None,
+    },
+    Scenario {
+        name: "lakeshire-statue-dusk", map: Some(MAP_AZEROTH),
+        eye: [-9318.0, -2238.0, 59.0], look: [-9356.0, -2247.0, 49.0], minute: 1170, ui: None,
+    },
+    Scenario {
+        name: "lakeshire-statue-under", map: Some(MAP_AZEROTH),
+        eye: [-9343.0, -2254.0, 52.0], look: [-9356.0, -2246.0, 48.5], minute: 720, ui: None,
+    },
+    Scenario {
+        name: "lakeshire-gryphons", map: Some(MAP_AZEROTH),
+        eye: [-9407.0, -2250.0, 72.5], look: [-9422.5, -2237.0, 69.5], minute: 720, ui: None,
+    },
+    Scenario {
+        name: "lakeshire-gryphons-dusk", map: Some(MAP_AZEROTH),
+        eye: [-9407.0, -2250.0, 72.5], look: [-9422.5, -2237.0, 69.5], minute: 1170, ui: None,
+    },
     // Duskwood: the road into Darkshire, the zone's short dark fog.
     Scenario {
         name: "duskwood-road", map: Some(MAP_AZEROTH),

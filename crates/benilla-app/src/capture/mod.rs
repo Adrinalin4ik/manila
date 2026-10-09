@@ -714,7 +714,21 @@ fn pin_scene(
         return;
     };
     debug.lighting.follow_server_time = false;
-    debug.lighting.manual_minute = scenario.minute;
+    // MONKEY (capture framing): `WOW_CAPTURE_MINUTE=<0..1440>`, `WOW_CAPTURE_EYE=x,y,z` and
+    // `WOW_CAPTURE_LOOK=x,y,z` (raw WoW coords) re-aim a scenario without a rebuild, for framing a
+    // reported spot; a scenario's baseline never sets them.
+    let triple = |var: &str| {
+        std::env::var(var).ok().and_then(|s| {
+            let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            (v.len() == 3).then(|| [v[0], v[1], v[2]])
+        })
+    };
+    debug.lighting.manual_minute = std::env::var("WOW_CAPTURE_MINUTE")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(scenario.minute);
+    let scene_eye = triple("WOW_CAPTURE_EYE").unwrap_or(scenario.eye);
+    let scene_look = triple("WOW_CAPTURE_LOOK").unwrap_or(scenario.look);
 
     // `WOW_MM_PROBE=x,y,z` (raw WoW coords) places an active player there, so the interior
     // minimap renders server-less, with the camera above so the WMO streams in around it.
@@ -748,7 +762,7 @@ fn pin_scene(
                 * Quat::from_rotation_x(-req.el_deg.to_radians());
             (look + orbit * (Vec3::Z * req.dist), look)
         }
-        _ => (wow_to_bevy(scenario.eye), wow_to_bevy(scenario.look)),
+        _ => (wow_to_bevy(scene_eye), wow_to_bevy(scene_look)),
     };
     for mut t in &mut cam {
         *t = Transform::from_translation(eye).looking_at(look, Vec3::Y);
