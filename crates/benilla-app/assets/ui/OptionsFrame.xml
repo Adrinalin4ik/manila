@@ -113,7 +113,8 @@
             BenillaOptionsFrame:SetScale(k)
         end
 
-        -- The era tab width, label + 40, measured after OnShow sets the scale.
+        -- The era tab width, label + 40, measured after the window's OnShow sets the scale:
+        -- the tabs' own OnShows run before it, children first.
         function BenillaOptionsTab_FitWidth(tab)
             tab:SetWidth(getglobal(tab:GetName() .. "Text"):GetStringWidth() + 40)
         end
@@ -1082,10 +1083,11 @@
                 -- GFX (volumetric light) / (moonlight): appended so the other rows keep their indices.
                 "RowVolumetricLight", "RowVolumetricLightStrength", "RowMoonLight",
             },
-            -- Guild Names is a child of Player Names (UIOptionsFrame.lua:703-709).
+            -- Guild Names and Player Titles are children of Player Names
+            -- (UIOptionsFrame.lua:703-709).
             Nameplates = {
                 "RowEnemyPlates", "RowFriendlyPlates",
-                "RowPlayerNames", "RowGuildNames", "RowNpcNames", "RowOwnName",
+                "RowPlayerNames", "RowGuildNames", "RowPlayerTitles", "RowNpcNames", "RowOwnName",
             },
             -- 1.12's Display box by column, then Help; target-of-target sits under Status Text.
             Interface = {
@@ -1568,9 +1570,13 @@
                 return
             end
             if key == "Nameplates" then
-                -- UIOptionsFrame.lua:703-709: Player Names off greys Player Guild Names.
-                BenillaOptionsRow_SetEnabled(BenillaOptionsFrameContainerBodyNameplatesRowGuildNames,
-                    GetCVar("UnitNamePlayer") ~= "0")
+                -- UIOptionsFrame.lua:703-709: Player Names off greys Player Guild Names and
+                -- Player Titles.
+                local on = GetCVar("UnitNamePlayer") ~= "0"
+                BenillaOptionsRow_SetEnabled(
+                    BenillaOptionsFrameContainerBodyNameplatesRowGuildNames, on)
+                BenillaOptionsRow_SetEnabled(
+                    BenillaOptionsFrameContainerBodyNameplatesRowPlayerTitles, on)
                 return
             end
             if key == "Interface" then
@@ -2068,9 +2074,6 @@
                 <NormalFont inherits="GameFontHighlightSmall"/>
                 <HighlightFont inherits="GameFontHighlightSmall"/>
                 <DisabledFont inherits="GameFontHighlightSmall"/>
-                <Scripts>
-                    <OnShow>BenillaOptionsTab_FitWidth(this)</OnShow>
-                </Scripts>
             </Button>
             <Button name="$parentAddOnsTab">
                 <Size><AbsDimension x="87" y="37"/></Size>
@@ -2098,7 +2101,6 @@
                 <!-- No addon list behind it: disabled, in the era's unselected gold. -->
                 <Scripts>
                     <OnLoad>this:Disable()</OnLoad>
-                    <OnShow>BenillaOptionsTab_FitWidth(this)</OnShow>
                 </Scripts>
             </Button>
 
@@ -3982,10 +3984,23 @@
                                                 this.parentRow = "RowPlayerNames"
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowNpcNames" inherits="BenillaOptionsCheckboxRowTemplate">
+                                        <!-- A child of Player Names on its own CVar, CheckButton23 of
+                                             21 (`UIOptionsFrame.lua:24`), greyed with it (`:703-709`). -->
+                                        <Frame name="$parentRowPlayerTitles" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowGuildNames" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowGuildNames" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "UnitNamePlayerPVPTitle", "Player Titles",
+                                                    "OPTION_TOOLTIP_SHOW_PLAYER_TITLES", 1)
+                                                this.parentRow = "RowPlayerNames"
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowNpcNames" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowPlayerTitles" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowPlayerTitles" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>BenillaOptionsRow_OnLoad(this, "UnitNameNPC", "NPC Names",
                                                 "OPTION_TOOLTIP_SHOW_NPC_NAMES")</OnLoad></Scripts>
@@ -4402,6 +4417,8 @@
             <!-- Controls by default; selection persists and the scale re-fits, as the era's. -->
             <OnShow>
                 BenillaOptionsFrame_UpdateScale()
+                BenillaOptionsTab_FitWidth(BenillaOptionsFrameGameTab)
+                BenillaOptionsTab_FitWidth(BenillaOptionsFrameAddOnsTab)
                 BenillaOptionsFrame_SelectCategory(this.selectedCategory or "Controls")
                 if UpdateMicroButtons then UpdateMicroButtons() end
             </OnShow>

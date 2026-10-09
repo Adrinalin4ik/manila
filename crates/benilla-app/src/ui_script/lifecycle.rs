@@ -230,26 +230,22 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     );
 }
 
-/// Seat the VM's screen size and text measurer for the load, under the current window and
-/// `uiScale`: the load-edge half of [`super::extract::tick_script`]'s per-frame pair. A fresh VM
-/// answers 1024×768 until then, and a value computed once at load keeps it: stock
-/// `WorldMapFrame_OnLoad` sizes the full-screen `BlackoutWorld` from `GetScreenWidth()` and
-/// `GetScreenHeight()` and never again (`WorldMapFrame.lua:19-28`). With no atlas yet (it bakes on
-/// the first `Update`) the per-frame pass seats the measurer.
+/// Seat the VM's screen size and text measurer for the load, under the current window: the
+/// load-edge half of [`super::extract::tick_script`]'s per-frame pair. A fresh VM answers 1024×768
+/// until then, and a value computed once at load keeps it: stock `WorldMapFrame_OnLoad` sizes the
+/// full-screen `BlackoutWorld` from `GetScreenWidth()` and `GetScreenHeight()` and never again
+/// (`WorldMapFrame.lua:19-28`), which answer the root while `UIParent` is still at scale 1. With no
+/// atlas yet (it bakes on the first `Update`) the per-frame pass seats the measurer.
 fn seat_raster_seam_for_load(world: &mut World, script: &mut UiScript) {
-    let ui_scale = world
-        .get_resource::<super::UiScaleCvar>()
-        .map_or(1.0, |c| c.0);
     let (w, h) = {
         let mut q = world.query_filtered::<&Window, With<bevy::window::PrimaryWindow>>();
         q.single(world)
             .map_or((0.0, 0.0), |win| (win.width(), win.height()))
     };
-    let s = super::seam_scale(h, ui_scale);
+    let s = super::seam_scale(h);
     if w > 0.0 && h > 0.0 {
-        // The VM lives in 768-tall virtual space, so logical size over the seam scale is its
-        // screen. No `UIParent_ManageFramePositions` here, unlike `tick_script`: nothing is laid
-        // out yet.
+        // The VM lives in a 768-tall root, so logical size over the seam scale is its screen. No
+        // `UIParent_ManageFramePositions` here, unlike `tick_script`: nothing is laid out yet.
         script.set_screen_size(w / s, h / s);
     }
     let Some(atlas) = world.get_resource::<crate::ui_text::UiFontAtlas>() else {
@@ -258,12 +254,29 @@ fn seat_raster_seam_for_load(world: &mut World, script: &mut UiScript) {
     super::extract::seat_text_measurer(script, atlas, s);
 }
 
+/// Which `"player"` a UI load runs its files under, by the edge that runs it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoadSeat {
+    /// World entry: `UI_Init` runs before `CMSG_PLAYER_LOGIN` goes out (the load at `0x46c236`,
+    /// the send in a later step at `0x46c272`), so no player object exists and the roster's
+    /// record stands in ([`seat_from_roster`]).
+    Roster,
+    /// `/reload`: the player object stays in the world through the teardown and the load, so the
+    /// live one is seated ([`crate::ui_unit::live_player_seat`]), the roster's if none exists.
+    Live,
+}
+
 /// Load the in-game UI for this session onto a VM built for it, once per world entry. The
 /// reference builds the UI in `UI_Init` (`0x48fbf0`, re-making the Lua state at `0x48fe97`) and
 /// destroys it at `0x490bd0`, so every login runs every addon's file scope afresh. Safe on the
 /// state edge because the initial transition runs after `PostStartup`: a capture booting straight
 /// into `InWorld` still loads after [`benilla_assets::AssetSet::Open`].
 pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
+    load_ingame_ui_seated(world, LoadSeat::Roster);
+}
+
+/// [`load_ingame_ui_on_world_entry`] under the `"player"` its edge has.
+fn load_ingame_ui_seated(world: &mut World, seat: LoadSeat) {
     // The parked VM goes back into the world, where the CVar fold reads it; a reload has none
     // parked and uses the live one.
     unpark_boot_vm(world);
@@ -322,19 +335,31 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     }
     // The player too, before the addon walk. The record first: the reference's
     // `UnitName`/`UnitRace`/`UnitClass`/`UnitSex` read only a copy of the char-enum row made at the
-    // Enter World commit (`0x5abd9e`) and never cleared, and each rebuilt VM is told once. The
-    // snapshot stands in for the descriptor until that streams in.
+    // Enter World commit (`0x5abd9e`) and never cleared, and each rebuilt VM is told once. Then
+    // the unit: the live player on a `/reload`, else the roster's stand-in until the descriptor
+    // streams in.
     if let Some(record) = world
         .get_resource::<crate::char_select::Roster>()
         .and_then(record_from_roster)
     {
         script.set_player_record(record);
     }
-    if let Some(seat) = world
-        .get_resource::<crate::char_select::Roster>()
-        .and_then(seat_from_roster)
+    match (seat == LoadSeat::Live)
+        .then(|| live_player_seat(world))
+        .flatten()
     {
-        script.set_unit("player", Some(seat));
+        Some(live) => {
+            script.set_unit("player", Some(live.state));
+            script.set_player_xp(live.xp.0, live.xp.1);
+        }
+        None => {
+            if let Some(seat) = world
+                .get_resource::<crate::char_select::Roster>()
+                .and_then(seat_from_roster)
+            {
+                script.set_unit("player", Some(seat));
+            }
+        }
     }
     // The addon version gate, read from the persisted base the fold above just made current, so a
     // character-screen "Load out of date AddOns" click counts. A bare test world is check on.
@@ -358,6 +383,9 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     // text width, `UIPanelTemplates.xml:370-373`), which answers 0 with no measurer.
     seat_raster_seam_for_load(world, &mut script);
     // Read out of the world first: the bracket below borrows `world` for the chat-cache restore.
+    let ui_scale = world
+        .get_resource::<super::UiScaleCvar>()
+        .map_or(1.0, |c| c.0);
     let zoom = {
         let z = world.resource::<crate::minimap::MinimapZoom>();
         (z.outdoor, z.inside)
@@ -392,6 +420,21 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
             |script| crate::vplates::seat_legacy_settings(script, &legacy_plates),
             |script| {
                 crate::ui_chat::restore_chat_looks(world, script);
+                // The UI scale lands on `UIParent` once the files, the addons and
+                // `VARIABLES_LOADED` are done, after the chat reader (`0x4900d6`) and before the
+                // `PLAYER_LOGIN` arm (`0x49011d`), through the display handler (`0x49010e` →
+                // `0x492e90`). So every `OnLoad` sees `UIParent` at scale 1 and the root's size.
+                let display = {
+                    let mut q =
+                        world.query_filtered::<&Window, With<bevy::window::PrimaryWindow>>();
+                    q.single(world).map_or((0, 0), |w| {
+                        (w.width().round() as u32, w.height().round() as u32)
+                    })
+                };
+                let mut none = None;
+                let mut cache = world.get_resource_mut::<super::UiAutoScaleCache>();
+                let cache = cache.as_deref_mut().map_or(&mut none, |c| &mut c.0);
+                script.seat_ui_scale(ui_scale, display, cache);
             },
         );
     });
@@ -416,6 +459,17 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     if let Some(mut armed) = world.get_resource_mut::<LeavingWorldArmed>() {
         armed.arm();
     }
+}
+
+/// The live player's seat off the world, through the unit feed's own builder; `None` before our
+/// own create. A world without the feed's resources (a bare test world) has none to read.
+fn live_player_seat(world: &mut World) -> Option<crate::ui_unit::LivePlayerSeat> {
+    world
+        .run_system_cached(crate::ui_unit::live_player_seat)
+        .unwrap_or_else(|e| {
+            warn!("ui_script: no live player to seat for the load ({e}); the roster stands in");
+            None
+        })
 }
 
 /// The wire's gender byte (0 male, 1 female) on `UnitSex`'s 2/3 scale, as `ui_unit::snapshot`
@@ -486,13 +540,52 @@ pub(crate) fn seat_from_roster(
 pub(crate) struct AddOnIdentity(pub(crate) Option<(String, String)>);
 
 /// The world latch, the reference's `[0xb4b424]`: set at `0x4908ce` in the world-enter cascade
-/// `0x4908c0` and cleared at `0x490a8d` as `PLAYER_LEAVING_WORLD` fires (`0x490b4d`, its one
-/// site), so the first departure in a world fires and the rest are no-ops until the next entry.
-/// Ours has two producers, [`shutdown_ui_state`]'s tail and `ui_unit`'s worldport fire. A
+/// `0x4908c0` and cleared at `0x490a8d` by the leave-world sweep `0x490a80`, which then fires
+/// `PLAYER_LEAVING_WORLD` (`0x490b4d`, its one site), so the first departure in a world sweeps
+/// and the rest are no-ops until the next entry. Ours is spent through [`LeaveWorldSweep`] or
+/// [`run_leave_world_sweep`], by [`shutdown_ui_state`]'s roots and `ui_unit`'s worldport fire. A
 /// cross-map worldport spends it without leaving `InWorld`, so a quit on its loading screen
 /// fires nothing; a `/reload` fires, and its rebuild re-arms.
 #[derive(Resource, Default)]
 pub(crate) struct LeavingWorldArmed(bool);
+
+/// The leave-world sweep `0x490a80` ran past its latch: a cross-map worldport (the local
+/// player's destructor, `0x5dd543`), a `/reload` (`0x490c20`) or leaving the world. Its legs
+/// past the clear read this, as the meeting stone's text drop (`0x490b2f` → `0x4c9f80`) does; a
+/// same-map teleport destroys nothing and never sweeps.
+#[derive(Message)]
+pub(crate) struct WorldLeaveSweepMessage;
+
+/// The latch and the sweep it gates, for a system: spending one writes the other.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct LeaveWorldSweep<'w> {
+    armed: ResMut<'w, LeavingWorldArmed>,
+    sweeps: MessageWriter<'w, WorldLeaveSweepMessage>,
+}
+
+impl LeaveWorldSweep<'_> {
+    /// Run the sweep: `true`, and [`WorldLeaveSweepMessage`] written, at most once per world.
+    pub(crate) fn run(&mut self) -> bool {
+        let swept = self.armed.spend();
+        if swept {
+            self.sweeps.write(WorldLeaveSweepMessage);
+        }
+        swept
+    }
+}
+
+/// [`LeaveWorldSweep::run`] for an exclusive edge; no latch is no world to leave.
+pub(crate) fn run_leave_world_sweep(world: &mut World) -> bool {
+    let swept = world
+        .get_resource_mut::<LeavingWorldArmed>()
+        .is_some_and(|mut l| l.spend());
+    if swept {
+        if let Some(mut sweeps) = world.get_resource_mut::<Messages<WorldLeaveSweepMessage>>() {
+            sweeps.write(WorldLeaveSweepMessage);
+        }
+    }
+    swept
+}
 
 impl LeavingWorldArmed {
     /// A world began. Idempotent, like the reference's `mov byte [0xb4b424],1`.
@@ -501,7 +594,7 @@ impl LeavingWorldArmed {
     }
 
     /// Take the one-shot: `true` at most once per world, `0x490a8d`'s clear folded in.
-    pub(crate) fn spend(&mut self) -> bool {
+    fn spend(&mut self) -> bool {
         std::mem::take(&mut self.0)
     }
 
@@ -566,9 +659,7 @@ pub(crate) fn end_ui_session(world: &mut World) {
         .get_resource::<AddOnIdentity>()
         .and_then(|id| id.0.clone());
     // Spent at the root: of this edge and the worldport's, the first to a departure owns it.
-    let leaving_world = world
-        .get_resource_mut::<LeavingWorldArmed>()
-        .is_some_and(|mut l| l.spend());
+    let leaving_world = run_leave_world_sweep(world);
     if !ui_never_loaded {
         if let Some(mut script) = world.get_non_send_resource_mut::<UiScript>() {
             shutdown_ui_state(&mut script, identity.as_ref(), leaving_world);
@@ -611,11 +702,13 @@ pub(crate) fn end_ui_session(world: &mut World) {
 pub(crate) struct ReloadUiPending(pub(crate) bool);
 
 /// Run a pending `ReloadUI()`: the reference's teardown and rebuild (`0x495664 call 0x490bd0`,
-/// `0x495669 call 0x48fbf0`), for us [`end_ui_session`] then [`load_ingame_ui_on_world_entry`]
-/// without leaving the world, so a `DisableAddOn` staged in the dying VM reaches `AddOns.txt`
-/// before the rebuild reads it. `PLAYER_ENTERING_WORLD` then refires from [`crate::ui_unit`]'s
-/// feed on the new VM. In-world only, as the reference's gate (`0x494a50(0xa)`) is; elsewhere the
-/// request is dropped.
+/// `0x495669 call 0x48fbf0`), for us [`end_ui_session`] then the load without leaving the world,
+/// so a `DisableAddOn` staged in the dying VM reaches `AddOns.txt` before the rebuild reads it.
+/// The load runs under the live player, which never left. `UI_Init` then enters the world-enter
+/// cascade itself (`0x490168`), firing the `PLAYER_LOGIN` it armed and `PLAYER_ENTERING_WORLD`;
+/// ours fire from [`crate::ui_unit`]'s feed on the new VM's first `Update`, once it has re-seated
+/// the player. In-world only, as the reference's gate (`0x494a50(0xa)`) is; elsewhere the request
+/// is dropped.
 pub(crate) fn run_pending_reload(world: &mut World) {
     if !std::mem::take(&mut world.resource_mut::<ReloadUiPending>().0) {
         return;
@@ -630,7 +723,18 @@ pub(crate) fn run_pending_reload(world: &mut World) {
     }
     info!("ui_script: ReloadUI — ending the UI session and building a new one");
     end_ui_session(world);
-    load_ingame_ui_on_world_entry(world);
+    load_ingame_ui_seated(world, LoadSeat::Live);
+    // `UI_Init` ends by re-entering the world-enter cascade (`0x490168`), its sends included, but
+    // only with the active player set (`0x490166 je`): our own player's entity exists. Not
+    // `SetActiveMover`, which only the player's create runs.
+    let seated = world
+        .query_filtered::<(), With<crate::net::SelfPlayer>>()
+        .iter(world)
+        .next()
+        .is_some();
+    if seated {
+        world.write_message(crate::net::WorldEnterCascadeMessage);
+    }
 }
 
 /// `AppExit`, the quit roots, read as a message because a quit from in-world never leaves
@@ -640,7 +744,7 @@ pub(crate) fn shutdown_on_exit(
     script: Option<NonSendMut<UiScript>>,
     id: Res<AddOnIdentity>,
     pending_entry: Option<Res<PendingEntryUiLoad>>,
-    mut armed: ResMut<LeavingWorldArmed>,
+    mut sweep: LeaveWorldSweep,
     mut exits: MessageReader<AppExit>,
 ) {
     if exits.read().next().is_none() {
@@ -650,7 +754,7 @@ pub(crate) fn shutdown_on_exit(
     if pending_entry.is_some() {
         return;
     }
-    let leaving_world = armed.spend();
+    let leaving_world = sweep.run();
     if let Some(mut script) = script {
         shutdown_ui_state(&mut script, id.0.as_ref(), leaving_world);
     }
@@ -662,13 +766,13 @@ pub(crate) fn shutdown_on_exit(
 /// saved file and fires `VARIABLES_LOADED` (`0x4900b2` → `0x4913b0`), and arms `PLAYER_LOGIN`
 /// (`[0xb4e260]`, set at `0x49011d`). The world-enter cascade `0x4908c0` fires `PLAYER_LOGIN` if
 /// armed (read at `0x49094b`, fired at `0x490959`, disarmed at `0x49095e`), then
-/// `PLAYER_ENTERING_WORLD` (`0x49096a`).
+/// `PLAYER_ENTERING_WORLD` (`0x49096a`): [`UiScript::fire_world_enter`].
 ///
 /// On a `/reload`, `UI_Init` enters the cascade itself (`0x490168`). On a fresh login that call is
 /// skipped (`0x490166 je`, the active-player GUID still 0) and the cascade runs from the local
-/// player's own create (`0x5deb60 call 0x4908c0`). This fires `PLAYER_LOGIN` at the end of the
-/// load on both, the `/reload` shape; `PLAYER_ENTERING_WORLD` fires from [`crate::ui_unit`] once
-/// the self descriptor lands.
+/// player's own create (`0x5deb60 call 0x4908c0`). Either way the player object exists when it
+/// runs, so this only arms, and [`crate::ui_unit`]'s feed fires both once it has seated the
+/// player.
 #[cfg(test)]
 pub(crate) fn finish_ui_load(script: &mut UiScript) {
     finish_ui_load_with(script, |_| {}, |_| {});
@@ -676,10 +780,10 @@ pub(crate) fn finish_ui_load(script: &mut UiScript) {
 
 /// [`finish_ui_load`] with its two host seams. `host_settings` runs between the saved-variables
 /// chunk and `VARIABLES_LOADED`, carrying over a setting `config.toml` held before it moved into
-/// the saved variables. `between`
-/// is the chat-cache restore's `UPDATE_CHAT_WINDOWS` + `UPDATE_CHAT_COLOR` burst, after
-/// `VARIABLES_LOADED` and before `PLAYER_LOGIN`, where the reference registers its reader
-/// (`0x4900d6` → `0x498a20`). On a fresh login the reference's cache (`0x5afe50`) defers that
+/// the saved variables. `between` runs after `VARIABLES_LOADED` and before the `PLAYER_LOGIN` arm
+/// (so before the event too): the chat-cache restore's `UPDATE_CHAT_WINDOWS` +
+/// `UPDATE_CHAT_COLOR` burst, where the reference registers its reader (`0x4900d6` → `0x498a20`),
+/// then the UI scale (`0x49010e`). On a fresh login the reference's cache (`0x5afe50`) defers that
 /// reader until the server's account data reconciles (`0x5afa42`/`0x5afd01`), after `UI_Init` has
 /// returned. Either way a `VARIABLES_LOADED` handler sees the boot chat colours, not the file's.
 pub(crate) fn finish_ui_load_with(
@@ -688,11 +792,12 @@ pub(crate) fn finish_ui_load_with(
     between: impl FnOnce(&mut UiScript),
 ) {
     // Still the load edge, so still bounded: re-armed so the saved variables and every
-    // `PLAYER_LOGIN` handler get the full allowance; the entry edge disarms it after.
+    // `VARIABLES_LOADED` handler get the full allowance; the entry edge disarms it after. The
+    // world-enter events fire later, unbounded, as every event the feeds fire is.
     script.set_instruction_budget(addons::LOAD_INSTRUCTION_BUDGET);
     crate::ui_saved::load_saved_variables(script, host_settings);
     between(script);
-    script.fire_event("PLAYER_LOGIN", vec![]);
+    script.arm_player_login();
 }
 
 /// Run the patch chain's `Interface\FrameXML\GlobalStrings.lua`, the first file in the reference's
@@ -840,6 +945,44 @@ mod tests {
         run_pending_reload(&mut world);
         assert!(!world.resource::<ReloadUiPending>().0, "the reload ran");
         assert_eq!(*world.resource::<VPlateMode>(), on, "a reload keeps them");
+    }
+
+    /// A `ReloadUI()` runs the leave-world sweep (`0x490c20`, past the armed latch) and then
+    /// re-enters the world-enter cascade (`0x490168`), whose readers re-send the time, mail,
+    /// battlefield and meeting-stone queries, only with the active player set (`0x490166 je`).
+    #[test]
+    fn a_reload_sweeps_and_reenters_the_world_enter_cascade_once_the_player_exists() {
+        use crate::net::WorldEnterCascadeMessage;
+        let reload = |seated: bool| {
+            let mut world = World::new();
+            world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+            world.insert_resource(crate::run_mode::CaptureMode);
+            world.init_resource::<Messages<WorldEnterCascadeMessage>>();
+            world.init_resource::<Messages<WorldLeaveSweepMessage>>();
+            world.init_resource::<LeavingWorldArmed>();
+            world.resource_mut::<LeavingWorldArmed>().arm();
+            if seated {
+                world.spawn(crate::net::SelfPlayer);
+            }
+            world.insert_resource(ReloadUiPending(true));
+            run_pending_reload(&mut world);
+            assert!(!world.resource::<ReloadUiPending>().0, "the reload ran");
+            let sweeps = world
+                .resource_mut::<Messages<WorldLeaveSweepMessage>>()
+                .drain()
+                .count();
+            let cascades = world
+                .resource_mut::<Messages<WorldEnterCascadeMessage>>()
+                .drain()
+                .count();
+            (sweeps, cascades)
+        };
+        assert_eq!(reload(true), (1, 1), "in the world");
+        assert_eq!(
+            reload(false).1,
+            0,
+            "no cascade before our own player's create"
+        );
     }
 
     /// The reference re-makes its Lua state inside `UI_Init` (`0x48fe97`).

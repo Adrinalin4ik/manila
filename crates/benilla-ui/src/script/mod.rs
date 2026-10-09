@@ -130,6 +130,7 @@ mod tooltip_item;
 mod tooltip_spell;
 mod tooltip_unit;
 mod ui_errors;
+mod ui_scale;
 pub use tooltip_unit::TooltipTint;
 mod trade;
 mod tradeskill;
@@ -137,6 +138,7 @@ mod trainer;
 mod types;
 mod unit;
 mod video_pairs;
+pub(crate) mod visibility;
 mod weapon_enchant;
 mod who_sort;
 mod worldmap;
@@ -227,7 +229,7 @@ pub(crate) use model::Model;
 pub use model::{FontProbe, TextureProbe, TextureSizeProbe, WorldLocProjector};
 pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo};
 pub use pet::{PetActionView, PetStats};
-pub use pvp::{HonorState, InspectHonorData};
+pub use pvp::{decorated_name, pvp_name_global_keys, HonorState, InspectHonorData, RankTitle};
 pub use quest::{
     QuestAction, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect, QuestState,
 };
@@ -270,8 +272,8 @@ pub use unit::{
 pub use weapon_enchant::WeaponEnchant;
 pub use who_sort::{WhoSortChain, WhoSortKey};
 pub use worldmap::{
-    WorldMapContinentView, WorldMapLandmarkView, WorldMapOverlayView, WorldMapState,
-    WorldMapZoneView,
+    WorldMapContinentView, WorldMapLandmarkSource, WorldMapLandmarkView, WorldMapLevel,
+    WorldMapOverlayView, WorldMapState, WorldMapZoneView,
 };
 pub use worldstate::WorldStateUiView;
 pub use worn_display::WornDisplay;
@@ -724,7 +726,8 @@ impl UiScript {
         self.model_mut().minimap_ping = ping;
     }
 
-    /// Drain a `Minimap:PingLocation(x, y)`: centre-relative offsets in UI units, x right, y up.
+    /// Drain a `Minimap:PingLocation(x, y)`: centre-relative offsets in the screen root's units,
+    /// x right, y up.
     pub fn take_minimap_ping_request(&mut self) -> Option<(f32, f32)> {
         self.model_mut().minimap_ping_request.take()
     }

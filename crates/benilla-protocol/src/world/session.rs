@@ -284,7 +284,8 @@ impl WorldSession {
         self.send(opcode::CMSG_PLAYER_LOGIN, &messages::full_guid(guid))
     }
 
-    /// Declare the unit we move, as the 1.12 client does at login; vmangos drops moves until then.
+    /// Declare the unit we move, as the 1.12 client does at its own create; vmangos drops moves
+    /// until then.
     pub fn set_active_mover(&mut self, guid: u64) -> Result<()> {
         self.send(opcode::CMSG_SET_ACTIVE_MOVER, &messages::full_guid(guid))
     }
@@ -777,7 +778,6 @@ impl WorldSession {
                 stream: self.stream,
                 encrypter,
                 chat_language: self.chat_language,
-                sent: None,
             },
         ))
     }

@@ -501,7 +501,7 @@ pub(crate) const GOSSIP_UI: &[&str] = &[
 /// lacks what the app loads at setup (the master-loot menu reads `GROUP` and `GIVE_LOOT`),
 /// `ItemButtonTemplate.xml` because a missing template only warns, and `PartyFrame.xml` because
 /// `LootFrame.lua:217` reads `MAX_PARTY_MEMBERS` at load. Needs client data.
-pub(super) const LOOT_UI: &[&str] = &[
+pub(crate) const LOOT_UI: &[&str] = &[
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Interface\\FrameXML\\Fonts.xml",
     "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
@@ -660,6 +660,8 @@ pub(super) const BAG_UI: &[&str] = &[
     "Interface\\FrameXML\\UIDropDownMenu.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    // `CharacterFrame.xml`'s tab template, for the hidden parent `PaperDollFrame` needs below.
+    r"Interface\FrameXML\CharacterFrameTemplates.xml",
     // The dialog engine, after the `UIPanelCloseButton` it inherits.
     r"Interface\FrameXML\StaticPopup.xml",
     // `ContainerFrameItemButton_OnClick` hides `StackSplitFrame` on every plain click
@@ -683,7 +685,9 @@ pub(super) const BAG_UI: &[&str] = &[
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     // `BagSlotButtonTemplate` inherits `PaperDollItemSlotButtonTemplate`, and its OnLoad
     // (`PaperDollItemSlotButton_OnLoad`) gives each bag button its inventory-slot id, 20..23.
-    // `CharacterFrame.xml` stays out: a missing `parent=` only warns.
+    // Its hidden parent `CharacterFrame` comes first: a parentless `PaperDollFrame` would be
+    // visible at the end of its load and run its OnShow, which reaches for the Honor tab.
+    "Interface\\FrameXML\\CharacterFrame.xml",
     "Interface\\FrameXML\\PaperDollFrame.xml",
     // The stock bag bar, with `BagSlotButtonTemplate` and `KEYRING_CONTAINER`.
     "Interface\\FrameXML\\MainMenuBarBagButtons.xml",

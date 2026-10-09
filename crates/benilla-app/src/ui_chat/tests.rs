@@ -2288,31 +2288,9 @@ fn level_up_gains_are_matched_by_level_and_a_miss_is_not_an_absence() {
     );
 }
 
-/// Stock `ChatFrame_OnEvent` prints the whole level-up block from `PLAYER_LEVEL_UP`
-/// (`ChatFrame.lua:1283-1323`); the app composes none of it.
-#[test]
-fn the_ding_block_is_printed_once() {
-    let _data = benilla_formats::wow_data_or_skip!();
-    use benilla_protocol::messages::LevelUpInfo;
-    let mut s = chat_vm();
-    let mut log = super::ChatLog::default();
-
-    let info = LevelUpInfo {
-        level: 10,
-        health: 22,
-        powers: [15, 0, 0, 0, 0],
-        stats: [1, 0, 0, 0, 0],
-    };
-    // The packet's apply parks the gains and prints nothing.
-    log.push_level_up_gains(&info, 1);
-    let before = lines_in_window(&s);
-    assert_eq!(
-        lines_in_window(&s) - before,
-        0,
-        "the app composes no ding line of its own"
-    );
-
-    // Tap the window's `AddMessage` to read the block itself.
+/// Fires `PLAYER_LEVEL_UP` with the nine reference args and returns every line the stock handler
+/// added to `ChatFrame1`.
+fn ding_lines(s: &mut benilla_ui::script::UiScript, args: [i64; 9]) -> Vec<String> {
     s.run(
         r#"
         DingLines = {}
@@ -2325,23 +2303,27 @@ fn the_ding_block_is_printed_once() {
     )
     .unwrap();
 
-    // The event `ui_unit` fires, with the reference's nine arguments.
-    let args: Vec<benilla_ui::script::ScriptValue> = [10i64, 22, 15, 1, 1, 0, 0, 0, 0]
+    let args = args
         .into_iter()
         .map(benilla_ui::script::ScriptValue::Int)
         .collect();
     s.fire_event("PLAYER_LEVEL_UP", args);
     assert!(s.errors().is_empty(), "handler errors: {:?}", s.errors());
-    assert_eq!(
-        lines_in_window(&s) - before,
-        4,
-        "LEVEL_UP, the health/mana pair, CHAR_POINTS, and one STAT — once each"
-    );
 
-    // The singular `LEVEL_UP_CHAR_POINTS` (`GetText`'s plural pick) and one `LEVEL_UP_STAT`.
-    let lines: Vec<String> = (1..=4)
+    let n: usize = s.eval("return table.getn(DingLines)").unwrap();
+    (1..=n)
         .map(|i| s.eval::<String>(&format!("return DingLines[{i}]")).unwrap())
-        .collect();
+        .collect()
+}
+
+/// Stock `ChatFrame_OnEvent` prints the whole level-up block from `PLAYER_LEVEL_UP`
+/// (`ChatFrame.lua:1283-1323`), once; the app composes none of it. The singular
+/// `LEVEL_UP_CHAR_POINTS` is `GetText`'s plural pick.
+#[test]
+fn the_ding_block_is_printed_once() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = chat_vm();
+    let lines = ding_lines(&mut s, [10, 22, 15, 1, 1, 0, 0, 0, 0]);
     assert_eq!(
         lines,
         [
@@ -2349,6 +2331,22 @@ fn the_ding_block_is_printed_once() {
             "You have gained 22 hit points and 15 mana.",
             "You have gained 1 talent point.",
             "Your Strength increases by 1.",
+        ]
+    );
+}
+
+/// A loss reaches stock signed, as the reference's `%d` fire passes it (`0x5e413e`): the health
+/// line prints it, and a lost stat prints no line (`if ( argN > 0 )`, `ChatFrame.lua:1302-1321`).
+#[test]
+fn a_negative_gain_prints_signed() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = chat_vm();
+    let lines = ding_lines(&mut s, [2, -2, 5, 0, -1, 0, 0, 0, 0]);
+    assert_eq!(
+        lines,
+        [
+            "Congratulations, you have reached level 2!",
+            "You have gained -2 hit points and 5 mana.",
         ]
     );
 }
@@ -2399,8 +2397,9 @@ fn the_free_professions_line_is_printed_once() {
 // ───────────── the chat cache restores inside the login ─────────
 
 /// `UPDATE_CHAT_WINDOWS` registers the chat frames for `CHAT_MSG_*`, and the `UPDATE_CHAT_COLOR`
-/// burst repaints id-0 lines through `ChatTypeInfo["REPLY"]`, so both come before `PLAYER_LOGIN`.
-/// The probe is a loose addon, because the entry load builds the VM it runs on.
+/// burst repaints id-0 lines through `ChatTypeInfo["REPLY"]`, so both come before `PLAYER_LOGIN`,
+/// which the load arms and the world-enter cascade fires. The probe is a loose addon, because the
+/// entry load builds the VM it runs on.
 #[test]
 fn the_chat_cache_restore_is_finished_before_player_login() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -2487,6 +2486,10 @@ fn the_chat_cache_restore_is_finished_before_player_login() {
         1,
     ));
     crate::ui_script::load_ingame_ui_on_world_entry(&mut world);
+    // The cascade, as the unit feed runs it once the player is in the world.
+    world
+        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .fire_world_enter();
 
     let read = |expr: &str| -> String {
         world
@@ -2514,7 +2517,7 @@ fn the_chat_cache_restore_is_finished_before_player_login() {
         read("ChatOrderProbe.loginRegistered")
     );
     // The reference's login order: `ADDON_LOADED` (`0x4900a3`), `VARIABLES_LOADED` (`0x4900b2`),
-    // the chat-cache burst (`0x4900d6`), `PLAYER_LOGIN` (`0x490959`).
+    // the chat-cache burst (`0x4900d6`), the arm (`0x49011d`), `PLAYER_LOGIN` (`0x490959`).
     assert_eq!(
         read("ChatOrderProbe.order"),
         "VARIABLES_LOADED UPDATE_CHAT_WINDOWS UPDATE_CHAT_COLOR PLAYER_LOGIN ",

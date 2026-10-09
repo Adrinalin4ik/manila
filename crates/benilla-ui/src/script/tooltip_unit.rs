@@ -1,7 +1,8 @@
-//! The engine unit tooltip, in `0x529fe0`'s line order: the name (gold; FrameXML recolours it by
-//! reaction), the creature subtitle, the level line, the faction name, then "PvP", "Skinnable",
-//! "Civilian" and "Leader", with health on the `<name>StatusBar` child. The world mouseover drives
-//! it through [`super::UiScript::world_tooltip_unit`]; unit-frame hovers call `SetUnit` from Lua.
+//! The engine unit tooltip, in `0x529fe0`'s line order: the name (gold, decorated by `0x609370`
+//! as `UnitPVPName`'s is; FrameXML recolours it by reaction), the creature subtitle, the level
+//! line, the faction name, then "PvP", "Skinnable", "Civilian" and "Leader", with health on the
+//! `<name>StatusBar` child. The world mouseover drives it through
+//! [`super::UiScript::world_tooltip_unit`]; unit-frame hovers call `SetUnit` from Lua.
 
 use mlua::{Lua, Table};
 
@@ -118,10 +119,12 @@ fn render_unit(lua: &Lua, this: &Table, token: &str) -> mlua::Result<bool> {
         return Ok(false);
     };
     // The name: `CGUnit_C::GetUnitName` `0x609210` (`0x52a187`), whose every miss falls to
-    // `UNKNOWNOBJECT`, as `UnitName`'s does. A token with no object never reaches the builder
+    // `UNKNOWNOBJECT`, as `UnitName`'s does, then decorated by `0x609370` with the flag a literal
+    // `1` (`0x52a19b`), as `UnitPVPName` does, so no CVar gates it: a ranked player's rank and
+    // medal line, a civilian kill's prefix. A token with no object never reaches the builder
     // (`0x468460`): no plate, and `SetUnit` answers nil.
     let title = match &u.name {
-        Some(n) => n.clone(),
+        Some(name) => super::pvp::pvp_name(lua, &u, name, player_level),
         None => unknownobject(lua)?.to_str()?.to_string(),
     };
     append_line(lua, this, (title, GOLD), None, false)?;
@@ -347,8 +350,8 @@ impl super::UiScript {
                 if let Ok(t) = tip_mut(&mut model, h) {
                     t.owner = Some(root);
                 }
+                let new = cursor_anchor_at(&model, h, root_id, ui_x, ui_y);
                 let input = model.layout_inputs.entry(h).or_default();
-                let new = Anchor::new(Point::Bottom, root_id, Point::BottomLeft, ui_x, ui_y);
                 let same = input.anchors.len() == 1
                     && super::object::anchor_bits_eq(&input.anchors[0], &new);
                 if !same {
@@ -437,10 +440,10 @@ impl super::UiScript {
         {
             let mut model = self.model_mut();
             clear_content(&mut model, h);
-            let input = model.layout_inputs.entry(h).or_default();
             // Anchor only: the frame's own clamp flag (`Frame::clamped_to_screen`, G flags bit 4)
             // slides a plate near the window edge back on screen.
-            let new = Anchor::new(Point::Bottom, root_id, Point::BottomLeft, ui_x, ui_y);
+            let new = cursor_anchor_at(&model, h, root_id, ui_x, ui_y);
+            let input = model.layout_inputs.entry(h).or_default();
             // Compare-then-touch, so a still cursor does not dirty the layout.
             let same =
                 input.anchors.len() == 1 && super::object::anchor_bits_eq(&input.anchors[0], &new);
@@ -494,8 +497,8 @@ impl super::UiScript {
             return;
         }
         let root_id = model.frame_id(root);
+        let new = cursor_anchor_at(&model, h, root_id, ui_x, ui_y);
         let input = model.layout_inputs.entry(h).or_default();
-        let new = Anchor::new(Point::Bottom, root_id, Point::BottomLeft, ui_x, ui_y);
         // Compare-then-touch: this runs on every pointer event.
         let same =
             input.anchors.len() == 1 && super::object::anchor_bits_eq(&input.anchors[0], &new);
@@ -555,4 +558,18 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
     Ok(())
+}
+
+/// The plate's BOTTOM on the cursor: `(ui_x, ui_y)` is in the screen root's units, and an anchor
+/// offset is in the tooltip's own, so it is divided by the tooltip's effective scale, the UI scale
+/// included, as the cursor arm `0x530b20` does ([`super::tooltip`]'s `cursor_anchor`).
+fn cursor_anchor_at(model: &Model, h: FrameHandle, root_id: u32, ui_x: f32, ui_y: f32) -> Anchor {
+    let s = super::object::eff_scale(model, h);
+    Anchor::new(
+        Point::Bottom,
+        root_id,
+        Point::BottomLeft,
+        ui_x / s,
+        ui_y / s,
+    )
 }

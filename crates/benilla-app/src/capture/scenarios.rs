@@ -18,6 +18,20 @@ pub(super) struct Scenario {
     pub(super) ui: Option<UiFixture>,
 }
 
+/// Which trainer [`UiFixture::Trainer`] captures.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum TrainerList {
+    /// Llane Beshere (entry 911), Northshire's warrior trainer: the rank-1 learn wrappers a
+    /// vmangos trainer lists, so the description is the taught ability's own text.
+    Warrior,
+    /// A shaman trainer's Astral Recall row (wrapper 1352 teaches 556), the shipped spell whose
+    /// description carries the `$z` token, so the shot pins the bind area's name too.
+    Shaman,
+    /// A profession trainer's two row shapes: the learn wrapper whose text is the taught
+    /// profession's, and a recipe whose text is its product's.
+    Blacksmith,
+}
+
 /// A UI window opened with synthetic state that mirrors what the server sends, so the capture
 /// runs the real feed, VM, extract and render chain.
 #[derive(Clone, Copy, PartialEq)]
@@ -29,6 +43,9 @@ pub(super) enum UiFixture {
     Merchant,
     Gossip,
     Quest,
+    /// The class trainer window fed as `SMSG_TRAINER_LIST` would: the first learnable service
+    /// selected, its description expanded from `Spell.dbc`.
+    Trainer(TrainerList),
     /// The bank window fed through a synthetic self-player descriptor: `PLAYER_FIELD_BANK_SLOT`
     /// guids, a bank bag, the purchased count in `PLAYER_BYTES_2` byte 2, and coinage.
     Bank,
@@ -53,6 +70,9 @@ pub(super) enum UiFixture {
     /// The world-mouseover tooltip over a seeded unit: the default anchor puts it at the screen's
     /// bottom-right (`GameTooltip.lua:73-77`), never on the hovered model.
     TooltipWorld,
+    /// The world-mouseover tooltip over a seeded ranked player: the same anchor, with the title's
+    /// PvP rank leg ("Sergeant Bob").
+    TooltipRank,
     /// The character window fed through a synthetic self player's stat block and equipped item
     /// guids, with the items in [`crate::items::Items`].
     Character,
@@ -113,6 +133,10 @@ pub(super) enum UiFixture {
     /// `water-noon` camera). Deep water is opaque (`WATER_DEEP_ALPHA` 1.0), so a name sorted before
     /// the liquid is painted out; it must read at full strength.
     NameWater,
+    /// The ranked player's overhead name line: a level-60 human holding honor rank 7 (internal;
+    /// the visual rank 3, "Sergeant") at the fixture's dry subject spot, framed close off the
+    /// `vplates` camera's bearing.
+    NameRank,
     /// One cell of the lighting matrix: a creature or GameObject spawned through the live path at
     /// `at` ([`SubjectKind`], the note above [`SUBJECT_SUN`]).
     Subject {
@@ -861,6 +885,15 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         minute: 720,
         ui: Some(UiFixture::TooltipWorld),
     },
+    // The same anchor over a ranked player: the tooltip title carries the rank, "Sergeant Bob".
+    Scenario {
+        name: "ui-tooltip-rank",
+        map: Some(MAP_AZEROTH),
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::TooltipRank),
+    },
     Scenario {
         name: "ui-char",
         map: Some(MAP_AZEROTH),
@@ -1570,6 +1603,45 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         look: [-9488.5, -258.5, 72.0],
         minute: 1380,
         ui: None,
+    },
+    // The ranked player's name line at the fixture's subject spot, 5 yd out level with it on the
+    // `vplates` camera's horizontal bearing, so the body and its name line fill the frame.
+    Scenario {
+        name: "name-rank",
+        map: Some(MAP_AZEROTH),
+        eye: [-8953.92, -135.53, 85.5],
+        look: [-8949.95, -132.49, 85.5],
+        minute: 720,
+        ui: Some(UiFixture::NameRank),
+    },
+    // The warrior trainer's window over the noon ground view, a learnable service selected.
+    Scenario {
+        name: "ui-trainer",
+        map: Some(MAP_AZEROTH),
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::Trainer(TrainerList::Warrior)),
+    },
+    // A shaman trainer's window: the one shipped service whose description carries `$z`, over a
+    // bind point, so the shot pins the token against `AreaTable`.
+    Scenario {
+        name: "ui-trainer-astral",
+        map: Some(MAP_AZEROTH),
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::Trainer(TrainerList::Shaman)),
+    },
+    // A blacksmithing trainer's window: the profession-learn row, whose text is the taught
+    // profession's, with a recipe row beneath it.
+    Scenario {
+        name: "ui-trainer-blacksmith",
+        map: Some(MAP_AZEROTH),
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::Trainer(TrainerList::Blacksmith)),
     },
 ];
 

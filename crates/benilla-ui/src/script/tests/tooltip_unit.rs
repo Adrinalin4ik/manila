@@ -182,6 +182,105 @@ fn a_pending_name_titles_unknownobject_and_the_answer_replaces_it() {
     assert!(s.take_errors().is_empty());
 }
 
+/// The title is decorated by `0x609370` with the flag on (`0x52a1ab`), the builder `UnitPVPName`
+/// runs: a ranked player's rank first through `UNIT_PVP_NAME`, gendered by the unit's sex, and a
+/// city protector's medal on a second line; a civilian kill's `PVP_RANK_CIVILIAN` prefix; anyone
+/// else the plain name.
+#[test]
+fn the_tooltip_title_is_the_pvp_name() {
+    let mut s = script();
+    seed_level_strings(&mut s);
+    s.set_screen_size(800.0, 600.0);
+    s.set_player_req_state(PlayerReqState {
+        level: 30,
+        ..Default::default()
+    });
+    let player = |sex: u8, pvp_rank: u8| UnitState {
+        exists: true,
+        is_player: true,
+        guid: 0x0000_0000_0000_002A,
+        name: Some("Pfedh".into()),
+        level: 1,
+        race: Some("Human".into()),
+        class: Some("Warrior".into()),
+        sex,
+        pvp_rank,
+        pvp_team: 1,
+        ..Default::default()
+    };
+    s.run(
+        r#"
+        UNIT_PVP_NAME = "%s %s"
+        PVP_RANK_7_1 = "Sergeant"
+        PVP_RANK_7_1_FEMALE = "Sergeant (f)"
+        PVP_MEDAL1 = "Guardian of Stormwind"
+        PVP_RANK_CIVILIAN = "Civilian"
+        local a = CreateFrame("Button", "UF1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+    "#,
+    )
+    .unwrap();
+    let title = |s: &UiScript| -> String { s.eval("return TTTextLeft1:GetText()").unwrap() };
+
+    s.set_unit("target", Some(player(2, 7)));
+    s.run(r#"assert(TT:SetUnit("target") == 1)"#).unwrap();
+    assert_eq!(title(&s), "Sergeant Pfedh", "the rank rides first");
+
+    s.set_unit("target", Some(player(3, 7)));
+    s.run(r#"assert(TT:SetUnit("target") == 1)"#).unwrap();
+    assert_eq!(
+        title(&s),
+        "Sergeant (f) Pfedh",
+        "the unit's sex picks the twin"
+    );
+
+    s.set_unit("target", Some(player(2, 0)));
+    s.run(r#"assert(TT:SetUnit("target") == 1)"#).unwrap();
+    assert_eq!(
+        title(&s),
+        "Pfedh",
+        "an unranked player keeps the plain name"
+    );
+
+    let mut protector = player(2, 7);
+    protector.pvp_medal = 1;
+    s.set_unit("target", Some(protector));
+    s.run(r#"assert(TT:SetUnit("target") == 1)"#).unwrap();
+    assert_eq!(
+        title(&s),
+        "Sergeant Pfedh\nGuardian of Stormwind",
+        "the medal rides a second line"
+    );
+
+    let mut beast = wolf();
+    beast.pvp_rank = 7; // a creature carries no rank byte, and must not read one anyway
+    s.set_unit("target", Some(beast));
+    s.run(r#"assert(TT:SetUnit("target") == 1)"#).unwrap();
+    assert_eq!(title(&s), "Timber Wolf", "a creature takes no rank");
+
+    // Hostile, PvP-flagged, a civilian and grey (`0x612550`): the dishonorable-kill prefix.
+    s.set_unit(
+        "target",
+        Some(UnitState {
+            exists: true,
+            name: Some("Defias Civilian".into()),
+            level: 20,
+            reaction: 2,
+            pvp: true,
+            civilian: true,
+            ..Default::default()
+        }),
+    );
+    s.run(r#"assert(TT:SetUnit("target") == 1)"#).unwrap();
+    assert_eq!(
+        title(&s),
+        "Civilian Defias Civilian",
+        "a civilian kill warns"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
 /// The faction line sits between the level line and "PvP" (`0x529fe0`). Civilian needs the PvP
 /// bit, the flag, hostility and a grey level (`0x612550`); Leader only the PvP bit and the flag
 /// (`0x6125c0`).
@@ -579,4 +678,49 @@ fn minimap_blip_tooltip_shows_and_fades() {
     s.run(r#"assert(not GameTooltip:IsShown(), "faded out after the ramp")"#)
         .unwrap();
     assert!(s.take_errors().is_empty());
+}
+
+/// A cursor-seated plate sits on the cursor under the UI scale: the cursor is in root units and
+/// the anchor offset in the tooltip's own, so the cursor arm divides by its effective scale
+/// (`0x530b20`).
+#[test]
+fn a_cursor_seated_plate_lands_on_the_cursor_under_the_ui_scale() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local up = CreateFrame("Frame", "UIParent")
+        up:SetPoint("BOTTOMLEFT", 0, 0); up:SetPoint("TOPRIGHT", 0, 0)
+        CreateFrame("GameTooltip", "GameTooltip", UIParent)
+    "#,
+    )
+    .unwrap();
+    assert!(s.set_ui_scale(0.9));
+    let at = |s: &mut crate::script::UiScript| -> (f64, f64) {
+        let answers: Vec<(u32, f32, f32, u64)> = s
+            .fontstrings_needing_measure()
+            .iter()
+            .map(|r| (r.id, 80.0, 10.0, r.key))
+            .collect();
+        s.set_measured_text_unwrapped(&answers);
+        s.resolve();
+        s.eval::<(f64, f64)>(
+            "local k = GameTooltip:GetEffectiveScale() \
+             local x = GameTooltip:GetCenter() \
+             return x * k, GameTooltip:GetBottom() * k",
+        )
+        .unwrap()
+    };
+    assert!(s.minimap_tooltip("Stormwind", 400.0, 300.0, false));
+    let (x, y) = at(&mut s);
+    assert!(
+        (x - 400.0).abs() < 1e-3 && (y - 300.0).abs() < 1e-3,
+        "({x}, {y})"
+    );
+    s.world_tooltip_move(200.0, 100.0);
+    let (x, y) = at(&mut s);
+    assert!(
+        (x - 200.0).abs() < 1e-3 && (y - 100.0).abs() < 1e-3,
+        "({x}, {y})"
+    );
 }
