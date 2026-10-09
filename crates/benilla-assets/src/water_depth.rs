@@ -42,9 +42,9 @@ impl Default for WaterQuality {
     fn default() -> Self { Self(1) }
 }
 
-/// MONKEY (planar water): how the High tier reflects the scenery. 0 = screen space (a march
-/// against the scene depth, which can only reflect what is on screen), 1 = planar (the scene
-/// rendered again, mirrored about the water plane near the camera, `liquid/mirror.rs`).
+/// MONKEY (planar water): how the High tier reflects the scenery. 1 = planar (the scene rendered
+/// again, mirrored about the water plane near the camera, `liquid/mirror.rs`) - the only shipped
+/// mode, no player option; 0 = screen space only, a dev A/B switch (`WOW_WATER_REFLECT=0`).
 #[derive(Resource, Clone, Copy, PartialEq, Debug)]
 pub struct WaterReflections(pub u8);
 

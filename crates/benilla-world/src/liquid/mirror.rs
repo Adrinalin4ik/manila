@@ -69,7 +69,8 @@ struct MirrorState {
     log_frames: u32,
 }
 
-/// `WOW_WATER_REFLECT=0|1` overrides the setting for this run, as `WOW_WATER` does the tier. The
+/// `WOW_WATER_REFLECT=0|1` overrides the (always-planar) default for this run, as `WOW_WATER` does
+/// the tier; 0 is a dev A/B switch, there is no player option. The
 /// tier's own override is read here too: `scene_depth.rs` re-applies it only in `Last`, after the
 /// options bridge has put the saved tier back for the frame, and the mirror is decided before that.
 #[derive(Resource)]

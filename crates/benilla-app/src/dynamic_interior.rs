@@ -24,7 +24,7 @@
 //! and the Off/Low presets reach.
 //!
 //! Water quality and lava glow use the same guarded bridge into their renderer resources.
-use benilla_assets::{WaterQuality, WaterReflections};
+use benilla_assets::WaterQuality;
 use benilla_world::lighting::{
     DynamicInteriors, EmissiveTier, FireLightGain, LavaLightGain, MoonShadowStrength, SpellLightGain,
 };
@@ -61,8 +61,6 @@ fn bridge(
     // reasons as the two gains above it — one live `f32`, one benilla-world resource, one guard.
     mut moon: ResMut<MoonShadowStrength>,
     mut water: ResMut<WaterQuality>,
-    // MONKEY (planar water): Option, absent in the headless bridge test.
-    reflections: Option<ResMut<WaterReflections>>,
     mut lava: ResMut<LavaLightGain>,
     // MONKEY (post): bloom also arms the HDR source hooks through the shared light blob.
     mut emissive: ResMut<EmissiveTier>,
@@ -76,11 +74,6 @@ fn bridge(
     }
     if water.0 != video.water_quality {
         water.0 = video.water_quality;
-    }
-    if let Some(mut reflections) = reflections {
-        if reflections.0 != video.water_reflections {
-            reflections.0 = video.water_reflections;
-        }
     }
     if lava.0 != video.lava_light_gain {
         lava.0 = video.lava_light_gain;
