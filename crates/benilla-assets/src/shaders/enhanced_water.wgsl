@@ -21,6 +21,7 @@
 //   105  the shared global-light buffer again, as the rows this module reads (the same buffer
 //        upstream binds at 90 - read-only storage may be bound twice)
 //   106  the opaque scene COLOUR, copied beside the depth: what the refraction looks through
+//   107  MONKEY (planar water): the MIRRORED view, rendered about the water plane (`liquid/mirror.rs`)
 
 #import bevy_pbr::mesh_view_bindings::{view, globals}
 // MONKEY (p0 MonkeyFrame): the programme block's struct, mirrored after the point table.
@@ -32,6 +33,7 @@
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(103) var scene_depth: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var scene_colour: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(107) var mirror_colour: texture_2d<f32>;
 
 struct WaterParams {
     // x = quality (0 Classic, 1 Enhanced, 2 High); y = wave energy (ocean 1.0, ADT inland 0.18,
@@ -43,6 +45,9 @@ struct WaterParams {
     sky_zenith: vec4<f32>,  // linear RGB, LightIntBand 2
     sky_horizon: vec4<f32>, // linear RGB, LightIntBand 6
     celestial: vec4<f32>,   // xyz toward the visible body; w = 0 sun, 1 white moon
+    // MONKEY (planar water): x = 1 while binding 107 holds this frame's mirrored view; y = the
+    // mirror plane's height (Bevy Y). x = 0: High falls back to the screen-space march.
+    mirror: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(104) var<uniform> water: WaterParams;
 
@@ -477,6 +482,15 @@ const SSR_FIRST_YD: f32 = 0.35;     // first step; each next one is SSR_GROWTH t
 const SSR_GROWTH: f32 = 1.20;       // 32 steps reach ~600 yd; bisection restores the precision
 const SSR_REFINE: i32 = 5;          // bisections between the last miss and the hit
 const SSR_RIPPLE: f32 = 0.35;       // share of the wave normal the reflected ray sees (WXL ssrRipple)
+// MONKEY (ssr stretch): how far a bisected hit may still sit BEHIND the depth it landed on. The
+// march's candidate test is loose (it must catch a surface between two long steps), so a ray that
+// merely passed behind a thin object - a dock deck, a plank, a post - converged onto that object's
+// silhouette, and every water pixel whose ray went under the deck read the same edge pixel: the
+// reflection smeared down the lake (owner screenshot, Lakeshire docks). A real hit converges onto
+// the surface itself, so after the bisection the ray is behind it by no more than the last
+// interval's own depth change; anything deeper is a ray that went behind an occluder and marches on.
+const SSR_HIT_SLACK_YD: f32 = 0.25;
+const SSR_HIT_SLACK_REL: f32 = 0.015;
 
 // The scene's view distance under the point `pos`, and that point's own; x = scene, y = ray,
 // z = 1 when `pos` is on screen. Sky pixels report no surface.
@@ -498,19 +512,33 @@ fn water_ssr(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
     var step_len = SSR_FIRST_YD;
     var along = 0.0;
     var last_miss = 0.0;
+    // MONKEY (ssr stretch): the scene depth of the occluder the ray is passing behind, 0 when none.
+    var hidden_by = 0.0;
     for (var i = 0; i < SSR_STEPS; i += 1) {
         along += step_len;
         let probe = ssr_probe(origin + dir * along, dims);
         if probe.z < 0.5 { break; }                       // left the screen: nothing to show
         let behind = probe.y - probe.x;
-        if behind > 0.0 && behind < 2.0 + 0.1 * probe.x + step_len {
+        // Out from behind the occluder: in front of the depth again, or over another surface.
+        if hidden_by > 0.0 && (behind <= 0.0 || abs(probe.x - hidden_by) > 1.0 + 0.05 * hidden_by) {
+            hidden_by = 0.0;
+        }
+        if hidden_by == 0.0 && behind > 0.0 && behind < 2.0 + 0.1 * probe.x + step_len {
             // Bisect back toward the last miss, so the reflection sits on the surface it hit.
             var lo = last_miss;
             var hi = along;
+            var at_hi = probe;
             for (var k = 0; k < SSR_REFINE; k += 1) {
                 let mid = 0.5 * (lo + hi);
                 let m = ssr_probe(origin + dir * mid, dims);
-                if m.y > m.x { hi = mid; } else { lo = mid; }
+                if m.y > m.x { hi = mid; at_hi = m; } else { lo = mid; }
+            }
+            // MONKEY (ssr stretch): a converged hit, or a ray that slipped behind an occluder?
+            if at_hi.y - at_hi.x > SSR_HIT_SLACK_YD + SSR_HIT_SLACK_REL * at_hi.x + (hi - lo) {
+                hidden_by = at_hi.x;
+                last_miss = along;
+                step_len *= SSR_GROWTH;
+                continue;
             }
             let clip = view.clip_from_world * vec4<f32>(origin + dir * hi, 1.0);
             let uv = (clip.xy / clip.w) * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
@@ -526,6 +554,48 @@ fn water_ssr(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
         step_len *= SSR_GROWTH;
     }
     return vec4<f32>(0.0);
+}
+
+// ── HIGH (planar): the mirrored view ──────────────────────────────────────────────────────────
+// MONKEY (planar water): `liquid/mirror.rs` renders the scene once more from the eye reflected in
+// the water plane near the camera (clipped at that plane, rolled half a turn so it stays a proper
+// rotation), into binding 107. Seen from that camera a point X lands where the world camera would
+// see X's mirror image, upside down: so the mirror is read at the flipped screen position of the
+// reflected point. On the plane that is the water pixel's own position; the ripple moves the read
+// by the bent ray's offset a few yards out, world-anchored like the refraction bend.
+const PLANAR_RIPPLE_YD: f32 = 2.5;
+// The reflectivity floor the mirror is shown at (the screen-space path's floor where it found a hit).
+const PLANAR_FLOOR: f32 = 0.42;
+
+// The mirror at a texture coordinate, bilinear by hand (it is bound unfiltered, as 103/106 are).
+fn planar_fetch(uv: vec2<f32>) -> vec3<f32> {
+    let dims = vec2<f32>(textureDimensions(mirror_colour));
+    let p = clamp(uv * dims - vec2<f32>(0.5), vec2<f32>(0.0), dims - vec2<f32>(1.0));
+    let i = vec2<i32>(floor(p));
+    let f = p - floor(p);
+    let top = vec2<i32>(dims) - vec2<i32>(1);
+    let a = textureLoad(mirror_colour, i, 0).rgb;
+    let b = textureLoad(mirror_colour, min(i + vec2<i32>(1, 0), top), 0).rgb;
+    let c = textureLoad(mirror_colour, min(i + vec2<i32>(0, 1), top), 0).rgb;
+    let d = textureLoad(mirror_colour, min(i + vec2<i32>(1, 1), top), 0).rgb;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// rgb = the reflected scene (gamma lane, already fogged over the whole path); w = how far this
+// surface lies on the mirrored plane (0: another sheet of water, keep the screen-space march).
+fn water_planar(pos: vec3<f32>, flat_dir: vec3<f32>, ripple_dir: vec3<f32>, tolerance: f32)
+    -> vec4<f32> {
+    if water.mirror.x < 0.5 { return vec4<f32>(0.0); }
+    let plane = water.mirror.y;
+    let on_plane = 1.0 - smoothstep(tolerance, 3.0 * tolerance, abs(pos.y - plane));
+    if on_plane <= 0.0 { return vec4<f32>(0.0); }
+    let s = pos + (ripple_dir - flat_dir) * PLANAR_RIPPLE_YD;
+    let clip = view.clip_from_world * vec4<f32>(s.x, 2.0 * plane - s.y, s.z, 1.0);
+    if clip.w <= 0.0 { return vec4<f32>(0.0); }
+    let ndc = clip.xy / clip.w;
+    // The world view's uv is (ndc.x, -ndc.y) * 0.5 + 0.5; the mirror's is that, upside down.
+    let uv = clamp(ndc * 0.5 + vec2<f32>(0.5), vec2<f32>(0.0), vec2<f32>(1.0));
+    return vec4<f32>(planar_fetch(uv), on_plane);
 }
 
 // Reverse-Z perspective: valid for both finite and infinite far planes. For z_view = -distance,
@@ -781,10 +851,15 @@ fn enhanced_water(in: WaterFragment, shallow: vec4<f32>, deep: vec4<f32>) -> vec
     // so the reflection holds together and the waves only ripple it; rays climbing toward the eye
     // (a steep look down) have nothing on screen to reflect and keep the sky.
     var reflection = mix(fog.rgb, sky, fog.w);   // the sky reflection is a surface term
-    if water.mode.x > 1.5 && reflectivity > 0.1 {
+    if water.mode.x > 1.5 {
         let ssr_n = normalize(mix(vec3<f32>(0.0, 1.0, 0.0), n, SSR_RIPPLE));
         let ssr_dir = reflect(-to_view, ssr_n);
-        if ssr_dir.y > 0.0 {
+        // MONKEY (planar water): the mirrored view first; it holds the sky too, so where it
+        // covers the surface whole the march is not run at all.
+        let planar = water_planar(in.world_position.xyz,
+            reflect(-to_view, vec3<f32>(0.0, 1.0, 0.0)), ssr_dir, select(0.3, 1.6, ocean_mesh));
+        let fresnel = reflectivity;
+        if reflectivity > 0.1 && ssr_dir.y > 0.0 && planar.w < 0.999 {
             let hit = water_ssr(in.world_position.xyz, ssr_dir);
             // Rays heading back toward the eye find nothing on screen that faces them.
             let facing = 1.0 - smoothstep(0.55, 0.9, dot(ssr_dir, to_view));
@@ -793,6 +868,12 @@ fn enhanced_water(in: WaterFragment, shallow: vec4<f32>, deep: vec4<f32>) -> vec
             // expects a lake to mirror its banks - but only where a reflection was actually found.
             reflectivity = mix(reflectivity, max(reflectivity, 0.42), hit.w * facing);
         }
+        // The mirror is a whole reflection - banks, hulls, the undersides SSR cannot see, and the
+        // real sky with its clouds - so it takes the scenery floor wherever it is trusted, ramped
+        // in from the Fresnel minimum so a steep look down does not meet a hard reflectivity step.
+        reflection = mix(reflection, planar.rgb, planar.w);
+        reflectivity = mix(reflectivity,
+            max(reflectivity, PLANAR_FLOOR * smoothstep(0.06, 0.3, fresnel)), planar.w);
     }
     rgb = mix(rgb, reflection, reflectivity);
     // Everything added from here on (glints, light speculars) is surface light: fog attenuates it.

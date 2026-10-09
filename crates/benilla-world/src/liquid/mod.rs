@@ -32,6 +32,9 @@ use benilla_assets::AssetSet;
 
 mod drift;
 mod lod;
+// MONKEY (planar water): the High tier's mirrored view of the scene.
+mod mirror;
+pub use mirror::{WaterMirrorCamera, WaterMirrorPlugin};
 mod scene_depth;
 // MONKEY (ao): the label orders the AO pass.
 pub use scene_depth::{WaterDepthLabel, WaterDepthPlugin};
@@ -92,6 +95,7 @@ impl Plugin for LiquidPlugin {
             .init_resource::<benilla_assets::WaterQuality>()
             .init_resource::<benilla_assets::WaterDepthImage>()
             .init_resource::<benilla_assets::WaterColourImage>()
+            .init_resource::<benilla_assets::WaterMirrorImage>()
             .init_resource::<Underwater>()
             .init_resource::<SubmergedEye>()
             .init_resource::<WaterIndex>()

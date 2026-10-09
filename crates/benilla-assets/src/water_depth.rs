@@ -16,6 +16,9 @@ pub struct WaterUniform {
     pub sky_horizon: Vec4,
     /// xyz toward the visible sun by day, the white moon by night; w = 0 sun, 1 moon.
     pub celestial: Vec4,
+    /// MONKEY (planar water): x = 1 while [`WaterMirrorImage`] holds this frame's mirrored view;
+    /// y = the mirror plane's height (Bevy Y). Zero: the High tier marches its screen-space rays.
+    pub mirror: Vec4,
 }
 
 impl Default for WaterUniform {
@@ -26,6 +29,7 @@ impl Default for WaterUniform {
             sky_zenith: Vec4::ZERO,
             sky_horizon: Vec4::ZERO,
             celestial: Vec3::Y.extend(0.0),
+            mirror: Vec4::ZERO,
         }
     }
 }
@@ -36,6 +40,35 @@ pub struct WaterQuality(pub u8);
 
 impl Default for WaterQuality {
     fn default() -> Self { Self(1) }
+}
+
+/// MONKEY (planar water): how the High tier reflects the scenery. 0 = screen space (a march
+/// against the scene depth, which can only reflect what is on screen), 1 = planar (the scene
+/// rendered again, mirrored about the water plane near the camera, `liquid/mirror.rs`).
+#[derive(Resource, Clone, Copy, PartialEq, Debug)]
+pub struct WaterReflections(pub u8);
+
+impl Default for WaterReflections {
+    fn default() -> Self { Self(1) }
+}
+
+/// MONKEY (planar water): the mirrored view's colour, rendered by the mirror camera before the
+/// world camera; the water samples it at its own (flipped) screen position.
+#[derive(Resource, Clone)]
+pub struct WaterMirrorImage(pub Handle<Image>);
+
+impl FromWorld for WaterMirrorImage {
+    fn from_world(world: &mut World) -> Self {
+        use bevy::{asset::RenderAssetUsages, render::render_resource::*};
+        let mut image = Image::new_fill(
+            Extent3d::default(), TextureDimension::D2, &[0u8; 8],
+            TextureFormat::Rgba16Float, RenderAssetUsages::default(),
+        );
+        image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING
+            | TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_DST;
+        image.data = None;
+        Self(world.resource_mut::<Assets<Image>>().add(image))
+    }
 }
 
 /// The world view's opaque depth, resolved to a sampleable R32Float image.

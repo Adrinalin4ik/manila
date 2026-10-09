@@ -397,6 +397,17 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         minute: 720,
         ui: None,
     },
+    // MONKEY (planar water): Lakeshire's small dock from the boardwalk, looking down at the deck
+    // and its reflection (the owner's stretched-reflection screenshot); the `vista` instrument at
+    // feet -9297,-2170,67, facing 205, pitch -30.
+    Scenario {
+        name: "water-lakeshire-dock",
+        map: Some(MAP_AZEROTH),
+        eye: [-9297.0, -2170.0, 69.0],
+        look: [-9689.4, -2353.0, -181.0],
+        minute: 720,
+        ui: None,
+    },
     // Westfall western coast: sand in the foreground, open sea to the west.
     Scenario {
         name: "water-ocean",

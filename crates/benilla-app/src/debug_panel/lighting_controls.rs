@@ -62,6 +62,8 @@ const INTERIOR: &[Knob] = &[
 const GROUPS: &[(&str, &[Knob])] = &[
     ("Water", &[
         knob!("waterQuality", water_quality, Choice(&[0, 1, 2]), "0 Classic, 1 Enhanced, 2 High; High adds mirror reflections and costs the most."),
+        // MONKEY (planar water): High water's scenery reflection.
+        knob!("waterReflections", water_reflections, Choice(&[0, 1]), "High water only: 0 Screen Space, 1 Planar (the scene drawn again, mirrored; about +1 ms CPU)."),
     ]),
     ("Interior light", INTERIOR),
     ("Fire", &[

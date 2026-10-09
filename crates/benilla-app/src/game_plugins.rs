@@ -107,6 +107,8 @@ impl PluginGroup for GamePlugins {
             // The game's own WGSL, compiled in, before anything that could ask for one.
             .add(crate::shaders::plugin)
             .add(benilla_world::liquid::WaterDepthPlugin)
+            // MONKEY (planar water): the High tier's mirrored view, rendered before the world.
+            .add(benilla_world::liquid::WaterMirrorPlugin)
             .add(BowstringPlugin)
             .add(crate::weapon_trail::WeaponTrailPlugin)
             .add(FishingLinePlugin)
