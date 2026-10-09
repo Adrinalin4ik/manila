@@ -18,7 +18,9 @@ struct MonkeyFrame {
     wind_a: vec4<f32>, // dir_x, dir_y (unit, world XZ: .x = world x, .y = world z), base_heading (rad, fixed profile heading), gust 0..1
     wind_b: vec4<f32>, // travel (yd, integrated speed, wrapped at 4096), sway_strength, grass_strength, tree_strength
     wet_a: vec4<f32>,  // rain_rate 0..1, wetness 0..1, ripple_time_s, snow 0..1
-    misc: vec4<f32>,  // bender_count, time_of_day 0..1 (packer), night 0..1 (packer), moon shadow confidence 0..1
+    // MONKEY (wmo surface lights): misc.x's integer is the bender count; its fraction is 0.5
+    // when enhanced exterior points are enabled, zero in Classic. Wind truncates to u32.
+    misc: vec4<f32>,  // bender_count + exterior gate, time_of_day 0..1, night 0..1, moon shadow confidence
     benders: array<vec4<f32>, 8>, // world xyz (Bevy space) + radius (yd); the first bender_count are live
     // GFX (moonlight): unit direction toward the moon (Bevy space) + intensity (gamma; 0 = off).
     moon: vec4<f32>,

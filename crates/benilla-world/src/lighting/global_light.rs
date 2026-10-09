@@ -756,10 +756,18 @@ fn pack_monkey_frame(
     frame: Res<super::MonkeyFrame>,
     clock: Res<super::GameClock>,
     light: Res<WowLighting>,
+    fire_gain: Res<FireLightGain>,
+    spell_gain: Res<SpellLightGain>,
+    lava_gain: Option<Res<super::LavaLightGain>>,
     mut data: ResMut<WowLightData>,
 ) {
     let night = 1.0 - sun_shadow_strength(light.celestial_dir.y);
-    let packed = frame.pack(clock.minute as f32 / 1440.0, night);
+    let mut packed = frame.pack(clock.minute as f32 / 1440.0, night);
+    // MONKEY (wmo surface lights): wind truncates misc.x to u32, leaving its fraction free.
+    // All enhanced point gains zero (Classic) preserves the old pick and frame bits.
+    if fire_gain.0 > 0.0 || spell_gain.0 > 0.0 || lava_gain.is_some_and(|gain| gain.0 > 0.0) {
+        packed[7][0] += 0.5;
+    }
     if data.0.monkey != packed {
         data.0.monkey = packed;
     }
@@ -2379,6 +2387,53 @@ mod tests {
         // Every slot past the count is literally empty — a stale fade would follow a live light.
         assert!(gpu[ROOM_CLAIM_FADE + 8..].iter().all(|w| *w == 0));
         assert_eq!(gpu.len(), ROOM_CLAIM_STRIDE, "2 head + 6 ids + 6 x 4 fade");
+    }
+
+    /// MONKEY (wmo surface lights): Classic keeps all frame bits, and the enhanced gate must
+    /// never alter the wind shader's integer bender count or any other programme row.
+    #[test]
+    fn the_wmo_surface_gate_preserves_classic_and_wind_counts() {
+        let mut app = App::new();
+        app.init_resource::<super::super::MonkeyFrame>()
+            .init_resource::<super::super::GameClock>()
+            .init_resource::<WowLighting>()
+            .init_resource::<WowLightData>()
+            .insert_resource(FireLightGain(0.0))
+            .insert_resource(SpellLightGain(0.0))
+            .insert_resource(super::super::LavaLightGain(0.0))
+            .add_systems(Update, pack_monkey_frame);
+        for count in 0..=8 {
+            app.world_mut()
+                .resource_mut::<super::super::MonkeyFrame>()
+                .bender_count = count;
+            let frame = app.world().resource::<super::super::MonkeyFrame>();
+            let classic = frame.pack(0.0, 1.0);
+            for gains in [
+                [0.0, 0.0, 0.0],
+                [0.25, 0.0, 0.0],
+                [0.0, 0.25, 0.0],
+                [0.0, 0.0, 0.25],
+                [1.0, 1.0, 1.0],
+                [0.0, 0.0, 0.0],
+            ] {
+                app.world_mut().resource_mut::<FireLightGain>().0 = gains[0];
+                app.world_mut().resource_mut::<SpellLightGain>().0 = gains[1];
+                app.world_mut()
+                    .resource_mut::<super::super::LavaLightGain>()
+                    .0 = gains[2];
+                app.update();
+                let packed = app.world().resource::<WowLightData>().0.monkey;
+                assert_eq!(
+                    packed[7][0] as u32, count,
+                    "wind count must truncate unchanged"
+                );
+                let mut expected = classic;
+                if gains.iter().any(|gain| *gain > 0.0) {
+                    expected[7][0] += 0.5;
+                }
+                assert_eq!(packed, expected, "only the enhanced gate may move");
+            }
+        }
     }
 
     /// GOLDEN — MONKEY (fire GO lights): `fireLightGain` scales SYNTHESISED sources and **only**
