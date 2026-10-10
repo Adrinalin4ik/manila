@@ -232,6 +232,9 @@ pub fn install_class_names<'a>(
 mod tests;
 
 #[cfg(test)]
+mod aura_tests;
+
+#[cfg(test)]
 mod focus_retention_tests;
 
 #[cfg(test)]

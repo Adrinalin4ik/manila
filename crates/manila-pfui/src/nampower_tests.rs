@@ -419,6 +419,7 @@ fn observed_sources_enrich_real_auras_and_server_duration_wins_over_dbc() {
             Some(vec![host::Aura {
                 slot: 1,
                 source_guid: None,
+                crowd_control: false,
                 state: AuraState {
                     spell_id: 139,
                     name: Some("Renew".into()),

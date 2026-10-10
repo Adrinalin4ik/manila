@@ -292,6 +292,26 @@ pub(super) fn custom_tokens(lua: &Lua, guid: u64) -> Vec<String> {
         .collect()
 }
 
+/// Current readable aliases for GUID-backed extension events; raw GUIDs are query-only.
+pub(super) fn event_tokens(lua: &Lua, guid: u64) -> Vec<String> {
+    let mut tokens = {
+        let model = lua.app_data_ref::<Model>().expect("model");
+        let mut tokens: Vec<String> = ["player", "pet", "target", "mouseover", "npc"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        tokens.extend((1..=4).flat_map(|i| [format!("party{i}"), format!("partypet{i}")]));
+        tokens.extend(
+            (1..=model.unit_guids.raid.len())
+                .flat_map(|i| [format!("raid{i}"), format!("raidpet{i}")]),
+        );
+        tokens.retain(|token| model.unit_guids.guid_of(token).ok().flatten() == Some(guid));
+        tokens
+    };
+    tokens.extend(custom_tokens(lua, guid));
+    tokens
+}
+
 fn query_tokens(lua: &Lua) -> Vec<String> {
     let mut bases = super::super::nameplate::pfui::all_tokens(lua);
     bases.push("focus".into());

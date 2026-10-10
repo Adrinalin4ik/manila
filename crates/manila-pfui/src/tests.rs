@@ -1119,6 +1119,7 @@ fn aura_tooltips_use_the_modern_index_space_and_existing_spell_renderer() {
         script.lua(),
         5,
         Some(vec![Aura {
+            crowd_control: false,
             slot: 7,
             state: AuraState {
                 spell_id: 123,
@@ -3085,6 +3086,7 @@ fn modern_auras_keep_descriptor_slots_and_report_only_known_casters_and_timers()
         ..Default::default()
     });
     let aura = |slot, spell, helpful, source_guid| Aura {
+        crowd_control: false,
         slot,
         source_guid,
         state: AuraState {

@@ -1,5 +1,6 @@
 //! Preserve raw aura slots for the optional modern projection without changing stock DTOs.
 
+use benilla_formats::SpellCatalog;
 use benilla_ui::script::{
     pfui_host::auras::{self, Aura},
     AuraState, UiScript,
@@ -46,7 +47,7 @@ fn feed_visible(
         let inputs: Vec<_> = super::other_unit_inputs(&store, catalog, true).collect();
         if fresh || catalog_changed || memo.get(&guid.0) != Some(&inputs) {
             let list = super::aura_list(catalog, &inputs);
-            unit(&script, guid.0, &inputs, &list);
+            unit(&script, guid.0, &inputs, &list, catalog);
             memo.insert(guid.0, inputs);
         }
     }
@@ -54,7 +55,9 @@ fn feed_visible(
         if present.contains(guid) {
             true
         } else {
-            remove(&script, *guid);
+            if !auras::has_group_alias(script.lua(), *guid) {
+                remove(&script, *guid);
+            }
             false
         }
     });
@@ -65,6 +68,7 @@ pub(super) fn player(
     guid: u64,
     slots: &[super::CachedAura],
     list: &[AuraState],
+    catalog: Option<&SpellCatalog>,
 ) {
     auras::set_auras(
         script.lua(),
@@ -73,17 +77,19 @@ pub(super) fn player(
             slots
                 .iter()
                 .zip(list)
-                .map(|(raw, state)| Aura {
-                    slot: raw.slot,
-                    state: state.clone(),
-                    source_guid: None,
-                })
+                .map(|(raw, state)| project(raw.slot, raw.flags, state, catalog))
                 .collect(),
         ),
     );
 }
 
-pub(super) fn unit(script: &UiScript, guid: u64, slots: &[super::AuraInput], list: &[AuraState]) {
+pub(super) fn unit(
+    script: &UiScript,
+    guid: u64,
+    slots: &[super::AuraInput],
+    list: &[AuraState],
+    catalog: Option<&SpellCatalog>,
+) {
     auras::set_auras(
         script.lua(),
         guid,
@@ -91,16 +97,49 @@ pub(super) fn unit(script: &UiScript, guid: u64, slots: &[super::AuraInput], lis
             slots
                 .iter()
                 .zip(list)
-                .map(|(raw, state)| Aura {
-                    slot: raw.0,
-                    state: state.clone(),
-                    source_guid: None,
-                })
+                .map(|(raw, state)| project(raw.0, raw.3, state, catalog))
                 .collect(),
         ),
     );
 }
 
+fn project(slot: u8, flags: u8, state: &AuraState, catalog: Option<&SpellCatalog>) -> Aura {
+    use benilla_protocol::messages::AURA_FLAG_EFF_INDEX_MASK;
+    let mut state = state.clone();
+    let mut crowd_control = false;
+    if let Some(spell) = catalog.and_then(|catalog| catalog.get(state.spell_id)) {
+        // The nibble names active effects in reverse bit order (effect 0 is bit 3).
+        // Roster-only records carry no flags, so all DBC effects remain candidates there.
+        let active = |i: usize| flags & AURA_FLAG_EFF_INDEX_MASK == 0 || flags & (8 >> i) != 0;
+        let control = |aura| matches!(aura, 2 | 5 | 6 | 7 | 12 | 25 | 26 | 27 | 33 | 60 | 67 | 128);
+        let mechanic =
+            |mechanic| matches!(mechanic, 1..=3 | 5 | 7..=14 | 17 | 18 | 20 | 23 | 24 | 27 | 30);
+        let control_effect = (0..3).any(|i| active(i) && control(spell.effect_apply_aura[i]));
+        // The wire has no polarity bit. Keep negative-range and cancelable slots authoritative;
+        // identify known overflow debuffs from AURA_IS_DEBUFF or intrinsically harmful effects.
+        let harmful = spell.attributes & 0x0400_0000 != 0
+            || control_effect
+            || (0..3).any(|i| active(i) && matches!(spell.effect_apply_aura[i], 3 | 53 | 64 | 89));
+        if state.helpful && !state.cancelable && harmful {
+            state.helpful = false;
+        }
+        crowd_control = !state.helpful
+            && (control_effect
+                || mechanic(spell.mechanic)
+                || (0..3).any(|i| active(i) && mechanic(spell.effect_mechanic[i])));
+    }
+    Aura {
+        slot,
+        state,
+        source_guid: None,
+        crowd_control,
+    }
+}
+
 pub(super) fn remove(script: &UiScript, guid: u64) {
     auras::set_auras(script.lua(), guid, None);
 }
+
+#[cfg(test)]
+#[path = "pfui_tests.rs"]
+mod tests;

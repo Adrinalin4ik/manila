@@ -241,6 +241,14 @@ pub fn auras(lua: &Lua, guid: u64, mut incoming: Vec<Aura>) {
         }
         (previous, annotations)
     };
+    for old in &previous {
+        if !incoming
+            .iter()
+            .any(|aura| aura.slot == old.slot && aura.spell == old.spell)
+        {
+            pfui_host::auras::forget_annotation(lua, guid, old.slot, old.spell);
+        }
+    }
     for (spell, app) in annotations {
         pfui_host::auras::annotate(lua, guid, spell, app.caster, app.duration, app.expires);
     }

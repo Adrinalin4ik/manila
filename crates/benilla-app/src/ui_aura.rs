@@ -624,7 +624,7 @@ fn feed_auras(
     }
 
     #[cfg(feature = "pfui")]
-    pfui::player(&script, self_guid.0, &cache.auras, &list);
+    pfui::player(&script, self_guid.0, &cache.auras, &list, catalog);
     script.set_player_auras(list);
     script.set_tracking(tracking);
     if changed {

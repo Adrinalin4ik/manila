@@ -97,7 +97,7 @@ builds against this checkout's benilla revision; upstream provides no stable ext
 | Player states | Descriptor form IDs and mount state, real stealth auras, authorized mount/form cancellation from DBC effects; warrior stances remain active |
 | Nampower integration | Explicit 3.0.0 compatibility identity, packet-backed spell/aura/heal events, raw aura slot and stack edges, event CVars, GUID-directed named casts, forced/no-queue spellbook overloads, GCD/non-GCD/on-swing queues, ground quickcasting, bounded server-rejection retries, prioritized queued scripts and pfUI queue indicator |
 | Observed casts | Cast/channel queries over spell packets, remote channels confirmed by live descriptors, stable per-cast identifiers, pushback and modern start/success/stop/failure events |
-| Auras | Seven pfUI-used queries, raw descriptor slots, pagination, fill buffers, polarity/source filters and authorized player-aura cancellation |
+| Auras | Seven pfUI-used queries, raw descriptor slots, pagination, fill buffers, polarity/source/crowd-control filters, DBC-backed overflow classification, refresh notifications and authorized player-aura cancellation |
 | Units and clock | Stock, focus, GUID and nameplate query tokens; local-player GUID checks, typed/raw power, NPC subtitles, party/raid membership and realm-local calendar |
 | Focus | `FocusUnit`/`ClearFocus`, target-chain reads over visible-unit snapshots, real GUID targeting and focus identity/health/name/level/target events |
 | Nameplates | Real pooled frames, stable unit-token slots, target chains and frame-valued creation, unit-added and readable unit-removed events |
@@ -170,8 +170,19 @@ the original slots and counts. Bank and specialized-bag sorting still need live 
 
 The aura feed retains actual descriptor slots, player durations when known, and unknown sources
 as unknown. Successful observed casts supply aura ownership and DBC duration for their hit
-targets; the player's server duration remains authoritative. Auras already present at login
-retain unknown ownership. Turtle polarity overflow and crowd-control filters remain unimplemented. Cast observation supports
+targets; the player's server duration remains authoritative. Ownership survives unchanged
+snapshots and clears on removal or slot reuse. Source tokens include group pets, focus and
+nameplates. Newly learned ownership and refreshed player duration packets notify `UNIT_AURA`
+after updating the modern snapshot; unchanged timers produce no repeated notifications.
+Roster auras remain available when a group member or pet leaves object range.
+
+`CROWD_CONTROL` and its negation use DBC mechanics and active control/slow aura effects.
+The modern projection identifies overflow debuffs through `AURA_IS_DEBUFF` and intrinsically
+harmful/control effects, keeping ordinary harmful slots first in filtered queries. Cancelable
+buffs and negative-range slots retain server classification. The descriptor carries no general
+polarity field, so unknown or ambiguous custom spells still use their slot range; complete Turtle
+overflow parity needs live comparison. Auras already present at login retain unknown ownership,
+as their descriptors omit the caster. Cast observation supports
 ordinary visible unit tokens, local channels and observed remote channels. Remote channel timing
 starts with an observed `SMSG_SPELL_START`; `UNIT_CHANNEL_SPELL` confirms the channel and stops it
 when the descriptor clears, changes spell or leaves view. A cast-time prelude waits for
@@ -336,7 +347,7 @@ into the game install.
 | Area | Backing behavior needed |
 | --- | --- |
 | Units and focus | Broader focus/plate aura and descriptor event feeds, further query/verb token integration |
-| Auras | Ownership of pre-existing auras, crowd-control filters, Turtle overflow polarity and broader aura-change coverage; observed successful casts provide caster/duration information, while the 1.12 aura descriptors omit it |
+| Auras | Live verification of ambiguous/custom-spell Turtle overflow and broader aura-change coverage; pre-existing aura ownership is unavailable from the 1.12 descriptor, while observed successful casts provide caster/duration information |
 | Casting and spells | Complete modern cast-event behavior and interruption classification; remote channel timing has no talent/pushback feed; runtime spell queries inherit existing engine validator limits |
 | Remaining Nampower behavior | Item queues, bulk disenchanting and the broader Nampower API remain outside this subset; original-DLL retry timing, non-GCD capacity, terrain cursor timing and manual-click event coverage need comparison; the auto-attack component count is unavailable from the stock decoder; non-GCD/on-swing ordering is covered by command-capture tests, with combat behavior still unverified |
 | Items and bags | Remaining instance helpers; broader multi-bag, bank and specialized-bag sorting verification |
@@ -383,6 +394,17 @@ typed mana/rage/energy, hidden known-spell queries, live/fallback creature IDs, 
 quest requirements, string-icon macros, plate token stability/removal/recycling, group rosters and GUID-based new-item tracking. Equipment tests retain duplicate GUIDs across saves,
 resolve a paired swap with one send, wait for acknowledgements, fail on timeouts and reload saved
 sets with character/realm isolation.
+Aura regressions cover crowd-control/negated filters, overflow ordering and active-effect masks,
+observed ownership during callbacks, timer refreshes without repeated notifications, slot reuse,
+group-pet source tokens and roster fallback after a member streams out. Registered-packet channel
+tests cover target/focus/nameplate queries and events, cast preludes, replacement, late failures,
+unrelated instants, despawn and session cleanup. The shared aura clock has independent regressions
+for uneven frames, hitches, refreshed durations and standalone feeds.
+Native live probes verify self-cast Renew ownership and refresh, stable expiration with no
+repeated idle aura notifications, and a six-second NPC First Aid channel on both target and
+focus. Channel callbacks see the active snapshot at start and a cleared snapshot at stop;
+pfUI renders both bars. The probe restores its character and event settings and reports no
+Lua errors. These checks do not establish remote talent/pushback timing or browser rendering.
 Equipment-button tests cover drag displacement, passive-spell refusal, rename/icon/delete
 updates, cursor transition payloads, saved bindings, server action conflicts and locked-item
 refusals through the actual swap queue.

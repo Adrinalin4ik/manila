@@ -11,6 +11,8 @@ pub struct Aura {
     pub state: AuraState,
     /// Unknown until a corresponding cast was observed.
     pub source_guid: Option<u64>,
+    /// DBC mechanics and the descriptor's active aura effects, supplied by the host.
+    pub crowd_control: bool,
 }
 
 #[derive(Default)]
@@ -18,25 +20,99 @@ struct Extras {
     by_guid: HashMap<u64, Vec<Aura>>,
 }
 
+/// The stock aura feed owns roster fallback even after a member or pet leaves object range.
+pub fn has_group_alias(lua: &Lua, guid: u64) -> bool {
+    lua.app_data_ref::<Model>().is_some_and(|model| {
+        let units = &model.unit_guids;
+        units
+            .party
+            .iter()
+            .chain(&units.party_pets)
+            .chain(&units.raid)
+            .chain(&units.raid_pets)
+            .any(|candidate| *candidate == guid && guid != 0)
+    })
+}
+
 /// Enrich a streamed aura only after an observed successful cast names its source.
 pub fn annotate(lua: &Lua, guid: u64, spell: u32, caster: u64, duration: f64, expires: f64) {
-    let Some(mut extras) = lua.app_data_mut::<Extras>() else {
-        return;
-    };
-    if let Some(auras) = extras.by_guid.get_mut(&guid) {
-        for aura in auras.iter_mut().filter(|a| a.state.spell_id == spell) {
-            aura.source_guid = Some(caster);
-            // The player's server-sent remaining time is more precise than DBC duration.
-            if aura.state.duration == 0.0 {
-                aura.state.duration = duration;
-                aura.state.expiration_time = expires;
+    let player = lua
+        .app_data_ref::<Model>()
+        .is_some_and(|m| m.unit_guids.player == guid);
+    let mut changed = false;
+    {
+        let Some(mut extras) = lua.app_data_mut::<Extras>() else {
+            return;
+        };
+        if let Some(auras) = extras.by_guid.get_mut(&guid) {
+            for aura in auras.iter_mut().filter(|a| a.state.spell_id == spell) {
+                let before = aura.clone();
+                aura.source_guid = Some(caster);
+                // A refresh updates remote timing; a player's duration packet stays authoritative.
+                if !player || aura.state.duration == 0.0 {
+                    aura.state.duration = duration;
+                    aura.state.expiration_time = expires;
+                }
+                changed |= *aura != before;
+            }
+        }
+    }
+    if changed {
+        for token in super::units::event_tokens(lua, guid) {
+            crate::script::tick::fire_event_into(
+                lua,
+                "UNIT_AURA",
+                vec![crate::script::ScriptValue::Str(token)],
+            );
+        }
+    }
+}
+
+/// A raw removal/reuse ends that application's ownership even if no modern feed ran between.
+pub fn forget_annotation(lua: &Lua, guid: u64, slot: u8, spell: u32) {
+    let player = lua
+        .app_data_ref::<Model>()
+        .is_some_and(|m| m.unit_guids.player == guid);
+    if let Some(mut extras) = lua.app_data_mut::<Extras>() {
+        if let Some(aura) = extras.by_guid.get_mut(&guid).and_then(|list| {
+            list.iter_mut()
+                .find(|aura| aura.slot == slot && aura.state.spell_id == spell)
+        }) {
+            aura.source_guid = None;
+            if !player {
+                aura.state.duration = 0.0;
+                aura.state.expiration_time = 0.0;
             }
         }
     }
 }
 
 /// Feed before UNIT_AURA dispatch. The host supplies raw slots, including out-of-range roster slots.
-pub fn set_auras(lua: &Lua, guid: u64, auras: Option<Vec<Aura>>) {
+pub fn set_auras(lua: &Lua, guid: u64, mut auras: Option<Vec<Aura>>) {
+    let player = lua
+        .app_data_ref::<Model>()
+        .is_some_and(|m| m.unit_guids.player == guid);
+    if let (Some(incoming), Some(extras)) = (&mut auras, lua.app_data_ref::<Extras>()) {
+        for aura in incoming {
+            if let Some(old) = extras.by_guid.get(&guid).and_then(|list| {
+                list.iter()
+                    .find(|old| old.slot == aura.slot && old.state.spell_id == aura.state.spell_id)
+            }) {
+                aura.source_guid = aura.source_guid.or(old.source_guid);
+                if !player && aura.state.duration == 0.0 {
+                    aura.state.duration = old.state.duration;
+                    aura.state.expiration_time = old.state.expiration_time;
+                }
+                // Joining the two clocks can introduce sub-millisecond rounding drift.
+                if (aura.state.duration - old.state.duration).abs() < 0.001 {
+                    aura.state.duration = old.state.duration;
+                }
+                if (aura.state.expiration_time - old.state.expiration_time).abs() < 0.001 {
+                    aura.state.expiration_time = old.state.expiration_time;
+                }
+            }
+        }
+    }
     // Legacy UnitBuff/UnitDebuff on GUID/focus aliases read this same live list.
     if let Some(mut model) = lua.app_data_mut::<Model>() {
         if guid != model.unit_guids.player {
@@ -52,19 +128,39 @@ pub fn set_auras(lua: &Lua, guid: u64, auras: Option<Vec<Aura>>) {
             }
         }
     }
-    let changed = if let Some(mut extras) = lua.app_data_mut::<Extras>() {
+    let (changed, timing_changed) = if let Some(mut extras) = lua.app_data_mut::<Extras>() {
         let changed = extras.by_guid.get(&guid) != auras.as_ref();
+        let timing_changed = player
+            && auras
+                .as_ref()
+                .zip(extras.by_guid.get(&guid))
+                .is_some_and(|(incoming, previous)| {
+                    incoming.iter().any(|aura| {
+                        previous.iter().any(|old| {
+                            old.slot == aura.slot
+                                && old.state.spell_id == aura.state.spell_id
+                                && (old.state.duration != aura.state.duration
+                                    || old.state.expiration_time != aura.state.expiration_time)
+                        })
+                    })
+                });
         if let Some(auras) = auras {
             extras.by_guid.insert(guid, auras);
         } else {
             extras.by_guid.remove(&guid);
         }
-        changed
+        (changed, timing_changed)
     } else {
-        false
+        (false, false)
     };
     if changed {
-        for token in super::units::custom_tokens(lua, guid) {
+        // Stock PLAYER_AURAS_CHANGED deliberately ignores countdown-only refreshes.
+        let tokens = if timing_changed {
+            super::units::event_tokens(lua, guid)
+        } else {
+            super::units::custom_tokens(lua, guid)
+        };
+        for token in tokens {
             crate::script::tick::fire_event_into(
                 lua,
                 "UNIT_AURA",
@@ -109,8 +205,8 @@ pub(crate) fn list(lua: &Lua, token: &str, filter: Option<&str>) -> Vec<Aura> {
         .map(str::to_ascii_uppercase)
         .collect();
     let has = |token: &str| tokens.iter().any(|s| s == token);
-    let harmful = has("HARMFUL");
-    let helpful = has("HELPFUL") || !harmful;
+    let harmful = has("HARMFUL") || !has("HELPFUL");
+    let helpful = has("HELPFUL") || !has("HARMFUL");
     let mut result: Vec<_> = auras
         .iter()
         .filter(|aura| {
@@ -130,7 +226,10 @@ pub(crate) fn list(lua: &Lua, token: &str, filter: Option<&str>) -> Vec<Aura> {
                 .debuff_type
                 .as_deref()
                 .is_some_and(|ty| matches!(ty, "Magic" | "Curse" | "Disease" | "Poison"));
-            !((has("DISPELLABLE") && !dispellable) || (has("!DISPELLABLE") && dispellable))
+            !((has("DISPELLABLE") && !dispellable)
+                || (has("!DISPELLABLE") && dispellable)
+                || (has("CROWD_CONTROL") && !aura.crowd_control)
+                || (has("!CROWD_CONTROL") && aura.crowd_control))
         })
         .cloned()
         .collect();
@@ -156,24 +255,7 @@ fn slot(lua: &Lua, token: &str, slot: i64) -> Option<Aura> {
 }
 
 fn source(lua: &Lua, aura: &Aura) -> Option<String> {
-    let guid = aura.source_guid?;
-    let model = lua.app_data_ref::<Model>()?;
-    for token in ["player", "pet", "target", "mouseover", "npc"] {
-        if model.unit_guids.guid_of(token).ok().flatten() == Some(guid) {
-            return Some(token.into());
-        }
-    }
-    for (i, candidate) in model.unit_guids.party.iter().enumerate() {
-        if *candidate == guid {
-            return Some(format!("party{}", i + 1));
-        }
-    }
-    for (i, candidate) in model.unit_guids.raid.iter().enumerate() {
-        if *candidate == guid {
-            return Some(format!("raid{}", i + 1));
-        }
-    }
-    None
+    super::units::token_from_guid(lua, aura.source_guid?)
 }
 
 fn cast_by_player(aura: &Aura) -> bool {

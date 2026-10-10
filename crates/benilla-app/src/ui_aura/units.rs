@@ -203,7 +203,7 @@ impl UnitAuras {
         for (&guid, e) in &self.by_guid {
             if self.pushed.insert(guid, e.version) != Some(e.version) {
                 #[cfg(feature = "pfui")]
-                super::pfui::unit(script, guid, &e.inputs, &e.list);
+                super::pfui::unit(script, guid, &e.inputs, &e.list, catalog);
                 script.set_unit_auras(guid, Some(e.list.clone()));
             }
         }

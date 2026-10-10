@@ -88,22 +88,7 @@ pub fn install(lua: &Lua) -> mlua::Result<()> {
 
 /// Fire once for each current stock token naming the caster, preserving legacy argN values.
 pub fn event(lua: &Lua, caster: u64, kind: &str, cast: &Cast) {
-    let mut tokens = {
-        let model = lua.app_data_ref::<Model>().expect("model");
-        let mut tokens: Vec<String> = ["player", "pet", "target", "mouseover", "npc"]
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect();
-        tokens.extend((1..=4).flat_map(|i| [format!("party{i}"), format!("partypet{i}")]));
-        tokens.extend(
-            (1..=model.unit_guids.raid.len())
-                .flat_map(|i| [format!("raid{i}"), format!("raidpet{i}")]),
-        );
-        tokens.retain(|token| model.unit_guids.guid_of(token).ok().flatten() == Some(caster));
-        tokens
-    };
-    tokens.extend(super::units::custom_tokens(lua, caster));
-    for token in tokens {
+    for token in super::units::event_tokens(lua, caster) {
         super::super::tick::fire_event_into(
             lua,
             kind,
