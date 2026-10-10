@@ -174,6 +174,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             fire_cleared(lua, h);
             append_line(lua, &this, (text, [r, g, b, a]), None, wrap)?;
             set_shown(lua, h, true);
+            super::measure_lines(lua, h);
             Ok(())
         })?,
     )?;
@@ -346,7 +347,10 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                     .unwrap_or(false)
             };
             match live {
-                true => set_shown(lua, h, true),
+                true => {
+                    set_shown(lua, h, true);
+                    super::measure_lines(lua, h);
+                }
                 false => hide_tooltip(lua, h),
             }
             Ok(())
