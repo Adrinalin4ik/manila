@@ -1,216 +1,235 @@
-# benilla — Everwood graphics
-
-A graphics fork of [**benilla**](https://github.com/samwhosung/benilla), the from-scratch World of Warcraft
-1.12.1 client in Rust and Bevy by samwhosung. This repository adds an optional modern look on top of it.
-Every feature has its own switch under **Options → Advanced Graphics**, and the **Classic** preset keeps
-the original 1.12 image.
-
-**This repository is maintained and will stay open source. Contributions are welcome:** open an issue or a
-pull request.
-
-## Graphics features
-
-**Lighting and shadows**
-- Realtime sun shadows for characters and the world, including foliage; moon shadows at night
-- Moonlight: at night the moon lights the world (cool, dim, from the moon's place in the sky) on top of the original night colours
-- Dynamic building interiors lit by their own fixtures
-- Torches, braziers and lamps emit flickering light and cast cube-map shadows; terrain blocks torch light
-- Daylight through doors and windows (including Stormwind's rooms and cathedral windows)
-- Spell and ground-effect lights, lava glow
-- Screen-space ambient occlusion (soft contact shadows)
-
-**Sky**
-- Smooth sky gradient with dithering, soft sun glow
-- Procedural star field with a Milky Way
-- Sun-lit, detailed clouds
-- Zone skyboxes (Burning Steppes, Blasted Lands, Mount Hyjal) and the 1.12 `LightSkybox` clear-weather slot
-
-**Fog and atmosphere**
-- Modern fog model: the world fades into the horizon, sun-coloured toward the sun
-- Volumetric fog (distance haze)
-- Volumetric light: sun and moon shafts marched through the shadow map (god rays through canopies and between buildings, faint moon shafts at night)
-- Lamps glowing through fog at night
-- Screen-space sun shafts
-- Render distance up to 1497 yards
-
-**Post-processing**
-- HDR bloom for fire, lava, spells and lit windows
-- Per-zone colour grading (day/night LUTs)
-
-**Water**
-- Enhanced water: refraction, caustics, depth colour, screen-space reflections
-- Enhanced city and building water (Stormwind canals)
-- Gerstner waves with whitecaps, finer mesh up close
-
-**Weather and nature**
-- Rain: wet ground, puddles, glossy stone, rings on water, shelter under roofs and bridges
-- Wind: grass and tree sway with gusts, grass parts around characters
-
-**Settings**
-- One Graphics Preset: Classic / Low / Medium / High / Ultra / Custom (default High)
-- Every feature individually switchable on the Advanced Graphics page
-
-Details: [`LIGHTING.md`](LIGHTING.md), [`WATER.md`](WATER.md). Third-party credits, including code ported
-from [WarcraftXL](https://github.com/WarcraftXL) by iThorgrim: [`THIRD-PARTY.md`](THIRD-PARTY.md).
-Licence: same as upstream benilla, MIT OR Apache-2.0.
-
----
-
-*The upstream benilla README follows.*
-
 <div align="center">
-  <h1>benilla</h1>
-  <p><b>A complete World of Warcraft 1.12.1 client, written from scratch in Rust and <a href="https://bevy.org">Bevy</a></b></p>
-  <p>
-    <a href="https://discord.gg/wJSJx467G4"><img src="https://img.shields.io/discord/1529280129518538922?style=for-the-badge&logo=discord&logoColor=white&label=discord&color=5865F2" alt="Discord"></a>
-    <a href="https://www.youtube.com/playlist?list=PLdCnpZNKxyb8"><img src="https://img.shields.io/badge/devlog-youtube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube devlog"></a>
-    <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue?style=for-the-badge" alt="License"></a>
-  </p>
+
+<img src="screenshots/Screenshot%202026-10-09%20093829.png" alt="Screenshot" width="100%">
+
+<h1>manila</h1>
+
+<p><b>World of Warcraft 1.12.1 and Turtle WoW 1.18.1, in a browser tab or on the desktop, with modern lighting, water and sky.</b></p>
+
+<p>
+Nothing is installed: this is a from-scratch Rust client compiled to WebAssembly and drawn with
+WebGPU. The same code also builds natively for Windows, Linux and macOS.
+</p>
+
+<p>
+<a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue?style=for-the-badge" alt="License"></a>
+<img src="https://img.shields.io/badge/client-1.12.1%20%7C%20Turtle%201.18.1-c79c6e?style=for-the-badge" alt="1.12.1 | Turtle 1.18.1">
+<img src="https://img.shields.io/badge/runs%20in-browser%20%7C%20Windows%20%7C%20Linux%20%7C%20macOS-4b8bbe?style=for-the-badge" alt="browser | Windows | Linux | macOS">
+</p>
+
 </div>
 
-benilla plays the whole game: character creation, questing and professions, dungeons and raids,
-battlegrounds and honor, groups, guilds, trade, mail and the auction house, on the stock 1.12
-interface and with your addons. It connects to a 1.12.1 server over the original protocol and
-reads the game's data from your own 1.12.1 install. Every file format, the network protocol and
-the interface engine are written from scratch, with no original client code, no third-party WoW
-crates and no bundled game assets.
+## What this is
 
-## wenilla — this fork: benilla in a browser tab
+A complete World of Warcraft client written from scratch in Rust and [Bevy](https://bevy.org):
+every file format, the network protocol and a FrameXML/Lua engine that runs the game's own
+interface and its addons. It reads the game data from your own install and connects to a server
+over the original protocol, with no original client code and no bundled game assets.
 
-This fork adds **wenilla** on `main`: the same client compiled to WebAssembly, so a 1.12.1
-server can be played from a browser with nothing installed — login, character select and the
-world, with the full FrameXML/Lua UI, over a WebSocket. Nothing is rewritten: raw TCP becomes a
-WebSocket through a small host (`wenilla-host`), the MPQ chain becomes single files fetched over
-HTTP, and the C Lua 5.1 VM is compiled for wasm with the wasi-sdk sysroot. WebGPU is required
-for the world; the host proxies only to the server you point it at, and never sends the MPQs.
+It plays in a browser tab with nothing installed, or as a native application, and it can render
+either the original image or a modern one: dynamic light and shadows, volumetric fog, new water and
+sky, each behind its own switch.
 
-```bash
-scripts/web-setup.sh                                   # once: wasm target, wasm-bindgen, wasi-sdk (no sudo)
-scripts/web-build.sh                                   # → web/dist/
-cargo run --release -p wenilla-host -- --www web/dist --data /path/to/WoW/Data
-# open http://127.0.0.1:8090/
-```
+The projects this one is built on and tracks: [`forks.md`](forks.md).
 
-`wenilla-host` is a local testing tool: it serves the game data you point it at with no login,
-so keep it on loopback or a private network and never on the open internet. Hosting players
-is [`wenilla-realm`](crates/wenilla-realm/README.md), which gates everything behind a session.
-See [`web/README.md`](web/README.md) for the how and the porting notes, [`AGENTS.md`](AGENTS.md)
-for the map of the repository and the rules that bite, and [`docs/UPSTREAM.md`](docs/UPSTREAM.md)
-for how upstream is merged in. Everything else below is upstream benilla's README, unchanged;
-upstream is [samwhosung/benilla](https://github.com/samwhosung/benilla), merged into `main` as it
-publishes, and the web work is meant to be upstreamable piece by piece.
+## Screenshots
 
-benilla speaks the original 1.12.1 protocol, so it connects to any server the real client could,
-and reads its game data at runtime from your own 1.12.1 install. Every file format and the network
-protocol are implemented from scratch, with no original client code, no third-party WoW crates,
-and no bundled game assets.
-## What's inside
+<table>
+  <tr>
+    <td width="50%"><img src="screenshots/Screenshot%202026-10-09%20091642.png" alt="Screenshot"></td>
+    <td width="50%"><img src="screenshots/Screenshot%202026-10-09%20094153.png" alt="Screenshot"></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/Screenshot%202026-10-09%20220031.png" alt="Screenshot"></td>
+    <td><img src="screenshots/Screenshot%202026-10-09%20220205.png" alt="Screenshot"></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/Screenshot%202026-10-09%20103552.png" alt="Screenshot"></td>
+    <td><img src="screenshots/Screenshot%202026-10-10%20002351.png" alt="Screenshot"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="screenshots/Screenshot%202026-10-10%20081926.png" alt="Screenshot"></td>
+  </tr>
+</table>
 
-- **Formats:** readers for the whole asset stack (the MPQ patch chain, BLP, DBC, ADT, WDT, WDL, M2
-  and WMO), wired into Bevy as an asset source.
-- **World:** terrain streamed out to the horizon, portal-culled buildings with interior lighting,
-  doodads and ground clutter, swimmable water, sky and weather, and the client's own day/night
-  lighting, fog and gamma.
-- **Models:** GPU-skinned M2s with the full animation controller, particles, ribbons and the spell
-  visuals, and characters end to end: customization, the armor composite, weapons with their
-  enchant glows, forms, stealth and mounts.
-- **Movement:** networked movement in both directions, the server-granted modes from slow fall to
-  roots, a follow camera with collision, boats, zeppelins and taxi flights.
-- **Networking:** SRP6 auth through world-session crypto and the object mirror into the ECS,
-  covering the game from movement and chat through combat, spells, groups and raids, quests,
-  trade, mail, the auction house and battlegrounds.
-- **Interface:** a FrameXML and Lua engine that runs the stock 1.12 interface off your install's
-  patch chain, and third-party 1.12 addons: Questie, pfUI, Bagnon, Bartender2 and most others
-  run. By choice, the options window and the ESC menu follow the Classic Era client's rather than
-  1.12's.
-- **Audio:** music, ambience and effects under the client's own selection and crossfade rules,
-  with interior and underwater transitions and zone reverb.
+## Features
 
-The format readers and the UI engine core are plain Rust with no Bevy in them, and the world
-renderer runs with no game attached. [`docs/MAP.md`](docs/MAP.md) maps every crate and subsystem,
-generated from the code.
+### The game
 
-## Status
+The same in the browser and natively:
 
-Complete and fully playable. What is left:
+- Login, realm list, character select and the world, on vanilla 1.12.1 and Turtle WoW 1.18.1 realms
+  alike, over the original protocol
+- Questing and professions, dungeons and raids, battlegrounds, groups, guilds, trade, mail and the
+  auction house
+- The interface your install ships, run from its own FrameXML and Lua — the stock 1.12 one, or
+  Turtle WoW's own with its options window, ESC menu and server prelude
+- Your addons: Questie, pfUI, Bagnon, Bartender2 and most other 1.12 addons run
 
-- The long tail of small features that separates a working client from a finished one, tracked
-  as [issues](https://github.com/samwhosung/benilla/issues).
-- Addons, options and performance, ongoing.
+### In the browser
 
-benilla is a faithful 1.12.1 client and the foundation people build on. There are no prebuilt
-downloads: a packaged build, a particular server's changes or anything 1.12.1 never had belongs
-in a fork, and forks are welcome. GitHub lists
-[every public fork](https://github.com/samwhosung/benilla/forks).
+The browser build is not a port of a different program: it is the same client compiled to
+WebAssembly, with only what a browser cannot do replaced.
 
-Not planned: other expansions or client versions, Warden (anticheat).
+- Raw TCP becomes a WebSocket through `wenilla-host`
+- The MPQ chain becomes single files fetched over HTTP; the MPQs never leave the host, and server
+  content missing from an archive's listfile still loads
+- An addon's own art loads in the browser too
+- Character skins are composited in a separate wasm module in a Web Worker
+  ([`crates/manila-skin`](crates/manila-skin)), off the thread that draws
+
+### Native builds
+
+The same tree builds and runs natively on **Windows, Linux and macOS**, with the same graphics, the
+same interface and the same servers. No WebGPU requirement there, no host in between, and the game
+data is read straight from your install.
+
+### Servers: vanilla, Turtle WoW, Warden
+
+- **Vanilla 1.12.1** — any server the original client could connect to:
+  [vmangos](https://github.com/vmangos/core), cMaNGOS and the other 1.12.1 cores
+- **Turtle WoW 1.18.1** — Turtle-derived realms, played from a Turtle client's data:
+  - its two extra races and its modified DBC layouts
+  - the server's own FrameXML prelude (`Globals.lua`, `Overrides.lua`) loads when the install has
+    it, so the character sheet and the world map run without script errors
+  - character creation accepts the race/class combinations Turtle adds (57 against vanilla's 40)
+    and lays out all ten races
+  - Turtle's replaced options window (no `OptionsFrameSliders`) and its own ESC menu, Donation
+    Rewards button included, work with the Graphics rows and the menu adapters
+  - login: native builds try build 5875 first, then 7272 and 12340 when the server refuses; the
+    browser logs in with 12340
+- **Warden, partially** — the client half of the anticheat exchange. A module offer is accepted by
+  reading the server's `.cr` module data instead of executing it, the challenge is answered from
+  that module's own table, and every scan the client can honestly witness about itself is answered:
+  hashes of the game files it holds, Lua globals from its own VM, timing. Scans that read memory
+  inside a `WoW.exe` process cannot be answered by a from-scratch client and are left unanswered,
+  never faked; the client never drops the session itself, so the server decides. Setup in
+  [`run.md`](run.md)
+
+### Graphics
+
+Every feature has its own switch under **Options → Advanced Graphics**, ordered on a preset ladder
+**Classic / Low / Medium / High / Ultra / Custom**. **Classic** is the original 1.12 image, and it is
+what the browser boots into — opt in to more from the preset list.
+
+- **Lighting and shadows** — realtime sun and moon shadows, foliage included; moonlight at night;
+  building interiors lit by their own fixtures; torches, braziers and lamps that flicker and cast
+  cube-map shadows; daylight through doors and windows; spell and lava glow; SSAO
+- **Sky** — smooth dithered gradient, sun glow, a procedural star field with the Milky Way, sun-lit
+  clouds, zone skyboxes
+- **Fog and atmosphere** — a modern fog model, volumetric haze, sun and moon shafts marched through
+  the shadow map, lamps glowing through fog at night with their count and brightness on sliders,
+  render distance up to 1497 yards
+- **Water** — refraction, caustics, depth colour, planar reflections, Gerstner waves with whitecaps,
+  enhanced city and building water
+- **Weather and nature** — wet ground, puddles and rings on water in the rain, shelter under roofs;
+  grass and trees in the wind, grass parting around characters
+- **Post-processing** — HDR bloom, per-zone day/night colour grading
+- **Saved presets** — save the Advanced Graphics page under a name and get it back in the Graphics
+  Preset list
+
+Details: [`LIGHTING.md`](LIGHTING.md), [`WATER.md`](WATER.md).
+
+### Options and tools
+
+- **Press and Hold Casting** — a held action-bar key casts again each time its slot is ready
+  (Options → Controls, off by default)
+- **Built for the browser's budget** — addons loaded one per frame instead of in a single
+  multi-second freeze, split collider builds, budgeted arrivals, a collapsed material key,
+  frustum-parked doodad animation, ETag-revalidated and version-pinned asset requests
+- **A measuring toolkit** — an FPS journal downloaded as CSV from the page, a frame trace naming
+  what blocked each frame, archetype and material censuses, and switches that turn a lane off so
+  the frame says what it was worth
+
+## Technologies
+
+| area | what |
+|---|---|
+| language | Rust 1.98 |
+| engine | [Bevy](https://bevy.org) 0.18 (ECS, scheduling, assets) |
+| rendering | wgpu 27 — WebGPU in the browser; Vulkan, DirectX 12 or Metal natively; WGSL shaders |
+| interface | Lua 5.1 via mlua, built from source and patched to the 1.12 client's dialect; a FrameXML engine of its own |
+| audio | kira 0.12 over cpal; Web Audio in the browser |
+| browser build | WebAssembly (`wasm32-unknown-unknown`), wasm-bindgen, web-sys, wasi-sdk for the C Lua, binaryen; Web Workers, WebSocket, brotli/gzip-precompressed bundle |
+| servers | axum 0.8 and tokio, tokio-tungstenite for the WebSocket relay; Askama templates and sqlx (SQLite) in the realm service |
+| formats | MPQ, BLP, DBC, ADT, WDT, WDL, M2, WMO — all read by our own crates, no third-party WoW libraries |
 
 ## Running it
 
-benilla builds and runs on macOS, Linux and Windows. You need:
+You need a client install for the game data — manila only reads it — and a server that matches it:
 
-- **An English 1.12.1 client (build 5875)** for the game data. benilla only reads it.
-- **A 1.12.1 server with Warden off.** [vmangos](https://github.com/vmangos/core) is what
-  development runs against, and it ships with Warden off; cMaNGOS and the other 1.12.1 cores speak
-  the same protocol.
-- **Stable Rust and a C compiler**, because the client's Lua is built from source: on macOS the
-  Xcode command line tools, on Linux the ALSA and udev development packages and pkg-config, on
-  Windows the MSVC build tools that the Rust installer sets up.
+- an English **1.12.1 (build 5875)** client and a 1.12.1 server, or
+- a **Turtle WoW 1.18.1** client and a Turtle-derived realm.
+
+Pick either route below; both are supported. The browser needs **WebGPU**: Chrome or Edge on
+Windows and macOS, Safari 26+, Firefox 141+; Linux Chrome needs `--enable-unsafe-webgpu`. For a
+server that runs Warden, see the Warden section of [`run.md`](run.md).
+
+### In the browser
+
+```bash
+scripts/web-setup.sh            # once per machine: wasm target, wasm-bindgen, wasi-sdk, binaryen (no sudo)
+scripts/web-build.sh            # → web/dist
+cargo run --release -p wenilla-host -- --www web/dist --data /path/to/WoW/Data --upstream 127.0.0.1
+# open http://127.0.0.1:8090/
+```
+
+`wenilla-host` serves the game files you point it at with no login, so it binds to loopback by
+default: keep it there or on a private network, never on the open internet. Hosting other players
+is [`wenilla-realm`](crates/wenilla-realm/README.md), which puts everything behind a session.
+
+[`run.md`](run.md) is the full guide — realm selection from the login screen, reaching the host from
+another machine, and the one check that proves a tab is running the build you just made.
+[`web/README.md`](web/README.md) explains how the port works.
+
+### On the desktop (Windows, Linux, macOS)
+
+The native build is fully supported and plays the same game as the browser one.
 
 ```sh
 WOW_DATA=/path/to/WoW/Data cargo run --release -p benilla
 ```
 
-On Windows, in PowerShell:
-
 ```powershell
 $env:WOW_DATA="C:\path\to\WoW\Data"; cargo run --release -p benilla
 ```
 
-Each release is a tag on the [Releases page](https://github.com/samwhosung/benilla/releases):
-`git checkout <tag>` first runs that release, and `main` is the development tip.
+The server defaults to `localhost:3724`; set `WOW_HOST` or use the Realmlist button on the login
+screen. Native builds try login build 5875 first and fall back to 7272 and 12340 for Turtle-derived
+and custom realms; `WOW_REALMD_BUILD=<build>` pins one. Settings, screenshots and addons live in
+`benilla-config/` (addons in `benilla-config/AddOns/`). A C compiler is required, because the
+client's Lua is built from source; on Linux also `pkg-config libasound2-dev libudev-dev`.
 
-`WOW_DATA` names the install's `Data` folder; a link to the install named `WoW` at the repo root
-does the same (`ln -s /path/to/WoW WoW`, or on Windows a junction, which needs no admin rights:
-`New-Item -ItemType Junction -Path WoW -Target C:\path\to\WoW`). The server defaults to
-`localhost:3724`, the stock auth port. Point `WOW_HOST` at another (`WOW_HOST=play.example.com`, or
-`play.example.com:5000` for a remapped port), or set it from the Realmlist button on the login
-screen, which remembers it. Credentials go in at the login screen, or set `WOW_USER` and `WOW_PASS`
-to skip it.
+Optional, locally built skybox and colour-grading data:
+[`Optional/sky-and-grading/`](Optional/sky-and-grading/README.md).
 
-This fork's native builds (macOS, Linux and Windows) try stock vanilla login build 5875 first. If
-the server explicitly rejects the version, they retry with Turtle/Tortoise 1.18.1's build 7272,
-then 12340 for custom realms that accept that build. Turtle-derived servers mark a realm offline if
-the login build differs from its realm build. `WOW_REALMD_BUILD=<build>` pins a single login build
-and disables these retries; an empty value is treated as unset. World auth always uses build 5875.
-The browser build keeps the fixed login build 12340.
+## Repository map
 
-Settings, screenshots and addons live in `benilla-config/` at the repo root: a 1.12 addon goes in
-`benilla-config/AddOns/`. [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) has the rest, from the
-player build to the tests.
+| path | what |
+|---|---|
+| `crates/benilla-*` | the client: formats, world, models, UI engine, protocol, app |
+| `crates/wenilla` | the wasm entry crate |
+| `crates/wenilla-host` | the local dev server: static files, `/data/*`, the `/ws/*` relay |
+| `crates/wenilla-realm` | the realm service: login, play page, admin panel |
+| `crates/manila-skin` | the skin compositor as its own wasm module for a Web Worker |
+| `web/` | the page side: `index.html`, `boot.js`, `platform.js`, `bridge.js`, `frame_trace.js` |
+| `scripts/` | `web-setup.sh` and `web-build.sh` |
 
-Optional, locally built skybox and colour-grading data: [`Optional/sky-and-grading/`](Optional/sky-and-grading/README.md).
+[`docs/MAP.md`](docs/MAP.md) maps every client crate and subsystem, generated from the code.
+[`AGENTS.md`](AGENTS.md) is the working map of the repository and the rules that bite here.
 
 ## Contributing
 
-Issues and pull requests are open. [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) says where to
-start, what gets in, how a change is judged and what happens to a pull request once it is open.
-Bugs, questions and ideas are welcome on the [Discord](https://discord.gg/wJSJx467G4) too.
+Issues and pull requests are welcome. [`docs/METHOD.md`](docs/METHOD.md) and
+[`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) say how a change is made and judged.
 
----
+## Legal
 
-Early inspiration and file format guidance came from the
-[wowemulation-dev](https://github.com/wowemulation-dev) community, and
-[warcraft-rs](https://github.com/wowemulation-dev/warcraft-rs) in particular.
+This is an independent fan project, not affiliated with or endorsed by Blizzard Entertainment. It
+ships **no Blizzard content**: no art, models, sounds, maps, MPQ contents or FrameXML. You provide
+your own legally obtained client, and its interface runs off its own FrameXML at runtime. World of
+Warcraft is a trademark of Blizzard Entertainment, Inc.
 
-benilla is an independent fan project, not affiliated with or endorsed by Blizzard Entertainment.
-It ships **no Blizzard content**: no art, models, sounds, maps, MPQ contents or FrameXML. You
-provide your own legally obtained 1.12.1 client, and the stock interface runs off its FrameXML at
-runtime. The few files under `crates/benilla-app/assets/ui/` are our own, not copies of it:
-adapters over stock files, and the settings windows and script error log benilla draws itself.
-
-World of Warcraft is a trademark of Blizzard Entertainment, Inc. Our own code is licensed under
-[MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option. The two vendored components
-under `third_party/`, the kira audio engine and a Lua 5.1 patched to the 1.12 client's dialect,
-keep their own upstream licenses, alongside each. Code and techniques ported from other projects
-(WarcraftXL, by iThorgrim) are credited file by file in [`THIRD-PARTY.md`](THIRD-PARTY.md).
+The code is licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.
+The vendored components under `third_party/` keep their own licenses, alongside each; code ported
+from other projects is listed in [`THIRD-PARTY.md`](THIRD-PARTY.md).
