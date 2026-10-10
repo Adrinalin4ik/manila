@@ -257,18 +257,23 @@ pub(crate) fn eff_scale(model: &Model, h: FrameHandle) -> f32 {
     }
 }
 
-/// `GetWidth`/`GetHeight`: the resolved span in the frame's own units (screen ÷ effective scale),
-/// else the size it was given, where 0 means derived, as in the reference.
+/// `GetWidth`/`GetHeight` (`0x7a1e00`, `0x7a2030`): the size the frame was given, in its own
+/// units, unless that is exactly 0 (`0x7a1e99`); then the resolved rect's span (`0x7a1ee6`), which
+/// the reference does not bring back into the frame's units. A frame sized by its anchors so
+/// answers `own span x effective scale`, and addons written for 1.12 divide that out themselves.
 fn size_read(model: &Model, h: FrameHandle, width: bool) -> f32 {
-    if let Some(r) = model.resolved.get(&h) {
-        let span = if width { r.width() } else { r.height() };
-        return span / eff_scale(model, h);
-    }
-    model
+    let authored = model
         .layout_inputs
         .get(&h)
         .map(|i| if width { i.width } else { i.height })
-        .unwrap_or(0.0)
+        .unwrap_or(0.0);
+    if authored != 0.0 {
+        return authored;
+    }
+    model
+        .resolved
+        .get(&h)
+        .map_or(0.0, |r| if width { r.width() } else { r.height() })
 }
 
 /// `SetPoint` (`0x7a2540`) for a frame: the argument ladder is [`super::anchor_args`], shared with

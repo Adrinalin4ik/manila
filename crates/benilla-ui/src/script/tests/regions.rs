@@ -1277,3 +1277,46 @@ fn tex_coord_modifies_rect_is_one_slash_nil_and_moves_no_rect_yet() {
         "cleared back to nil"
     );
 }
+
+/// `GetWidth`/`GetHeight` (`0x7a1e00`, `0x7a2030`) answer an authored size as given, and a size
+/// that comes from the anchors as the resolved span, which carries the effective scale.
+#[test]
+fn a_frames_size_getter_answers_the_authored_size_or_the_scaled_span() {
+    let mut s = script();
+    s.run(
+        r#"
+        local host = CreateFrame("Frame", "SizeHost", UIParent)
+        host:SetScale(0.5)
+        host:SetPoint("CENTER", 0, 0)
+        host:SetWidth(200); host:SetHeight(40)
+        local filled = CreateFrame("Frame", "SizeFilled", host)
+        filled:SetAllPoints(host)
+        local half = CreateFrame("Frame", "SizeHalf", host)
+        half:SetPoint("TOPLEFT", host, "TOPLEFT", 0, 0)
+        half:SetPoint("BOTTOMRIGHT", host, "BOTTOMRIGHT", -100, 0)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let size = |name: &str| {
+        s.eval::<(f64, f64)>(&format!("return {name}:GetWidth(), {name}:GetHeight()"))
+            .unwrap()
+    };
+    assert_eq!(
+        size("SizeHost"),
+        (200.0, 40.0),
+        "authored, in its own units"
+    );
+    assert_eq!(
+        size("SizeFilled"),
+        (100.0, 20.0),
+        "200x40 at an effective scale of 0.5"
+    );
+    assert_eq!(size("SizeHalf"), (50.0, 20.0));
+    // The division 1.12 addons apply brings the span back into the frame's units.
+    assert_eq!(
+        s.eval::<f64>("return SizeFilled:GetWidth() / SizeFilled:GetEffectiveScale()")
+            .unwrap(),
+        200.0
+    );
+}
