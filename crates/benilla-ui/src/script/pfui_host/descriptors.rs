@@ -74,5 +74,72 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             })
         })?,
     )?;
+    // The stock repair feed's cost for a worn slot, the tooltip's third value; 0 with nothing
+    // to repair or outside the nineteen equipment slots.
+    globals.set(
+        "GetInventoryItemRepairCost",
+        lua.create_function(|lua, slot: i64| {
+            let model = lua.app_data_ref::<Model>().expect("model");
+            Ok(if (1..=19).contains(&slot) {
+                model.inv_repair_cost(slot as usize)
+            } else {
+                0
+            })
+        })?,
+    )?;
+    // The inbox row's item as the basic entry link the stock builder writes, with its entry.
+    globals.set(
+        "GetInboxItemLink",
+        lua.create_function(|lua, (index, attachment): (i64, Option<i64>)| {
+            let model = lua.app_data_ref::<Model>().expect("model");
+            let row = usize::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_sub(1))
+                .filter(|_| attachment.is_none_or(|n| n == 1))
+                .and_then(|index| model.mail.as_ref()?.inbox.get(index))
+                .filter(|row| row.item_id != 0);
+            let Some((row, name)) = row.and_then(|row| Some((row, row.item_name.as_deref()?)))
+            else {
+                return Ok((None, None));
+            };
+            Ok((
+                Some(crate::script::item_stats::item_link(
+                    row.item_id,
+                    name,
+                    row.item_quality.unwrap_or(1),
+                )),
+                Some(row.item_id),
+            ))
+        })?,
+    )?;
+    globals.set(
+        "GetInboxItemID",
+        lua.create_function(|lua, index: i64| {
+            let model = lua.app_data_ref::<Model>().expect("model");
+            Ok(usize::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_sub(1))
+                .and_then(|index| model.mail.as_ref()?.inbox.get(index))
+                .map(|row| row.item_id)
+                .filter(|id| *id != 0))
+        })?,
+    )?;
+    // The attached item is still the carried instance, so its own link is returned.
+    globals.set(
+        "GetSendMailItemLink",
+        lua.create_function(|lua, attachment: Option<i64>| {
+            let model = lua.app_data_ref::<Model>().expect("model");
+            let item = model
+                .mail_send_item
+                .as_ref()
+                .filter(|_| attachment.is_none_or(|n| n == 1));
+            Ok(
+                match item.and_then(|item| Some((item.link.clone()?, item.item_id))) {
+                    Some((link, id)) => (Some(link), Some(id)),
+                    None => (None, None),
+                },
+            )
+        })?,
+    )?;
     Ok(())
 }

@@ -4,7 +4,35 @@ use benilla_ui::script::{pfui_host::units, UiScript};
 use bevy::prelude::*;
 
 pub(super) fn register(app: &mut App) {
-    app.add_systems(Update, feed.in_set(super::InputSnapshots));
+    app.add_systems(Update, (feed, speeds).in_set(super::InputSnapshots));
+}
+
+/// Our own mover's speed follows its move flags through the reference's selector; a remote
+/// unit's is the speed its motion is being advanced with.
+fn speeds(
+    script: Option<NonSend<UiScript>>,
+    player: Option<Res<crate::player::Player>>,
+    units: Query<(
+        &crate::net::Guid,
+        &crate::net::UnitSpeeds,
+        Option<&crate::net::RemoteMotion>,
+        Has<crate::net::SelfPlayer>,
+    )>,
+) {
+    let Some(script) = script else { return };
+    benilla_ui::script::pfui_host::player_stats::set_speeds(
+        script.lua(),
+        units.iter().map(|(guid, speeds, motion, own)| {
+            let current = if own {
+                player.as_ref().map_or(0.0, |player| {
+                    crate::net::current_speed(&speeds.0, player.move_flags())
+                })
+            } else {
+                motion.map_or(0.0, |motion| motion.speed)
+            };
+            (guid.0, [current, speeds.0.run, speeds.0.swim])
+        }),
+    );
 }
 
 fn feed(

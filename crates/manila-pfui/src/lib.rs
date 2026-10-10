@@ -154,6 +154,12 @@ pub fn install(script: &UiScript) -> mlua::Result<()> {
         "EquipmentManager_UnpackLocation",
         "EquipmentManager_GetLocationData",
         "INTERFACE_VERSION",
+        "GetUnitSpeed",
+        "GetInventoryItemRepairCost",
+        "GetInboxItemLink",
+        "GetInboxItemID",
+        "GetSendMailItemLink",
+        "CreateSimpleTextureMarkup",
         "CLASS_SORT_ORDER",
     ] {
         if !lua.globals().get::<Value>(name)?.is_nil() {

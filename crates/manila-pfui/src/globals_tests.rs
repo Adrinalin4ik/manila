@@ -401,3 +401,94 @@ fn slot_candidates_filter_carried_items_by_inventory_type_and_hand() {
         )
         .unwrap();
 }
+
+#[test]
+fn repair_cost_and_mail_links_read_the_stock_feeds() {
+    use benilla_ui::script::{ContainerSlot, ContainerState, MailInboxRow, MailState, RepairCosts};
+    let mut script = extended();
+    script.set_repair_costs(RepairCosts {
+        equipped: [(5, 1234)].into(),
+        ..Default::default()
+    });
+    script.set_mail(Some(MailState {
+        inbox: vec![
+            MailInboxRow {
+                item_id: 2589,
+                item_name: Some("Linen Cloth".into()),
+                item_quality: Some(1),
+                ..Default::default()
+            },
+            MailInboxRow::default(),
+            MailInboxRow {
+                item_id: 4306,
+                ..Default::default()
+            },
+        ],
+    }));
+    let link = "|cffffffff|Hitem:2589:0:0:0|h[Linen Cloth]|h|r";
+    script.set_container(
+        0,
+        Some(ContainerState {
+            num_slots: 16,
+            slots: [(
+                1,
+                ContainerSlot {
+                    item_id: 2589,
+                    count: 3,
+                    link: Some(link.into()),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        }),
+    );
+    script
+        .run(
+            r#"
+        assert(GetInventoryItemRepairCost(5) == 1234 and GetInventoryItemRepairCost(6) == 0)
+        assert(GetInventoryItemRepairCost(0) == 0 and GetInventoryItemRepairCost(20) == 0)
+        local link, id = GetInboxItemLink(1)
+        assert(link == "|cffffffff|Hitem:2589:0:0:0|h[Linen Cloth]|h|r" and id == 2589)
+        assert(GetInboxItemLink(1, 1) == link and GetInboxItemLink(1, 2) == nil)
+        assert(GetInboxItemLink(2) == nil and GetInboxItemLink(9) == nil and GetInboxItemLink(0) == nil)
+        assert(GetInboxItemLink(3) == nil, "a name still in flight builds no link")
+        assert(GetInboxItemID(1) == 2589 and GetInboxItemID(2) == nil and GetInboxItemID(3) == 4306)
+        assert(GetSendMailItemLink() == nil)
+        PickupContainerItem(0, 1)
+        ClickSendMailItemButton()
+        link, id = GetSendMailItemLink()
+        assert(link == GetContainerItemLink(0, 1) and id == 2589, tostring(link))
+        assert(GetSendMailItemLink(2) == nil)
+        assert(CreateSimpleTextureMarkup("Interface\\Icons\\X", 24) == "|TInterface\\Icons\\X:24:24|t")
+    "#,
+        )
+        .unwrap();
+}
+
+#[test]
+fn unit_speed_reads_the_fed_mover_and_zeroes_an_unseen_unit() {
+    use benilla_ui::script::{pfui_host::player_stats, UnitGuids};
+    let mut script = extended();
+    script.set_unit_guids(&UnitGuids {
+        player: 3,
+        target: 5,
+        ..Default::default()
+    });
+    player_stats::set_speeds(script.lua(), [(3, [7.0, 7.0, 4.722_222])]);
+    script
+        .run(
+            r#"
+        local current, run, flight, swim = GetUnitSpeed("player")
+        assert(current == 7 and run == 7 and flight == 0 and math.abs(swim - 4.7222) < .001)
+        current, run, flight, swim = GetUnitSpeed("target")
+        assert(current == 0 and run == 0 and flight == 0 and swim == 0)
+        assert(GetUnitSpeed("nonsense") == 0 and GetUnitSpeed(nil) == 0)
+    "#,
+        )
+        .unwrap();
+    player_stats::set_speeds(script.lua(), [(3, [0.0, 14.0, 4.722_222])]);
+    script
+        .run("local current, run = GetUnitSpeed('player') assert(current == 0 and run == 14)")
+        .unwrap();
+}
