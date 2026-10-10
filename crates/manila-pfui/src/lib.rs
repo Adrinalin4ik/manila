@@ -221,6 +221,12 @@ pub fn install(script: &UiScript) -> mlua::Result<()> {
     lua.load(include_str!("equipment.lua"))
         .set_name("@manila-pfui/equipment.lua")
         .call::<()>(lua.named_registry_value::<mlua::Table>("manila.pfui.equipment_bridge")?)?;
+    lua.load(include_str!("tooltips.lua"))
+        .set_name("@manila-pfui/tooltips.lua")
+        .call::<()>(
+            lua.named_registry_value::<mlua::Table>("manila.pfui.equipment_bridge")?
+                .get::<mlua::Table>("tooltips")?,
+        )?;
     lua.load(include_str!("equipment_actions.lua"))
         .set_name("@manila-pfui/equipment_actions.lua")
         .call::<()>(lua.named_registry_value::<mlua::Table>("manila.pfui.equipment_bridge")?)?;

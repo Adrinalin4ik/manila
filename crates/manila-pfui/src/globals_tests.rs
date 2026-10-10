@@ -492,3 +492,69 @@ fn unit_speed_reads_the_fed_mover_and_zeroes_an_unseen_unit() {
         .run("local current, run = GetUnitSpeed('player') assert(current == 0 and run == 14)")
         .unwrap();
 }
+
+#[test]
+fn hyperlink_compare_draws_the_worn_counterpart_and_reanchoring_keeps_the_text() {
+    use benilla_ui::script::{InvSlotView, InventorySlots, ItemTemplateView};
+    let mut script = extended();
+    // 11 is a ring: two candidate slots. 99 is equippable with nothing worn; 50 is not cached.
+    for (id, name, inventory_type) in [
+        (1, "Offered Ring", 11),
+        (2, "Worn Ring", 11),
+        (3, "Other Ring", 11),
+        (99, "Helm", 1),
+    ] {
+        script.set_item_template(
+            id,
+            ItemTemplateView {
+                name: name.into(),
+                class: 4,
+                inventory_type,
+                ..Default::default()
+            },
+        );
+    }
+    let mut slots: InventorySlots = Default::default();
+    for (slot, id, name) in [(11, 2, "Worn Ring"), (12, 3, "Other Ring")] {
+        slots[slot] = Some(InvSlotView {
+            item_id: id,
+            name: Some(name.into()),
+            quality: 1,
+            ..Default::default()
+        });
+    }
+    script.set_inventory_slots(slots);
+    script
+        .run(
+            r#"
+        CURRENTLY_EQUIPPED = "Currently Equipped"
+        UIParent = CreateFrame("Frame", "UIParent")
+        local owner = CreateFrame("Frame", "CompareOwner", UIParent)
+        local tip = CreateFrame("GameTooltip", "CompareTip", UIParent)
+        local function lines()
+          return CompareTipTextLeft1:GetText(), CompareTipTextLeft2:GetText()
+        end
+        tip:SetOwner(owner, "ANCHOR_RIGHT")
+        assert(tip:SetHyperlinkCompareItem("|cffffffff|Hitem:1:0:0:0|h[Offered Ring]|h|r", 1, true) == 1)
+        local header, name = lines()
+        assert(header == "Currently Equipped" and name == "Worn Ring", tostring(header) .. tostring(name))
+        tip:SetAnchorType("ANCHOR_RIGHT", 30, 4)
+        local point, relative, relativePoint, x, y = tip:GetPoint(1)
+        assert(point == "BOTTOMLEFT" and relative == owner and relativePoint == "TOPRIGHT" and x == 30 and y == 4)
+        assert(select(2, lines()) == "Worn Ring" and tip:GetAnchorType() == "ANCHOR_RIGHT")
+        tip:SetAnchorType("ANCHOR_CURSOR", 9, 9)
+        assert(select(4, tip:GetPoint(1)) == 30)
+        tip:SetOwner(owner, "ANCHOR_RIGHT")
+        assert(tip:SetHyperlinkCompareItem(1, 2) == 1 and select(2, lines()) == "Other Ring")
+        tip:SetOwner(owner, "ANCHOR_RIGHT")
+        assert(tip:SetHyperlinkCompareItem("item:1", 3) == nil and tip:SetHyperlinkCompareItem("item:1", 0) == nil)
+        assert(tip:SetHyperlinkCompareItem("item:99") == nil, "nothing is worn in that slot")
+        assert(tip:SetHyperlinkCompareItem("item:50") == nil and tip:SetHyperlinkCompareItem("junk") == nil)
+        assert(tip:SetHyperlinkCompareItem(nil) == nil)
+        local unowned = CreateFrame("GameTooltip", "UnownedTip", UIParent)
+        unowned:SetAnchorType("ANCHOR_RIGHT", 1, 1)
+        assert(unowned:GetNumPoints() == 0)
+    "#,
+        )
+        .unwrap();
+}

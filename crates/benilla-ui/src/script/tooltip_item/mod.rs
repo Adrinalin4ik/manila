@@ -17,6 +17,9 @@ use super::tooltip::{append_line, clear_content, fire_cleared, show_or_hide_empt
 use super::{ItemTemplateView, Model};
 
 mod names;
+#[cfg(feature = "pfui")]
+#[path = "../pfui_host/tooltip_compare.rs"]
+pub(crate) mod pfui;
 mod render;
 
 use names::{quality_color, GRAY, WHITE};

@@ -133,6 +133,7 @@ pub fn install(lua: &Lua) -> mlua::Result<()> {
     auras::install(lua)?;
     super::tooltip_spell::pfui::install(lua)?;
     tooltip_subjects::install(lua)?;
+    super::tooltip_item::pfui::install(lua)?;
     quests::install(lua)?;
     super::macros::pfui::install(lua)?;
     super::reputation::pfui::install(lua)?;
