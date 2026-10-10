@@ -12,6 +12,10 @@ use mlua::{Lua, MultiValue, Value};
 use super::cursor::{queue_cursor_update, CursorMacro, CursorPayload};
 use super::Model;
 
+#[cfg(feature = "pfui")]
+#[path = "pfui_host/macros.rs"]
+pub(crate) mod pfui;
+
 /// Macros per tab (`Blizzard_MacroUI.lua:1`), and so the character tab's base.
 pub const MAX_MACROS: usize = 18;
 

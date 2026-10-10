@@ -306,6 +306,8 @@ pub(super) fn clear_content(model: &mut Model, h: FrameHandle) {
 
 /// Fires `OnTooltipCleared`; a script error is recorded, never propagated.
 pub(super) fn fire_cleared(lua: &Lua, h: FrameHandle) {
+    #[cfg(feature = "pfui")]
+    let subject_epoch = super::pfui_host::tooltip_subjects::clear(lua, h);
     let id = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
         model.frame_id(h)
@@ -315,6 +317,8 @@ pub(super) fn fire_cleared(lua: &Lua, h: FrameHandle) {
             .expect("model app_data")
             .record_script_error(e.to_string());
     }
+    #[cfg(feature = "pfui")]
+    super::pfui_host::tooltip_subjects::resume(lua, h, subject_epoch);
 }
 
 /// A content `Set*`'s tail: shown with lines, hidden without. The reference leaves an uncached

@@ -288,6 +288,9 @@ impl Loader<'_> {
 
     /// Run a chunk under a complete chunk name, for a producer whose name is not a path.
     fn run_named(&self, chunk: &[u8], name: &str) -> mlua::Result<()> {
+        #[cfg(feature = "pfui")]
+        return crate::script::pfui_host::run_chunk(self.lua, chunk, name);
+        #[cfg(not(feature = "pfui"))]
         self.lua
             .load(chunk)
             .set_name(name)

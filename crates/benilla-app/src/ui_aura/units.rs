@@ -202,6 +202,8 @@ impl UnitAuras {
 
         for (&guid, e) in &self.by_guid {
             if self.pushed.insert(guid, e.version) != Some(e.version) {
+                #[cfg(feature = "pfui")]
+                super::pfui::unit(script, guid, &e.inputs, &e.list);
                 script.set_unit_auras(guid, Some(e.list.clone()));
             }
         }
@@ -209,6 +211,8 @@ impl UnitAuras {
         self.pushed.retain(|guid, _| {
             let keep = by_guid.contains_key(guid);
             if !keep {
+                #[cfg(feature = "pfui")]
+                super::pfui::remove(script, *guid);
                 script.set_unit_auras(*guid, None);
             }
             keep

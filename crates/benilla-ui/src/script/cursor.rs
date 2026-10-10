@@ -164,6 +164,8 @@ pub struct CursorMacro {
 /// take changes. Call it after `model.cursor` holds the new payload; an action hop keeps the grid
 /// up rather than hiding and reshowing it.
 pub(crate) fn queue_cursor_update(model: &mut Model) {
+    #[cfg(feature = "pfui")]
+    super::pfui_host::equipment_actions::cursor_changed(model);
     model
         .pending_events
         .push(("CURSOR_UPDATE".to_string(), Vec::new()));

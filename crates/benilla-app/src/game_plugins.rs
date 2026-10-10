@@ -325,6 +325,8 @@ pub(crate) mod schedule_tests {
             connect: false,
             start: crate::char_select::ClientState::Login,
         });
+        #[cfg(feature = "pfui")]
+        app.add_plugins(crate::pfui::PfuiPlugin);
         app.finish();
         app.cleanup();
         app
@@ -744,7 +746,11 @@ pub(crate) mod schedule_tests {
     /// MONKEY (merge upstream b396bbf6, 2026-10-02): upstream's own declarations dropped its
     /// ceiling to 4,980; the merged tree reads 4,999 = upstream 4,980 + 19 of ours (the lanes'
     /// residual pairs above, unchanged in kind). Read off the merged tree's test run.
+    #[cfg(not(feature = "pfui"))]
     const UPDATE_ACTIONABLE_CEILING: usize = 4_999;
+    // The optional feeds order stock producers before their consumers; retain a separate ratchet.
+    #[cfg(feature = "pfui")]
+    const UPDATE_ACTIONABLE_CEILING: usize = 4_927;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

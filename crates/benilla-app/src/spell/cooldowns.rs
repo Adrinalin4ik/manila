@@ -28,6 +28,10 @@ use super::{SpellModifiers, OP_GCD};
 use benilla_formats::SpellDisplay;
 use benilla_protocol::messages::ItemUseSpell;
 
+#[cfg(feature = "pfui")]
+#[path = "../pfui/cooldowns.rs"]
+mod pfui;
+
 /// One timer; a zero duration is untracked.
 #[derive(Clone, Copy, Debug)]
 struct Timer {

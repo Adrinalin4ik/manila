@@ -24,6 +24,8 @@ mod drain;
 mod equip_error;
 pub(crate) mod feed;
 mod net;
+#[cfg(feature = "pfui")]
+pub(crate) mod pfui;
 
 pub(crate) use drain::send_auto_equip;
 use drain::{

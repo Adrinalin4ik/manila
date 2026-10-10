@@ -26,6 +26,8 @@ pub(crate) mod io;
 mod motion;
 mod objects;
 pub(crate) use objects::tear_down;
+#[cfg(feature = "pfui")]
+mod pfui;
 mod session;
 mod world;
 

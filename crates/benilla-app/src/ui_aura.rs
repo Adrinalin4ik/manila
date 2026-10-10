@@ -5,6 +5,8 @@
 //! 0x4e4170`); any other unit's reads its descriptor by ascending slot, or, for a group member or
 //! pet with no live object, its roster record.
 
+#[cfg(feature = "pfui")]
+pub(crate) mod pfui;
 mod units;
 
 use std::collections::HashMap;
@@ -619,6 +621,8 @@ fn feed_auras(
         }
     }
 
+    #[cfg(feature = "pfui")]
+    pfui::player(&script, self_guid.0, &cache.auras, &list);
     script.set_player_auras(list);
     script.set_tracking(tracking);
     if changed {

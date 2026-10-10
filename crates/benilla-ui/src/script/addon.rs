@@ -599,6 +599,14 @@ const ADDONS_ROOT: &str = "Interface/AddOns/";
 /// anything else FrameXML, each path resolved against the including file's directory. `toc` is
 /// the `.toc`'s load record (`0x6edb90`).
 fn run_files(lua: &Lua, name: &str, read: &Reader, files: &[String], toc: &mut Status) {
+    #[cfg(feature = "pfui")]
+    let _pfui_scope = match super::pfui_host::addon_scope(lua, name) {
+        Ok(scope) => Some(scope),
+        Err(error) => {
+            log_error(lua, &error.to_string());
+            return;
+        }
+    };
     let provider = |req: &str| -> Option<Vec<u8>> { read(req) };
     for file in files {
         let path = crate::loader::join_ref(name, file);
@@ -676,6 +684,9 @@ fn read_under(root: &std::path::Path, rel: &str) -> Option<Vec<u8>> {
 /// Run a chunk read off disk, BOM stripped: [`crate::script::UiScript::run_chunk`] for the
 /// demand-load path, which has no `UiScript`.
 fn run_chunk(lua: &Lua, bytes: &[u8], name: &str) -> mlua::Result<()> {
+    #[cfg(feature = "pfui")]
+    return super::pfui_host::run_chunk(lua, crate::source::chunk(bytes), name);
+    #[cfg(not(feature = "pfui"))]
     lua.load(crate::source::chunk(bytes))
         .set_name(name)
         .set_mode(mlua::ChunkMode::Text)

@@ -282,6 +282,9 @@ pub use zone_text::ZoneTexts;
 
 use mlua::Lua;
 
+#[cfg(feature = "pfui")]
+pub mod pfui_host;
+
 use crate::layout::Rect;
 use crate::order::ZTarget;
 use crate::widget::{FrameHandle, KindState};
@@ -811,6 +814,9 @@ impl UiScript {
 
     /// Run a chunk under the name the 1.12 client gives it ([`addon_chunk_name`] for addon files).
     pub fn run_chunk_named(&self, chunk: &[u8], name: &str) -> mlua::Result<()> {
+        #[cfg(feature = "pfui")]
+        return pfui_host::run_chunk(&self.lua, crate::source::chunk(chunk), name);
+        #[cfg(not(feature = "pfui"))]
         self.lua
             .load(crate::source::chunk(chunk))
             .set_name(name)

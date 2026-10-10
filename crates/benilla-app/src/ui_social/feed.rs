@@ -79,6 +79,8 @@ pub(super) fn feed_social(
 
     let selected_friend = index_of(&display_order, social.selected_friend);
     let selected_ignore = index_of(&ignore_order, social.selected_ignore);
+    #[cfg(feature = "pfui")]
+    crate::pfui::feed_friend_guids(&script, &friends, &display_order);
     social.display_order = display_order;
     social.ignore_display_order = ignore_order;
 

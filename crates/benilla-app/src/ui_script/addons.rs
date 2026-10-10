@@ -131,6 +131,12 @@ impl Addon {
         files: &[String],
         toc: &mut Status,
     ) -> Vec<String> {
+        #[cfg(feature = "pfui")]
+        let _pfui_scope = match benilla_ui::script::pfui_host::addon_scope(script.lua(), &self.name)
+        {
+            Ok(scope) => scope,
+            Err(error) => return vec![error.to_string()],
+        };
         let mut failures = Vec::new();
         // The `<Include>` / `<Script file=>` provider; `read` is the sandbox.
         let provider = |req: &str| -> Option<Vec<u8>> { self.read(req) };
@@ -481,6 +487,15 @@ fn discover_folder() -> Vec<Addon> {
         .into_iter()
         .filter_map(|name| {
             let want = format!("{name}.toc");
+            #[cfg(feature = "pfui")]
+            let want = crate::pfui::manifest(&name)
+                .filter(|want| {
+                    by_folder.get(&name).is_some_and(|files| {
+                        files.iter().any(|file| file.eq_ignore_ascii_case(want))
+                    })
+                })
+                .unwrap_or(&want)
+                .to_string();
             // Case-insensitively, for the same reason the native probe is: the reference is a
             // Windows client, so `MyAddon/myaddon.toc` is an addon there and has to be one here.
             let file = by_folder
@@ -518,6 +533,11 @@ fn discover_folder() -> Vec<Addon> {
             let dir = root.join(&name);
             // A folder with no `<Name>.toc` is not an addon; the reference skips it silently too.
             let text = manifest_in(&dir, &name)?;
+            #[cfg(feature = "pfui")]
+            let text = crate::pfui::manifest(&name)
+                .and_then(|file| std::fs::read(dir.join(file)).ok())
+                .map(|bytes| benilla_ui::source::decode(&bytes).into_owned())
+                .unwrap_or(text);
             Some(Addon {
                 name,
                 toc: Toc::parse(&text),

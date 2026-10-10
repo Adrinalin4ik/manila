@@ -15,6 +15,10 @@
 
 use mlua::{Lua, Table, Value};
 
+#[cfg(feature = "pfui")]
+#[path = "pfui_host/tooltip_auras.rs"]
+pub(crate) mod pfui;
+
 use super::object::{frame_handle_of, frame_wrapper};
 use super::tooltip::{append_line, clear_content, fire_cleared, tip_mut};
 use super::{CraftTooltip, Model, TrainerTooltip};
@@ -444,6 +448,8 @@ pub(super) fn set_spell_with_talent(
     if talent.next_desc.is_none() {
         super::talent::ask_next_rank(lua, talent.next_spell);
     }
+    #[cfg(feature = "pfui")]
+    super::pfui_host::tooltip_subjects::set_spell(lua, h, spell_id);
     match spell_view_of(lua, spell_id, false) {
         Some(v) => render_spell(
             lua,
@@ -511,6 +517,8 @@ fn fill_spell(
     opts: SpellRenderOpts,
     remaining: Option<String>,
 ) -> mlua::Result<()> {
+    #[cfg(feature = "pfui")]
+    super::pfui_host::tooltip_subjects::set_spell(lua, h, spell_id);
     match spell_view_of(lua, spell_id, opts.alt_caster) {
         Some(v) => render_spell(lua, this, &v, opts, remaining, None)?,
         None => {

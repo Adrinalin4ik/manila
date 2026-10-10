@@ -12,6 +12,10 @@ use crate::pending_item_ops::PendingItemOps;
 
 use super::{slot_guid, slot_guid_count, wire_pos, INVTYPE_AMMO};
 
+#[cfg(feature = "pfui")]
+#[path = "../pfui/item_use.rs"]
+pub(super) mod pfui_use;
+
 /// The one auto-equip sender, as in the reference (`AutoEquipCursorItem`, `0x5e1480`); answers
 /// whether it sent. An ammo item loads by entry with `CMSG_SET_AMMO` and stays in its bag. An
 /// unbound, equippable `bonding == 2` item raises `AUTOEQUIP_BIND_CONFIRM` and sends nothing
@@ -1222,6 +1226,7 @@ pub(super) fn drain_bind_confirm_answers(
 /// The pending state is one cell, taken on the first accept, so a doubled accept does nothing.
 pub(super) fn drain_bind_on_use_confirms(
     script: Option<NonSendMut<UiScript>>,
+    #[cfg(feature = "pfui")] pending_items: Res<PendingItemOps>,
     targeting: crate::spell::cast_target::CastTargeting,
     mut ladder: crate::spell::CastLadder,
     mut ui_errors: ResMut<crate::ui_action::UiErrorKeys>,
@@ -1236,6 +1241,18 @@ pub(super) fn drain_bind_on_use_confirms(
     let Some(it) = gate.on_use.0.take() else {
         return;
     };
+    #[cfg(feature = "pfui")]
+    if pfui_use::confirm(
+        &mut script,
+        it,
+        &targeting,
+        &mut ladder,
+        &mut gate,
+        &mut ui_errors,
+        &pending_items,
+    ) {
+        return;
+    }
     debug!(
         "ui_items: bind-on-use confirmed for wire {}/{}",
         it.bag_index, it.slot

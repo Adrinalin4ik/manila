@@ -20,6 +20,9 @@ trace_chrome = ["bevy/trace_chrome"]
 # needs WebGPU).
 webgl2 = ["bevy/webgl2", "benilla-world/webgl2"]
 webgpu = ["bevy/webgpu", "benilla-world/webgpu"]
+# Optional fork extension; stock builds retain the 1.12 API and addon loading ABI.
+pfui = ["dep:manila-pfui"]
+pfui-turtle = ["pfui"]
 
 [dependencies]
 # Wall-clock reads (`SystemTime::now`) go through `web-time`: a re-export of std's on native, and
@@ -27,6 +30,7 @@ webgpu = ["bevy/webgpu", "benilla-world/webgpu"]
 web-time = "1"
 anyhow.workspace = true
 benilla-ui = { path = "../benilla-ui" }
+manila-pfui = { path = "../manila-pfui", optional = true }
 bevy.workspace = true
 wgpu.workspace = true
 bevy_egui = { version = "0.39", optional = true }

@@ -34,6 +34,8 @@ impl ScriptSelect<'_, '_> {
     /// out-of-range roster member is a no-op (the guid-only selection is not built).
     pub(crate) fn select(&mut self, request: SelectionRequest) {
         match request {
+            #[cfg(feature = "pfui")]
+            SelectionRequest::PfuiGuid(guid) => self.commit.select_unit(guid),
             SelectionRequest::Unit(token) => {
                 if let Some((entity, guid)) = self.tokens.resolve(&token, &self.commit.selection) {
                     self.commit.commit(entity, guid);
@@ -66,6 +68,10 @@ impl ScriptSelect<'_, '_> {
                     ),
                 }
             }
+            // Cargo may unify the UI extension into a client that did not enable its plugin.
+            #[cfg(not(feature = "pfui"))]
+            #[allow(unreachable_patterns)]
+            _ => {}
         }
     }
 

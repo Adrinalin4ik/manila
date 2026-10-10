@@ -94,6 +94,8 @@ mod pending_item_ops;
 /// Ships in part (the FPS journal and the clocks it reads); the rest is `dev`.
 mod perf;
 mod character_shadow;
+#[cfg(feature = "pfui")]
+mod pfui;
 mod pipe_warm;
 mod player;
 mod player_distance;
@@ -278,6 +280,11 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // Every line that names the build says whether a crate on top extended it.
     let build = BuildId {
         extended: extend.is_some(),
+        ..build
+    };
+    #[cfg(feature = "pfui")]
+    let build = BuildId {
+        extended: true,
         ..build
     };
 
@@ -466,6 +473,9 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
         connect: !capturing,
         start: run_mode::start_state(),
     });
+
+    #[cfg(feature = "pfui")]
+    app.add_plugins(pfui::PfuiPlugin);
 
     app.add_plugins(webbridge::WebBridgePlugin);
 

@@ -23,6 +23,9 @@ use crate::ui_script::{gate, UiInput};
 
 mod held;
 
+#[cfg(feature = "pfui")]
+pub(crate) mod pfui;
+
 /// The unit-feed pass, gated so none of its login one-shots or per-VM memos runs before the in-game
 /// interface exists; the demo override orders itself after it.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]

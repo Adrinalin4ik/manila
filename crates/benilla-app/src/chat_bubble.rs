@@ -38,6 +38,10 @@ use crate::vplates::{device_snap, gx_px, plate_basis, text_px, VPlateSet, VPlate
 use benilla_assets::{AssetSet, WorldAssets};
 use benilla_world::view::WorldCamera;
 
+#[cfg(feature = "pfui")]
+#[path = "pfui/bubbles.rs"]
+mod pfui;
+
 /// The two bubble CVars (registrar `0x603280`), booting at the reference's defaults.
 #[derive(Resource)]
 pub(crate) struct BubbleConfig {
@@ -301,6 +305,7 @@ fn drive_bubbles(
     time: Res<Time>,
     // The device scale, for the seat's pixel snap.
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    #[cfg(feature = "pfui")] script: Option<NonSend<benilla_ui::script::UiScript>>,
 ) {
     active.0.clear();
     let now = time.elapsed_secs();
@@ -364,6 +369,10 @@ fn drive_bubbles(
         );
     }
     if bubbles.0.is_empty() {
+        #[cfg(feature = "pfui")]
+        if let Some(script) = &script {
+            pfui::sync(script, &bubbles.0, &[], 1.0);
+        }
         return;
     }
 
@@ -437,6 +446,13 @@ fn drive_bubbles(
     // Sorted farthest first (`0x4b1360`), levels stamped head to tail (`0x4b1309`). The reference
     // re-sorts only on a change; sorting every frame gives the same list.
     stack_sort(&mut pending);
+    #[cfg(feature = "pfui")]
+    if script
+        .as_ref()
+        .is_some_and(|script| pfui::sync(script, &bubbles.0, &pending, scale))
+    {
+        return;
+    }
     let (Some((_, cam_pose)), Some(atlas), Some(art)) = (cam, atlas.as_deref_mut(), art) else {
         return; // the tick's same gate kept `pending` empty
     };

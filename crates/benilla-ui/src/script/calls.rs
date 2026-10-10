@@ -11,6 +11,9 @@ use super::{ActionUse, SelectionRequest, UiScript};
 /// One queued call, in the reference's terms.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScriptCall {
+    /// Optional frame actions retain their position in the stock ordered call stream.
+    #[cfg(feature = "pfui")]
+    PfuiClick(super::pfui_host::attributes::ClickAction),
     /// `TargetUnit`, `AssistUnit`, `AssistByName` and `TargetLastEnemy`.
     Select(SelectionRequest),
     /// `TargetByName(name, exactMatch)` (`0x489d60`), the stock `/target`.

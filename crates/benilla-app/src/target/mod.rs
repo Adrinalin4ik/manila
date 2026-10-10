@@ -34,6 +34,8 @@ pub(crate) fn hover_probe_armed() -> bool {
     hover_probe::armed()
 }
 pub(crate) mod lock;
+#[cfg(feature = "pfui")]
+pub(crate) mod pfui;
 mod price_discount;
 mod relations;
 mod reticle;

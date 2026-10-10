@@ -22,6 +22,7 @@ const MAX_NESTING: u8 = 8;
 #[allow(clippy::type_complexity)] // the appliers, one per owner of the state a call touches
 pub(crate) fn apply_script_calls(
     script: Option<NonSendMut<UiScript>>,
+    #[cfg(feature = "pfui")] pick: Option<Res<crate::target::PickOcclusion>>,
     mut appliers: ParamSet<(
         crate::target::ScriptSelect,
         crate::spell::ScriptCursor,
@@ -36,8 +37,31 @@ pub(crate) fn apply_script_calls(
     let Some(mut script) = script else {
         return;
     };
+    #[cfg(feature = "pfui")]
+    crate::pfui::spell_queue::resume(&mut script, &appliers.p3());
     in_call_order(&mut script, |script, call| {
+        #[cfg(feature = "pfui")]
+        let Some(call) = crate::pfui::spell_queue::intercept(
+            script,
+            call,
+            &appliers.p3(),
+            pick.as_ref().and_then(|p| p.point),
+        ) else {
+            return;
+        };
+        #[cfg(feature = "pfui")]
+        let attempt = crate::pfui::spell_queue::before(script, &call, &appliers.p3());
         match call {
+            #[cfg(feature = "pfui")]
+            ScriptCall::PfuiClick(
+                benilla_ui::script::pfui_host::attributes::ClickAction::Item { guid, target },
+            ) => {
+                appliers.p5().pfui_use_item(script, guid, target);
+            }
+            #[cfg(feature = "pfui")]
+            ScriptCall::PfuiClick(action) => {
+                crate::pfui::clicks::apply(script, action, &mut appliers.p3());
+            }
             ScriptCall::Select(request) => appliers.p0().select(request),
             ScriptCall::TargetByName { name, exact } => appliers.p0().target_by_name(&name, exact),
             ScriptCall::TargetNearest { mode, reverse } => {
@@ -70,10 +94,15 @@ pub(crate) fn apply_script_calls(
             }
             ScriptCall::PetAction(slot) => appliers.p6().press_slot(slot),
             ScriptCall::PetOrder(packed) => appliers.p6().order(packed),
+            #[cfg(not(feature = "pfui"))]
+            #[allow(unreachable_patterns)]
+            _ => {}
         }
         // TryCast's attack pick can move the selection mid-cast (`0x6e4efb`), so a press held
         // there is picked and resumed before the next call reads the selection.
         let Some(held) = appliers.p3().ladder.take_held() else {
+            #[cfg(feature = "pfui")]
+            crate::pfui::spell_queue::after(script, attempt, &appliers.p3());
             return;
         };
         if appliers.p7().pick_for_cast(held) {
@@ -81,6 +110,8 @@ pub(crate) fn apply_script_calls(
             let ctx = cast.targeting.context();
             cast.ladder.resume_after_pick(held, &ctx);
         }
+        #[cfg(feature = "pfui")]
+        crate::pfui::spell_queue::after(script, attempt, &appliers.p3());
     });
 }
 
@@ -115,6 +146,8 @@ pub(crate) fn in_call_order(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "pfui")]
+    include!("pfui/spell_queue_deferred_tests.rs");
     use super::*;
     use crate::net::{
         ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, SelfGuid, SelfPlayer,

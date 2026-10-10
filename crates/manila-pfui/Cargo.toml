@@ -1,0 +1,30 @@
+[package]
+name = "manila-pfui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Opt-in pfUI compatibility primitives and a headless dependency audit"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+audit = ["dep:benilla-formats", "dep:roxmltree", "dep:serde"]
+
+[dependencies]
+benilla-ui = { path = "../benilla-ui", features = ["pfui"] }
+mlua = { version = "0.11", features = ["lua51", "vendored"] }
+base64 = "0.22"
+ciborium = "0.2"
+miniz_oxide = "0.8"
+serde_json = "1"
+benilla-formats = { path = "../benilla-formats", default-features = false, optional = true }
+benilla-dbc = { path = "../benilla-dbc" }
+roxmltree = { version = "0.20", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+
+[[bin]]
+name = "pfui-audit"
+path = "src/bin/audit.rs"
+required-features = ["audit"]

@@ -553,6 +553,8 @@ pub(crate) struct Model {
     pub(crate) has_key: bool,
     /// What the cursor carries; nothing moves locally, the server's updates settle the bags.
     pub(crate) cursor: Option<cursor::CursorPayload>,
+    #[cfg(feature = "pfui")]
+    pub(crate) pfui_cursor: Option<super::pfui_host::equipment_actions::CursorState>,
     /// The action bar's drop grid: shown on the cursor's empty-to-held edge for any payload but a
     /// pet action or a vendor row (mode 5; the grab setter `0x4950f0` shows it for mode 7 only).
     pub(crate) cursor_grid_shown: bool,
@@ -1288,6 +1290,8 @@ impl Model {
             container_cooldowns: HashMap::new(),
             has_key: false,
             cursor: None,
+            #[cfg(feature = "pfui")]
+            pfui_cursor: None,
             cursor_grid_shown: false,
             pet_grid_shown: false,
             world_pick: cursor::WorldPick::default(),

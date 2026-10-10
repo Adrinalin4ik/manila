@@ -445,6 +445,8 @@ pub(super) fn feed_item_stats(
 
     pending.extend(items.take_fresh());
     pending.extend(script.take_item_stat_asks());
+    #[cfg(feature = "pfui")]
+    crate::pfui::resolve_item_misses(&script, pending, &items);
     if spell_mods.is_changed() || reads_changed {
         pending.extend(mod_sensitive.iter().copied());
     }
@@ -474,6 +476,13 @@ pub(super) fn feed_item_stats(
             .filter_map(|id| {
                 pending.remove(&id);
                 let t = items.template(id, 0, &commands)?.clone();
+                #[cfg(feature = "pfui")]
+                benilla_ui::script::pfui_host::items::set_metadata(
+                    script.lua(),
+                    id,
+                    t.item_level,
+                    t.bag_family,
+                );
                 if item_has_mod_tokens(&t, spell_res) {
                     mod_sensitive.insert(id);
                 } else {

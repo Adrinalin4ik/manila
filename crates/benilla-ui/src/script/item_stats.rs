@@ -207,6 +207,11 @@ impl super::UiScript {
         let mut model = self.model_mut();
         model.item_stat_asks.remove(&item_id);
         model.item_templates.insert(item_id, view);
+        #[cfg(feature = "pfui")]
+        {
+            drop(model);
+            super::pfui_host::item_received(&self.lua, item_id);
+        }
     }
 
     /// Asks for the templates of `ids` the store lacks, for the trade-skill and craft lists,

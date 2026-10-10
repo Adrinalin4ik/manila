@@ -12,6 +12,8 @@ description = "The browser entry point: a wasm-bindgen `#[start]` that boots ben
 # chrome://flags/#enable-unsafe-webgpu; needs https or localhost). Exactly one must be on.
 webgl2 = ["benilla-app/webgl2"]
 webgpu = ["benilla-app/webgpu"]
+pfui = ["benilla-app/pfui"]
+pfui-turtle = ["pfui", "benilla-app/pfui-turtle"]
 
 [lib]
 crate-type = ["cdylib"]

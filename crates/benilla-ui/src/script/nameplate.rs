@@ -10,6 +10,10 @@
 
 use mlua::Lua;
 
+#[cfg(feature = "pfui")]
+#[path = "pfui_host/nameplates.rs"]
+pub(crate) mod pfui;
+
 use crate::layout::{Anchor, Point};
 use crate::order::DrawLayer;
 use crate::widget::{FrameHandle, FrameKind, KindState, RegionHandle, RegionKind};
@@ -240,6 +244,8 @@ impl UiScript {
     /// has its plate retired (hidden, never destroyed). An unchanged `geometry` costs nothing.
     pub fn sync_nameplates(&mut self, geometry: PlateGeometry, states: &[PlateState]) {
         let lua = self.lua();
+        #[cfg(feature = "pfui")]
+        pfui::before_sync(lua, states);
         let effects = {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             // No WorldFrame (no interface loaded), no plates: no addon walks an invented root.
@@ -252,6 +258,8 @@ impl UiScript {
         for (bar, value) in effects.values {
             super::statusbar::fire_engine_value_changed(lua, bar, value);
         }
+        #[cfg(feature = "pfui")]
+        pfui::after_sync(lua);
     }
 
     /// The unit whose plate is the hovered frame, the mouseover its OnEnter publishes (`0x7cb850`
@@ -296,6 +304,8 @@ impl UiScript {
     /// clears); the app's every early return owes this, since a widget stays up until hidden.
     pub fn retire_nameplates(&mut self) {
         let lua = self.lua();
+        #[cfg(feature = "pfui")]
+        pfui::before_sync(lua, &[]);
         let effects = {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let mut effects = SyncEffects::default();

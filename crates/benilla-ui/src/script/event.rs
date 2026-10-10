@@ -6,6 +6,10 @@
 
 use std::borrow::Cow;
 
+#[cfg(feature = "pfui")]
+#[path = "pfui_host/frame_events.rs"]
+pub(crate) mod pfui;
+
 use mlua::{Function, Lua, Table, Value};
 
 use super::{Model, ScriptValue, REG_SCRIPTS};
@@ -188,6 +192,9 @@ pub(crate) fn invoke_with_globals(
     }
 
     // A protected call; the globals are restored before its outcome returns.
+    #[cfg(feature = "pfui")]
+    let outcome = super::pfui_host::invoke_handler(lua, func, wrapper, event_name, &extra);
+    #[cfg(not(feature = "pfui"))]
     let outcome = func.call::<()>(());
 
     g.set("this", saved_this)?;

@@ -168,6 +168,10 @@ pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
 /// `UI_Init` never reads (`0x48fff2`), going on to `Bindings.xml` and the addons. benilla goes on
 /// the same way and reports it as a load failure, an `ERROR` line and a row in `/errors`.
 pub(super) fn load_core(script: &UiScript) -> Vec<String> {
+    #[cfg(feature = "pfui")]
+    if let Err(error) = crate::pfui::prepare(script) {
+        return vec![error];
+    }
     let Some(core) = reference_ui::core() else {
         let e = format!(
             "{}: not found — the stock interface is not built",
@@ -207,6 +211,11 @@ pub(super) fn load_core(script: &UiScript) -> Vec<String> {
 /// The chain's core and the file list to walk, or `None` — having reported the missing toc
 /// exactly as [`load_core`]'s own miss arm does, so a sliced load fails the same way.
 pub(super) fn open_core(script: &UiScript) -> Option<(Addon, Vec<String>)> {
+    #[cfg(feature = "pfui")]
+    if let Err(error) = crate::pfui::prepare(script) {
+        script.report_script_error(&error);
+        return None;
+    }
     match reference_ui::core() {
         Some(core) => {
             let files = core.toc.files.clone();

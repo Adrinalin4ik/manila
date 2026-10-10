@@ -46,6 +46,11 @@ pub(super) fn pickup_action(model: &mut Model, id: u32) -> bool {
 /// slot's action hops onto the cursor with `id` as its source; an item stays in its bag, since a
 /// bar item is a reference, not a move. Returns whether to repaint.
 pub(crate) fn place_action(model: &mut Model, id: u32) -> bool {
+    // The extension owns its cursor tag; the stock packet packer must never transmit it.
+    #[cfg(feature = "pfui")]
+    if crate::script::pfui_host::equipment_actions::held_set(model).is_some() {
+        return false;
+    }
     // The two accept filters (`0x4e62e0`) refuse with a bare return: nothing stored or sent, and
     // the payload stays held. An item needs an on-use spell or an equip slot (`0x4e6571`), so a
     // bag is placeable; a passive spell (`Attributes & 0x40`) also raises errorId `0x9e` through
