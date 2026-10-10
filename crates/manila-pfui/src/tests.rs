@@ -2345,7 +2345,7 @@ fn opt_in_is_per_vm_and_does_not_advertise_classicapi_parity() {
         "ello"
     );
     script
-        .run("assert(CLASSIC_API_VERSION == nil and type(C_EquipmentSet) == 'table' and GetNampowerVersion() == 3 and ManilaNampowerCompatibility.emulated)")
+        .run("assert(CLASSIC_API_VERSION == 11510 and ManilaClassicAPICompatibility.emulated and not ManilaClassicAPICompatibility.fullClassicAPI and type(C_EquipmentSet) == 'table' and GetNampowerVersion() == 3 and ManilaNampowerCompatibility.emulated)")
         .unwrap();
     let stock = UiScript::new().unwrap();
     for source in [

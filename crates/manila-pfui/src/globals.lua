@@ -1,5 +1,14 @@
 -- ClassicAPI globals pfUI calls directly. Each reads the engine's own state or stock queries.
 
+-- pfUI's load gate requires ClassicAPI 1.15.10 (X*10000 + Y*100 + Z) and otherwise raises a
+-- dialog at every login that says pfUI is disabled and takes the keyboard focus. This is the
+-- version whose pfUI-used surface the extension implements, not the DLL's complete API: the
+-- second table says so for an addon that needs to tell the two apart.
+CLASSIC_API_VERSION = 11510
+ManilaClassicAPICompatibility = {
+  implementation = 'Manila', apiVersion = '1.15.10', emulated = true, fullClassicAPI = false,
+}
+
 function IsModifierKeyDown()
   if IsShiftKeyDown() or IsControlKeyDown() or IsAltKeyDown() then return 1 end
 end

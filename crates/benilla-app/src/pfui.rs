@@ -177,8 +177,8 @@ fn feed_clock(script: Option<NonSendMut<UiScript>>, clock: Res<crate::net::Serve
     }
 }
 
-/// The full Vanilla flavor is selected explicitly; its dependency notice remains visible until
-/// the extension satisfies pfUI's complete API contract. No ClassicAPI DLL version is spoofed.
+/// The full flavor manifest is selected explicitly, as the ClassicAPI DLL's redirect does; the
+/// extension publishes the version that manifest's load gate requires.
 pub(crate) fn manifest(name: &str) -> Option<&'static str> {
     name.eq_ignore_ascii_case("pfUI")
         .then_some(if cfg!(feature = "pfui-turtle") {

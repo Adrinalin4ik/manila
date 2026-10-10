@@ -360,7 +360,7 @@ fn bootstrap(
         }
     }
     drop(_scope);
-    // Do not suppress pfUI's real version gate and do not fire session events after a bad load.
+    // Do not fire session events after a bad load.
     if report.bootstrap_errors.is_empty() {
         script.fire_event("ADDON_LOADED", vec![ScriptValue::Str("pfUI".into())]);
         script.fire_event("VARIABLES_LOADED", vec![]);

@@ -1,7 +1,8 @@
 //! Opt-in building blocks for the ClassicAPI edition of pfUI.
 //!
 //! This is an extension, not a claim of ClassicAPI parity. The caller explicitly installs it
-//! on each in-game VM, before loading third-party addons. It publishes no ClassicAPI version.
+//! on each in-game VM, before loading third-party addons. It publishes the ClassicAPI version
+//! pfUI's load gate requires, beside a table that marks the surface as emulated and partial.
 //! The headless audit is separate from the client and does not install or modify addons.
 
 mod attributes;
@@ -29,7 +30,8 @@ pub use mlua::{Function as LuaFunction, Lua};
 const INSTALLED: &str = "manila.pfui.installed";
 
 /// Install the independently implemented compatibility subset, once per VM. Default clients
-/// never call this. No dummy engine API or complete-ClassicAPI capability flag is published.
+/// never call this. No dummy engine API is published; `ManilaClassicAPICompatibility` states
+/// that the surface behind `CLASSIC_API_VERSION` is partial.
 pub fn install(script: &UiScript) -> mlua::Result<()> {
     let lua = script.lua();
     if lua.named_registry_value::<Option<bool>>(INSTALLED)? == Some(true) {
@@ -154,6 +156,8 @@ pub fn install(script: &UiScript) -> mlua::Result<()> {
         "EquipmentManager_UnpackLocation",
         "EquipmentManager_GetLocationData",
         "INTERFACE_VERSION",
+        "CLASSIC_API_VERSION",
+        "ManilaClassicAPICompatibility",
         "GetUnitSpeed",
         "GetInventoryItemRepairCost",
         "GetInboxItemLink",

@@ -673,11 +673,16 @@ reputation offset of 50 and an unequipped main hand; each was undone and confirm
    is not allowed unattended.
 3. **`DisenchantAll` and item queues**, as described above; destructive, so command-capture only.
 4. **Comparison stat lines** for `SetHyperlinkCompareItem`.
-5. **The dependency popup.** Publishing `CLASSIC_API_VERSION` would remove it and the focus
-   steal, but claims complete ClassicAPI to every addon. That is the owner's decision.
-6. **Hearthstone bind live check**, once the binder probe passes or by a manual bind.
-7. Profile exchange with a real ClassicAPI client, the browser runtime, and the combat-side
+5. **Hearthstone bind live check**, once the binder probe passes or by a manual bind.
+6. Profile exchange with a real ClassicAPI client, the browser runtime, and the combat-side
    Nampower comparisons remain exactly as described above.
+
+**Decided by the owner after this addendum was first written.** The extension now publishes
+`CLASSIC_API_VERSION = 11510`, so the dependency popup and its focus steal are gone, and the
+instructions above that say never to publish it are superseded. The surface is still partial:
+`ManilaClassicAPICompatibility.fullClassicAPI` is false. The owner also allows reasonable
+changes to the main client where pfUI support needs them, as long as they stay easy to carry
+across upstream merges.
 
 ## Suggested prompt for the next session
 

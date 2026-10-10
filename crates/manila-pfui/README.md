@@ -62,12 +62,12 @@ Use `/pfui` in game to open its configuration. This is an experimental native se
 gameplay support and browser support remain unverified.
 
 The ordinary `pfUI.toc` deliberately loads only `API_Check.lua`. ClassicAPI selects the full
-flavor TOC in the original client. The full TOC still checks `CLASSIC_API_VERSION >= 11510`.
-This partial extension **does not publish that version**, suppress the check, or claim that
-ClassicAPI's complete API exists. The dependency notice therefore remains visible. Replacing it
-requires a pfUI-specific capability check or cooperation with its maintainer, alongside real
-engine support. The notice can say pfUI is disabled even though this build selected its full
-manifest and loaded the UI. Acknowledge it with OK. The extension separately implements
+flavor TOC in the original client. The full TOC still checks `CLASSIC_API_VERSION >= 11510`,
+and without it raises a dialog at every login that says pfUI is disabled and takes the keyboard
+focus. The extension therefore publishes `CLASSIC_API_VERSION = 11510`, the minimum pfUI asks
+for. Deviation: this is the pfUI-used surface, not ClassicAPI's complete API, so another addon
+that tests the version can find a function missing. `ManilaClassicAPICompatibility.emulated`
+identifies the implementation and `fullClassicAPI` stays false. The extension separately implements
 pfUI's Nampower integration and returns `3, 0, 0` from `GetNampowerVersion`, which enables those
 pfUI modules. `ManilaNampowerCompatibility.emulated` explicitly identifies the implementation;
 `fullNampower` remains false. Installing Windows DLLs does not supply APIs to Manila.
@@ -391,7 +391,6 @@ into the game install.
 | Text | Inline `|T…|t` texture escapes in font strings, which pfUI uses for race, faction and item icons |
 | Swing timer | `PLAYER_SWING` from the server's attack clock; needs a controlled GM-off combat check |
 | Item comparison | Per-stat change lines, which need item stat totals including on-equip spell bonuses |
-| Dependency notice | The notice focuses its edit box at every login, so movement keys type into it until it is dismissed |
 
 The target is the complete pfUI manifest, including equipment management, sorting and sharing.
 Implement only the functions/events that inventory and runtime probes demonstrate pfUI uses,
@@ -421,7 +420,7 @@ unit-event filtering, item-cache
 arrivals, cold-bank counting and bag operation queues. Further checks cover action/equipment
 queries, attribute-driven selection, recursive attribute handlers, social records, note persistence,
 player-cache name collisions, realm isolation and `/who` rate limiting. The audit deliberately
-reports unresolved engine APIs instead of hiding them behind compatibility-version flags.
+reports unresolved engine APIs whatever version the extension publishes.
 Additional tests cover real overlay tile layouts and independent view tables, tooltip subject
 clearing and late spell views, bubble replacement/recycling, loot result ordering, runtime spell
 queries, quest bulk-sync suppression and turn-in/removal ordering, bag-event coalescing and
