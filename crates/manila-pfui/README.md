@@ -44,7 +44,8 @@ cargo build -p benilla --features pfui-turtle
 Place the separately obtained pfUI checkout under `benilla-config/AddOns/pfUI` (or
 `$BENILLA_HOME/AddOns/pfUI`), outside the WoW install. The features select
 `pfUI_ClassicAPI.toc` or `pfUI_Turtle.toc`, respectively. Browser builds can select the same
-features on `wenilla`, but need their normal wasm toolchain and have not been verified yet.
+features on `wenilla` and need their normal wasm toolchain. The `webgpu,pfui-turtle`
+combination passes a wasm compile check; browser runtime behavior remains unverified.
 
 To run the native Turtle build, point it at the matching data and the state folder containing
 `AddOns/pfUI`:
@@ -335,7 +336,7 @@ into the game install.
 | Items and bags | Remaining instance helpers; broader multi-bag, bank and specialized-bag sorting verification |
 | Equipment sets | Broader character/action-slot conflict verification; failures and bind-confirm behavior |
 | Profile sharing | Live interoperability with the original ClassicAPI client; standard codec fixtures are covered |
-| Browser | Build and live verification with the wasm toolchain; current live coverage is native |
+| Browser | Live verification in a WebGPU browser; the Turtle feature passes the wasm compile check, while current live coverage is native |
 | Remaining extras | Optional visible-player sweep, live vendor/group/totem checks and broader map/bubble validation |
 | Widgets and globals | Further token-aware verbs, equipment IDs for uninspected players; broader click-casting and addon macro-runner live coverage |
 
@@ -355,6 +356,9 @@ cargo test -p manila-pfui --all-features
 cargo fmt -p manila-pfui -- --check
 cargo clippy -p manila-pfui --all-features --all-targets --no-deps -- -D warnings
 cargo check -p benilla-app --features pfui-turtle
+# With the wasm target and WASI SDK installed (scripts/web-setup.sh):
+WASI_SDK=/path/to/wasi-sdk cargo check --target wasm32-unknown-unknown \
+  -p wenilla --no-default-features --features webgpu,pfui-turtle
 ```
 
 Tests cover VM isolation, legacy and modern varargs, stock formatting, timer cancellation and
