@@ -665,9 +665,15 @@ reputation offset of 50 and an unequipped main hand; each was undone and confirm
 
 **Still open, in the order I would take them.**
 
-1. **Inline `|T…|t` textures.** `crates/benilla-ui/src/markup.rs` draws the escape literally,
-   as 1.12 does. pfUI uses it for race, faction and item icons, so raw escape text is visible
-   where those appear. It is a text-layout change in an upstream file.
+1. **Inline `|T…|t` textures: done.** `crates/benilla-app/src/pfui/inline_texture.rs` swaps
+   each escape for a private-use placeholder before the markup parser sees it, so the stock
+   decoder in `benilla-ui/src/markup.rs` is untouched and upstream's "no texture escape" tests
+   still pass. The upstream files carry only `#[cfg(feature = "pfui")]` hooks: the engine
+   field and glyphless check (`ui_text/engine/mod.rs`), width, block height and the four
+   substitution points (`ui_text/layout/measure.rs`, `layout/mod.rs`), the unit scale
+   (`ui_text/measurer.rs`, `ui_script/extract/text.rs`) and the shadow filter. Seen live in a
+   font string, a tooltip and a chat line. Left: EditBox caret over an escape, and chat rows
+   that do not grow for an icon taller than the line.
 2. **`PLAYER_SWING`.** The decoded attack log already feeds `AUTO_ATTACK_SELF`; the swing clock
    needs weapon speed, next-swing spells and ranged shots. Live proof needs GM-off combat, which
    is not allowed unattended.

@@ -20,6 +20,8 @@ pub(crate) fn measure_request(
     r: &MeasureRequest,
 ) -> (f32, f32, f32) {
     let rs = seam * r.scale;
+    #[cfg(feature = "pfui")]
+    super::inline_texture::set_scale(e, rs);
     let spec = || super::FontSpec {
         path: r.font.as_deref(),
         // The render pass's drawn px: `GetStringWidth` and `GetStringHeight` report the drawn

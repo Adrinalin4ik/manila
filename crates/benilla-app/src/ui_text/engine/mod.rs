@@ -139,6 +139,8 @@ pub(crate) struct TextEngine {
     substituted: HashSet<usize>,
     over_ceiling: bool,
     stats: CacheStats,
+    #[cfg(feature = "pfui")]
+    pub(crate) inline: super::inline_texture::Registry,
 }
 
 /// A `cosmic-text` font system over an empty database: the client's faces are the only faces.
@@ -211,6 +213,8 @@ impl TextEngine {
             substituted: HashSet::new(),
             over_ceiling: false,
             stats: CacheStats::default(),
+            #[cfg(feature = "pfui")]
+            inline: Default::default(),
         })
     }
 
@@ -356,7 +360,11 @@ impl TextEngine {
         }
         // A control character (`\n`, which the markup parser takes as a line break) has no glyph
         // by design: an empty cell, before any shaping, so it neither re-shapes nor warns.
-        if ch.is_control() {
+        #[cfg(feature = "pfui")]
+        let glyphless = ch.is_control() || super::inline_texture::is_placeholder(ch);
+        #[cfg(not(feature = "pfui"))]
+        let glyphless = ch.is_control();
+        if glyphless {
             self.chars.insert(
                 (face, ppem, ch),
                 CharCell {
@@ -646,6 +654,8 @@ pub(super) fn test_engine(dpi: f32) -> Option<TextEngine> {
         substituted: HashSet::new(),
         over_ceiling: false,
         stats: CacheStats::default(),
+        #[cfg(feature = "pfui")]
+        inline: Default::default(),
     })
 }
 

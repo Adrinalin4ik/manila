@@ -80,6 +80,8 @@ pub(super) fn emit(
     };
     // The focused editbox draws windowed (`0x77da80`): the scroll window's substring from the
     // line origin, unwrapped and clipped at the box edge, the selection behind, the caret after.
+    #[cfg(feature = "pfui")]
+    crate::ui_text::inline_texture::set_scale(&mut atlas.lock(), host.scale * host.font_scale);
     let ebox = host.ebox.filter(|u| u.target == host.target);
     let mut draw_text: &str = text;
     let mut draw_rect = host.rect;
@@ -210,6 +212,12 @@ pub(super) fn emit(
             shadow_spec,
             seat,
         );
+        // An inline texture casts no shadow.
+        #[cfg(feature = "pfui")]
+        {
+            let e = atlas.lock();
+            sq.retain(|q| !e.inline.owns(q));
+        }
         for q in &mut sq {
             // Markup tints ride the fill only; the alpha is [`shadow_alpha`].
             q.color = [

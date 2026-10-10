@@ -51,6 +51,8 @@ pub(super) fn measure_line_width(e: &TextEngine, r: Resolved, step_extra: f32, t
         .filter_map(|c| e.char_cell(r.face, r.ppem, c))
         .map(|c| c.floor_sum + step_extra * c.glyphs.len() as f32)
         .sum();
+    #[cfg(feature = "pfui")]
+    let steps = steps + e.inline.advance(text, r.ppem);
     steps / e.dpi()
 }
 
@@ -106,6 +108,10 @@ pub(crate) fn measure_text(
     wrap_width: Option<f32>,
     font: FontSpec,
 ) -> (f32, f32) {
+    #[cfg(feature = "pfui")]
+    let inlined = e.inline.substitute(text);
+    #[cfg(feature = "pfui")]
+    let text = inlined.as_ref();
     let r = resolve(e, &font);
     // Metrics only: a string measured and never drawn costs no raster.
     e.ensure_metrics(r.face, r.ppem, text);
@@ -133,7 +139,14 @@ pub(crate) fn measure_text(
     // it narrows every auto-sized FontString, a look change.
     // Height: N lines at the font em with no outline pad (`0x5c2070`: `N·S + (N-1)·gap`, gap 0 in
     // shipped UI); an outlined ring pokes past it, as in the reference.
-    (max_w.ceil() + 1.0, render_lines.len() as f32 * r.size)
+    let height = render_lines.len() as f32 * r.size;
+    #[cfg(feature = "pfui")]
+    let height = height
+        + render_lines
+            .iter()
+            .map(|line| e.inline.extra_height(line, r.ppem, e.dpi()))
+            .sum::<f32>();
+    (max_w.ceil() + 1.0, height)
 }
 
 /// How many rows `text` wraps into at `wrap_width`, by the render's own [`wrap_line`] pass: the
@@ -145,6 +158,10 @@ pub(crate) fn measure_wrapped_rows(
     wrap_width: f32,
     font: FontSpec,
 ) -> u16 {
+    #[cfg(feature = "pfui")]
+    let inlined = e.inline.substitute(text);
+    #[cfg(feature = "pfui")]
+    let text = inlined.as_ref();
     let r = resolve(e, &font);
     e.ensure_metrics(r.face, r.ppem, text);
     let rows = wrapped_rows(e, r, text, wrap_width);
@@ -226,6 +243,11 @@ pub(crate) fn ellipsize_to_fit(
     }
     let display = {
         let mut e = atlas.lock();
+        // A prefix must never end inside an escape, so the walk backs off over placeholders.
+        #[cfg(feature = "pfui")]
+        let inlined = e.inline.substitute(text);
+        #[cfg(feature = "pfui")]
+        let text = inlined.as_ref();
         let r = resolve(&mut e, &font);
         // Every candidate is a prefix of `text` plus "...", so these two cover the whole walk.
         e.ensure_metrics(r.face, r.ppem, text);

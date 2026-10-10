@@ -140,6 +140,7 @@ impl Plugin for PfuiPlugin {
         loot::register(app);
         quests::register(app);
         session_events::register(app);
+        crate::ui_text::inline_texture::register(app);
         social::register(app);
         spells::register(app);
         units::register(app);

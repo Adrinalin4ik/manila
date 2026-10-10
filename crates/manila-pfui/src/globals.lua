@@ -148,8 +148,8 @@ function bridge.beforeAddon()
   if WHITE_FONT_COLOR == nil then WHITE_FONT_COLOR = CreateColor(1, 1, 1) end
 end
 
--- Inline texture markup as later clients spell it. 1.12's text engine draws the escape
--- literally, so the caller's string is correct while the icon itself is not rendered.
+-- Inline texture markup as later clients spell it. The client draws it once the extension is
+-- enabled (benilla-app's pfui/inline_texture.rs); a stock 1.12 client draws the bytes.
 function CreateSimpleTextureMarkup(file, width, height)
   return string.format('|T%s:%d:%d|t', file, height or width, width)
 end

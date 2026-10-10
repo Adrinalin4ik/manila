@@ -14,6 +14,9 @@
 //! (load flags `0x208a`/`0x20c2`), so stems are slightly slimmer at small sizes.
 
 mod engine;
+#[cfg(feature = "pfui")]
+#[path = "../pfui/inline_texture.rs"]
+pub(crate) mod inline_texture;
 mod layout;
 mod markup;
 mod measurer;
