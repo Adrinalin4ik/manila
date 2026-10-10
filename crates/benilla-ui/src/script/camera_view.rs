@@ -173,8 +173,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::CameraViewRequest;
-    use crate::script::UiScript;
+    use crate::script::{BindingInput, FiredInput, UiScript};
 
     /// The zoom pair queues the amount given, and a bare call steps the notch's own 1.0 — the
     /// number `WoW.exe`'s zoom verb is VERIFIED to default (the app side's `CAM_ZOOM_STEP`).
@@ -186,14 +185,15 @@ mod tests {
         s.run("CameraZoomIn()").unwrap();
         s.run("CameraZoomOut('garbage')").unwrap();
         assert_eq!(
-            s.take_camera_view_requests(),
+            s.take_binding_input(),
             vec![
-                CameraViewRequest::ZoomOut(2.0),
-                CameraViewRequest::ZoomIn(0.5),
-                CameraViewRequest::ZoomIn(1.0),
-                CameraViewRequest::ZoomOut(1.0),
+                BindingInput::Fire(FiredInput::CameraZoomOut(2.0)),
+                BindingInput::Fire(FiredInput::CameraZoomIn(0.5)),
+                BindingInput::Fire(FiredInput::CameraZoomIn(1.0)),
+                BindingInput::Fire(FiredInput::CameraZoomOut(1.0)),
             ]
         );
+        assert!(s.take_binding_input().is_empty());
         assert!(s.take_camera_view_requests().is_empty());
     }
 }
