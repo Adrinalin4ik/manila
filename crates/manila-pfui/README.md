@@ -345,6 +345,9 @@ fired: neither ClassicAPI nor Nampower documents them. pfUI's bar then hides whe
 runs out with no new one. The swing clock is covered by tests and a check of the three
 `Spell.dbc` columns against the Turtle install; it has not been watched in a live fight.
 
+The client's game menu has two rungs of its own, Edit Mode and Support. When pfUI's game-menu
+skin has run they take the same button skin, so the menu reads as one.
+
 The state events compare the stock snapshots after their feeds, with a baseline per VM and
 character: a login, a reload and a relisted reputation table announce nothing.
 `UPDATE_INVENTORY_DURABILITY` fires once when any worn slot's item or durability changes.

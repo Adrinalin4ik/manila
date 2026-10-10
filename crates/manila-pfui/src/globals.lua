@@ -171,3 +171,15 @@ function GetCoinTextureString(amount, fontHeight)
   if copper > 0 or #parts == 0 then parts[#parts + 1] = string.format(COPPER_AMOUNT_TEXTURE, copper, size, size) end
   return table.concat(parts, ' ')
 end
+
+-- The client's game menu carries two rungs of its own that pfUI has never heard of. When pfUI's
+-- game-menu skin has run (it creates `GameMenuButtonPFUI`), they take the same skin, once.
+local menu = CreateFrame('Frame')
+menu:RegisterEvent('PLAYER_ENTERING_WORLD')
+menu:SetScript('OnEvent', function()
+  menu:UnregisterEvent('PLAYER_ENTERING_WORLD')
+  if not (pfUI and pfUI.api and pfUI.api.SkinButton and GameMenuButtonPFUI) then return end
+  for _, name in ipairs({ 'BenillaGameMenuButtonEditMode', 'BenillaGameMenuButtonSupport' }) do
+    if _G[name] then pfUI.api.SkinButton(_G[name]) end
+  end
+end)
