@@ -426,6 +426,29 @@ pub fn creature_id(lua: &Lua, value: Value) -> mlua::Result<Option<u32>> {
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
+    // The inverse of GetSpellName(slot, bookType); the player's book answers before the pet's.
+    lua.globals().set(
+        "FindSpellBookSlotByID",
+        lua.create_function(|lua, id: Value| {
+            let Some(id) = lua
+                .coerce_number(id)?
+                .filter(|n| n.fract() == 0.0 && *n >= 1.0 && *n <= f64::from(u32::MAX))
+                .map(|n| n as u32)
+            else {
+                return Ok((None, None));
+            };
+            let model = lua.app_data_ref::<Model>().expect("model");
+            for (book, slots) in [
+                ("spell", &model.spellbook.slots),
+                ("pet", &model.pet_book.slots),
+            ] {
+                if let Some(slot) = slots.iter().position(|slot| slot.spell_id == id) {
+                    return Ok((Some(slot + 1), Some(book)));
+                }
+            }
+            Ok((None, None))
+        })?,
+    )?;
     lua.globals().set(
         "GetShapeshiftFormID",
         lua.create_function(|lua, ()| {

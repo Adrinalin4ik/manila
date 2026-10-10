@@ -132,6 +132,29 @@ pub fn install(script: &UiScript) -> mlua::Result<()> {
         "CopyTable",
         "CreateObjectPool",
         "CreateTexturePool",
+        "IsModifierKeyDown",
+        "strtrim",
+        "GetLootRollItemID",
+        "GetLootSlotItemID",
+        "GetMerchantItemID",
+        "GetQuestItemID",
+        "GetQuestLogItemID",
+        "GetTradeSkillItemID",
+        "GetTradeSkillReagentItemID",
+        "GetCraftReagentItemID",
+        "GetMacroSpell",
+        "GetNumTrackingTypes",
+        "GetTrackingInfo",
+        "SetTracking",
+        "FindSpellBookSlotByID",
+        "GetFactionInfoByID",
+        "UnitNameFromGUID",
+        "GetPlayerInfoByGUID",
+        "GetInventoryItemsForSlot",
+        "EquipmentManager_UnpackLocation",
+        "EquipmentManager_GetLocationData",
+        "INTERFACE_VERSION",
+        "CLASS_SORT_ORDER",
     ] {
         if !lua.globals().get::<Value>(name)?.is_nil() {
             return Err(mlua::Error::runtime(format!(
@@ -143,6 +166,14 @@ pub fn install(script: &UiScript) -> mlua::Result<()> {
     encoding::install(lua)?;
     lua.load(include_str!("utilities.lua"))
         .set_name("@manila-pfui/utilities.lua")
+        .exec()?;
+    let globals = lua.create_table()?;
+    lua.load(include_str!("globals.lua"))
+        .set_name("@manila-pfui/globals.lua")
+        .call::<()>(globals.clone())?;
+    lua.set_named_registry_value("manila.pfui.globals_bridge", globals)?;
+    lua.load(include_str!("strings.lua"))
+        .set_name("@manila-pfui/strings.lua")
         .exec()?;
     lua.load(include_str!("event_registry.lua"))
         .set_name("@manila-pfui/event_registry.lua")
@@ -233,6 +264,9 @@ mod tests;
 
 #[cfg(test)]
 mod aura_tests;
+
+#[cfg(test)]
+mod globals_tests;
 
 #[cfg(test)]
 mod focus_retention_tests;

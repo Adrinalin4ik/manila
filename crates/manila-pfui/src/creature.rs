@@ -17,6 +17,8 @@ pub struct Race {
 #[derive(Clone, Debug)]
 pub struct Catalog {
     pub classes: BTreeMap<String, String>,
+    /// Class tokens in ChrClasses.dbc ID order.
+    pub class_order: Vec<String>,
     pub races: BTreeMap<u32, Race>,
 }
 
@@ -38,13 +40,16 @@ impl Catalog {
         let factions = rows(read, "FactionTemplate", 14)?;
         let groups = rows(read, "FactionGroup", 12)?;
         let mut names = BTreeMap::new();
+        let mut ordered = Vec::new();
         for row in classes.records() {
             let token = string(&classes, row, 14)?;
             let name = localized(&classes, row, 5, slot)?;
             if !token.is_empty() && !name.is_empty() {
+                ordered.push((number(row, 0)?, token.clone()));
                 names.insert(token, name);
             }
         }
+        ordered.sort();
         let mut result = BTreeMap::new();
         for row in races.records() {
             let id = number(row, 0)?;
@@ -77,6 +82,7 @@ impl Catalog {
         }
         Ok(Self {
             classes: names,
+            class_order: ordered.into_iter().map(|(_, token)| token).collect(),
             races: result,
         })
     }
@@ -122,6 +128,9 @@ impl Catalog {
             "GetCreatureID",
             lua.create_function(benilla_ui::script::pfui_host::units::creature_id)?,
         )?;
+        // The DBC's class IDs order the list; the reference client has no such table.
+        lua.globals()
+            .set("CLASS_SORT_ORDER", self.class_order.clone())?;
         lua.globals().set("C_CreatureInfo", api)
     }
 }

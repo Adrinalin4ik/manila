@@ -118,6 +118,7 @@ pub fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(MultiValue::from_vec(result))
         })?,
     )?;
+    globals.set("INTERFACE_VERSION", super::addon_gate::CLIENT_INTERFACE)?;
     items::install(lua)?;
     cursor::install(lua)?;
     merchant::install(lua)?;
@@ -196,6 +197,14 @@ pub fn addon_scope<'a>(lua: &'a Lua, name: &str) -> mlua::Result<AddonScope<'a>>
         context.set(1, name)?;
         context.set(2, private)?;
         lua.set_named_registry_value("manila.pfui.addon_context", context)?;
+        // Stock globals a preceding load assigned are adapted before this addon reads them.
+        if let Some(bridge) =
+            lua.named_registry_value::<Option<Table>>("manila.pfui.globals_bridge")?
+        {
+            if let Some(adapt) = bridge.get::<Option<Function>>("beforeAddon")? {
+                adapt.call::<()>(())?;
+            }
+        }
     }
     Ok(AddonScope {
         lua,

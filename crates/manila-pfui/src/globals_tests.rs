@@ -1,0 +1,403 @@
+use benilla_ui::script::UiScript;
+use std::collections::BTreeMap;
+
+fn extended() -> UiScript {
+    let script = UiScript::new().unwrap();
+    super::install(&script).unwrap();
+    script
+}
+
+fn spell(name: &str, rank: &str, aura: f64) -> crate::spell::Spell {
+    let mut effects = vec![BTreeMap::new(); 3];
+    effects[0].insert("effect", if aura == 0.0 { 2.0 } else { 6.0 });
+    effects[0].insert("auraName", aura);
+    crate::spell::Spell {
+        name: name.into(),
+        rank: rank.into(),
+        icon: Some(format!("Interface\\Icons\\{name}")),
+        dispel: 0,
+        attributes: 0,
+        reagents: Vec::new(),
+        effects,
+        cast_time: 0,
+        min_range: 0.0,
+        max_range: 0.0,
+        cost: 0,
+        power_type: 0,
+        funnel: false,
+    }
+}
+
+fn book(script: &mut UiScript) {
+    use benilla_ui::script::{PetBookState, SpellBookState, SpellSlotView};
+    let slot = |id, name: &str, rank: &str| SpellSlotView {
+        spell_id: id,
+        name: name.into(),
+        rank: (!rank.is_empty()).then(|| rank.into()),
+        texture: Some(format!("Interface\\Icons\\{name}")),
+        ..Default::default()
+    };
+    script.set_spellbook(SpellBookState {
+        slots: vec![
+            slot(133, "Fireball", "Rank 1"),
+            slot(2580, "Find Minerals", ""),
+            slot(143, "Fireball", "Rank 2"),
+            slot(2383, "Find Herbs", ""),
+        ],
+        ..Default::default()
+    });
+    script.set_pet_book(PetBookState {
+        slots: vec![slot(2649, "Growl", "Rank 1")],
+        ..Default::default()
+    });
+    crate::spell::Catalog(BTreeMap::from([
+        (133, spell("Fireball", "Rank 1", 0.0)),
+        (143, spell("Fireball", "Rank 2", 0.0)),
+        (2580, spell("Find Minerals", "", 45.0)),
+        (2383, spell("Find Herbs", "", 45.0)),
+        (2649, spell("Growl", "Rank 1", 0.0)),
+    ]))
+    .install(script.lua())
+    .unwrap();
+}
+
+#[test]
+fn modifier_rollup_and_literal_trim_follow_the_documented_contract() {
+    let mut script = extended();
+    script
+        .run(
+            r#"
+        assert(IsModifierKeyDown() == nil)
+        assert(strtrim("  hello \t\n") == "hello" and strtrim("xxhelloxx", "x") == "hello")
+        assert(strtrim("[a]", "[]") == "a" and strtrim("%a%", "%") == "a")
+        assert(strtrim("   ") == "" and strtrim("") == "" and strtrim(12) == "12")
+        assert(not pcall(strtrim, nil))
+    "#,
+        )
+        .unwrap();
+    script.set_modifiers(false, false, true);
+    script.run("assert(IsModifierKeyDown() == 1)").unwrap();
+}
+
+#[test]
+fn item_id_companions_read_the_slot_the_stock_link_names() {
+    use benilla_ui::script::{MerchantItem, MerchantState};
+    let mut script = extended();
+    script.set_merchant(Some(MerchantState {
+        items: vec![
+            MerchantItem {
+                item_id: 4540,
+                link: Some("|cffffffff|Hitem:4540:0:0:0|h[Tough Hunk of Bread]|h|r".into()),
+                ..Default::default()
+            },
+            MerchantItem::default(),
+        ],
+        ..Default::default()
+    }));
+    script
+        .run(
+            r#"
+        assert(GetMerchantItemID(1) == 4540)
+        assert(GetMerchantItemID(2) == nil and GetMerchantItemID(9) == nil)
+        assert(GetLootSlotItemID(1) == nil and GetLootRollItemID(1) == nil)
+        assert(GetQuestItemID("reward", 1) == nil and GetQuestLogItemID("choice", 1) == nil)
+        assert(GetTradeSkillItemID(1) == nil and GetTradeSkillReagentItemID(1, 1) == nil)
+        assert(GetCraftReagentItemID(1, 1) == nil)
+    "#,
+        )
+        .unwrap();
+}
+
+#[test]
+fn spellbook_slot_lookup_prefers_the_player_book_and_rejects_unknown_ids() {
+    let mut script = extended();
+    book(&mut script);
+    script
+        .run(
+            r#"
+        local slot, kind = FindSpellBookSlotByID(143)
+        assert(slot == 3 and kind == "spell")
+        slot, kind = FindSpellBookSlotByID(2649)
+        assert(slot == 1 and kind == "pet")
+        assert(FindSpellBookSlotByID(999) == nil and FindSpellBookSlotByID(0) == nil)
+        assert(FindSpellBookSlotByID("143") == 3 and FindSpellBookSlotByID(nil) == nil)
+    "#,
+        )
+        .unwrap();
+}
+
+#[test]
+fn macro_spell_reads_directives_then_the_first_cast_and_only_known_spells() {
+    use benilla_ui::script::{MacroState, MacroView};
+    let mut script = extended();
+    book(&mut script);
+    let view = |body: &str| MacroView {
+        name: "m".into(),
+        body: body.into(),
+        ..Default::default()
+    };
+    script.set_macros(MacroState {
+        account: vec![
+            view("/cast Fireball(Rank 1)"),
+            view("/say hi\n/cast Fireball"),
+            view("#showtooltip Find Herbs\n/cast Fireball"),
+            view("/script CastSpellByName(\"Fireball\")"),
+            view("/castsequence reset=5 Find Minerals, Fireball"),
+            view("/say nothing"),
+            view("#showtooltip Linen Bandage\n/cast Fireball"),
+            view("#showtooltip\n/cast Unknown Spell"),
+            view("/cast [mod:alt] Fireball"),
+        ],
+        ..Default::default()
+    });
+    script
+        .run(
+            r#"
+        local function same(slot, name, rank, id)
+          local n, r, i = GetMacroSpell(slot)
+          assert(n == name and r == rank and i == id, slot .. ": " .. tostring(n) .. tostring(r) .. tostring(i))
+        end
+        same(1, "Fireball", "Rank 1", 133)
+        same(2, "Fireball", "Rank 2", 143)
+        same(3, "Find Herbs", "", 2383)
+        same(4, "Fireball", "Rank 2", 143)
+        same(5, "Find Minerals", "", 2580)
+        for slot = 6, 10 do assert(GetMacroSpell(slot) == nil, slot) end
+    "#,
+        )
+        .unwrap();
+}
+
+#[test]
+fn tracking_lists_book_spells_with_a_tracking_aura_and_casts_the_chosen_slot() {
+    use benilla_ui::script::ScriptCall;
+    let mut script = extended();
+    book(&mut script);
+    script
+        .run(
+            r#"
+        assert(GetNumTrackingTypes() == 2)
+        local name, texture, active, category, id = GetTrackingInfo(1)
+        assert(name == "Find Minerals" and texture == "Interface\\Icons\\Find Minerals")
+        assert(active == false and category == "spell" and id == 2580)
+        name, _, _, _, id = GetTrackingInfo(2)
+        assert(name == "Find Herbs" and id == 2383)
+        assert(GetTrackingInfo(3) == nil and GetTrackingInfo(0) == nil)
+        SetTracking(9)
+    "#,
+        )
+        .unwrap();
+    assert!(script.take_script_calls().is_empty());
+    script.run("SetTracking(2)").unwrap();
+    assert!(matches!(
+        script.take_script_calls().as_slice(),
+        [ScriptCall::CastSpell {
+            spell_id: 2383,
+            on_self: false
+        }]
+    ));
+}
+
+#[test]
+fn faction_lookup_by_id_separates_met_unmet_and_absent_factions() {
+    use benilla_ui::script::{FactionEntry, ReputationState};
+    let entry = |faction_id, rep_list_id, visible, is_header| FactionEntry {
+        faction_id,
+        rep_list_id,
+        parent_id: 0,
+        name: format!("Faction {faction_id}"),
+        description: "About".into(),
+        standing: 4200,
+        standing_id: 5,
+        bar_min: 3000,
+        bar_max: 9000,
+        visible,
+        is_header,
+        at_war: false,
+        can_toggle_at_war: true,
+        inactive: false,
+    };
+    let mut script = extended();
+    script.set_reputation(ReputationState {
+        entries: vec![
+            entry(69, 1, true, false),
+            entry(574, 2, false, false),
+            entry(469, 3, true, true),
+        ],
+        watched: Some(1),
+    });
+    script
+        .run(
+            r#"
+        local name, text, rank, low, high, value, war, toggle, header, collapsed, watched = GetFactionInfoByID(69)
+        assert(name == "Faction 69" and text == "About" and rank == 5 and low == 3000 and high == 9000)
+        assert(value == 4200 and war == nil and toggle == 1 and header == nil and collapsed == nil and watched == 1)
+        name, _, rank, low, high, value, war, toggle = GetFactionInfoByID(574)
+        assert(name == "Faction 574" and rank == 4 and low == 0 and high == 3000 and value == 0)
+        assert(war == nil and toggle == nil)
+        assert(GetFactionInfoByID(469) == nil and GetFactionInfoByID(1) == nil and GetFactionInfoByID(nil) == nil)
+    "#,
+        )
+        .unwrap();
+}
+
+#[test]
+fn guid_name_lookups_use_visible_units_then_real_name_replies() {
+    use benilla_ui::script::{pfui_host::units, UnitState};
+    let script = extended();
+    units::set_unit_states(
+        script.lua(),
+        [(
+            5,
+            UnitState {
+                guid: 5,
+                exists: true,
+                has_object: true,
+                name: Some("Seen".into()),
+                ..Default::default()
+            },
+            0,
+        )],
+    );
+    crate::player_cache::observe_name(script.lua(), 0x777, "Heard", Some("Mage"), 0, 1).unwrap();
+    script
+        .run(
+            r#"
+        local name, realm = UnitNameFromGUID("0x0000000000000005")
+        assert(name == "Seen" and realm == "")
+        name, realm = UnitNameFromGUID("0x00000777")
+        assert(name == "Heard" and realm == "")
+        local _, class, _, _, sex, cached = GetPlayerInfoByGUID("0x0000000000000777")
+        assert(class == "MAGE" and sex == 3 and cached == "Heard")
+        assert(UnitNameFromGUID("0x0000000000000999") == nil and GetPlayerInfoByGUID("0x0000000000000999") == nil)
+        assert(UnitNameFromGUID("junk") == nil and GetPlayerInfoByGUID(nil) == nil)
+        assert(not C_PlayerCache.IsEnabled() and C_PlayerCache.GetPlayerInfoByName("Heard") == nil)
+    "#,
+        )
+        .unwrap();
+}
+
+#[test]
+fn packed_locations_unpack_to_the_slots_the_snapshot_publishes() {
+    let script = extended();
+    script
+        .run(
+            r#"
+        assert(ITEM_INVENTORY_LOCATION_PLAYER == 1048576)
+        local worn = EquipmentManager_GetLocationData(0x100007)
+        assert(worn.isPlayer and not worn.isBags and not worn.isBank and worn.slot == 7 and worn.bag == nil)
+        local bag = EquipmentManager_GetLocationData(0x300205)
+        assert(bag.isPlayer and bag.isBags and not bag.isBank and bag.bag == 2 and bag.slot == 5)
+        local bank = EquipmentManager_GetLocationData(0x400003)
+        assert(bank.isBank and not bank.isBags and not bank.isPlayer and bank.slot == 3)
+        local bankbag = EquipmentManager_GetLocationData(0x600101)
+        assert(bankbag.isBank and bankbag.isBags and bankbag.bag == 5 and bankbag.slot == 1)
+        local none = EquipmentManager_GetLocationData(-1)
+        assert(not none.isPlayer and not none.isBank and not none.isBags)
+    "#,
+        )
+        .unwrap();
+}
+
+#[test]
+fn stock_font_colours_gain_colour_methods_before_an_addon_loads() {
+    let script = extended();
+    script
+        .run("NORMAL_FONT_COLOR = { r = 1, g = .82, b = 0 }; OTHER_TABLE = { r = 1 }")
+        .unwrap();
+    drop(benilla_ui::script::pfui_host::addon_scope(script.lua(), "pfUI").unwrap());
+    script
+        .run(
+            r#"
+        local r, g, b, a = NORMAL_FONT_COLOR:GetRGBA()
+        assert(r == 1 and g == .82 and b == 0 and a == 1)
+        assert(WHITE_FONT_COLOR:GetRGB() == 1 and OTHER_TABLE.GetRGB == nil)
+        assert(INTERFACE_VERSION == 11200 and EQUIPMENT_MANAGER == "Equipment Manager")
+    "#,
+        )
+        .unwrap();
+}
+
+#[test]
+fn slot_candidates_filter_carried_items_by_inventory_type_and_hand() {
+    use benilla_ui::script::{
+        pfui_host::items::{self, Instance},
+        ContainerSlot, ContainerState, ItemTemplateView,
+    };
+    let mut script = extended();
+    // 13 one-hand, 17 two-hand, 22 off-hand only, 14 shield, 11 ring; 99 is not cached.
+    let kinds = [(1, 13), (2, 17), (3, 22), (4, 14), (5, 11)];
+    for (id, inventory_type) in kinds {
+        script.set_item_template(
+            id,
+            ItemTemplateView {
+                inventory_type,
+                ..Default::default()
+            },
+        );
+    }
+    let ids = [1, 2, 3, 4, 5, 99];
+    script.set_container(
+        1,
+        Some(ContainerState {
+            num_slots: 8,
+            slots: ids
+                .iter()
+                .enumerate()
+                .map(|(index, id)| {
+                    (
+                        index as u32 + 1,
+                        ContainerSlot {
+                            item_id: *id,
+                            count: 1,
+                            link: Some(format!("|Hitem:{id}:0:0:0|h[Item]|h")),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        }),
+    );
+    items::set_instances(
+        script.lua(),
+        ids.iter().enumerate().map(|(index, id)| {
+            (
+                (1, index as u32 + 1),
+                Instance {
+                    guid: 100 + u64::from(*id),
+                    item_id: *id,
+                    count: 1,
+                    uses: 1,
+                    name: None,
+                },
+            )
+        }),
+    );
+    script
+        .run(
+            r#"
+        local function ids(slot)
+          local found, count = {}, 0
+          local result = {}
+          assert(GetInventoryItemsForSlot(slot, result) == result)
+          for location, link in pairs(result) do
+            local data = EquipmentManager_GetLocationData(location)
+            assert(data.isBags and data.bag == 1 and GetContainerItemLink(1, data.slot) == link)
+            found[tonumber(link:match("item:(%d+)"))] = true
+            count = count + 1
+          end
+          return found, count
+        end
+        local main, mainCount = ids(16)
+        assert(mainCount == 2 and main[1] and main[2])
+        local off, offCount = ids(17)
+        assert(offCount == 3 and off[1] and off[3] and off[4])
+        local ring, ringCount = ids(12)
+        assert(ringCount == 1 and ring[5])
+        assert(select(2, ids(1)) == 0 and select(2, ids(0)) == 0 and select(2, ids(20)) == 0)
+        assert(not pcall(GetInventoryItemsForSlot, 16))
+    "#,
+        )
+        .unwrap();
+}

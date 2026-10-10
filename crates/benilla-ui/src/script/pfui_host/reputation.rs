@@ -85,5 +85,47 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 .transpose()
         })?,
     )?;
+    // The eleven GetFactionInfo values by faction ID. A faction the player has not met answers
+    // its DBC name with the documented neutral rank; one without a reputation slot has no
+    // client record here and answers nil.
+    lua.globals().set(
+        "GetFactionInfoByID",
+        lua.create_function(|lua, id: mlua::Value| {
+            use mlua::Value::{Integer, Nil};
+            let id = lua.coerce_number(id)?.filter(|n| n.fract() == 0.0);
+            let model = lua.app_data_ref::<Model>().expect("model");
+            let Some(entry) = id.and_then(|id| {
+                model
+                    .reputation
+                    .entries
+                    .iter()
+                    .find(|entry| !entry.is_header && f64::from(entry.faction_id) == id)
+            }) else {
+                return Ok(mlua::MultiValue::new());
+            };
+            let flag = |on: bool| if on { Integer(1) } else { Nil };
+            let mut values = vec![
+                mlua::Value::String(lua.create_string(&entry.name)?),
+                mlua::Value::String(lua.create_string(&entry.description)?),
+            ];
+            if entry.visible {
+                values.extend([
+                    Integer(i64::from(entry.standing_id)),
+                    Integer(i64::from(entry.bar_min)),
+                    Integer(i64::from(entry.bar_max)),
+                    Integer(i64::from(entry.standing)),
+                    flag(entry.at_war),
+                    flag(entry.can_toggle_at_war),
+                    Nil,
+                    Nil,
+                    flag(model.reputation.watched == Some(entry.rep_list_id)),
+                ]);
+            } else {
+                values.extend([Integer(4), Integer(0), Integer(3000), Integer(0)]);
+                values.extend([Nil, Nil, Nil, Nil, Nil]);
+            }
+            Ok(mlua::MultiValue::from_vec(values))
+        })?,
+    )?;
     lua.globals().set("C_Reputation", namespace)
 }

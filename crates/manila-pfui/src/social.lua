@@ -141,9 +141,58 @@ end
 function C_PlayerCache.RememberPlayer(guid, name, class, race, sex)
   return remember(guid, name, class, race, sex, false)
 end
+-- Every name-query reply of this VM's session, independent of the opt-in saved cache.
+local seen = {}
+local function canonical(guid)
+  if type(guid) ~= 'string' then return end
+  local digits = guid:match('^0[xX](%x+)$')
+  if not digits or (#digits ~= 8 and #digits ~= 16) or digits:match('^0+$') then return end
+  return '0x' .. string.rep('0', 16 - #digits) .. digits:upper()
+end
 function bridge.nameReply(guid, name, class, raceID, sex)
   local race = C_CreatureInfo and C_CreatureInfo.GetRaceInfo(raceID)
+  local key = canonical(guid)
+  if key and type(name) == 'string' and name ~= '' then
+    seen[key] = { name = name, class = type(class) == 'string' and class:upper() or nil,
+      race = race and race.clientFileString, sex = sex }
+  end
   return remember(guid, name, class, race and race.clientFileString, sex, true)
+end
+local function record(guid)
+  local key = canonical(guid)
+  if not key then return end
+  if seen[key] then return seen[key] end
+  if C_PlayerCache.IsEnabled() then
+    local saved = cache()
+    return saved and saved.entries[key]
+  end
+end
+-- A visible unit answers first, then the friends list, then name-query replies.
+function UnitNameFromGUID(guid)
+  local key = canonical(guid)
+  if not key then return end
+  local name = UnitExists(key) and UnitName(key)
+  if name then return name, '' end
+  for index = 1, GetNumFriends() do
+    local info = friend(index)
+    if info and info.guid == key then return info.name, '' end
+  end
+  local known = record(key)
+  if known then return known.name, '' end
+end
+function GetPlayerInfoByGUID(guid)
+  local key = canonical(guid)
+  if not key then return end
+  if UnitExists(key) and UnitIsPlayer(key) then
+    local class, classToken = UnitClass(key)
+    local race, raceToken = UnitRace(key)
+    return class, classToken, race, raceToken, UnitSex(key), UnitName(key), ''
+  end
+  local known = record(key)
+  if not known then return end
+  local race = known.race and raceInfo(known.race)
+  return (LOCALIZED_CLASS_NAMES_MALE or {})[known.class], known.class,
+    race and race.raceName, known.race, (known.sex or 0) + 2, known.name, ''
 end
 function C_PlayerCache.GetPlayerInfoByName(name)
   if not C_PlayerCache.IsEnabled() then return end

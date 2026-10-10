@@ -2568,6 +2568,7 @@ fn real_name_answers_populate_opt_in_cache_and_correct_wire_gender() {
     script.set_realm_name("Realm");
     creature::Catalog {
         classes: Default::default(),
+        class_order: vec!["WARRIOR".into(), "MAGE".into()],
         races: [(
             1,
             creature::Race {

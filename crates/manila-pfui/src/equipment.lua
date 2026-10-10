@@ -229,3 +229,38 @@ function bridge.tooltips:SetEquipmentSet(name)
     end
   end
 end
+
+-- Inventory types each paperdoll slot accepts. Two-handers stay in the main hand, and the
+-- literal main/off-hand types stay in their own hand. 1.12 relics equip in the ranged slot.
+local accepts = {
+  [1] = { INVTYPE_HEAD = true }, [2] = { INVTYPE_NECK = true }, [3] = { INVTYPE_SHOULDER = true },
+  [4] = { INVTYPE_BODY = true }, [5] = { INVTYPE_CHEST = true, INVTYPE_ROBE = true },
+  [6] = { INVTYPE_WAIST = true }, [7] = { INVTYPE_LEGS = true }, [8] = { INVTYPE_FEET = true },
+  [9] = { INVTYPE_WRIST = true }, [10] = { INVTYPE_HAND = true },
+  [11] = { INVTYPE_FINGER = true }, [12] = { INVTYPE_FINGER = true },
+  [13] = { INVTYPE_TRINKET = true }, [14] = { INVTYPE_TRINKET = true },
+  [15] = { INVTYPE_CLOAK = true },
+  [16] = { INVTYPE_WEAPON = true, INVTYPE_2HWEAPON = true, INVTYPE_WEAPONMAINHAND = true },
+  [17] = { INVTYPE_WEAPON = true, INVTYPE_SHIELD = true, INVTYPE_WEAPONOFFHAND = true,
+    INVTYPE_HOLDABLE = true },
+  [18] = { INVTYPE_RANGED = true, INVTYPE_THROWN = true, INVTYPE_RANGEDRIGHT = true,
+    INVTYPE_RELIC = true },
+  [19] = { INVTYPE_TABARD = true },
+}
+function GetInventoryItemsForSlot(slot, result)
+  assert(type(result) == 'table', 'GetInventoryItemsForSlot requires a result table')
+  local types = accepts[slot]
+  if not types then return result end
+  for _, item in ipairs(bridge.snapshot()) do
+    if item.bag == -100 or item.bag >= 0 and item.bag <= 4 then
+      local _, _, _, token = C_Item.GetItemInfoInstant(item.itemID)
+      if token and types[token] then
+        local link
+        if item.bag == -100 then link = GetInventoryItemLink('player', item.slot)
+        else link = GetContainerItemLink(item.bag, item.slot) end
+        if link then result[item.location] = link end
+      end
+    end
+  end
+  return result
+end
