@@ -5,6 +5,7 @@
 //! 0x4e4170`); any other unit's reads its descriptor by ascending slot, or, for a group member or
 //! pet with no live object, its roster record.
 
+mod clock;
 #[cfg(feature = "pfui")]
 pub(crate) mod pfui;
 mod units;
@@ -435,6 +436,7 @@ fn feed_auras(
     mut durations: ResMut<AuraDurations>,
     mut cache: ResMut<PlayerAuraCache>,
     time: Res<Time<Real>>,
+    clock: Option<Res<crate::ui_script::UiClock>>,
     mut mem: ResMut<AuraFeedMemory>,
 ) {
     let Some(mut script) = script else {
@@ -479,7 +481,7 @@ fn feed_auras(
 
     // No stamp is pruned for an empty slot: the packet arrives before its slot fills.
 
-    let script_now = script.now();
+    let script_now = clock::script_now(&time, clock.as_deref(), script.now());
 
     let list: Vec<AuraState> = cache
         .auras
