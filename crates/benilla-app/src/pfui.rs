@@ -10,6 +10,7 @@ mod icons;
 mod loot;
 mod nampower;
 mod quests;
+mod session_events;
 mod social;
 pub(crate) mod spell_queue;
 mod spells;
@@ -138,6 +139,7 @@ impl Plugin for PfuiPlugin {
         bags::register(app);
         loot::register(app);
         quests::register(app);
+        session_events::register(app);
         social::register(app);
         spells::register(app);
         units::register(app);

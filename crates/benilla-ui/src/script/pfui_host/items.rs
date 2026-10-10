@@ -13,6 +13,9 @@ mod new_items;
 #[path = "inventory_events.rs"]
 mod events;
 
+#[path = "state_events.rs"]
+mod state_events;
+
 #[path = "item_actions.rs"]
 mod actions;
 pub(super) use actions::request_use;
@@ -20,6 +23,7 @@ pub(super) use actions::request_use;
 /// The host calls this once after the stock inventory feeds have delivered their events.
 pub fn dispatch_inventory_events(lua: &Lua) {
     events::dispatch(lua);
+    state_events::dispatch(lua);
 }
 
 /// Public-slot GUIDs come directly from the player descriptor, even before item objects arrive.
@@ -198,6 +202,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     new_items::install(lua)?;
     equipment::install(lua)?;
     events::install(lua)?;
+    state_events::install(lua);
     let api = lua.create_table()?;
     actions::install(lua, &api)?;
     api.set("GetItemID", lua.create_function(location_id)?)?;

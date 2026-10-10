@@ -269,6 +269,9 @@ mod aura_tests;
 mod globals_tests;
 
 #[cfg(test)]
+mod state_events_tests;
+
+#[cfg(test)]
 mod focus_retention_tests;
 
 #[cfg(test)]
