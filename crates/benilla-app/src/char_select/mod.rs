@@ -1002,7 +1002,7 @@ pub(crate) fn test_character(guid: u64, name: &str) -> Character {
 
 /// The roster policy and its CVar mirror without the screen, for tests over a real CVar host.
 #[cfg(test)]
-pub(crate) fn add_test_systems(app: &mut App, pick: async_channel::Sender<CharRequest>) {
+pub(crate) fn add_test_systems(app: &mut App, pick: crossbeam_channel::Sender<CharRequest>) {
     app.insert_state(ClientState::CharSelect)
         .init_resource::<Roster>()
         .insert_resource(CharPick(pick.into()))
@@ -1358,7 +1358,7 @@ mod tests {
         names: &[&str],
         preselected: Option<usize>,
     ) -> Option<usize> {
-        let (tx, _rx) = async_channel::unbounded();
+        let (tx, _rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<Roster>()
@@ -1473,7 +1473,7 @@ mod tests {
     /// `selectLast` overwrites the restored index.
     #[test]
     fn a_created_character_outranks_the_remembered_one() {
-        let (tx, _rx) = async_channel::unbounded();
+        let (tx, _rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<Roster>()
@@ -1527,7 +1527,7 @@ mod tests {
     /// The write is at Enter World, not at selection (`0x46b500`).
     #[test]
     fn only_entering_the_world_writes_the_cvar() {
-        let (tx, _rx) = async_channel::unbounded();
+        let (tx, _rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<Roster>()

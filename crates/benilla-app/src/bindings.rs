@@ -2008,10 +2008,6 @@ mod tests {
     // command registry: the kind switch they asserted (Held vs Host vs Edge) no longer exists — a
     // command is a name and a body now — and the amount lane moved onto `synth_amount`.
 
-    fn script_of(app: &mut App) -> Option<NonSendMut<'_, UiScript>> {
-        app.world_mut().get_non_send_resource_mut::<UiScript>()
-    }
-
     /// A bridge hold runs the command's down-half and stays held until the bridge lets go; the
     /// release runs the up-half. `MOVEFORWARD` is the stock hold (`runOnUp`).
     #[test]
@@ -2021,7 +2017,9 @@ mod tests {
         {
             let world = app.world_mut();
             let mut state = world.remove_resource::<BindingsState>().expect("state");
-            let mut script = world.get_non_send_resource_mut::<UiScript>();
+            let mut params =
+                bevy::ecs::system::SystemState::<Option<NonSendMut<UiScript>>>::new(world);
+            let mut script = params.get_mut(world);
             synth_press(&mut state, &mut script, "MOVEFORWARD");
             assert!(state.synth_held("MOVEFORWARD"));
             // Idempotent within the frame: a second assert does not latch twice.
@@ -2049,7 +2047,9 @@ mod tests {
         {
             let world = app.world_mut();
             let mut state = world.remove_resource::<BindingsState>().expect("state");
-            let mut script = world.get_non_send_resource_mut::<UiScript>();
+            let mut params =
+                bevy::ecs::system::SystemState::<Option<NonSendMut<UiScript>>>::new(world);
+            let mut script = params.get_mut(world);
             synth_press(&mut state, &mut script, "MOVEFORWARD");
             world.insert_resource(state);
         }

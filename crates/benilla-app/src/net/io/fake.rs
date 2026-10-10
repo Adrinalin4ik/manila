@@ -725,7 +725,7 @@ pub(crate) struct Cycles {
     pub(crate) events: Receiver<SessionEvent>,
     /// The app's commands, to the write thread and on to the world socket while in the world.
     pub(crate) commands: Sender<ClientCommand>,
-    pub(crate) login: Sender<LoginRequest>,
+    pub(crate) login: async_channel::Sender<LoginRequest>,
     pub(crate) realm: ParkSender<RealmRequest>,
     pub(crate) pick: ParkSender<CharRequest>,
     pub(crate) abandon: Arc<AtomicU64>,
@@ -747,8 +747,8 @@ fn spawn_cycles_for(screen_asks_roster: bool) -> Cycles {
     let (commands, cmd_rx) = crossbeam_channel::unbounded::<ClientCommand>();
     let (writer_tx, writer_rx) = crossbeam_channel::unbounded::<WriterSwap>();
     thread::spawn(move || writer_loop(&cmd_rx, writer_rx, &Mutex::new(PingClock::default())));
-    let (login, login_rx) = crossbeam_channel::unbounded();
-    let (park_tx, park_rx) = crossbeam_channel::unbounded::<ParkRequest>();
+    let (login, login_rx) = async_channel::unbounded();
+    let (park_tx, park_rx) = async_channel::unbounded::<ParkRequest>();
     let abandon = Arc::new(AtomicU64::new(0));
     let thread_abandon = Arc::clone(&abandon);
     thread::spawn(move || {
@@ -760,14 +760,15 @@ fn spawn_cycles_for(screen_asks_roster: bool) -> Cycles {
         let clock = Mutex::new(PingClock::default());
         let mut tails = Default::default();
         loop {
-            match run(
+            // The cycle is a future in this tree; this thread turns it over, as the app's does.
+            match futures_lite::future::block_on(run(
                 &events_tx,
                 &writer_tx,
                 &parks,
                 &thread_abandon,
                 &clock,
                 &mut tails,
-            ) {
+            )) {
                 Ok(Cycle::Exit) => return,
                 Ok(Cycle::Repark) => {}
                 Err(e) => {
@@ -798,7 +799,7 @@ fn spawn_cycles_for(screen_asks_roster: bool) -> Cycles {
 pub(crate) fn login(cycles: &Cycles, host: &str) {
     cycles
         .login
-        .send(LoginRequest {
+        .try_send(LoginRequest {
             user: USER.into(),
             pass: PASS.into(),
             host: host.into(),

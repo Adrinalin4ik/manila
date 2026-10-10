@@ -372,7 +372,7 @@ pub(super) fn land_skin_composites(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
+    use crossbeam_channel::{unbounded, Sender};
 
     fn key(race: u8) -> SkinKey {
         SkinKey {
@@ -401,8 +401,8 @@ mod tests {
 
     /// Work that finishes when the test says so, and counts how many times it ran. It gives up
     /// after two seconds, so work run inline on the test's thread fails the test, never hangs it.
-    fn gated(ran: &Arc<std::sync::atomic::AtomicUsize>) -> (mpsc::Sender<()>, Work) {
-        let (tx, rx) = mpsc::channel::<()>();
+    fn gated(ran: &Arc<std::sync::atomic::AtomicUsize>) -> (Sender<()>, Work) {
+        let (tx, rx) = unbounded::<()>();
         let ran = ran.clone();
         let work: Work = Box::new(move || {
             ran.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

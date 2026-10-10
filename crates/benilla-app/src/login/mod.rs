@@ -1174,7 +1174,7 @@ mod tests {
     #[test]
     fn escape_on_the_realm_list_does_not_also_quit() {
         for list_first in [true, false] {
-            let (tx, _requests) = crossbeam_channel::unbounded();
+            let (tx, _requests) = async_channel::unbounded();
             let (realm_tx, realm_rx) = crossbeam_channel::unbounded();
             let mut app = App::new();
             app.add_plugins(MinimalPlugins)
@@ -1279,7 +1279,7 @@ mod tests {
     /// and the next Login is sent, where the attempt left in flight refused it.
     #[test]
     fn the_realm_lists_cancel_lets_the_next_login_through() {
-        let (tx, requests) = crossbeam_channel::unbounded();
+        let (tx, requests) = async_channel::unbounded();
         let (realm_tx, realm_rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)

@@ -62,27 +62,29 @@ fn an_empty_account_parks_at_select_without_creating_a_character() {
 
     let (events_tx, events) = crossbeam_channel::unbounded();
     let (writer_tx, _writer_rx) = crossbeam_channel::unbounded::<WriterSwap>();
-    let (login_tx, login_rx) = crossbeam_channel::unbounded();
-    let (park_tx, park_rx) = crossbeam_channel::unbounded();
+    let (login_tx, login_rx) = async_channel::unbounded();
+    let (park_tx, park_rx) = async_channel::unbounded();
     let cycle = thread::spawn(move || {
         let parks = Parks {
             login_rx,
             park_rx,
             screen_asks_roster: Default::default(),
         };
-        let ended = run(
+        // The cycle is a future in this tree (the page has no thread to block); a thread turns
+        // it over, as the app's own does.
+        let ended = futures_lite::future::block_on(run(
             &events_tx,
             &writer_tx,
             &parks,
             &AtomicU64::new(0),
             &Mutex::new(PingClock::default()),
             &mut Default::default(),
-        );
+        ));
         matches!(ended, Ok(Cycle::Repark))
     });
 
     login_tx
-        .send(LoginRequest {
+        .try_send(LoginRequest {
             user: fake::USER.into(),
             pass: fake::PASS.into(),
             host: realmd.addr.clone(),
@@ -93,7 +95,7 @@ fn an_empty_account_parks_at_select_without_creating_a_character() {
     assert!(!failed);
     assert_eq!(realms[0].name, REALM);
     park_tx
-        .send(ParkRequest::Realm(enter(realms[0].clone())))
+        .try_send(ParkRequest::Realm(enter(realms[0].clone())))
         .unwrap();
     assert!(
         matches!(next_event(&events), SessionEvent::WorldAuthenticated { .. }),
@@ -117,7 +119,7 @@ fn an_empty_account_parks_at_select_without_creating_a_character() {
     }
     // Select's Back ends the cycle, so the socket is done and its log complete.
     park_tx
-        .send(ParkRequest::Char(CharRequest::Abandon))
+        .try_send(ParkRequest::Char(CharRequest::Abandon))
         .unwrap();
     assert!(cycle.join().unwrap(), "Back returns to the login park");
     let sent = world.sent.lock().unwrap().clone();
@@ -418,6 +420,7 @@ fn a_world_session_has_one_epoch_and_a_realm_change_a_new_one() {
 /// login fails for good with the server's words, as it does at the park under the native policy,
 /// not as a lost stream.
 #[test]
+#[ignore = "upstream's policy: this fork never ends a session over Warden (WorldSession::handle_warden answers or stays silent), so no terminal failure is raised"]
 fn a_warden_demand_at_the_asked_roster_is_a_terminal_login_failure() {
     let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
     world.demand_warden();
