@@ -3524,7 +3524,10 @@
                                                 -- is 32, and a step of 4 keeps 1 and 2 - the old
                                                 -- tier's rungs, which `video.rs` still reads as
                                                 -- 16 and 32 - out of reach of the slider.
-                                                BenillaOptionsSliderRow_Setup(this, 0, 32, 4)
+                                                -- `"raw"`: the readout is a count of lamps, not a
+                                                -- share of anything. Without it the row's default
+                                                -- format is a percentage and 32 reads "3200%".
+                                                BenillaOptionsSliderRow_Setup(this, 0, 32, 4, "raw")
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowLampFogStrength" inherits="BenillaOptionsSliderRowTemplate">
@@ -3542,8 +3545,8 @@
                                         <!-- MONKEY (integration): the daylight lane's district window split (checkbox). -->
                                         <Frame name="$parentRowDaylightWindowSplit" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowLampFog" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowLampFog" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowLampFogStrength" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowLampFogStrength" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 BenillaOptionsRow_OnLoad(this, "daylightWindowSplit",
