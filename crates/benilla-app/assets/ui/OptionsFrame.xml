@@ -531,6 +531,7 @@
                 ambientOcclusion = "Ambient Occlusion",
                 -- MONKEY (lampfog)
                 lampFog = "Lamp Fog",
+                lampFogStrength = "Lamp Fog Strength",
                 -- GFX (volumetric light) / (moonlight)
                 volumetricLight = "Volumetric Light",
                 volumetricLightStrength = "Volumetric Light Strength",
@@ -715,10 +716,16 @@
                         .. "Off is the earlier look.",
                     -- MONKEY (lampfog)
                     LAMP_FOG =
-                        "Makes nearby lamps and fires glow through the air after dark. Low uses the "
-                        .. "nearest 16 lights; High uses 32. Rain and fog strengthen the halos. "
-                        .. "The effect is unshadowed, but stops at visible scene depth.\n\n"
-                        .. "Off is unchanged, and daylight is unchanged at every setting.",
+                        "Makes nearby lamps and fires glow through the air after dark. The setting is "
+                        .. "HOW MANY of the nearest lights glow, up to 32. Rain and fog strengthen the "
+                        .. "halos. The effect is unshadowed, but stops at visible scene depth.\n\n"
+                        .. "Each lamp costs the same, so this is the dial that costs; 0 is unchanged, "
+                        .. "and daylight is unchanged at every setting.",
+                    LAMP_FOG_STRENGTH =
+                        "How bright the halos are, over whatever the hour and the weather already "
+                        .. "decide: 1 leaves that alone, below 1 dims it, above 1 lifts it.\n\n"
+                        .. "This changes the look and not the cost - the lamp count above is the one "
+                        .. "that costs.",
                     -- GFX (volumetric light)
                     VOLUMETRIC_LIGHT =
                         "Sunlight and moonlight shine through the air as visible shafts: rays through "
@@ -798,6 +805,7 @@
                 ambientOcclusion = "Затенение окружения",
                 -- MONKEY (lampfog)
                 lampFog = "Свечение фонарей в тумане",
+                lampFogStrength = "Сила свечения фонарей",
                 -- GFX (volumetric light) / (moonlight)
                 volumetricLight = "Объёмный свет",
                 volumetricLightStrength = "Сила объёмного света",
@@ -992,10 +1000,15 @@
                         .. "изменения. Выключено — прежний вид.",
                     -- MONKEY (lampfog)
                     LAMP_FOG =
-                        "После заката ближайшие фонари и огни светятся сквозь воздух. Низкое "
-                        .. "качество использует 16 ближайших источников, высокое — 32. Дождь и туман усиливают ореолы. "
+                        "После заката ближайшие фонари и огни светятся сквозь воздух. Настройка — это "
+                        .. "СКОЛЬКО ближайших источников светится, до 32. Дождь и туман усиливают ореолы. "
                         .. "Эффект не рассчитывает тени, но обрывается на видимой глубине.\n\n"
-                        .. "Выключено — без изменений; днём изображение не меняется при любом значении.",
+                        .. "Каждая лампа стоит одинаково, так что цену задаёт именно эта ручка; 0 — без "
+                        .. "изменений, днём изображение не меняется при любом значении.",
+                    LAMP_FOG_STRENGTH =
+                        "Насколько ярки ореолы поверх того, что уже решают время суток и погода: 1 "
+                        .. "оставляет как есть, меньше 1 приглушает, больше 1 усиливает.\n\n"
+                        .. "Эта ручка меняет вид, а не цену — цену задаёт число ламп выше.",
                     -- GFX (volumetric light)
                     VOLUMETRIC_LIGHT =
                         "Солнечный и лунный свет виден в воздухе лучами: сквозь кроны деревьев, между "
@@ -1088,7 +1101,7 @@
                 -- MONKEY (ao): appended so the other rows keep their indices.
                 "RowAmbientOcclusion",
                 -- MONKEY (lampfog)
-                "RowLampFog",
+                "RowLampFog", "RowLampFogStrength",
                 -- MONKEY (integration): daylight window split.
                 "RowDaylightWindowSplit",
                 -- MONKEY (integration): the skybox lane's row (the lane left it out of this list).
@@ -3499,7 +3512,7 @@
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- MONKEY (lampfog): night point-light airlight tiers. -->
-                                        <Frame name="$parentRowLampFog" inherits="BenillaOptionsDropdownRowTemplate">
+                                        <Frame name="$parentRowLampFog" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowAmbientOcclusion" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowAmbientOcclusion" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
@@ -3507,11 +3520,23 @@
                                             <Scripts><OnLoad>
                                                 BenillaOptionsRow_OnLoad(this, "lampFog", BENILLA_ADVGFX.lampFog,
                                                     "BENILLA_TOOLTIP_LAMP_FOG")
-                                                BenillaOptionsDropdownRow_Setup(this, {
-                                                    { text = BENILLA_ADVGFX.fogOff, value = "0" },
-                                                    { text = BENILLA_ADVGFX.qLow, value = "1" },
-                                                    { text = BENILLA_ADVGFX.qHigh, value = "2" },
-                                                })
+                                                -- Step 4, not 1: `volumetric_fog::MAX_FOG_LAMPS`
+                                                -- is 32, and a step of 4 keeps 1 and 2 - the old
+                                                -- tier's rungs, which `video.rs` still reads as
+                                                -- 16 and 32 - out of reach of the slider.
+                                                BenillaOptionsSliderRow_Setup(this, 0, 32, 4)
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowLampFogStrength" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowLampFog" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowLampFog" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "lampFogStrength",
+                                                    BENILLA_ADVGFX.lampFogStrength,
+                                                    "BENILLA_TOOLTIP_LAMP_FOG_STRENGTH")
+                                                BenillaOptionsSliderRow_Setup(this, 0, 2, 0.25)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- MONKEY (integration): the daylight lane's district window split (checkbox). -->

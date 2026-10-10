@@ -48,6 +48,10 @@ struct FogOverride {
 }
 
 const MAX_FOG_LAMPS: usize = 32;
+/// The old Low tier's lamp budget. The lane no longer has tiers - `lampFog` IS the count - so
+/// this is now only the fixture the selection tests pick a budget from, and the number the
+/// legacy mapping in `video.rs` turns a stored `1` into.
+#[cfg_attr(not(test), allow(dead_code))]
 const LOW_FOG_LAMPS: usize = 16;
 const FOG_LAMP_RADIUS: f32 = 100.0;
 
@@ -262,8 +266,10 @@ fn update_fog(
 ) {
     let tier = override_value.fog.unwrap_or(video.volumetric_fog).min(2);
     let shafts_retired = vol_light.is_some_and(|v| v.tier(&video) > 0);
-    let lamp_tier = override_value.lamp.unwrap_or(video.lamp_fog).min(2);
-    let enabled = (tier != 0 || lamp_tier != 0)
+    // The number of lamps to light, 0 for off. Was a 0/1/2 tier standing for 16 and 32.
+    let lamp_count =
+        usize::from(override_value.lamp.unwrap_or(video.lamp_fog)).min(MAX_FOG_LAMPS);
+    let enabled = (tier != 0 || lamp_count != 0)
         && cameras.iter().any(|(_, camera, _, _, _)| camera.is_active);
     for (entity, sun) in &suns {
         // Only a tag for selecting this light in our shader. No Bevy VolumetricFog
@@ -288,21 +294,18 @@ fn update_fog(
             .clamp(0.0, 1.0);
         // Exact zero by day is both the intended look and the A/B invariant. At night a constant
         // floor makes nearby halos survive the zone haze's ten-yard dead zone; rain/fog raises it.
-        let lamp_strength = if lamp_tier == 0 {
+        let lamp_strength = if lamp_count == 0 {
             0.0
         } else {
             lamp_haze_strength(sun.y, weather_amount, interior.0.is_some())
+                * video.lamp_fog_strength
         };
         let lamps = if lamp_strength > 0.0 {
             select_fog_lamps(
                 point_lights.as_slice(),
                 camera_transform.map_or(Vec3::ZERO, GlobalTransform::translation),
                 frustum,
-                if lamp_tier == 1 {
-                    LOW_FOG_LAMPS
-                } else {
-                    MAX_FOG_LAMPS
-                },
+                lamp_count,
             )
         } else {
             FogLamps::default()

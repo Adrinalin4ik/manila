@@ -151,6 +151,7 @@ pub(crate) struct VideoConfig {
     pub(crate) ambient_occlusion: u8,
     // MONKEY (lampfog): point-light fog tier: 0 Off, 1 nearest 16, 2 nearest 32.
     pub(crate) lamp_fog: u8,
+    pub(crate) lamp_fog_strength: f32,
     // GFX (volumetric light): shadow-mapped sun/moon light shafts, 0 Off / 1 Medium / 2 High.
     pub(crate) volumetric_light: u8,
     // GFX (volumetric light): the shafts' brightness multiplier, 0..2 (1 = the shipped tuning).
@@ -429,6 +430,7 @@ impl Default for VideoConfig {
             ambient_occlusion: 0,
             // MONKEY (lampfog): opt-in; zero is exactly the pre-lane render.
             lamp_fog: 0,
+            lamp_fog_strength: 1.0,
             // GFX (volumetric light) / (moonlight): opt-in; the Graphics Preset turns them on.
             volumetric_light: 0,
             volumetric_light_strength: 1.0,
@@ -527,7 +529,18 @@ pub(crate) fn on_cvar(
         // MONKEY (ao): constrain UI/console writes to supported tiers.
         "ambientocclusion" => cfg.ambient_occlusion = v.clamp(0.0, 2.0) as u8,
         // MONKEY (lampfog): 0 Off / 1 nearest 16 / 2 nearest 32.
-        "lampfog" => cfg.lamp_fog = v.clamp(0.0, 2.0) as u8,
+        // A COUNT of lamps now, capped by the uniform's array. 1 and 2 are the old tier's
+        // rungs, carried over so a config written before this still means what it meant;
+        // the slider steps by 4, so it cannot ask for them and the mapping is unambiguous.
+        "lampfog" => {
+            let n = v.clamp(0.0, 32.0) as u8;
+            cfg.lamp_fog = match n {
+                1 => 16,
+                2 => 32,
+                other => other,
+            };
+        }
+        "lampfogstrength" => cfg.lamp_fog_strength = v.clamp(0.0, 2.0),
         // GFX (volumetric light): 0 Off / 1 Medium / 2 High, and its 0..2 strength.
         "volumetriclight" => cfg.volumetric_light = v.clamp(0.0, 2.0) as u8,
         "volumetriclightstrength" => cfg.volumetric_light_strength = v.clamp(0.0, 2.0),

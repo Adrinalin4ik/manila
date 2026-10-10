@@ -2805,6 +2805,10 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
             ("BENILLA_TOOLTIP_AMBIENT_OCCLUSION", "AdvancedGraphicsRowAmbientOcclusion"),
             // MONKEY (lampfog): the quality row owns a translated tooltip too.
             ("BENILLA_TOOLTIP_LAMP_FOG", "AdvancedGraphicsRowLampFog"),
+            (
+                "BENILLA_TOOLTIP_LAMP_FOG_STRENGTH",
+                "AdvancedGraphicsRowLampFogStrength",
+            ),
             // MONKEY (integration): the daylight window split row.
             ("BENILLA_TOOLTIP_DAYLIGHT_WINDOW_SPLIT", "AdvancedGraphicsRowDaylightWindowSplit"),
             // MONKEY (skybox): the zone skybox row.
@@ -2924,9 +2928,9 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     }
     // The loop above walks every entry of `BENILLA_OPTIONS_PAGE_ROWS` and sorts each row into
     // `checked` or `untipped`, so this number can only be the table's length less the untipped
-    // list: 125 rows in `OptionsFrame.xml` (Controls 18, Audio 9, Graphics 12, AdvancedGraphics
-    // 37, Nameplates 7, Interface 13, Chat 6, ActionBars 6, Combat 17 - counted per page and as
-    // one sweep, both 125) less the three below. 34 of the 122 carry a `BENILLA_` key.
+    // list: 126 rows in `OptionsFrame.xml` (Controls 18, Audio 9, Graphics 12, AdvancedGraphics
+    // 38, Nameplates 7, Interface 13, Chat 6, ActionBars 6, Combat 17 - counted per page and as
+    // one sweep, both 126) less the three below. 35 of the 123 carry a `BENILLA_` key.
     //
     // **UNVERIFIED, AND THE ONE NUMBER IN THESE MERGES I COULD NOT SETTLE.** The graphics fork
     // this page comes from asserts 101 against a table of 121 rows and the same three-entry
@@ -2935,7 +2939,7 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // derived from the same model their number contradicts. `cargo test -p benilla-app` does not
     // build on this tree (14 pre-existing errors elsewhere), so no run has judged either. First
     // person who can run the suite: this assertion, and `raised` below, are where to look.
-    assert_eq!(checked, 122, "every tipped row carries a live key");
+    assert_eq!(checked, 123, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -3037,7 +3041,7 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
     // Every tipped row: the same count the key census above makes. 81 here plus the 19 the
     // graphics fork's Advanced Graphics page adds to its own 80. Arithmetic, not a run - see the
     // census assertion's note.
-    assert_eq!(raised, 100, "every row but Auto Loot raises a description");
+    assert_eq!(raised, 101, "every row but Auto Loot raises a description");
 }
 
 /// 1.12's AdvancedOptionsCombatText box as saved-global rows: a click writes the global, never a

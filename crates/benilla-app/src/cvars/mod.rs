@@ -948,7 +948,10 @@ pub(crate) const GRAPHICS_PRESETS: &[(&str, [&str; 5])] = &[
     // the lamp halos are GPU passes; the zone skybox is a look change), Medium takes the Low tiers.
     ("ambientOcclusion",     ["0",    "0",   "1",      "2",    "2"]),
     ("zoneSkyboxes",         ["0",    "0",   "1",      "1",    "1"]),
-    ("lampFog",              ["0",    "0",   "1",      "2",    "2"]),
+    // Lamp COUNTS now, not tiers: Medium takes the old Low rung's 16, High and Ultra
+    // the old High rung's 32. The ladder matches on exact values, so these had to move
+    // with the setting - left at 1 and 2 every rung past Low would read Custom for ever.
+    ("lampFog",              ["0",    "0",   "16",     "32",   "32"]),
     // GFX (volumetric light) / (moonlight): the shafts are a GPU pass (Medium = the cheap tier);
     // moonlight is a few ALU per fragment, so every rung past Classic takes it.
     ("volumetricLight",      ["0",    "0",   "1",      "2",    "2"]),
@@ -1650,6 +1653,7 @@ mod tests {
             ("volumetricFog", shadows.volumetric_fog as f32),
             // MONKEY (lampfog): opt-in point-light fog.
             ("lampFog", shadows.lamp_fog as f32),
+            ("lampFogStrength", shadows.lamp_fog_strength),
             // MONKEY (post): weld registry and renderer defaults.
             ("bloom", shadows.bloom as f32),
             ("sunShafts", flag(shadows.sun_shafts)),
@@ -1708,11 +1712,13 @@ mod tests {
             assert_eq!(d[name], want, "{name}: registered default left the knob");
         }
         // …and the census is the VideoConfig-backed row set. A name here that nothing registers
-        // would weld against a row the client does not have; the length is the other half — 38
-        // VideoConfig rows, 38 welds (MONKEY lampfog: + lampFog). MONKEY (wind): `foliageWind` is a world resource bridge.
+        // would weld against a row the client does not have; the length is the other half.
+        // The count lives in the assertion below and nowhere else: a second copy of it in
+        // this comment had already gone stale at 38 against an assertion reading 41.
+        // MONKEY (wind): `foliageWind` is a world resource bridge.
         let welded: std::collections::BTreeSet<&str> = lighting.iter().map(|(n, _)| *n).collect();
         // MONKEY (volumetric fog): the atmospheric tier joins the default-consumer weld.
-        assert_eq!(welded.len(), 41, "the lighting lane welds 41 distinct rows");
+        assert_eq!(welded.len(), 42, "the lighting lane welds 42 distinct rows");
         for name in &welded {
             assert!(
                 REGISTERED.iter().any(|r| r.name == *name),
@@ -2038,7 +2044,7 @@ mod tests {
         cvars.load_file(file);
         assert!(cvars.reapply_saved_presets() > 0);
         assert_eq!(cvars.get("ambientOcclusion"), Some("2"));
-        assert_eq!(cvars.get("lampFog"), Some("2"));
+        assert_eq!(cvars.get("lampFog"), Some("32"));
         assert_eq!(cvars.get("farclip"), Some("1497"));
         assert_eq!(cvars.get("zoneSkyboxes"), Some("0"), "a saved row stays");
         // The lighting members follow Ultra too.
