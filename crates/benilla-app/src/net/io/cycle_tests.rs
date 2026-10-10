@@ -223,28 +223,28 @@ fn an_empty_account_parks_at_select_without_creating_a_character() {
 
     let (events_tx, events) = crossbeam_channel::unbounded();
     let (writer_tx, _writer_rx) = crossbeam_channel::unbounded::<WorldWriter>();
-    let (login_tx, login_rx) = crossbeam_channel::unbounded();
-    let (realm_tx, realm_rx) = crossbeam_channel::unbounded();
-    let (pick_tx, pick_rx) = crossbeam_channel::unbounded();
+    let (login_tx, login_rx) = async_channel::unbounded();
+    let (realm_tx, realm_rx) = async_channel::unbounded();
+    let (pick_tx, pick_rx) = async_channel::unbounded();
     let cycle = thread::spawn(move || {
         let parks = Parks {
             login_rx,
             realm_rx,
             pick_rx,
         };
-        let ended = run(
+        let ended = futures_lite::future::block_on(run(
             &events_tx,
             &writer_tx,
             &parks,
             &AtomicU64::new(0),
             &Mutex::new(PingClock::default()),
             &mut Default::default(),
-        );
+        ));
         matches!(ended, Ok(Cycle::Repark))
     });
 
     login_tx
-        .send(LoginRequest {
+        .try_send(LoginRequest {
             user: USER.into(),
             pass: PASS.into(),
             host: realmd,
@@ -255,7 +255,7 @@ fn an_empty_account_parks_at_select_without_creating_a_character() {
         SessionEvent::RealmList { realms } => assert_eq!(realms[0].name, REALM),
         other => panic!("expected the realm list, got {other:?}"),
     }
-    realm_tx.send(RealmRequest::Enter(REALM.into())).unwrap();
+    realm_tx.try_send(RealmRequest::Enter(REALM.into())).unwrap();
     match next_event(&events) {
         SessionEvent::CharacterList { characters, .. } => assert!(
             characters.is_empty(),
@@ -264,7 +264,7 @@ fn an_empty_account_parks_at_select_without_creating_a_character() {
         other => panic!("expected the roster at select, got {other:?}"),
     }
     // Select's Back ends the cycle, so the socket is done and its log complete.
-    pick_tx.send(CharRequest::Abandon).unwrap();
+    pick_tx.try_send(CharRequest::Abandon).unwrap();
     assert!(cycle.join().unwrap(), "Back returns to the login park");
     let sent = sent.lock().unwrap().clone();
     assert!(

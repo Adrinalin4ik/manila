@@ -1012,8 +1012,8 @@ mod tests {
     #[test]
     fn escape_on_the_realm_list_does_not_also_quit() {
         for list_first in [true, false] {
-            let (tx, _requests) = crossbeam_channel::unbounded();
-            let (realm_tx, realm_rx) = crossbeam_channel::unbounded();
+            let (tx, _requests) = async_channel::unbounded();
+            let (realm_tx, realm_rx) = async_channel::unbounded();
             let mut app = App::new();
             app.add_plugins(MinimalPlugins)
                 .init_resource::<crate::glue::GlueClicks>()
@@ -1061,8 +1061,7 @@ mod tests {
                 "{order}: the list's Cancel closed it"
             );
             assert!(
-                realm_rx
-                    .try_iter()
+                std::iter::from_fn(|| realm_rx.try_recv().ok())
                     .any(|r| matches!(r, crate::net::RealmRequest::Abandon)),
                 "{order}: and answered the park"
             );

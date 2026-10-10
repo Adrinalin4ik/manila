@@ -744,6 +744,7 @@ mod tests {
                         None::<parts::DynText>,
                         "",
                         &art,
+                        48.0,
                         1.0,
                     );
                 }
@@ -757,6 +758,7 @@ mod tests {
                         None::<parts::DynText>,
                         "",
                         &art,
+                        48.0,
                         1.0,
                     );
                 }
@@ -770,6 +772,7 @@ mod tests {
                         None::<parts::DynText>,
                         "",
                         &art,
+                        48.0,
                         1.0,
                     );
                 }

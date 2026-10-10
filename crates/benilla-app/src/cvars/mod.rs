@@ -2932,6 +2932,8 @@ mod tests {
             .init_resource::<crate::spell::AutoSelfCast>()
             .init_resource::<crate::bindings::hold_cast::PressAndHoldCasting>()
             .init_resource::<crate::perf::FpsJournalSetting>()
+            .init_resource::<crate::ui_script::UiCostWanted>()
+            .init_resource::<crate::player_distance::PlayerDistance>()
             .init_resource::<crate::text_filter::TextFilterSwitches>()
             .init_resource::<crate::game_tip::GameTipSetting>()
             .add_plugins(CvarPlugin);

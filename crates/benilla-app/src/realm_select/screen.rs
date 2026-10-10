@@ -846,7 +846,7 @@ mod tests {
     /// categories, with the click and refresh passes the plugin runs.
     fn tab_app(list: &[(&str, u8)]) -> App {
         let mut app = App::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let (tx, _rx) = async_channel::unbounded();
         app.init_resource::<Time>()
             .init_resource::<GlueClicks>()
             .insert_resource(crate::net::RealmChoice(tx))
