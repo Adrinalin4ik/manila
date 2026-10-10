@@ -131,6 +131,7 @@ builds against this checkout's benilla revision; upstream provides no stable ext
 | State events | `UPDATE_SHAPESHIFT_FORM`, `UPDATE_INVENTORY_DURABILITY`, `FACTION_STANDING_CHANGED`, `HEARTHSTONE_BOUND`, `GLOBAL_MOUSE_DOWN`/`GLOBAL_MOUSE_UP` |
 | Item comparison | `GameTooltip:SetHyperlinkCompareItem` through the stock worn-item compare walk, and `SetAnchorType` |
 | Inline textures | `|T…|t` in font strings, tooltips and chat lines: the later clients' size law, pixel crops, offsets and tint, drawn from the client's own texture store (`benilla-app/src/pfui/inline_texture.rs`); `GetCoinTextureString` |
+| Unit model panes | An addon's own `PlayerModel:SetUnit` pane, such as pfUI's 3D portraits, shows the client's portrait-camera still for the player, target, target's target, pet and party (`benilla-app/src/pfui/unit_pane.rs`) |
 | Swing clock | `PLAYER_SWING(swingDuration, swingType)` rebuilt from the player's white hits, on-next-swing abilities, swing-resetting casts, auto-repeat shots and parried attacks; at most one event per weapon per frame (`src/swing.rs`) |
 | Colours and labels | Colour methods on the stock `*_FONT_COLOR` tables, `WHITE_FONT_COLOR`, and English labels for the equipment manager, icon picker and friend notes |
 
@@ -344,6 +345,10 @@ below 20%. `START_AUTOATTACK` and `STOP_AUTOATTACK`, which pfUI also registers, 
 fired: neither ClassicAPI nor Nampower documents them. pfUI's bar then hides when a swing
 runs out with no new one. The swing clock is covered by tests and a check of the three
 `Spell.dbc` columns against the Turtle install; it has not been watched in a live fight.
+
+A unit model pane shows a still, frozen at Stand, where the original client animates the
+model; a pane bound to a raid member, a focus or any unit without a round-portrait bake draws
+nothing.
 
 The client's game menu has two rungs of its own, Edit Mode and Support. When pfUI's game-menu
 skin has run they take the same button skin, so the menu reads as one.

@@ -82,6 +82,7 @@ impl UiScript {
                             handle: fh,
                             name: frame.and_then(|f| f.name.clone()),
                             model: m.path.clone(),
+                            unit: m.unit.clone(),
                             facing: m.facing,
                             model_scale: m.scale,
                             position: m.position,

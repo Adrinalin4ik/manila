@@ -16,6 +16,7 @@ pub(crate) mod spell_queue;
 mod spells;
 mod swing;
 mod totems;
+pub(crate) mod unit_pane;
 mod units;
 
 pub(crate) fn prepare(script: &UiScript) -> Result<(), String> {

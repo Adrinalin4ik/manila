@@ -708,3 +708,22 @@ across upstream merges.
 > install read-only and use the declared dedicated test identity. Do not fake complete
 > ClassicAPI/Nampower, repeat already fixed aura/channel work, or claim browser/profile
 > interoperability without proof. Report baseline failures and remaining limitations clearly.
+
+## Addendum: first play session findings, 2026-10-11
+
+- **`GetWidth`/`GetHeight` were wrong for anchor-sized frames (engine fix, own commit).** The
+  reference (`0x7a1e00`, `0x7a2030`) answers the authored size unless it is exactly 0, else the
+  resolved span with the effective scale still in it. benilla divided that span by the scale.
+  pfUI's status bars divide by `GetEffectiveScale()` themselves, so every bar overfilled under a
+  UI scale below 1 and an empty one drew a mirrored sliver beside its frame. Read from the
+  install's own `WoW_org.exe` with `objdump`; nothing was copied.
+- **3D portraits.** `QuadContent::ModelPane` now carries the pane's `SetUnit` token (ungated,
+  three small hunks), and `benilla-app/src/pfui/unit_pane.rs` draws the round-portrait bake
+  for a pane no stock window claims.
+- **Game menu.** The client's own Edit Mode and Support rungs take pfUI's button skin.
+- **Addons.** Atlas, AtlasQuest, pfQuest and pfQuest-turtle load cleanly. AtlasLoot does not:
+  it sets an `OnTooltipSetItem` script and inherits two templates the loader does not find.
+- The owner asked that a bug found in pfUI itself be fixed in a local clone of pfUI with a
+  commit on top, for a pull request there. None found so far: the two reports above were
+  client bugs.
+

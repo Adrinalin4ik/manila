@@ -75,6 +75,8 @@ pub enum QuadContent {
         name: Option<String>,
         /// The `SetModel` file; `None` for a unit pane or an empty one.
         model: Option<String>,
+        /// The `SetUnit` token of a pane with no file.
+        unit: Option<String>,
         /// `SetFacing`'s radians (0 default).
         facing: f32,
         /// `SetModelScale`'s factor (1 default).

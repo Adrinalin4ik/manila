@@ -1199,6 +1199,7 @@ fn convert_entry(
             handle,
             name,
             model,
+            unit,
             facing,
             model_scale,
             position,
@@ -1270,6 +1271,21 @@ fn convert_entry(
                 return;
             }
             let Some(slot) = name.as_deref().and_then(crate::portrait::model_pane_booth) else {
+                // An addon's own unit pane, which no stock window claims.
+                #[cfg(feature = "pfui")]
+                crate::pfui::unit_pane::emit(
+                    unit.as_deref(),
+                    rect,
+                    clip,
+                    eq.z,
+                    eq.alpha,
+                    booths,
+                    assets,
+                    images,
+                    out,
+                );
+                #[cfg(not(feature = "pfui"))]
+                let _ = unit;
                 return;
             };
             // The aspect is published before the readiness check: the bake waits on the publish.
