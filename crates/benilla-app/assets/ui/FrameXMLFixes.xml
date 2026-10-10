@@ -47,5 +47,10 @@
             end
         end
         RegisterForSave("FRIENDNAMEPLATES_ON")
+        -- The player's own graphics presets (OptionsFrame.xml). A table, which the saved writer
+        -- handles: `script/saved.rs` serializes `Value::Table` with a depth cap and cycle
+        -- detection. Account-wide on purpose - a graphics preset is about the machine, not the
+        -- character.
+        RegisterForSave("BENILLA_USER_PRESETS")
     ]]></Script>
 </Ui>

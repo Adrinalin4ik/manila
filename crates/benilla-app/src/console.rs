@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use bevy::prelude::*;
 
-use crate::cvars::{Cvars, SetOutcome};
+use crate::cvars::{Cvars, SetOutcome, GRAPHICS_PRESETS, LIGHTING_PRESETS};
 
 /// A command's body: the world and the trimmed argument tail in, the lines to print out.
 pub(crate) type ConsoleHandler = fn(&mut World, &str) -> Vec<String>;
@@ -93,6 +93,11 @@ impl Plugin for ConsolePlugin {
                 "cvarlist",
                 "List the CVars, optionally matching a string.",
                 cvarlist,
+            )
+            .console_command(
+                "preset_dump",
+                "Print the live graphics rows as a preset rung, ready to paste.",
+                preset_dump,
             )
             .console_command("help", "List the console commands, or describe one.", help);
     }
@@ -244,6 +249,41 @@ fn cvarlist(world: &mut World, args: &str) -> Vec<String> {
         })
         .collect();
     out.push(format!("{} CVar(s)", rows.len()));
+    out
+}
+
+/// `preset_dump [name]`: the live value of every row the two preset ladders govern, in the order
+/// those tables declare them, formatted as Rust source.
+///
+/// Ours, not the reference's: 1.12 has no realtime light or shadow system to preset. It exists
+/// because `cvarlist` cannot answer this question - it sorts alphabetically and prints every row
+/// in the registry, while a new rung needs exactly these rows in exactly this order.
+///
+/// Two blocks, because a rung is two edits. `LIGHTING_PRESETS` takes a whole new entry and the
+/// block printed first IS that entry. `GRAPHICS_PRESETS` is one row per line with five columns,
+/// so a sixth rung means adding one value to each line; the second block prints the column
+/// top to bottom in the table's own row order, to be read down the left of the edit.
+fn preset_dump(world: &mut World, args: &str) -> Vec<String> {
+    let name = args.split_whitespace().next().unwrap_or("MyPreset");
+    let cvars = world.resource::<Cvars>();
+    let live = |k: &str| cvars.get(k).unwrap_or_default().to_string();
+
+    let mut out = vec![format!("// LIGHTING_PRESETS: a new rung, paste whole into the table")];
+    out.push(format!("    (\"{name}\", &["));
+    // The members of any rung name the same rows, so the first rung's list is the row set.
+    for (k, _) in LIGHTING_PRESETS.first().map(|(_, m)| *m).unwrap_or(&[]) {
+        out.push(format!("        (\"{k}\", \"{}\"),", live(k)));
+    }
+    out.push("    ]),".to_string());
+
+    out.push(String::new());
+    out.push(format!(
+        "// GRAPHICS_PRESETS: one more column, {} rows, in this order",
+        GRAPHICS_PRESETS.len()
+    ));
+    for (k, _) in GRAPHICS_PRESETS {
+        out.push(format!("    {k:24} \"{}\"", live(k)));
+    }
     out
 }
 

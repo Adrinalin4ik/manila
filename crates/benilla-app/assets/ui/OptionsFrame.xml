@@ -476,6 +476,9 @@
                 graphicsQuality = "Graphics Preset",
                 renderDistance = "Render Distance",
                 pClassic = "Classic",
+                -- The saved-preset button and the name prompt.
+                savePreset = "Save as...",
+                savePresetPrompt = "Name for this graphics preset:",
                 qUltra = "Ultra",
                 -- MONKEY (volumetric fog): localised atmospheric quality row.
                 volumetricFog = "Volumetric Fog",
@@ -740,6 +743,9 @@
                 graphicsQuality = "Набор графики",
                 renderDistance = "Дальность прорисовки",
                 pClassic = "Классика",
+                -- The saved-preset button and the name prompt.
+                savePreset = "Сохранить как...",
+                savePresetPrompt = "Название набора графики:",
                 qUltra = "Ультра",
                 -- MONKEY (post): Russian HDR excess + halo quality row.
                 bloom = "Свечение",
@@ -1324,9 +1330,126 @@
         function BenillaOptionsDropdownEntry_OnClick()
             local dd = UIDropDownMenu_GetCurrentDropDown()
             local row = dd:GetParent()
-            BenillaOptionsRow_Set(row, this.value)
+            local v = this.value
+            -- A saved graphics preset is NOT a rung: the engine's ladder would refuse its name.
+            -- It writes the rows it carries, and the ladder then derives `Custom` for them.
+            if type(v) == "string" and string.sub(v, 1, 5) == "user:" then
+                local t = BENILLA_USER_PRESETS[string.sub(v, 6)]
+                if t then BenillaGfxPreset_Apply(t) end
+            else
+                BenillaOptionsRow_Set(row, v)
+            end
             BenillaOptionsDropdown_ShowValue(row)
         end
+
+        -- Saved graphics presets: a player's own named rung, beside the five the engine ships.
+        --
+        -- **The set of rows a preset carries is read off the PAGE, never written down twice.** The
+        -- engine's two ladders (`cvars::GRAPHICS_PRESETS`, `cvars::LIGHTING_PRESETS`) already name
+        -- their members, and a second copy here would drift the first time a row is added there:
+        -- the preset would save short and nobody would be told. Every row on this page except the
+        -- two ladder rows themselves IS the set, and those two are excluded because they are
+        -- DERIVED from the rest - saving `graphicsQuality` would make applying write a rung name.
+        --
+        -- Stored through `BenillaOptionsRow_Get`/`_Set` by row key rather than by CVar, so a row
+        -- backed by a saved global or a setter (`uvar`, `setFunc`) travels like a CVar row.
+        BENILLA_USER_PRESETS = BENILLA_USER_PRESETS or {}
+
+        function BenillaGfxPreset_Rows()
+            local out = {}
+            local rows = BENILLA_OPTIONS_PAGE_ROWS and BENILLA_OPTIONS_PAGE_ROWS.AdvancedGraphics
+            if not rows then return out end
+            for _, key in ipairs(rows) do
+                if key ~= "RowGraphicsQuality" and key ~= "RowLightingQuality" then
+                    local row = getglobal("BenillaOptionsFrameContainerBodyAdvancedGraphics" .. key)
+                    if row and BenillaOptionsRow_HasStore(row) then
+                        table.insert(out, { key = key, row = row })
+                    end
+                end
+            end
+            return out
+        end
+
+        function BenillaGfxPreset_Capture()
+            local t = {}
+            for _, e in ipairs(BenillaGfxPreset_Rows()) do
+                t[e.key] = BenillaOptionsRow_Get(e.row)
+            end
+            return t
+        end
+
+        -- Rows the saved set does not name are LEFT ALONE: a preset saved before a row existed
+        -- must not silently reset it.
+        function BenillaGfxPreset_Apply(t)
+            for _, e in ipairs(BenillaGfxPreset_Rows()) do
+                if t[e.key] ~= nil then BenillaOptionsRow_Set(e.row, t[e.key]) end
+            end
+            BenillaOptionsPage_Refresh("AdvancedGraphics")
+        end
+
+        -- Whether the page currently spells this preset, over the rows it names.
+        function BenillaGfxPreset_Matches(t)
+            for _, e in ipairs(BenillaGfxPreset_Rows()) do
+                if t[e.key] ~= nil and t[e.key] ~= BenillaOptionsRow_Get(e.row) then return nil end
+            end
+            return 1
+        end
+
+        function BenillaGfxPreset_Names()
+            local names = {}
+            for n in pairs(BENILLA_USER_PRESETS) do table.insert(names, n) end
+            table.sort(names)
+            return names
+        end
+
+        -- The Graphics Preset list: the engine's rungs, then the player's own.
+        function BenillaGfxPreset_RefreshMenu()
+            local row = getglobal("BenillaOptionsFrameContainerBodyAdvancedGraphicsRowGraphicsQuality")
+            if not row then return end
+            local entries = {
+                { text = BENILLA_ADVGFX.pClassic, value = "Classic" },
+                { text = BENILLA_ADVGFX.qLow, value = "Low" },
+                { text = BENILLA_ADVGFX.qMedium, value = "Medium" },
+                { text = BENILLA_ADVGFX.qHigh, value = "High" },
+                { text = BENILLA_ADVGFX.qUltra, value = "Ultra" },
+                { text = BENILLA_ADVGFX.qCustom, value = "Custom" },
+            }
+            for _, n in ipairs(BenillaGfxPreset_Names()) do
+                table.insert(entries, { text = n, value = "user:" .. n, user = n })
+            end
+            BenillaOptionsDropdownRow_Setup(row, entries)
+            BenillaOptionsDropdown_ShowValue(row)
+        end
+
+        function BenillaGfxPreset_Save(name)
+            if not name or name == "" then return end
+            BENILLA_USER_PRESETS[name] = BenillaGfxPreset_Capture()
+            BenillaGfxPreset_RefreshMenu()
+        end
+
+        StaticPopupDialogs["BENILLA_SAVE_GFX_PRESET"] = {
+            text = BENILLA_ADVGFX.savePresetPrompt,
+            button1 = ACCEPT or "Accept",
+            button2 = CANCEL or "Cancel",
+            hasEditBox = 1,
+            maxLetters = 32,
+            OnShow = function()
+                local box = getglobal(this:GetName() .. "EditBox")
+                box:SetText("")
+                box:SetFocus()
+            end,
+            OnAccept = function()
+                BenillaGfxPreset_Save(getglobal(this:GetParent():GetName() .. "EditBox"):GetText())
+            end,
+            EditBoxOnEnterPressed = function()
+                BenillaGfxPreset_Save(this:GetText())
+                this:GetParent():Hide()
+            end,
+            EditBoxOnEscapePressed = function() this:GetParent():Hide() end,
+            timeout = 0,
+            whileDead = 1,
+            hideOnEscape = 1,
+        }
 
         -- A field, not SetSelectedValue, whose Refresh walks the shared DropDownList1. An off-grid
         -- value shows the nearest entry.
@@ -1337,6 +1460,11 @@
             for _, e in ipairs(row.entries) do
                 -- `alt`: a stored "3" shows as Never, where the nearest value would show Always.
                 if e.value == v or (e.alt ~= nil and e.alt == v) then match = e end
+                -- A saved preset wears its name while every row it carries still matches. The
+                -- engine reads `Custom` for all of them, so this must win over the Custom entry
+                -- above - which it does by being appended after it.
+                if e.user and BENILLA_USER_PRESETS[e.user]
+                    and BenillaGfxPreset_Matches(BENILLA_USER_PRESETS[e.user]) then match = e end
             end
             if not match and tonumber(v) then
                 local best
@@ -2908,7 +3036,11 @@
                                                     { text = BENILLA_ADVGFX.qUltra, value = "Ultra" },
                                                     { text = BENILLA_ADVGFX.qCustom, value = "Custom" },
                                                 })
-                                            </OnLoad></Scripts>
+                                            </OnLoad>
+                                            <!-- Saved presets join the list here, not at OnLoad:
+                                                 `RegisterForSave` globals arrive at
+                                                 VARIABLES_LOADED, after every OnLoad has run. -->
+                                            <OnShow>BenillaGfxPreset_RefreshMenu()</OnShow></Scripts>
                                         </Frame>
                                         <!-- MONKEY (presets): `farclip`, the Graphics page's Terrain
                                              Distance, on the extended range (`view::FARCLIP_RANGE`,
@@ -3447,6 +3579,19 @@
                                                 BenillaOptionsSliderRow_Setup(this, 0, 2, 0.25)
                                             </OnLoad></Scripts>
                                         </Frame>
+                                        <!-- Save the page as a named preset. Inside the page's own
+                                             frames, so it shows and scrolls with it and the row
+                                             walker (which reads BENILLA_OPTIONS_PAGE_ROWS) never
+                                             sees it. -->
+                                        <Button name="$parentSavePreset" inherits="BenillaOptionsRedButtonTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowMoonLight" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="10" y="-14"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts>
+                                                <OnLoad>this:SetText(BENILLA_ADVGFX.savePreset)</OnLoad>
+                                                <OnClick>StaticPopup_Show("BENILLA_SAVE_GFX_PRESET")</OnClick>
+                                            </Scripts>
+                                        </Button>
                                     </Frames>
                                     <!-- The poll (see AdvGfx_OnUpdate): this is the one page whose
                                          settings move from outside it — the Lighting Quality row
