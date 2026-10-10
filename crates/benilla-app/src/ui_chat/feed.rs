@@ -740,6 +740,12 @@ pub(super) fn feed_chat(
                     continue;
                 }
                 text_filter.mask_chat(msg.chat_type, &mut text);
+                #[cfg(feature = "pfui")]
+                crate::ui_text::inline_texture::strip_typed(
+                    msg.sender_guid,
+                    msg.language,
+                    &mut text,
+                );
                 let text = text;
                 let mut event = ChatEvent {
                     kind,

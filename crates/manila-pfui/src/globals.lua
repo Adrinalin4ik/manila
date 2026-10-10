@@ -153,3 +153,21 @@ end
 function CreateSimpleTextureMarkup(file, width, height)
   return string.format('|T%s:%d:%d|t', file, height or width, width)
 end
+
+-- A money amount with coin icons, cropped from the stock money sheet (64x16, three 16 px
+-- coins). A locale may define the three formats first; `fontHeight` 0 sizes a coin to its font.
+local SHEET = 'Interface\\MoneyFrame\\UI-MoneyIcons'
+local function coin(left) return '%d|T' .. SHEET .. ':%d:%d:2:0:64:16:' .. left .. ':' .. (left + 16) .. ':0:16|t' end
+GOLD_AMOUNT_TEXTURE = GOLD_AMOUNT_TEXTURE or coin(0)
+SILVER_AMOUNT_TEXTURE = SILVER_AMOUNT_TEXTURE or coin(16)
+COPPER_AMOUNT_TEXTURE = COPPER_AMOUNT_TEXTURE or coin(32)
+function GetCoinTextureString(amount, fontHeight)
+  amount = math.max(0, math.floor((tonumber(amount) or 0) + 0.5))
+  local size = math.max(0, math.floor(tonumber(fontHeight) or 0))
+  local gold, silver, copper = math.floor(amount / 10000), math.floor(amount / 100) % 100, amount % 100
+  local parts = {}
+  if gold > 0 then parts[#parts + 1] = string.format(GOLD_AMOUNT_TEXTURE, gold, size, size) end
+  if silver > 0 then parts[#parts + 1] = string.format(SILVER_AMOUNT_TEXTURE, silver, size, size) end
+  if copper > 0 or #parts == 0 then parts[#parts + 1] = string.format(COPPER_AMOUNT_TEXTURE, copper, size, size) end
+  return table.concat(parts, ' ')
+end

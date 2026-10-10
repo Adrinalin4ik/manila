@@ -156,6 +156,13 @@ pub(super) fn emit(
             });
         }
     }
+    // The focused EditBox shows inline-texture markup raw, as an unfocused one does.
+    #[cfg(feature = "pfui")]
+    let raw = ebox.map(|_| benilla_ui::script::pfui_host::inline_texture::raw(draw_text));
+    #[cfg(feature = "pfui")]
+    if let Some(raw) = raw.as_deref() {
+        draw_text = raw;
+    }
     // A region FontString whose wrapped text needs more lines than its rect holds draws
     // `prefix + "..."` (`CSimpleFontString` `0x771ec0`); an editbox never truncates and a message
     // line sizes to its text. Before the shadow, which the client draws from the same string.

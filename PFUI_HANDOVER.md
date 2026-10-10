@@ -672,8 +672,11 @@ reputation offset of 50 and an unequipped main hand; each was undone and confirm
    field and glyphless check (`ui_text/engine/mod.rs`), width, block height and the four
    substitution points (`ui_text/layout/measure.rs`, `layout/mod.rs`), the unit scale
    (`ui_text/measurer.rs`, `ui_script/extract/text.rs`) and the shadow filter. Seen live in a
-   font string, a tooltip and a chat line. Left: EditBox caret over an escape, and chat rows
-   that do not grow for an icon taller than the line.
+   font string, a tooltip and a chat line. A second pass matched ClassicAPI's documented
+   behaviour (`docs/InlineTextureEscapes.md` in its repository): raw markup in EditBoxes,
+   grown chat rows, same-frame loading, `r:g:b` tint, outline ink, stripped player-typed
+   escapes (`ui_chat/feed.rs` hook) and `GetCoinTextureString`. Left: chat rows grow by whole
+   font heights, and `|A…|a` atlas markup needs an atlas registry first.
 2. **`PLAYER_SWING`.** The decoded attack log already feeds `AUTO_ATTACK_SELF`; the swing clock
    needs weapon speed, next-swing spells and ranged shots. Live proof needs GM-off combat, which
    is not allowed unattended.

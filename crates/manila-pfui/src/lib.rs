@@ -164,6 +164,7 @@ pub fn install(script: &UiScript) -> mlua::Result<()> {
         "GetInboxItemID",
         "GetSendMailItemLink",
         "CreateSimpleTextureMarkup",
+        "GetCoinTextureString",
         "CLASS_SORT_ORDER",
     ] {
         if !lua.globals().get::<Value>(name)?.is_nil() {

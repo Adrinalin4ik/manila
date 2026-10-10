@@ -276,7 +276,7 @@ fn layout_text_quads_inner(
             // ([`client_step`]) a run is its characters' steps, the sum `measure_line_width` takes.
             for ch in run.text.chars() {
                 #[cfg(feature = "pfui")]
-                if let Some(step) = inline.place(e, r.ppem, ch, pen_dev, run.color[3]) {
+                if let Some(step) = inline.place(e, r.ppem, r.radius, ch, pen_dev, run.color[3]) {
                     pen_dev += step;
                     char_index += 1;
                     continue;
@@ -355,6 +355,12 @@ fn layout_text_quads_inner(
                     link: info.link.clone(),
                     markup: info.markup.clone(),
                 });
+                // A link is hoverable across the whole of a tall texture inside it.
+                #[cfg(feature = "pfui")]
+                if let Some(span) = out.last_mut() {
+                    span.rect.min.y -= grown;
+                    span.rect.max.y += grown;
+                }
             }
         }
         pen_y += pitch;

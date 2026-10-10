@@ -3,9 +3,11 @@
 //! one for a private-use placeholder character before the text reaches the markup parser, and the
 //! layout gives that character the texture's width and quad instead of a glyph.
 //!
-//! The grammar is the later clients' `|Tpath:size1:size2:xoff:yoff:texW:texH:left:right:top:bottom|t`.
-//! EditBoxes keep the 1.12 cursor law over the raw string, so an escape set into one draws its
-//! icon while the caret still counts its bytes.
+//! The grammar is the later clients'
+//! `|Tpath:size1:size2:xoff:yoff:texW:texH:left:right:top:bottom:r:g:b|t`, and the behaviour is the
+//! one ClassicAPI documents for the 1.12 client it patches: widths, heights and wraps count the
+//! icon, a tall icon grows its line, an EditBox shows the markup raw, and text another player
+//! typed draws no art.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -22,6 +24,9 @@ use super::markup::ColorRun;
 const FIRST: u32 = 0xF_0000;
 const LAST: u32 = 0xF_FFFD;
 
+/// Where a font-height icon's centre sits in its line, as a fraction of the font height.
+const CENTRE: f32 = 0.6;
+
 /// Whether `ch` stands for an inline texture: it has no glyph in any face.
 pub(super) fn is_placeholder(ch: char) -> bool {
     (FIRST..=LAST).contains(&(ch as u32))
@@ -34,6 +39,8 @@ struct Spec {
     offset: (f32, f32),
     /// `[left, right, top, bottom]` in 0..1; `None` samples the whole texture.
     crop: Option<[f32; 4]>,
+    /// The `r:g:b` vertex tint in 0..1; white leaves the texture's own colours.
+    tint: [f32; 3],
     /// `None` until resolved; `Some(None)` is a path with no texture.
     handle: Option<Option<Handle<Image>>>,
 }
@@ -70,6 +77,11 @@ fn parse(body: &str) -> Option<Spec> {
         size2: numbers.get(1).copied(),
         offset: (at(2), at(3)),
         crop,
+        tint: if numbers.len() >= 13 {
+            [at(10) / 255.0, at(11) / 255.0, at(12) / 255.0]
+        } else {
+            [1.0; 3]
+        },
         handle: None,
     })
 }
@@ -101,23 +113,14 @@ impl Registry {
             return Cow::Borrowed(text);
         }
         let mut out = String::with_capacity(text.len());
-        let mut at = 0usize;
         let mut copied = 0usize;
-        while let Some(token) = benilla_ui::markup::token_at(text, at) {
-            let rest = &text[at..];
-            let escape = (rest.starts_with("|T"))
-                .then(|| rest[2..].find("|t"))
-                .flatten()
-                .and_then(|end| Some((self.placeholder(&rest[2..2 + end])?, end + 4)));
-            match escape {
-                Some((ch, len)) => {
-                    out.push_str(&text[copied..at]);
-                    out.push(ch);
-                    at += len;
-                    copied = at;
-                }
-                None => at += token.byte_len,
-            }
+        for span in benilla_ui::script::pfui_host::inline_texture::spans(text) {
+            let Some(ch) = self.placeholder(&text[span.start + 2..span.end - 2]) else {
+                continue;
+            };
+            out.push_str(&text[copied..span.start]);
+            out.push(ch);
+            copied = span.end;
         }
         if copied == 0 {
             return Cow::Borrowed(text);
@@ -137,15 +140,30 @@ impl Registry {
         Some(ch)
     }
 
-    /// The device-px width the placeholders in `text` add to a line.
-    pub(super) fn advance(&self, text: &str, ppem: u16) -> f32 {
+    /// The device-px width the placeholders in `text` add to a line. An outlined font's ink
+    /// reaches `radius` past each glyph, so an icon keeps that much clear on either side.
+    pub(super) fn advance(&self, text: &str, ppem: u16, radius: u8) -> f32 {
         if self.specs.is_empty() {
             return 0.0;
         }
         text.chars()
             .filter_map(|c| self.spec(c))
-            .map(|s| s.size_dev(ppem, self.units_to_dev).0)
+            .map(|s| s.size_dev(ppem, self.units_to_dev).0 + 2.0 * f32::from(radius))
             .sum()
+    }
+
+    /// The whole rows of a message frame the grown lines of `lines` add: its rows are the font
+    /// height each, so a tall icon takes the next whole row.
+    pub(super) fn extra_rows(
+        &self,
+        lines: impl Iterator<Item = Vec<ColorRun>>,
+        ppem: u16,
+    ) -> usize {
+        if self.specs.is_empty() {
+            return 0;
+        }
+        let extra: f32 = lines.map(|line| self.extra_height(&line, ppem, 1.0)).sum();
+        (extra / f32::from(ppem)).ceil() as usize
     }
 
     /// How far the tallest texture of `line` stands past the font height, in logical px: the line
@@ -199,7 +217,7 @@ struct Placed {
     offset_dev: (f32, f32),
     uv: UvRect,
     texture: Option<Handle<Image>>,
-    alpha: f32,
+    color: [f32; 4],
     ppem: u16,
 }
 
@@ -209,6 +227,7 @@ impl Line {
         &mut self,
         e: &TextEngine,
         ppem: u16,
+        radius: u8,
         ch: char,
         pen_dev: f32,
         alpha: f32,
@@ -216,8 +235,9 @@ impl Line {
         let spec = e.inline.spec(ch)?;
         let scale = e.inline.units_to_dev;
         let (w_dev, h_dev) = spec.size_dev(ppem, scale);
+        let ink = f32::from(radius);
         self.pending.push(Placed {
-            x_dev: pen_dev,
+            x_dev: pen_dev + ink,
             w_dev,
             h_dev,
             offset_dev: (
@@ -228,14 +248,16 @@ impl Line {
                 UvRect::from_rect(Rect::new(l, t, r, b))
             }),
             texture: spec.handle.clone().flatten(),
-            alpha,
+            color: [spec.tint[0], spec.tint[1], spec.tint[2], alpha],
             ppem,
         });
-        Some(w_dev)
+        Some(w_dev + 2.0 * ink)
     }
 
-    /// Emit the line's textures, centred on the glyph cell whose top is `cell_top_dev`. They keep
-    /// their own colours: only the string's alpha reaches them.
+    /// Emit the line's textures against the glyph cell whose top is `cell_top_dev`. One no taller
+    /// than the font centres 0.6 of the font height down, where the text's own weight sits; a
+    /// taller one centres on the cell, and so in the line it grew. Only the string's alpha reaches
+    /// them, never its colour.
     pub(super) fn emit(
         &mut self,
         quads: &mut Vec<UiQuad>,
@@ -247,23 +269,57 @@ impl Line {
         for p in self.pending.drain(..) {
             let Some(texture) = p.texture else { continue };
             let x = (origin_dev_x + p.x_dev + p.offset_dev.0) / dpi;
-            let top = cell_top_dev.round() + ((f32::from(p.ppem) - p.h_dev) * 0.5).round()
-                - p.offset_dev.1;
+            let em = f32::from(p.ppem);
+            let centre = if p.h_dev > em { 0.5 } else { CENTRE };
+            let top = cell_top_dev.round() + (em * centre - p.h_dev * 0.5).round() - p.offset_dev.1;
             let y = top / dpi;
             quads.push(UiQuad {
                 rect: Rect::new(x, y, x + p.w_dev / dpi, y + p.h_dev / dpi),
                 z_key,
                 texture: Some(texture),
                 uv: p.uv,
-                color: [1.0, 1.0, 1.0, p.alpha],
+                color: p.color,
                 ..default()
             });
         }
     }
 }
 
-/// Enable the escape on the client's engine and load the textures it has met. A texture first
-/// seen this frame draws from the next one; its width is right from the start.
+/// Register and load the textures of a string about to be drawn, so an icon appears in the frame
+/// its text does.
+pub(crate) fn prepare(
+    atlas: &super::UiFontAtlas,
+    text: &str,
+    assets: &mut Option<ResMut<benilla_assets::WorldAssets>>,
+    images: &mut Assets<Image>,
+) {
+    if !text.contains("|T") {
+        return;
+    }
+    let Some(assets) = assets.as_mut() else {
+        return;
+    };
+    let mut engine = atlas.lock();
+    engine.inline.substitute(text);
+    engine
+        .inline
+        .resolve(|path| assets.sprite_texture(path, images));
+}
+
+/// Drop the escapes from a line another player typed: only the client's and its addons' own text
+/// draws art. Addon messages are data and pass untouched.
+pub(crate) fn strip_typed(sender_guid: u64, language: u32, text: &mut String) {
+    const ADDON: u32 = u32::MAX;
+    let from_player = sender_guid != 0 && sender_guid >> 48 == 0;
+    if !from_player || language == ADDON {
+        return;
+    }
+    if let Cow::Owned(stripped) = benilla_ui::script::pfui_host::inline_texture::strip(text) {
+        *text = stripped;
+    }
+}
+
+/// Enable the escape on the client's engine and load the textures a measure met before any draw.
 fn feed(
     atlas: Option<Res<super::UiFontAtlas>>,
     assets: Option<ResMut<benilla_assets::WorldAssets>>,
@@ -300,7 +356,7 @@ mod tests {
         let mut registry = Registry::default();
         let text = "a|TInterface\\Icons\\Foo:16:16|tb";
         assert!(matches!(registry.substitute(text), Cow::Borrowed(t) if t == text));
-        assert_eq!(registry.advance(text, 12), 0.0);
+        assert_eq!(registry.advance(text, 12, 0), 0.0);
     }
 
     #[test]
@@ -406,6 +462,11 @@ mod tests {
         let icon = quads.iter().find(|q| e.inline.owns(q)).expect("the icon");
         assert_eq!((icon.rect.width(), icon.rect.height()), (20.0, 20.0));
         assert_eq!(icon.color, [1.0, 1.0, 1.0, 0.5], "untinted, at the alpha");
+        let tint = "|Tfoo:0:0:0:0:0:0:0:0:0:0:255:0:51|t";
+        e.inline.substitute(tint);
+        e.inline.resolve(|_| Some(handle.clone()));
+        let tinted = draw(&mut e, tint);
+        assert_eq!(tinted[0].color, [1.0, 0.0, 0.2, 0.5]);
         assert_eq!(icon.z_key, 7);
         // The `b` sits one icon width right of where it sits without one.
         let last = |qs: &[UiQuad]| {
@@ -433,10 +494,49 @@ mod tests {
     }
 
     #[test]
+    fn only_a_players_typed_line_loses_its_escapes() {
+        let typed = |guid: u64, language: u32| {
+            let mut text = "look |Tfoo:64|t here".to_string();
+            strip_typed(guid, language, &mut text);
+            text
+        };
+        assert_eq!(typed(5, 7), "look  here");
+        assert_eq!(typed(0, 0), "look |Tfoo:64|t here", "the client's own line");
+        assert_eq!(
+            typed(0xF130_0000_0000_0001, 0),
+            "look |Tfoo:64|t here",
+            "a creature"
+        );
+        assert_eq!(typed(5, u32::MAX), "look |Tfoo:64|t here", "addon data");
+    }
+
+    #[test]
+    fn a_tall_icon_takes_whole_message_rows() {
+        let mut registry = enabled();
+        let line = |registry: &mut Registry, text: &str| {
+            vec![ColorRun {
+                text: registry.substitute(text).into_owned(),
+                color: [1.0; 4],
+                link: None,
+            }]
+        };
+        let tall = line(&mut registry, "a|Tfoo:12|t");
+        let small = line(&mut registry, "a|Tfoo:0|t");
+        // 24 device px on a 14 px font: 10 px over, one more row.
+        assert_eq!(registry.extra_rows([tall].into_iter(), 14), 1);
+        assert_eq!(registry.extra_rows([small].into_iter(), 14), 0);
+    }
+
+    #[test]
     fn the_advance_sums_the_placeholders_of_a_line() {
         let mut registry = enabled();
         let out = registry.substitute("x|Tfoo:0|ty|Tbar:10|t").into_owned();
-        assert_eq!(registry.advance(&out, 12), 12.0 + 20.0);
-        assert_eq!(registry.advance("xy", 12), 0.0);
+        assert_eq!(registry.advance(&out, 12, 0), 12.0 + 20.0);
+        assert_eq!(
+            registry.advance(&out, 12, 2),
+            12.0 + 20.0 + 8.0,
+            "outline ink"
+        );
+        assert_eq!(registry.advance("xy", 12, 0), 0.0);
     }
 }

@@ -312,6 +312,22 @@ impl UiScript {
                     if bar_fill.is_none() && !thumb_fill && !color_thumb {
                         rect = model.region_resolved.get(&rh).copied();
                     }
+                    // An EditBox shows inline-texture markup as the bytes it holds; the focused
+                    // box's windowed text is the host's to mark, after its byte window.
+                    #[cfg(feature = "pfui")]
+                    if model.focused_editbox != owner
+                        && owner_frame.is_some_and(|f| {
+                            matches!(f.kind_state, crate::widget::KindState::EditBox(_))
+                        })
+                    {
+                        if let Some(std::borrow::Cow::Owned(raw)) = data
+                            .text
+                            .as_deref()
+                            .map(super::pfui_host::inline_texture::raw)
+                        {
+                            data.text = Some(raw);
+                        }
+                    }
                     let is_text = matches!(
                         region.map(|r| r.kind),
                         Some(crate::widget::RegionKind::FontString)

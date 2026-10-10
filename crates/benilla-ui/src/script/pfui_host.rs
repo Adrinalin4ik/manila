@@ -9,6 +9,7 @@ pub mod auras;
 pub mod casts;
 mod cursor;
 mod descriptors;
+pub mod inline_texture;
 pub(crate) mod equipment_actions;
 pub mod items;
 pub mod maps;

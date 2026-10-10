@@ -52,7 +52,7 @@ pub(super) fn measure_line_width(e: &TextEngine, r: Resolved, step_extra: f32, t
         .map(|c| c.floor_sum + step_extra * c.glyphs.len() as f32)
         .sum();
     #[cfg(feature = "pfui")]
-    let steps = steps + e.inline.advance(text, r.ppem);
+    let steps = steps + e.inline.advance(text, r.ppem, r.radius);
     steps / e.dpi()
 }
 
@@ -165,6 +165,15 @@ pub(crate) fn measure_wrapped_rows(
     let r = resolve(e, &font);
     e.ensure_metrics(r.face, r.ppem, text);
     let rows = wrapped_rows(e, r, text, wrap_width);
+    // A line grown by a tall texture takes the rows that hold it.
+    #[cfg(feature = "pfui")]
+    let rows = rows
+        + e.inline.extra_rows(
+            fontstring_lines(text, [1.0, 1.0, 1.0, 1.0])
+                .iter()
+                .flat_map(|line| wrap_line(e, r, line, wrap_width)),
+            r.ppem,
+        );
     rows.clamp(1, usize::from(u16::MAX)) as u16
 }
 

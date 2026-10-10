@@ -130,7 +130,7 @@ builds against this checkout's benilla revision; upstream provides no stable ext
 | Equipment flyout | `GetInventoryItemsForSlot` over worn and carried instances, packed locations and their unpack helpers |
 | State events | `UPDATE_SHAPESHIFT_FORM`, `UPDATE_INVENTORY_DURABILITY`, `FACTION_STANDING_CHANGED`, `HEARTHSTONE_BOUND`, `GLOBAL_MOUSE_DOWN`/`GLOBAL_MOUSE_UP` |
 | Item comparison | `GameTooltip:SetHyperlinkCompareItem` through the stock worn-item compare walk, and `SetAnchorType` |
-| Inline textures | `|T…|t` in font strings, tooltips and chat lines: the later clients' size law, pixel crops and offsets, drawn from the client's own texture store (`benilla-app/src/pfui/inline_texture.rs`) |
+| Inline textures | `|T…|t` in font strings, tooltips and chat lines: the later clients' size law, pixel crops, offsets and tint, drawn from the client's own texture store (`benilla-app/src/pfui/inline_texture.rs`); `GetCoinTextureString` |
 | Colours and labels | Colour methods on the stock `*_FONT_COLOR` tables, `WHITE_FONT_COLOR`, and English labels for the equipment manager, icon picker and friend notes |
 
 Frame spell actions reuse the native cast binder and validators with the clicked unit's GUID,
@@ -324,11 +324,16 @@ session's name-query replies, and the saved cache only when it is enabled.
 friend-note labels are English in every locale unless the install's own strings define them.
 `CreateSimpleTextureMarkup` returns the modern `|T…|t` escape. The client draws it only while
 the extension is enabled; a stock client and the stock markup decoder still treat it as text.
-An icon keeps its own colours and takes the string's alpha, casts no shadow, and one taller
-than the font grows its line. A texture first seen draws one frame after its width is
-reserved. An EditBox keeps the 1.12 cursor law over the raw string, so an escape set into one
-draws its icon while the caret still counts its bytes, and a ScrollingMessageFrame row is
-sized by the font height, so an icon taller than a chat line overlaps its neighbours.
+The behaviour follows what ClassicAPI documents for its own backport: width, height and wrap
+count the icon; an icon takes the string's alpha and its optional `r:g:b` tint, never the
+text colour, and casts no shadow; one taller than the font grows its line and centres in it;
+an outlined font keeps its ink clear of the icon; a link is hoverable across a tall icon
+inside it; an EditBox shows the markup raw; and a line another player typed loses its
+escapes before any addon sees it. Two deviations remain. A ScrollingMessageFrame row is a
+whole font height here, so a tall icon in chat takes the next whole row rather than its exact
+overflow. Atlas markup (`|A…|a`) is not implemented, since there is no atlas registry.
+`GetCoinTextureString` crops the stock 64x16 money sheet; its three format strings are
+English-neutral and a locale may define them first.
 
 The state events compare the stock snapshots after their feeds, with a baseline per VM and
 character: a login, a reload and a relisted reputation table announce nothing.

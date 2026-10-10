@@ -558,3 +558,25 @@ fn hyperlink_compare_draws_the_worn_counterpart_and_reanchoring_keeps_the_text()
         )
         .unwrap();
 }
+
+#[test]
+fn coin_strings_show_the_non_zero_denominations_with_money_sheet_crops() {
+    let script = extended();
+    let coins: (String, String, String, String) = script
+        .eval(
+            r#"return GetCoinTextureString(123456), GetCoinTextureString(0),
+                GetCoinTextureString(500, 24), GetCoinTextureString(-3.2)"#,
+        )
+        .unwrap();
+    let sheet = "Interface\\MoneyFrame\\UI-MoneyIcons";
+    assert_eq!(
+        coins.0,
+        format!(
+            "12|T{sheet}:0:0:2:0:64:16:0:16:0:16|t 34|T{sheet}:0:0:2:0:64:16:16:32:0:16|t \
+             56|T{sheet}:0:0:2:0:64:16:32:48:0:16|t"
+        )
+    );
+    assert_eq!(coins.1, format!("0|T{sheet}:0:0:2:0:64:16:32:48:0:16|t"));
+    assert_eq!(coins.2, format!("5|T{sheet}:24:24:2:0:64:16:16:32:0:16|t"));
+    assert_eq!(coins.3, coins.1);
+}
