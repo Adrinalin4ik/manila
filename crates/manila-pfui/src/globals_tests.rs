@@ -25,6 +25,7 @@ fn spell(name: &str, rank: &str, aura: f64) -> crate::spell::Spell {
         cost: 0,
         power_type: 0,
         funnel: false,
+        swing: None,
     }
 }
 

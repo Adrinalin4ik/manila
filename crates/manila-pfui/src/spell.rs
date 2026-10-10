@@ -24,6 +24,8 @@ pub struct Spell {
     pub cost: u32,
     pub power_type: i32,
     pub funnel: bool,
+    /// How the spell moves the swing clock when it goes off.
+    pub swing: Option<crate::swing::Kind>,
 }
 
 #[derive(Clone, Debug)]
@@ -113,6 +115,11 @@ impl Catalog {
                     cost: number(row, 32)?,
                     power_type: number(row, 31)? as i32,
                     funnel: number(row, 8)? & 0x800 != 0,
+                    swing: crate::swing::Kind::of(
+                        number(row, 6)?,
+                        number(row, 8)?,
+                        number(row, 21)?,
+                    ),
                 },
             );
         }
@@ -124,6 +131,12 @@ impl Catalog {
             return Err(mlua::Error::runtime("C_Spell already installed"));
         }
         let api = lua.create_table()?;
+        crate::swing::install_kinds(
+            lua,
+            self.0
+                .iter()
+                .filter_map(|(id, spell)| Some((*id, spell.swing?))),
+        );
         let records = Rc::new(self.0.clone());
         legacy::install(lua, records.clone())?;
         let r = records.clone();

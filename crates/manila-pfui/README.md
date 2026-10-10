@@ -131,6 +131,7 @@ builds against this checkout's benilla revision; upstream provides no stable ext
 | State events | `UPDATE_SHAPESHIFT_FORM`, `UPDATE_INVENTORY_DURABILITY`, `FACTION_STANDING_CHANGED`, `HEARTHSTONE_BOUND`, `GLOBAL_MOUSE_DOWN`/`GLOBAL_MOUSE_UP` |
 | Item comparison | `GameTooltip:SetHyperlinkCompareItem` through the stock worn-item compare walk, and `SetAnchorType` |
 | Inline textures | `|T…|t` in font strings, tooltips and chat lines: the later clients' size law, pixel crops, offsets and tint, drawn from the client's own texture store (`benilla-app/src/pfui/inline_texture.rs`); `GetCoinTextureString` |
+| Swing clock | `PLAYER_SWING(swingDuration, swingType)` rebuilt from the player's white hits, on-next-swing abilities, swing-resetting casts, auto-repeat shots and parried attacks; at most one event per weapon per frame (`src/swing.rs`) |
 | Colours and labels | Colour methods on the stock `*_FONT_COLOR` tables, `WHITE_FONT_COLOR`, and English labels for the equipment manager, icon picker and friend notes |
 
 Frame spell actions reuse the native cast binder and validators with the clicked unit's GUID,
@@ -335,6 +336,15 @@ overflow. Atlas markup (`|A…|a`) is not implemented, since there is no atlas r
 `GetCoinTextureString` crops the stock 64x16 money sheet; its three format strings are
 English-neutral and a locale may define them first.
 
+`PLAYER_SWING` reports the weapon's current speed from the unit fields at each reset. Two of
+its rules are the server's and reach the client in no packet, so they follow vmangos: a cast
+restarts the melee timers when the server announced its start and its `InterruptFlags` carry
+the auto-attack bit, and a parry takes 40% of the weapon speed off the nearer swing, never
+below 20%. `START_AUTOATTACK` and `STOP_AUTOATTACK`, which pfUI also registers, are not
+fired: neither ClassicAPI nor Nampower documents them. pfUI's bar then hides when a swing
+runs out with no new one. The swing clock is covered by tests and a check of the three
+`Spell.dbc` columns against the Turtle install; it has not been watched in a live fight.
+
 The state events compare the stock snapshots after their feeds, with a baseline per VM and
 character: a login, a reload and a relisted reputation table announce nothing.
 `UPDATE_INVENTORY_DURABILITY` fires once when any worn slot's item or durability changes.
@@ -399,7 +409,7 @@ into the game install.
 | Browser | Live verification in a WebGPU browser; the Turtle feature passes the wasm compile check, while current live coverage is native |
 | Remaining extras | Optional visible-player sweep, live vendor/group/totem checks and broader map/bubble validation |
 | Widgets and globals | Further token-aware verbs, equipment IDs for uninspected players; broader click-casting and addon macro-runner live coverage |
-| Swing timer | `PLAYER_SWING` from the server's attack clock; needs a controlled GM-off combat check |
+| Swing timer | A live GM-off combat check of `PLAYER_SWING`; the off-hand delay at attack start, the reset after a weapon swap, and `C_SwingTimer` range checks |
 | Item comparison | Per-stat change lines, which need item stat totals including on-equip spell bonuses |
 
 The target is the complete pfUI manifest, including equipment management, sorting and sharing.

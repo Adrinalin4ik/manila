@@ -1688,6 +1688,7 @@ fn legacy_spell_metadata_preserves_tuple_positions_and_resolves_both_books() {
                     cost: 30,
                     power_type: 0,
                     funnel: true,
+                    swing: None,
                 },
             )
         })
@@ -1799,6 +1800,7 @@ fn structured_spell_metadata_and_aura_lookup_include_hidden_known_spells() {
         cost: 30,
         power_type: 0,
         funnel: false,
+        swing: None,
     };
     Catalog(std::collections::BTreeMap::from([
         (1, spell.clone()),
@@ -2702,6 +2704,7 @@ fn mount_stealth_and_form_helpers_follow_live_descriptors_and_authorized_dbc_aur
         cost: 0,
         power_type: 0,
         funnel: false,
+        swing: None,
     };
     Catalog(BTreeMap::from([
         (100, spell(78.0, 0.0)),

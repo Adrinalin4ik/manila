@@ -677,9 +677,14 @@ reputation offset of 50 and an unequipped main hand; each was undone and confirm
    grown chat rows, same-frame loading, `r:g:b` tint, outline ink, stripped player-typed
    escapes (`ui_chat/feed.rs` hook) and `GetCoinTextureString`. Left: chat rows grow by whole
    font heights, and `|A…|a` atlas markup needs an atlas registry first.
-2. **`PLAYER_SWING`.** The decoded attack log already feeds `AUTO_ATTACK_SELF`; the swing clock
-   needs weapon speed, next-swing spells and ranged shots. Live proof needs GM-off combat, which
-   is not allowed unattended.
+2. **`PLAYER_SWING`: implemented, not seen live.** `crates/manila-pfui/src/swing.rs` is the
+   clock and `crates/benilla-app/src/pfui/swing.rs` feeds it from `AttackerState`,
+   `AttackStart/Stop`, `SpellStart` and `SpellGo`; no upstream file changed. The spell
+   classification (`Spell.dbc` columns 6, 8 and 21) is checked against the Turtle install by
+   `cargo test -p manila-pfui --features audit the_installs_spell` with `WOW_DATA` set. Live
+   proof needs GM-off combat, which is not allowed unattended: fight a mob with pfUI's swing
+   timer enabled and compare the bar with the hits. Not modelled: off-hand delay at attack
+   start, weapon-swap reset, `C_SwingTimer` range checks, `START/STOP_AUTOATTACK`.
 3. **`DisenchantAll` and item queues**, as described above; destructive, so command-capture only.
 4. **Comparison stat lines** for `SetHyperlinkCompareItem`.
 5. **Hearthstone bind live check**, once the binder probe passes or by a manual bind.

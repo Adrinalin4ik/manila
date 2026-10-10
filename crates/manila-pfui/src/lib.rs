@@ -18,6 +18,7 @@ pub mod maps;
 pub mod nampower;
 pub mod player_cache;
 pub mod spell;
+pub mod swing;
 mod widgets;
 
 #[cfg(feature = "audit")]

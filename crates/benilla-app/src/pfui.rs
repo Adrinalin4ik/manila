@@ -14,6 +14,7 @@ mod session_events;
 mod social;
 pub(crate) mod spell_queue;
 mod spells;
+mod swing;
 mod totems;
 mod units;
 
@@ -143,6 +144,7 @@ impl Plugin for PfuiPlugin {
         crate::ui_text::inline_texture::register(app);
         social::register(app);
         spells::register(app);
+        swing::register(app);
         units::register(app);
         totems::register(app);
         crate::ui_unit::pfui::register(app);
