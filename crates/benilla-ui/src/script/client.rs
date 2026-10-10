@@ -377,15 +377,30 @@ mod tests {
     }
 
     /// `IsWindowsClient` (`0x48c960`) pushes 1 and `IsLinuxClient` (`0x48c990`) nil, one value
-    /// each; `GetDebugStats` (`0x488af0`) pushes none.
+    /// each.
     #[test]
-    fn the_platform_queries_and_debug_stats_answer_the_pc_build() {
+    fn the_platform_queries_answer_the_pc_build() {
         let s = UiScript::new().unwrap();
         assert_eq!(s.arity("IsWindowsClient()").unwrap(), 1);
         assert_eq!(s.eval::<f64>("return IsWindowsClient(0)").unwrap(), 1.0);
         assert_eq!(s.arity("IsLinuxClient()").unwrap(), 1);
         assert!(s.eval::<bool>("return IsLinuxClient() == nil").unwrap());
-        assert_eq!(s.arity("GetDebugStats()").unwrap(), 0);
+    }
+
+    /// The fork's debug-stat line exposes the current FPS and retained script diagnostics.
+    #[test]
+    fn debug_stats_reports_the_forks_live_diagnostics() {
+        let s = UiScript::new().unwrap();
+        assert_eq!(s.arity("GetDebugStats()").unwrap(), 1);
+        assert_eq!(
+            s.eval::<String>("return GetDebugStats()").unwrap(),
+            "FPS: 0.0 | script issues: 0 (0 retained)"
+        );
+        s.run("RunScript([[error('debug-stat-probe')]])").unwrap();
+        assert_eq!(
+            s.eval::<String>("return GetDebugStats()").unwrap(),
+            "FPS: 0.0 | script issues: 1 (1 retained)"
+        );
     }
 
     /// Each `OpeningCinematic()` queues one send and returns nothing.
