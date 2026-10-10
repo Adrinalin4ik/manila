@@ -25,7 +25,11 @@ pub(super) fn register(app: &mut App) {
 }
 
 fn bound(In(event): In<SessionEvent>, mut pending: ResMut<Bound>) {
-    pending.0 = matches!(event, SessionEvent::PlayerBound { .. });
+    match event {
+        SessionEvent::PlayerBound { .. } => pending.0 = true,
+        SessionEvent::Disconnected { .. } | SessionEvent::LoggedOut => pending.0 = false,
+        _ => (),
+    }
 }
 
 fn name(button: MouseButton) -> Option<&'static str> {
