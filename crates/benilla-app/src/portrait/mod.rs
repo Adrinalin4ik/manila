@@ -1443,9 +1443,17 @@ fn sync_portraits(
             continue;
         }
         let key = LookKey::build(&parts, &riders, &billboards, &effects);
+        // An addon's unit pane shows the model alive, so its slot loops Stand while one is drawn.
+        #[cfg(feature = "pfui")]
+        let animate = crate::pfui::unit_pane::animated(&party.panes, token);
+        #[cfg(not(feature = "pfui"))]
+        let animate = false;
         // A changed occupant re-bakes even at an identical look, or the handover files one
         // member's face under another's guid.
-        if booth.baked.as_ref() != Some(&key) || booth.baked_guid != occupant {
+        if booth.baked.as_ref() != Some(&key)
+            || booth.baked_guid != occupant
+            || booth.live != animate
+        {
             let display_id = ent_q.get(unit).ok().and_then(|n| n.display_id);
             // Resolve the anchors before any teardown; a still-loading display waits.
             let Some(anchors) = booth_anchors(creatures.as_deref(), display_id) else {
@@ -1516,7 +1524,11 @@ fn sync_portraits(
                         .map(|ibp| (r.skeleton, ibp, r.animations))
                 }),
                 anim_data.as_deref().map(|a| &a.0),
-                BoothMotion::Frozen,
+                if animate {
+                    BoothMotion::Loop
+                } else {
+                    BoothMotion::Frozen
+                },
                 // Open hands: the reference's portrait bake (`0x524f60`) runs the attach reset but,
                 // unlike `0x5059a0`, never probes the hand points or calls `0x479660`.
                 [false, false],
@@ -1543,6 +1555,7 @@ fn sync_portraits(
             );
             booth.baked = Some(key);
             booth.baked_guid = occupant;
+            booth.live = animate;
         }
         let live = PortraitSource::Live(booth.target.clone());
         if portraits.0.get(token) != Some(&live) {

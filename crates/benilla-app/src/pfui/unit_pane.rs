@@ -3,12 +3,23 @@
 //! already bakes through that camera for the round unit portraits, so only the units with such a
 //! bake draw: the player, target, target's target, pet, and the party with its pets.
 //!
-//! Deviation: the still is frozen at Stand, where the reference animates the model in the pane.
+//! While a pane shows a unit, that unit's bake loops Stand and keeps rendering, as the reference
+//! animates the model in the pane; a round portrait of the same unit then moves with it.
 
 use bevy::prelude::*;
 
-use crate::portrait::{BoothBridge, PortraitSource};
+use crate::portrait::{BoothBridge, BoothPanes, PortraitSource};
 use crate::ui_pass::UiQuad;
+
+/// The key under which a drawn unit pane asks for its slot's bake to stay alive.
+fn live_key(token: &str) -> String {
+    format!("live:{token}")
+}
+
+/// Whether a unit pane drew `token`'s slot last frame.
+pub(crate) fn animated(panes: &BoothPanes, token: &str) -> bool {
+    panes.0.contains_key(&live_key(token))
+}
 
 /// The bake is square and the portrait projection holds the diagonal field of view, so a pane
 /// sees what a square of its own diagonal sees: the still is scaled to that diagonal, centred,
@@ -38,6 +49,7 @@ pub(crate) fn emit(
     // Marks the slot drawn: the target's target and a party pet bake only while something shows
     // them. The round slots bake square whatever aspect is published.
     booths.panes.0.insert(token.clone(), 1.0);
+    booths.panes.0.insert(live_key(&token), 1.0);
     let (texture, premultiplied) = match booths.images.0.get(&token) {
         Some(PortraitSource::Live(handle)) => (Some(handle.clone()), true),
         Some(PortraitSource::File(path)) => (

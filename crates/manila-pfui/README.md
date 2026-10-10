@@ -346,9 +346,9 @@ fired: neither ClassicAPI nor Nampower documents them. pfUI's bar then hides whe
 runs out with no new one. The swing clock is covered by tests and a check of the three
 `Spell.dbc` columns against the Turtle install; it has not been watched in a live fight.
 
-A unit model pane shows a still, frozen at Stand, where the original client animates the
-model; a pane bound to a raid member, a focus or any unit without a round-portrait bake draws
-nothing.
+While a unit model pane is drawn, its unit's portrait bake loops Stand and renders every
+other frame, so a stock round portrait of the same unit moves with it. A pane bound to a raid
+member, a focus or any unit without a round-portrait bake draws nothing.
 
 The client's game menu has two rungs of its own, Edit Mode and Support. When pfUI's game-menu
 skin has run they take the same button skin, so the menu reads as one.
