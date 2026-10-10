@@ -603,6 +603,82 @@ files may contain failed intermediate probes or builds. Do not overwrite evidenc
 or treat a scratch wrapper as reviewed production automation. No game data, credentials,
 reference binaries or full third-party addon code belong in a handover commit.
 
+## Addendum: second session, 2026-10-10
+
+Written by a later session that continued from the text above. Code state for this addendum is
+the commit that adds it; the seven commits before it are that session's work. Where this
+section and the text above disagree, this section is newer.
+
+**What changed.** The earlier audit counted only dotted `C_*` references. A live inventory
+looked up every global, upper-case constant and widget method pfUI's source names in the running
+VM, and compared every event pfUI registers with `reference/1.12-events.tsv` and the events this
+client fires. It found about thirty missing ClassicAPI globals, a set of constants and labels,
+six unfired events and two tooltip methods. They are now implemented; the list, deviations and
+evidence are in [the extension README](crates/manila-pfui/README.md).
+
+| Commit subject | Purpose |
+| --- | --- |
+| Add the ClassicAPI globals pfUI calls outside its C_ namespaces | Globals, tracking, equipment flyout query, constants, labels, colour methods |
+| Fire the ClassicAPI state events pfUI registers for | Form, durability, reputation, hearth bind, global mouse |
+| Add repair cost, mail item links and unit speed for pfUI | Durability panel, mail hooks, tooltip speed line |
+| Name each session event the pfUI bind handler registers for | Satisfies the handler registry test |
+| Size a tooltip in the call that shows it | **Engine fix, ungated, kept separate for upstream review** |
+| Add hyperlink item comparison and tooltip re-anchoring for pfUI | Shift-hover comparison |
+
+**Corrections to the text above.**
+
+- Everything under `/tmp` was lost. The pinned sources were re-fetched and the installed
+  `benilla-config/AddOns/pfUI` was confirmed identical to pfUI `40dd9dd6`. Scratch probes and
+  logs of this session were also temporary.
+- `.probe-identity` declares the warrior **Pfuitest** (level 1, Northshire), not the priest.
+- With Turtle data the headless audit reports three stock errors in Turtle's own FrameXML
+  (`Turtle_TransmogUI`, `Turtle_ShopUI`, `EverlookBroadcastingCo`) and therefore never
+  bootstraps pfUI: `bootstrap_attempted` is false. Use the native client for that data.
+- The dependency popup is more than a cosmetic notice: its `OnShow` focuses an edit box, so
+  after every login keyboard input goes to that box until the popup is dismissed. A scripted
+  run that presses keys must first call `StaticPopup_Hide("PFUI_CLASSICAPI_REQUIRED")`; a
+  movement probe that skipped this read a false zero.
+- `WOW_PROBE_BINDER=1` fails its own step 3 in this build (`BENILLA_GOSSIP_ICONS.binder`
+  resolves to nothing) and stops before binding. It still teleports the character to Dolanaar;
+  return it with `WOW_PROBE_CHAT=".go xyz -8950 -132.5 83.5 0"`.
+
+**Baselines at the end of the session (Linux).**
+
+| Check | Result |
+| --- | --- |
+| Extension tests, all features | 116 pass |
+| UI tests, with and without the feature | 1,721 pass, 1 ignored |
+| Full app lib suite, feature on, `WOW_DATA=` | 4,434 pass, the same 8 failures, 9 ignored |
+| Extension strict clippy | Pass |
+| Native Turtle build; stock native check | Pass |
+| Browser check, `webgpu,pfui-turtle` and `webgpu` | Pass |
+
+The schedule-ceiling failure now reports 4,968 actionable pairs against the ceiling of 4,927;
+it was 4,965 before this session, and three of the difference are this session's new systems.
+
+**How the live checks were run.** Each used `WOW_UNATTENDED=1`, `WOW_NOSOUND=1`, the declared
+identity, a copy of `benilla-config` as `BENILLA_HOME`, `WOW_PROBE_EXIT_AT`, and a
+`WOW_PROBE_LUA` chunk reporting through `ProbeLog`. A small recording addon in that state
+folder's `AddOns` registered for the new events at load, which is what showed that login and a
+cross-map teleport fire none of them. Temporary changes were a learned Defensive Stance, a
+reputation offset of 50 and an unequipped main hand; each was undone and confirmed.
+
+**Still open, in the order I would take them.**
+
+1. **Inline `|T…|t` textures.** `crates/benilla-ui/src/markup.rs` draws the escape literally,
+   as 1.12 does. pfUI uses it for race, faction and item icons, so raw escape text is visible
+   where those appear. It is a text-layout change in an upstream file.
+2. **`PLAYER_SWING`.** The decoded attack log already feeds `AUTO_ATTACK_SELF`; the swing clock
+   needs weapon speed, next-swing spells and ranged shots. Live proof needs GM-off combat, which
+   is not allowed unattended.
+3. **`DisenchantAll` and item queues**, as described above; destructive, so command-capture only.
+4. **Comparison stat lines** for `SetHyperlinkCompareItem`.
+5. **The dependency popup.** Publishing `CLASSIC_API_VERSION` would remove it and the focus
+   steal, but claims complete ClassicAPI to every addon. That is the owner's decision.
+6. **Hearthstone bind live check**, once the binder probe passes or by a manual bind.
+7. Profile exchange with a real ClassicAPI client, the browser runtime, and the combat-side
+   Nampower comparisons remain exactly as described above.
+
 ## Suggested prompt for the next session
 
 > Read PFUI_HANDOVER.md, AGENTS.md, the required Benilla docs, and

@@ -125,6 +125,12 @@ builds against this checkout's benilla revision; upstream provides no stable ext
 | Callbacks | `CallbackRegistryMixin` and `EventRegistry` owner registration/removal, real frame-event callbacks, dispatch and reentrant subscriptions |
 | `EventUtil` | `ContinueOnPlayerLogin`, `ContinueOnAddOnLoaded`; once per registration, immediate when already ready |
 | `C_EncodingUtil` | Eight profile-sharing calls: CBOR/JSON serialization, zlib compression, Base64 encoding, and their inverses |
+| ClassicAPI globals | `IsModifierKeyDown`, `strtrim`, item-ID companions of the stock link queries, `FindSpellBookSlotByID`, `GetMacroSpell`, `GetFactionInfoByID`, `UnitNameFromGUID`, `GetPlayerInfoByGUID`, `GetUnitSpeed`, `GetInventoryItemRepairCost`, inbox and send-mail item links, `CreateSimpleTextureMarkup`, `CLASS_SORT_ORDER`, `INTERFACE_VERSION` |
+| Tracking | `GetNumTrackingTypes`, `GetTrackingInfo`, `SetTracking` over the player's book spells whose DBC effect applies a tracking aura |
+| Equipment flyout | `GetInventoryItemsForSlot` over worn and carried instances, packed locations and their unpack helpers |
+| State events | `UPDATE_SHAPESHIFT_FORM`, `UPDATE_INVENTORY_DURABILITY`, `FACTION_STANDING_CHANGED`, `HEARTHSTONE_BOUND`, `GLOBAL_MOUSE_DOWN`/`GLOBAL_MOUSE_UP` |
+| Item comparison | `GameTooltip:SetHyperlinkCompareItem` through the stock worn-item compare walk, and `SetAnchorType` |
+| Colours and labels | Colour methods on the stock `*_FONT_COLOR` tables, `WHITE_FONT_COLOR`, and English labels for the equipment manager, icon picker and friend notes |
 
 Frame spell actions reuse the native cast binder and validators with the clicked unit's GUID,
 without changing selection or falling back to self-cast. Ground spells use the unit's position.
@@ -300,6 +306,32 @@ actions changed by another client. A local cursor tag is rejected by the stock p
 no new server action type or generated macro is used. Renames, icon updates and deletion reach
 every bound button. Locked items and active casts prevent an action-button equipment swap.
 
+The globals outside the `C_` namespaces were found by a live inventory: every global, upper-case
+constant and widget method pfUI's source names was looked up in the running VM, and every event
+it registers was compared with the stock event list and the events this client fires. The static
+audit below only sees dotted names. The item-ID companions read the entry out of the link the
+stock builder returns for the same slot. `GetMacroSpell` resolves a `#showtooltip`/`#show`
+argument or the first `/cast`, `/castsequence` or `CastSpellByName` through the player's books;
+macro conditionals are not evaluated, so such a line resolves to nothing. `GetTrackingInfo`'s
+`active` compares the spell's icon with the stock tracking texture. `GetFactionInfoByID` answers
+a faction the player has a reputation slot for, with the documented neutral values before it is
+met; a faction without a slot answers nil, where ClassicAPI reads `Faction.dbc`.
+`GetPlayerInfoByGUID` and `UnitNameFromGUID` read a visible unit, the friends list, then this
+session's name-query replies, and the saved cache only when it is enabled.
+`GetInventoryItemsForSlot` also offers relics for the ranged slot, where they equip in 1.12.
+`CLASS_SORT_ORDER` follows `ChrClasses.dbc` ID order. The equipment-manager, icon-picker and
+friend-note labels are English in every locale unless the install's own strings define them.
+`CreateSimpleTextureMarkup` returns the modern `|T…|t` escape, which the 1.12 text engine still
+draws literally: inline icons in pfUI's text are not rendered.
+
+The state events compare the stock snapshots after their feeds, with a baseline per VM and
+character: a login, a reload and a relisted reputation table announce nothing.
+`UPDATE_INVENTORY_DURABILITY` fires once when any worn slot's item or durability changes.
+`HEARTHSTONE_BOUND` follows the server's `SMSG_PLAYERBOUND`. `PLAYER_SWING` is not fired, so
+pfUI's swing timer stays idle. `SetHyperlinkCompareItem` returns 1 or nil as the stock compare
+bindings do, never 0, and draws no per-stat change lines. `SetAnchorType` applies an offset for
+the six owner-relative modes and leaves the recorded mode unchanged.
+
 Timers use the engine's `GetTime` clock and require its ordinary `UiScript::tick` calls.
 Callbacks scheduled during a timer callback wait until the next frame. A long frame fires a
 ticker once rather than running an unbounded catch-up loop. Timer callback errors are caught,
@@ -356,6 +388,10 @@ into the game install.
 | Browser | Live verification in a WebGPU browser; the Turtle feature passes the wasm compile check, while current live coverage is native |
 | Remaining extras | Optional visible-player sweep, live vendor/group/totem checks and broader map/bubble validation |
 | Widgets and globals | Further token-aware verbs, equipment IDs for uninspected players; broader click-casting and addon macro-runner live coverage |
+| Text | Inline `|T…|t` texture escapes in font strings, which pfUI uses for race, faction and item icons |
+| Swing timer | `PLAYER_SWING` from the server's attack clock; needs a controlled GM-off combat check |
+| Item comparison | Per-stat change lines, which need item stat totals including on-equip spell bonuses |
+| Dependency notice | The notice focuses its edit box at every login, so movement keys type into it until it is dismissed |
 
 The target is the complete pfUI manifest, including equipment management, sorting and sharing.
 Implement only the functions/events that inventory and runtime probes demonstrate pfUI uses,
@@ -452,6 +488,23 @@ no-queue and CVar controls, resolved GUID and terrain retention, missing units, 
 minimum spacing, the resend/lifetime limits, late acceptance, newer user requests and session/VM
 cleanup. Fresh scripts and pop-event callbacks can cancel a released request before it reaches
 the sender; ordinary queued casts restore the selection present when they execute.
+
+Global and event regressions cover the modifier rollup, literal trimming, item-ID companions,
+spellbook slot lookup in both books, macro spell resolution and its refusals, tracking lists and
+the cast a selection sends, met, unmet and absent factions, GUID name lookups, packed locations,
+slot candidates by inventory type and hand, repair costs, mail links, unit speed, colour methods
+on stock tables, form, durability and reputation edges with their baselines, the confirmed bind
+and raw mouse buttons, and the worn-item comparison with re-anchoring.
+Native live probes on the dedicated test character verify the new globals against real state
+and the equipment flyout opening; one form event per stance change with the new form readable;
+a +50 and -50 reputation change with the documented payload; one durability event per unequip
+and re-equip; no event during login or a cross-map teleport; `GetUnitSpeed` reading 0, 7.0 while
+walking and 0 again; and pfUI's shift-hover comparison placed beside the docked tooltip. A sweep
+that opened pfUI's windows and ran all 3,446 hover handlers reports no pfUI error. The character
+was restored after each probe. The hearthstone bind has handler coverage only.
+On Turtle data the audit's stock-interface phase currently reports three errors in Turtle's own
+FrameXML (the transmog, shop and Everlook frames), so it skips the pfUI bootstrap there; the
+native client is the working check for that data.
 
 All implementation in this crate is independently written under MIT OR Apache-2.0.
 ClassicAPI's GPL implementation and the player's FrameXML are not bundled here.
