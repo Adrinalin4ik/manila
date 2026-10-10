@@ -3,6 +3,13 @@
 Upstream: [`mlua-rs/lua-src-rs`](https://github.com/mlua-rs/lua-src-rs), MIT, version `550.0.0`,
 the version mlua 0.11 resolves to. Wired in through `[patch.crates-io]` in the workspace root.
 
+Manila additionally carries an **opt-in extension**: `lmanila.h` reads the per-VM registry key
+`manila.pfui.lua51`. Only `manila-pfui::install` sets it. Three guarded parser branches enable
+the original Lua 5.1 `...`, `#`, and `%` expressions for that VM; with the key absent, every
+reference grammar rule below still applies. This is a fork-only deviation for addon
+compatibility, not a change to stock benilla's default dialect. The extension's tests verify
+both VMs side by side (`cargo test -p manila-pfui`), including legacy `arg`-table varargs.
+
 ## Why a fork exists at all
 
 benilla's Lua has to accept exactly the grammar the 1.12.1 client's Lua accepts, no more and no

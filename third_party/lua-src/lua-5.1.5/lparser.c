@@ -24,6 +24,7 @@
 #include "lstate.h"
 #include "lstring.h"
 #include "ltable.h"
+#include "lmanila.h"
 
 
 
@@ -787,6 +788,18 @@ static void simpleexp (LexState *ls, expdesc *v) {
     ** VARARG_NEEDSARG for any function that mentioned `...', so with the arm
     ** gone every vararg function gets its `arg' table, which is what 5.0 does
     ** and what the shipped 1.12 FrameXML reads. */
+    case TK_DOTS: {  /* Optional extended-client grammar; stock still rejects it. */
+      FuncState *fs = ls->fs;
+      if (!manila_lua51(ls->L)) {
+        primaryexp(ls, v);
+        return;
+      }
+      check_condition(ls, fs->f->is_vararg,
+                      "cannot use " LUA_QL("...") " outside a vararg function");
+      fs->f->is_vararg &= ~VARARG_NEEDSARG;
+      init_exp(v, VVARARG, luaK_codeABC(fs, OP_VARARG, 0, 1, 0));
+      break;
+    }
     case '{': {  /* constructor */
       constructor(ls, v);
       return;
@@ -875,6 +888,7 @@ static BinOpr subexpr (LexState *ls, expdesc *v, unsigned int limit) {
   UnOpr uop;
   enterlevel(ls);
   uop = getunopr(ls->t.token);
+  if (ls->t.token == '#' && manila_lua51(ls->L)) uop = OPR_LEN;
   if (uop != OPR_NOUNOPR) {
     luaX_next(ls);
     subexpr(ls, v, UNARY_PRIORITY);
@@ -883,6 +897,7 @@ static BinOpr subexpr (LexState *ls, expdesc *v, unsigned int limit) {
   else simpleexp(ls, v);
   /* expand while operators have priorities higher than `limit' */
   op = getbinopr(ls->t.token);
+  if (ls->t.token == '%' && manila_lua51(ls->L)) op = OPR_MOD;
   while (op != OPR_NOBINOPR && priority[op].left > limit) {
     expdesc v2;
     BinOpr nextop;
