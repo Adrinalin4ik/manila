@@ -2829,6 +2829,7 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
             (
                 "BENILLA_TOOLTIP_PRESS_AND_HOLD_CASTING",
                 "ControlsRowPressAndHoldCasting",
+            ),
             // MONKEY (advanced graphics): the whole Advanced Graphics page. Every row on it is
             // benilla's own mechanism — 1.12 has no realtime shadow, no fixture-lit interior and
             // no invented light — so there is no `OPTION_TOOLTIP_*` any of them could resolve,
