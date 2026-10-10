@@ -87,7 +87,7 @@ fn int(n: impl Into<i64>) -> V {
     V::Int(n.into())
 }
 
-fn duration(
+pub(super) fn duration(
     spells: &crate::ui_action::Spells,
     def: &benilla_formats::SpellDisplay,
     caster: Option<&benilla_protocol::ObjectFields>,

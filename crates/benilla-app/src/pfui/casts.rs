@@ -18,9 +18,15 @@ struct Observed {
     end: Instant,
 }
 
+struct RemoteChannel {
+    cast: Observed,
+    awaiting_go: bool,
+}
+
 #[derive(Resource, Default)]
 struct State {
     active: HashMap<u64, Observed>,
+    remote_channels: HashMap<u64, RemoteChannel>,
     recent: HashMap<(u64, u32), (Observed, &'static str, Instant)>,
     edges: Vec<(u64, &'static str, Observed)>,
     serial: u64,
@@ -105,6 +111,7 @@ fn receive(
     mut state: ResMut<State>,
     me: Res<crate::net::SelfGuid>,
     spells: Option<Res<crate::ui_action::Spells>>,
+    objects: crate::net::Objects,
 ) {
     let now = Instant::now();
     match event {
@@ -113,18 +120,62 @@ fn receive(
             spell_id,
             cast_time_ms,
             ..
-        } if cast_time_ms > 0 && caster != 0 => {
+        } if caster != 0 => {
+            state.remote_channels.remove(&caster);
+            if cast_time_ms > 0 {
+                if let Some(old) = state.active.get(&caster).cloned() {
+                    state.stop(caster, old.info.spell_id, "UNIT_SPELLCAST_STOP");
+                }
+            }
             state.recent.remove(&(caster, spell_id));
-            let record = state.record(
-                caster,
-                spell_id,
-                cast_time_ms,
-                false,
-                now,
-                spells.as_deref(),
-            );
-            state.active.insert(caster, record.clone());
-            state.edges.push((caster, "UNIT_SPELLCAST_START", record));
+            let regular = (cast_time_ms > 0).then(|| {
+                state.record(
+                    caster,
+                    spell_id,
+                    cast_time_ms,
+                    false,
+                    now,
+                    spells.as_deref(),
+                )
+            });
+            if me.0 != Some(caster) {
+                if let Some((spells, def)) = spells
+                    .as_deref()
+                    .and_then(|spells| spells.catalog.get(spell_id).map(|def| (spells, def)))
+                    .filter(|(_, def)| def.tooltip_channeled())
+                {
+                    // Observers receive no MSG_CHANNEL_START/UPDATE. A seen cast supplies the
+                    // time anchor; UNIT_CHANNEL_SPELL must confirm that the channel is live.
+                    let duration =
+                        super::nampower::duration(spells, def, objects.object(caster), None);
+                    if duration > 0 {
+                        let mut cast = state.record(
+                            caster,
+                            spell_id,
+                            duration as u32,
+                            true,
+                            now,
+                            Some(spells),
+                        );
+                        if let Some(regular) = &regular {
+                            cast.info.cast_guid.clone_from(&regular.info.cast_guid);
+                            cast.start += Duration::from_millis(u64::from(cast_time_ms));
+                            cast.end += Duration::from_millis(u64::from(cast_time_ms));
+                        }
+                        state.remote_channels.insert(
+                            caster,
+                            RemoteChannel {
+                                cast,
+                                awaiting_go: cast_time_ms > 0,
+                            },
+                        );
+                    }
+                }
+            }
+            if let Some(record) = regular {
+                state.active.insert(caster, record.clone());
+                state.edges.push((caster, "UNIT_SPELLCAST_START", record));
+            }
         }
         SessionEvent::SpellGo {
             caster, spell_id, ..
@@ -135,6 +186,18 @@ fn receive(
                 .filter(|s| s.info.spell_id == spell_id)
                 .cloned();
             let was_regular = current.as_ref().is_some_and(|s| !s.info.channel);
+            if let Some(pending) = state
+                .remote_channels
+                .get_mut(&caster)
+                .filter(|pending| pending.cast.info.spell_id == spell_id)
+            {
+                if pending.awaiting_go {
+                    let span = pending.cast.end.duration_since(pending.cast.start);
+                    pending.cast.start = now;
+                    pending.cast.end = now + span;
+                    pending.awaiting_go = false;
+                }
+            }
             let recent = state
                 .recent
                 .remove(&(caster, spell_id))
@@ -143,7 +206,12 @@ fn receive(
                         && now.duration_since(*ended) < Duration::from_secs(2)
                 })
                 .map(|(cast, _, _)| cast);
-            let record = current.or(recent).unwrap_or_else(|| {
+            let pending = state
+                .remote_channels
+                .get(&caster)
+                .filter(|pending| pending.cast.info.spell_id == spell_id)
+                .map(|pending| pending.cast.clone());
+            let record = current.or(recent).or(pending).unwrap_or_else(|| {
                 state.record(caster, spell_id, 0, false, now, spells.as_deref())
             });
             if was_regular {
@@ -157,6 +225,13 @@ fn receive(
             }
         }
         SessionEvent::SpellFailedOther { caster, spell_id } => {
+            if state
+                .remote_channels
+                .get(&caster)
+                .is_some_and(|pending| pending.cast.info.spell_id == spell_id)
+            {
+                state.remote_channels.remove(&caster);
+            }
             state.stop(caster, spell_id, "UNIT_SPELLCAST_INTERRUPTED");
         }
         SessionEvent::CastResult {
@@ -221,6 +296,7 @@ fn receive(
         }
         SessionEvent::Disconnected { .. } | SessionEvent::LoggedOut => {
             state.active.clear();
+            state.remote_channels.clear();
             state.edges.clear();
             state.recent.clear();
         }
@@ -252,6 +328,7 @@ fn feed(
     me: Res<crate::net::SelfGuid>,
     channel: Res<crate::spell::ActiveChannel>,
     casting: Query<(&crate::net::Guid, &crate::creature_anim::Casting)>,
+    objects: crate::net::Objects,
 ) {
     let Some(script) = script else {
         state.edges.clear();
@@ -265,11 +342,16 @@ fn feed(
         .iter()
         .map(|(guid, cast)| (guid.0, cast.spell_id))
         .collect();
+    let remote_spell = |guid| objects.object(guid).map(|store| store.unit_channel_spell());
     let mut stopped = Vec::new();
     state.active.retain(|guid, record| {
         let alive = now < record.end
             && if record.info.channel {
-                me.0 == Some(*guid) && channel.current(now) == Some(record.info.spell_id)
+                if me.0 == Some(*guid) {
+                    channel.current(now) == Some(record.info.spell_id)
+                } else {
+                    remote_spell(*guid) == Some(record.info.spell_id)
+                }
             } else {
                 live.get(guid) == Some(&record.info.spell_id)
             };
@@ -295,6 +377,26 @@ fn feed(
             .insert((guid, record.info.spell_id), (record.clone(), kind, now));
         state.edges.push((guid, kind, record));
     }
+    let mut started = Vec::new();
+    state.remote_channels.retain(|guid, pending| {
+        if now >= pending.cast.end {
+            return false;
+        }
+        if !pending.awaiting_go && remote_spell(*guid) == Some(pending.cast.info.spell_id) {
+            started.push((*guid, pending.cast.clone()));
+            return false;
+        }
+        true
+    });
+    for (guid, record) in started {
+        if let Some(old) = state.active.get(&guid).cloned() {
+            state.stop(guid, old.info.spell_id, "UNIT_SPELLCAST_STOP");
+        }
+        state.active.insert(guid, record.clone());
+        state
+            .edges
+            .push((guid, "UNIT_SPELLCAST_CHANNEL_START", record));
+    }
     casts::set_casts(
         script.lua(),
         state
@@ -306,6 +408,10 @@ fn feed(
         casts::event(script.lua(), guid, kind, &project(&record, &clock));
     }
 }
+
+#[cfg(test)]
+#[path = "cast_channel_tests.rs"]
+mod channel_tests;
 
 #[cfg(test)]
 mod tests {

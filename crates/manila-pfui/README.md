@@ -96,7 +96,7 @@ builds against this checkout's benilla revision; upstream provides no stable ext
 | Known spells | Aura-effect searches over the complete known-spell set, including hidden talents, rather than only visible spellbook rows |
 | Player states | Descriptor form IDs and mount state, real stealth auras, authorized mount/form cancellation from DBC effects; warrior stances remain active |
 | Nampower integration | Explicit 3.0.0 compatibility identity, packet-backed spell/aura/heal events, raw aura slot and stack edges, event CVars, GUID-directed named casts, forced/no-queue spellbook overloads, GCD/non-GCD/on-swing queues, ground quickcasting, bounded server-rejection retries, prioritized queued scripts and pfUI queue indicator |
-| Observed casts | Cast/channel queries over spell packets, stable per-cast identifiers, pushback and modern start/success/stop/failure events |
+| Observed casts | Cast/channel queries over spell packets, remote channels confirmed by live descriptors, stable per-cast identifiers, pushback and modern start/success/stop/failure events |
 | Auras | Seven pfUI-used queries, raw descriptor slots, pagination, fill buffers, polarity/source filters and authorized player-aura cancellation |
 | Units and clock | Stock, focus, GUID and nameplate query tokens; local-player GUID checks, typed/raw power, NPC subtitles, party/raid membership and realm-local calendar |
 | Focus | `FocusUnit`/`ClearFocus`, target-chain reads over visible-unit snapshots, real GUID targeting and focus identity/health/name/level/target events |
@@ -172,8 +172,14 @@ The aura feed retains actual descriptor slots, player durations when known, and 
 as unknown. Successful observed casts supply aura ownership and DBC duration for their hit
 targets; the player's server duration remains authoritative. Auras already present at login
 retain unknown ownership. Turtle polarity overflow and crowd-control filters remain unimplemented. Cast observation supports
-ordinary visible unit tokens and local channels; remote channels, targeting/sent/quiet events,
-remaining focus/nameplate event coverage, and spell-interruption immunity still need integration. Cast events already include current focus and plate aliases. Interruption
+ordinary visible unit tokens, local channels and observed remote channels. Remote channel timing
+starts with an observed `SMSG_SPELL_START`; `UNIT_CHANNEL_SPELL` confirms the channel and stops it
+when the descriptor clears, changes spell or leaves view. A cast-time prelude waits for
+`SMSG_SPELL_GO` before becoming a channel. Start, success and stop retain the cast identifier
+across target, focus and nameplate aliases. Remote durations use the caster-level-scaled DBC;
+remote talent modifiers and pushback are unavailable, and a channel first encountered midway
+has no invented start time. Targeting/sent/quiet events, remaining focus/nameplate event coverage
+and spell-interruption immunity still need integration. Interruption
 immunity is returned as `nil` when unknown. Query availability alone does not establish full
 Nampower behavior.
 
@@ -331,7 +337,7 @@ into the game install.
 | --- | --- |
 | Units and focus | Broader focus/plate aura and descriptor event feeds, further query/verb token integration |
 | Auras | Ownership of pre-existing auras, crowd-control filters, Turtle overflow polarity and broader aura-change coverage; observed successful casts provide caster/duration information, while the 1.12 aura descriptors omit it |
-| Casting and spells | Remote channels, complete modern cast-event behavior and interruption classification; runtime spell queries inherit existing engine validator limits |
+| Casting and spells | Complete modern cast-event behavior and interruption classification; remote channel timing has no talent/pushback feed; runtime spell queries inherit existing engine validator limits |
 | Remaining Nampower behavior | Item queues, bulk disenchanting and the broader Nampower API remain outside this subset; original-DLL retry timing, non-GCD capacity, terrain cursor timing and manual-click event coverage need comparison; the auto-attack component count is unavailable from the stock decoder; non-GCD/on-swing ordering is covered by command-capture tests, with combat behavior still unverified |
 | Items and bags | Remaining instance helpers; broader multi-bag, bank and specialized-bag sorting verification |
 | Equipment sets | Broader character/action-slot conflict verification; failures and bind-confirm behavior |
