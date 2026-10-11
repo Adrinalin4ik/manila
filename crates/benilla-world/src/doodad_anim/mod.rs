@@ -316,6 +316,14 @@ fn park_all() -> bool {
     PARK_ALL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// On a placed model whose host moves: a prop of a transport, parented under its GameObject.
+/// [`DoodadAnimHost::fade`] is a world sphere fixed at spawn, so its frustum test answers for the
+/// place the ship was, and a sail parked on that verdict stops following the hull: its palette
+/// rows and origin are only rewritten while it animates. A carried host is judged by its parts'
+/// visibility alone.
+#[derive(Component)]
+pub struct CarriedHost;
+
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
 
 fn gate_doodad_anim(
@@ -328,6 +336,7 @@ fn gate_doodad_anim(
         Has<crate::rig_palette::RigSkin>,
         Option<&mut AnimationPlayer>,
         Option<&mut GlobalSeqDrive>,
+        Has<CarriedHost>,
     )>,
     vis: Query<&Visibility>,
     // Last frame's frustum verdict; see the meshed branch below and `cull_by_view`.
@@ -398,10 +407,17 @@ fn gate_doodad_anim(
             false,
         )
     };
-    for (entity, mut host, lazy, pose, has_rig, player, drive) in &mut hosts {
+    for (entity, mut host, lazy, pose, has_rig, player, drive, carried) in &mut hosts {
         // A host born this frame has no verdict to reuse (`active` starts false).
         let drawn = if park_all() {
             false
+        } else if carried {
+            // No spawn-time sphere and no reused verdict: the host is somewhere else every frame.
+            host.meshes.is_empty()
+                || host
+                    .meshes
+                    .iter()
+                    .any(|&e| vis.get(e).is_ok_and(|v| *v != Visibility::Hidden))
         } else if verdicts_still && !host.is_added() {
             host.active
         } else if host.meshes.is_empty() {

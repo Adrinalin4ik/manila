@@ -300,6 +300,12 @@ pub(super) fn spawn_wmo_gameobject_props(
                 None,
             );
             commands.entity(entity).add_children(&ents);
+            // Its animation host rides the GameObject, so its spawn-time draw sphere is void.
+            for &ent in &ents {
+                commands
+                    .entity(ent)
+                    .insert(benilla_world::doodad_anim::CarriedHost);
+            }
             // The slot's component hook returns it to the table whoever despawns the prop.
             if let (Some(slot), Some(&first)) = (interior_slot, ents.first()) {
                 commands.entity(first).insert(PropProbeSlot(slot));
