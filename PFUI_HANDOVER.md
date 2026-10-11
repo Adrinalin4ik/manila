@@ -762,4 +762,9 @@ across upstream merges.
 - **Options labels were cut short** (`f9d10fa7`): benilla's own options page relied on the old
   `GetWidth` answer. Any other in-tree Lua that sizes from `GetWidth`/`GetHeight` of an
   anchor-sized frame under a scale needs the same care; `OptionsFrame.xml` was the only user.
+- **pfUI borders were twice as thick on a 2880x1800 display.** pfUI derives one device pixel
+  from `gxResolution`, which the client keeps at its windowed default. The extension now
+  answers that CVar with the window's real pixels (`manila-pfui/src/display.rs`, fed from
+  `benilla-app/src/pfui.rs` when a VM is enabled and on resize). The owner's UI scale itself
+  already matched the original client (0.83).
 

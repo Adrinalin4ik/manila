@@ -1,4 +1,5 @@
 -- ClassicAPI globals pfUI calls directly. Each reads the engine's own state or stock queries.
+local bridge = ...
 
 -- pfUI's load gate requires ClassicAPI 1.15.10 (X*10000 + Y*100 + Z) and otherwise raises a
 -- dialog at every login that says pfUI is disabled and takes the keyboard focus. This is the
@@ -134,9 +135,19 @@ function EquipmentManager_GetLocationData(location)
   return { isPlayer = player, isBank = bank, isBags = bags, slot = slot, bag = bag }
 end
 
+-- `gxResolution` as the reference means it, the size the game draws at: the host stores only the
+-- windowed size there, and pfUI computes one device pixel from this string.
+local stockGetCVar = GetCVar
+function GetCVar(name)
+  if type(name) == 'string' and string.lower(name) == 'gxresolution' then
+    local pixels = bridge.windowPixels()
+    if pixels then return pixels end
+  end
+  return stockGetCVar(name)
+end
+
 -- Run before each addon loads: the stock colour tables exist by then, and FrameXML assigns them
 -- as plain tables after this extension installs.
-local bridge = ...
 function bridge.beforeAddon()
   for name, value in pairs(_G) do
     if type(name) == 'string' and type(value) == 'table' and name:find('_FONT_COLOR$') and

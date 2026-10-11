@@ -10,6 +10,7 @@ pub mod bags;
 pub mod bubbles;
 pub mod clock;
 pub mod creature;
+pub mod display;
 mod encoding;
 pub mod icons;
 pub mod loot;
@@ -180,6 +181,7 @@ pub fn install(script: &UiScript) -> mlua::Result<()> {
         .set_name("@manila-pfui/utilities.lua")
         .exec()?;
     let globals = lua.create_table()?;
+    display::install(lua, &globals)?;
     lua.load(include_str!("globals.lua"))
         .set_name("@manila-pfui/globals.lua")
         .call::<()>(globals.clone())?;

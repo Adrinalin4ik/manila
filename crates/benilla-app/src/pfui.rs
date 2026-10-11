@@ -85,6 +85,27 @@ pub(crate) fn enable_vm(world: &World, script: &UiScript) {
         {
             script.report_script_error(&format!("pfUI VM activation: {error}"));
         }
+        // Before any addon loads: pfUI reads `gxResolution` once, as it loads.
+        if let Some(pixels) = world.get_resource::<WindowPixels>() {
+            let _ = manila_pfui::display::set_window_pixels(script.lua(), pixels.0, pixels.1);
+        }
+    }
+}
+
+/// The primary window's size in device pixels, tracked every frame so a VM built at any moment
+/// starts with it.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
+struct WindowPixels(u32, u32);
+
+fn track_window_pixels(
+    window: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut pixels: ResMut<WindowPixels>,
+) {
+    if let Ok(window) = window.single() {
+        let now = WindowPixels(window.physical_width(), window.physical_height());
+        if *pixels != now {
+            *pixels = now;
+        }
     }
 }
 
@@ -152,6 +173,8 @@ impl Plugin for PfuiPlugin {
         crate::ui_aura::pfui::register(app);
         crate::target::pfui::register(app);
         app.add_systems(Update, feed_clock.in_set(InputSnapshots));
+        app.init_resource::<WindowPixels>();
+        app.add_systems(Update, (track_window_pixels, feed_window_pixels).chain());
         app.add_systems(
             Update,
             inventory_events
@@ -167,6 +190,20 @@ fn inventory_events(script: Option<NonSend<UiScript>>) {
     if let Some(script) = script {
         benilla_ui::script::pfui_host::units::announce_restored_focus(script.lua());
         benilla_ui::script::pfui_host::items::dispatch_inventory_events(script.lua());
+    }
+}
+
+/// A resize reaches the running VM too.
+fn feed_window_pixels(script: Option<NonSend<UiScript>>, pixels: Res<WindowPixels>) {
+    if !pixels.is_changed() {
+        return;
+    }
+    if let Some(script) = script {
+        if let Err(error) =
+            manila_pfui::display::set_window_pixels(script.lua(), pixels.0, pixels.1)
+        {
+            script.report_script_error(&format!("pfUI window size: {error}"));
+        }
     }
 }
 

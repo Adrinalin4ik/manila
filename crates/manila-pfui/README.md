@@ -350,6 +350,11 @@ While a unit model pane is drawn, its unit's portrait bake loops Stand and rende
 other frame, so a stock round portrait of the same unit moves with it. A pane bound to a raid
 member, a focus or any unit without a round-portrait bake draws nothing.
 
+`GetCVar("gxResolution")` answers the window's size in device pixels. The client keeps that CVar
+for the windowed size only and draws fullscreen at the monitor's own, while pfUI computes the
+size of one device pixel from the string; with the stored default its borders came out twice
+as thick on a high-resolution display.
+
 The client's game menu has two rungs of its own, Edit Mode and Support. When pfUI's game-menu
 skin has run they take the same button skin, so the menu reads as one.
 The client also shrinks its own menu to 0.78 at every show; a skinned menu is put back to

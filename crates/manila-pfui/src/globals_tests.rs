@@ -581,3 +581,30 @@ fn coin_strings_show_the_non_zero_denominations_with_money_sheet_crops() {
     assert_eq!(coins.2, format!("5|T{sheet}:24:24:2:0:64:16:16:32:0:16|t"));
     assert_eq!(coins.3, coins.1);
 }
+
+/// `gxResolution` answers the window's real pixels once the host has fed them, and the stock
+/// string before; every other CVar is untouched.
+#[test]
+fn the_resolution_query_answers_the_windows_real_pixels() {
+    let script = extended();
+    let stock: Option<String> = script.eval(r#"return GetCVar("gxResolution")"#).unwrap();
+    crate::display::set_window_pixels(script.lua(), 2880, 1800).unwrap();
+    let (fed, cased, other): (String, String, Option<String>) = script
+        .eval(r#"return GetCVar("gxResolution"), GetCVar("GXRESOLUTION"), GetCVar("uiScale")"#)
+        .unwrap();
+    assert_eq!(fed, "2880x1800");
+    assert_eq!(cased, "2880x1800");
+    assert_eq!(
+        other,
+        script
+            .eval::<Option<String>>(r#"return GetCVar("uiScale")"#)
+            .unwrap()
+    );
+    crate::display::set_window_pixels(script.lua(), 0, 0).unwrap();
+    assert_eq!(
+        script
+            .eval::<Option<String>>(r#"return GetCVar("gxResolution")"#)
+            .unwrap(),
+        stock
+    );
+}
