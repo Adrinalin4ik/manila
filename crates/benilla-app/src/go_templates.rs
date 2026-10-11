@@ -79,6 +79,10 @@ pub(crate) struct TextPage {
 #[derive(Resource, Default)]
 pub(crate) struct GameObjectTemplates {
     templates: QueryCache<u32, GoTemplate>,
+    /// A boat's or zeppelin's entry as its create block names it (`OBJECT_FIELD_ENTRY`). vmangos
+    /// passes the entry as the guid's counter (`Transport.cpp:65`); the Turtle core counts its
+    /// transports from 1 there instead, so the field is the one that is right on both.
+    transport_entries: std::sync::Mutex<std::collections::HashMap<u64, u32>>,
 }
 
 impl crate::query_cache::AskOnce for GameObjectTemplates {
@@ -88,9 +92,29 @@ impl crate::query_cache::AskOnce for GameObjectTemplates {
 }
 
 impl GameObjectTemplates {
+    /// Record the entry a boat's or zeppelin's create block carries, before its template is asked.
+    pub(crate) fn note_transport_entry(&self, guid: u64, entry: u32) {
+        if guid::high(guid) == guid::HIGH_MO_TRANSPORT && entry != 0 {
+            self.transport_entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(guid, entry);
+        }
+    }
+
+    /// The template entry of `guid`: the one its create block named, else the guid's own.
+    fn entry_of(&self, guid: u64) -> Option<u32> {
+        self.transport_entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&guid)
+            .copied()
+            .or_else(|| guid::entry(guid))
+    }
+
     /// Asks for a template once per entry; every spawn of a template shares the one query.
     pub(crate) fn request(&self, guid: u64, commands: &NetCommands) {
-        let Some(entry) = guid::entry(guid) else {
+        let Some(entry) = self.entry_of(guid) else {
             return;
         };
         self.templates.get_or_ask(entry, || {
@@ -152,7 +176,7 @@ impl GameObjectTemplates {
 
     /// The cached template for a GameObject guid.
     pub(crate) fn get(&self, guid: u64) -> Option<&GoTemplate> {
-        guid::entry(guid).and_then(|e| self.templates.get(e))
+        self.entry_of(guid).and_then(|e| self.templates.get(e))
     }
 }
 
@@ -203,6 +227,35 @@ mod tests {
             "a GOOBER (type 10) reads data[9]"
         );
         assert_eq!(t.templates.get(103).unwrap().quest_material, None);
+    }
+
+    /// A core that counts its transports from 1 in the guid still names the entry in the create
+    /// block, and that is the template a boat is looked up by.
+    #[test]
+    fn a_boats_template_follows_the_entry_its_create_block_names() {
+        let mut t = GameObjectTemplates::default();
+        let mut data = [0i32; 24];
+        data[0] = 117;
+        data[1] = 30;
+        data[2] = 1;
+        t.insert(176244, 15, "Moonspray".into(), &data);
+        t.insert(2, 5, "Some chair".into(), &[0i32; 24]);
+        let boat = guid::HIGH_MO_TRANSPORT as u64 * (1 << 48) + 2;
+        assert!(
+            t.get(boat).is_some_and(|g| g.mo_transport.is_none()),
+            "by the guid's counter it is entry 2"
+        );
+        t.note_transport_entry(boat, 176244);
+        assert_eq!(
+            t.get(boat)
+                .and_then(|g| g.mo_transport)
+                .map(|m| m.taxi_path_id),
+            Some(117)
+        );
+        // Only a boat's guid takes the field over its own entry.
+        let chair = guid::HIGH_GAMEOBJECT as u64 * (1 << 48) + (2u64 << 24) + 7;
+        t.note_transport_entry(chair, 176244);
+        assert!(t.get(chair).is_some_and(|g| g.mo_transport.is_none()));
     }
 
     #[test]
