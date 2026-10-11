@@ -138,6 +138,11 @@ pub(crate) struct NamePlates {
 }
 
 impl NamePlates {
+    /// Whether `frame` is a plate, whose leave publishes the empty mouseover (`0x7cb8b0`).
+    pub(crate) fn is_plate(&self, frame: FrameHandle) -> bool {
+        self.by_frame.contains_key(&frame)
+    }
+
     /// Whether the `0x7cba30` veto refuses `frame`: only a plate, only while the veto stands.
     pub(crate) fn vetoes(&self, frame: FrameHandle) -> bool {
         self.hit_test_vetoed && self.by_frame.contains_key(&frame)
@@ -272,13 +277,17 @@ impl UiScript {
     }
 
     /// The freelook toggle (`0x60f830`): entering camera freelook disables mouse input on every
-    /// plate and leaving re-enables it (called from `0x483e80` and `0x483e70`).
+    /// plate and leaving re-enables it (called from `0x483e80` and `0x483e70`). The disable is
+    /// `EnableMouse(false)`'s (`0x76af50(2)`), whose removal tail (`0x764ba0`, flag 0, `0x76af7f`)
+    /// ends a hovered plate's hover through its leave (`0x7cb8b0`).
     pub fn set_nameplate_mouse(&mut self, enabled: bool) {
         let lua = self.lua();
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        let frames: Vec<FrameHandle> = model.nameplates.plates.iter().map(|p| p.frame).collect();
+        let frames: Vec<FrameHandle> = {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            model.nameplates.plates.iter().map(|p| p.frame).collect()
+        };
         for frame in frames {
-            model.arena.set_mouse_enabled(frame, enabled);
+            super::visibility::set_mouse_enabled(lua, frame, enabled);
         }
     }
 
