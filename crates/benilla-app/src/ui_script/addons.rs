@@ -237,37 +237,16 @@ fn is_lua(entry: &str) -> bool {
         .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("lua"))
 }
 
-/// `root/rel`, refusing to escape `root`. `rel` is already resolved by
-/// [`benilla_ui::loader::join_ref`], so an escape shows as a leading `..`, refused with anything
-/// absolute before any filesystem call; a symlinked addon folder still works.
-fn read_under(root: &Path, rel: &str) -> Option<Vec<u8>> {
-    let rel = Path::new(rel);
-    if rel
-        .components()
-        .any(|c| !matches!(c, std::path::Component::Normal(_)))
-    {
-        return None;
-    }
-    std::fs::read(root.join(rel)).ok()
-}
-
 /// The one file namespace, install-relative, as in the reference: `0x647e60` answers a name from
 /// the install tree's hash index, then the archive chain, after `0x6ede10` collapses `..`. So an
 /// addon's `..\Blizzard_AuctionUI\…` reaches the archive behind a `.pub`-only folder. Only a path
-/// under `Interface/AddOns/` touches the filesystem, and never above the AddOns root.
+/// under `Interface/AddOns/` touches the filesystem, never above the AddOns root, and each of its
+/// components matches case-insensitively, as on the reference's Windows filesystem: the resolver
+/// addon art and sound use ([`benilla_assets::loose_addon_file`]).
 pub(crate) fn read_addon_file(root: &Path, req: &str) -> Option<Vec<u8>> {
-    under_addons(req)
-        .and_then(|rel| read_under(root, rel))
+    benilla_assets::loose_addon_file(root, &benilla_assets::normalize_path(req))
+        .and_then(|file| std::fs::read(file).ok())
         .or_else(|| super::reference_ui::read(&req.replace('/', "\\")))
-}
-
-/// `req` with the `Interface/AddOns/` prefix stripped, or `None` without it; matched
-/// case-insensitively, as the reference is a Windows client (`Interface\Addons\` is the same path).
-fn under_addons(req: &str) -> Option<&str> {
-    let rest = req.get(ADDONS_PREFIX.len()..)?;
-    req.get(..ADDONS_PREFIX.len())
-        .filter(|p| p.eq_ignore_ascii_case(ADDONS_PREFIX))
-        .map(|_| rest)
 }
 
 /// A `Dir` addon's base before its folder name ([`Addon::prefix`]), `/`-separated as `join_ref` is.
@@ -1241,6 +1220,44 @@ mod tests {
         // chain lookup that misses.
         assert_eq!(join_ref("", "/etc/hosts"), "etc/hosts");
         assert!(addon.read(&join_ref("", "/etc/hosts")).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A manifest entry names its file in whatever case its author typed on Windows: Questie's
+    /// `.toc` lists `Astrolabe\Astrolabe.lua` from a folder shipped as `astrolabe`. Every
+    /// component matches case-insensitively, the folder and the file alike, on any filesystem.
+    #[test]
+    fn an_addon_file_is_found_whatever_the_case_of_its_path() {
+        let tmp =
+            std::env::temp_dir().join(format!("benilla-addon-case-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("AddOns");
+        std::fs::create_dir_all(root.join("!Probe/astrolabe")).unwrap();
+        std::fs::write(
+            root.join("!Probe/astrolabe/astrolabe.lua"),
+            "Astrolabe = {}",
+        )
+        .unwrap();
+        let addon = Addon {
+            name: "!Probe".into(),
+            toc: Toc::default(),
+            source: Source::Dir(root),
+        };
+
+        for req in [
+            "Interface/AddOns/!Probe/Astrolabe/Astrolabe.lua",
+            "Interface/AddOns/!PROBE/ASTROLABE/ASTROLABE.LUA",
+            "interface/addons/!probe/astrolabe/astrolabe.lua",
+        ] {
+            assert_eq!(
+                addon.read(req).as_deref(),
+                Some(&b"Astrolabe = {}"[..]),
+                "{req} names the file on disk as the reference's filesystem would"
+            );
+        }
+        assert!(addon
+            .read("Interface/AddOns/!Probe/astrolabe/missing.lua")
+            .is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
