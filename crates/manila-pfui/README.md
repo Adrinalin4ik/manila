@@ -354,6 +354,8 @@ The client's game menu has two rungs of its own, Edit Mode and Support. When pfU
 skin has run they take the same button skin, so the menu reads as one.
 The client also shrinks its own menu to 0.78 at every show; a skinned menu is put back to
 UIParent's scale, where pfUI's one-pixel borders land on whole pixels.
+Its rungs are stacked flush, where the stock menu leaves one unit between two; the extension
+puts that unit back, or a highlighted rung's border is covered by its neighbour's backdrop.
 
 The state events compare the stock snapshots after their feeds, with a baseline per VM and
 character: a login, a reload and a relisted reputation table announce nothing.

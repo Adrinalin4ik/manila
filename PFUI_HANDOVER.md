@@ -726,4 +726,10 @@ across upstream merges.
 - The owner asked that a bug found in pfUI itself be fixed in a local clone of pfUI with a
   commit on top, for a pull request there. None found so far: the two reports above were
   client bugs.
+- **`GameTooltip:SetOwner` did not hide the tooltip (engine fix, own commit).** The binding
+  (`0x531183`) calls the hide slot before the core, so re-owning a shown tooltip makes the next
+  show a fresh one. Without it a child's `OnShow` never re-fired, which is where pfUI positions
+  the tooltip: moving from one mob to the next left it in the stock corner.
+- **Game menu under pfUI.** The extension keeps the skinned menu at UIParent's scale and puts
+  back the stock one-unit gap between rungs.
 

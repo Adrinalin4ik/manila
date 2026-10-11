@@ -182,6 +182,20 @@ menu:SetScript('OnEvent', function()
   for _, name in ipairs({ 'BenillaGameMenuButtonEditMode', 'BenillaGameMenuButtonSupport' }) do
     if _G[name] then pfUI.api.SkinButton(_G[name]) end
   end
+  -- The client stacks its rungs flush, where the stock menu leaves one unit between two. pfUI's
+  -- backdrops reach one unit past each button, so flush neighbours cover each other's border
+  -- and a highlighted rung loses an edge. Put the stock gap back.
+  local opened = 0
+  for _, rung in ipairs({ GameMenuFrame:GetChildren() }) do
+    if rung:IsShown() and rung:GetObjectType() == 'Button' and rung:GetNumPoints() == 1 then
+      local point, to, toPoint, x, y = rung:GetPoint(1)
+      if point == 'TOP' and toPoint == 'BOTTOM' and y == 0 and to and to ~= GameMenuFrame then
+        rung:SetPoint(point, to, toPoint, x, -1)
+        opened = opened + 1
+      end
+    end
+  end
+  GameMenuFrame:SetHeight(GameMenuFrame:GetHeight() + opened)
   -- The client shrinks its own menu at every show. A skinned menu belongs to pfUI's layout,
   -- which draws at UIParent's scale as on the original client, where its one-pixel borders
   -- land on whole pixels.
