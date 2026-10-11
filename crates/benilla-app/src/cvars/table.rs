@@ -1151,9 +1151,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "manila's own: 1 loads the lettered patch archives (patch-A.mpq to patch-Z.mpq), 0 leaves \
          them out so the install looks as the server ships it; applies at the next start",
     ),
-    // The restart `hdPatches` needs, one write away: `SetCVar("restartClient", "1")` quits and
-    // starts the client again ([`crate::hd_patches`]). A CVar and not a Lua function, as the
-    // engine adds no global past 1.12. Session-only, or a saved 1 would restart for ever.
+    // The restart `hdPatches` needs, one write away: `/console restartClient 1` quits and starts
+    // the client again ([`crate::hd_patches`]). A CVar and not a Lua function, as the engine
+    // adds no global past 1.12. Session-only, or a saved 1 would restart for ever.
     ours(
         "restartClient",
         "0",

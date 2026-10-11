@@ -754,7 +754,7 @@ across upstream merges.
   first chain opens (`benilla-app/src/hd_patches.rs`, `benilla-formats` `set_letter_patches`),
   so it applies at the next start: a live switch would need every cache keyed on chain content
   rebuilt, and the owner agreed that is not worth it. The session-only `restartClient` CVar
-  quits and starts the client again. Surfaces: a checkbox on the Graphics options page and the
-  `addons/ManilaHDSwitch` addon (minimap button, `/hd`), which has to be copied into
-  `benilla-config/AddOns`. `$WOW_HD_PATCHES` overrides the saved value for a session.
+  quits and starts the client again (`/console restartClient 1`). The one surface is a checkbox
+  on the Graphics options page; a minimap-button addon was written and removed again at the
+  owner's request. `$WOW_HD_PATCHES` overrides the saved value for a session.
 
