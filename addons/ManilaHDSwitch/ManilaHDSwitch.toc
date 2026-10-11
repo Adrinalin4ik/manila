@@ -1,0 +1,5 @@
+## Interface: 11200
+## Title: Manila HD Switch
+## Notes: A minimap button and the /hd command for the HD Patches graphics setting.
+## Author: manila
+ManilaHDSwitch.lua

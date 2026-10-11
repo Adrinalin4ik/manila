@@ -195,6 +195,35 @@ impl ReadCache {
     }
 }
 
+/// Whether the lettered patch archives (`patch-A.mpq` to `patch-Z.mpq`) mount. The reference and
+/// a server's own client number their patches; a letter is the convention player-installed art
+/// packs use to sort above them, so this one switch takes an install back to the server's own
+/// look. Process-wide and read by every [`Chain::open`], so set it before the first one.
+#[cfg(not(target_arch = "wasm32"))]
+static LETTER_PATCHES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Mount (`true`, the default) or skip the lettered patch archives in every later [`Chain::open`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_letter_patches(mount: bool) {
+    LETTER_PATCHES.store(mount, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the lettered patch archives mount ([`set_letter_patches`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn letter_patches() -> bool {
+    LETTER_PATCHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A `patch-?.MPQ` name whose one character is a letter.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_letter_patch(name: &str) -> bool {
+    is_patch_glob_match(name)
+        && name
+            .as_bytes()
+            .get("patch-".len())
+            .is_some_and(u8::is_ascii_alphabetic)
+}
+
 /// `patch-?.MPQ` with the reference's FindFirstFileW semantics: `?` matches **exactly one**
 /// character, case-insensitively — `patch-3.MPQ` mounts, `patch-10.MPQ` does not (VERIFIED at the
 /// glob template `0x82edbc` and its wrapper `0x42ad10`; wow-re `patch-mount-order.md`).
@@ -231,6 +260,7 @@ fn mount_order(dir_names: &[String]) -> Vec<String> {
     let mut patches: Vec<String> = dir_names
         .iter()
         .filter(|n| is_patch_glob_match(n))
+        .filter(|n| letter_patches() || !is_letter_patch(n))
         .cloned()
         .collect();
     patches.sort_by_key(|n| n.to_ascii_lowercase());
@@ -563,6 +593,26 @@ mod tests {
         assert!(!is_patch_glob_match("patch.MPQ"));
         assert!(!is_patch_glob_match("patch-2.MPQ.bak"));
         assert!(!is_patch_glob_match("mypatch-2.MPQ"));
+    }
+
+    /// With the lettered archives switched off, the numbered patches still mount in their order.
+    /// One test owns the process-wide switch, and puts it back.
+    #[test]
+    fn the_letter_switch_drops_only_the_lettered_patches() {
+        assert!(is_letter_patch("patch-A.mpq"));
+        assert!(is_letter_patch("PATCH-z.MPQ"));
+        assert!(!is_letter_patch("patch-3.mpq"));
+        assert!(!is_letter_patch("patch.MPQ"));
+        assert!(!is_letter_patch("patch-AB.mpq"));
+        let dir = owned(&["patch-A.mpq", "patch-2.MPQ", "dbc.MPQ", "patch-Z.mpq", "patch.MPQ"]);
+        set_letter_patches(false);
+        let without = mount_order(&dir);
+        set_letter_patches(true);
+        assert_eq!(without, owned(&["dbc.MPQ", "patch.MPQ", "patch-2.MPQ"]));
+        assert_eq!(
+            mount_order(&dir),
+            owned(&["dbc.MPQ", "patch.MPQ", "patch-2.MPQ", "patch-A.mpq", "patch-Z.mpq"])
+        );
     }
 
     #[test]

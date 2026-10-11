@@ -415,6 +415,13 @@
             .. "Below 100% trades sharpness for frame rate; above 100% is supersampling, which "
             .. "smooths edges at the cost of frame rate. Applies when you click Apply."
 
+        -- manila's own row: the lettered patch archives, where art packs install.
+        BENILLA_TOOLTIP_HD_PATCHES =
+            "Loads the lettered patch files in the Data folder (patch-A.mpq to patch-Z.mpq), "
+            .. "where HD texture and model packs are installed.\n\n"
+            .. "Turn it off to see the game as the server ships it. "
+            .. "Applies the next time the game starts."
+
         -- 1.12 has no such checkbox.
         BENILLA_TOOLTIP_BACKGROUND_SOUND =
             "Keeps the game's sound playing while you are working in another window.\n\n"
@@ -1062,6 +1069,7 @@
                 "RowWeatherDensity", "RowEffectsQuality", "RowEffectsDistance",
                 "RowPlayerDistance",
                 "RowDisplayMode", "RowVerticalSync", "RowRenderScale",
+                "RowHdPatches",
             },
             -- MONKEY (advanced graphics): the dynamic light + shadow system's own page. Order is
             -- the preset first (it writes the rest), then the SUN lanes, then the ROOM lane and
@@ -2984,6 +2992,18 @@
                                                     "BENILLA_TOOLTIP_RENDER_SCALE")
                                                 BenillaOptionsSliderRow_Setup(this, 0.5, 2.0, 0.05)
                                                 this.deferred = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- manila's own row: read once at start, so not deferred
+                                             to Apply; the description says when it takes hold. -->
+                                        <Frame name="$parentRowHdPatches" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "hdPatches", "HD Patches",
+                                                    "BENILLA_TOOLTIP_HD_PATCHES")
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>

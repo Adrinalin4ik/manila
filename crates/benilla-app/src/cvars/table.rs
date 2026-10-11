@@ -135,6 +135,7 @@ pub(crate) const SESSION_ONLY: &[&str] = &[
     "matKeyOrder",
     "dumpSchedule",
     "archCensus",
+    "restartClient",
 ];
 
 /// The table as the script VM's registrar wants it: `(name, default)` pairs in table order.
@@ -1140,6 +1141,23 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1",
         "benilla's own — the reference has no off-screen buffer to hang a resolution dial \
          on; its nearest equivalent, `gxResolution`, drops the interface with the world",
+    ),
+    // Whether the lettered patch archives (`patch-A.mpq`..`patch-Z.mpq`, where art packs install)
+    // mount. Read once, before the first archive opens ([`crate::hd_patches`]), so a write takes
+    // effect at the next start. `$WOW_HD_PATCHES` overrides it for the session.
+    ours(
+        "hdPatches",
+        "1",
+        "manila's own: 1 loads the lettered patch archives (patch-A.mpq to patch-Z.mpq), 0 leaves \
+         them out so the install looks as the server ships it; applies at the next start",
+    ),
+    // The restart `hdPatches` needs, one write away: `SetCVar("restartClient", "1")` quits and
+    // starts the client again ([`crate::hd_patches`]). A CVar and not a Lua function, as the
+    // engine adds no global past 1.12. Session-only, or a saved 1 would restart for ever.
+    ours(
+        "restartClient",
+        "0",
+        "manila's own: writing 1 quits the client and starts it again with the same arguments",
     ),
     // benilla's own: `/console fpsJournal 1` appends a per-second row of position, frame cost and
     // per-pass GPU time to `benilla-config/Diagnostics/fps-journal.csv`. The knob is

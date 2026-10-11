@@ -2956,6 +2956,9 @@ mod tests {
         |app| {
             app.add_observer(crate::video::on_cvar);
         },
+        |app| {
+            app.add_observer(crate::hd_patches::on_cvar);
+        },
         // MONKEY (p0 graphics programme)
         |app| {
             app.init_resource::<benilla_world::ffx_glow::SkyDither>();

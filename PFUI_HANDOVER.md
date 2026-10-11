@@ -749,4 +749,12 @@ across upstream merges.
   app tests not compiling (fixed, own commit) and two of their own tests failing (not fixed),
   so the no-install baseline is now ten failures. `PFUI_UPSTREAM_FIXES.md` lists every client
   fix on this branch for the maintainers, split into benilla and manila.
+- **HD patches switch (not pfUI, added on request 2026-10-11).** The `hdPatches` CVar decides
+  whether the lettered archives (`patch-A.mpq`..`patch-Z.mpq`) mount. It is read before the
+  first chain opens (`benilla-app/src/hd_patches.rs`, `benilla-formats` `set_letter_patches`),
+  so it applies at the next start: a live switch would need every cache keyed on chain content
+  rebuilt, and the owner agreed that is not worth it. The session-only `restartClient` CVar
+  quits and starts the client again. Surfaces: a checkbox on the Graphics options page and the
+  `addons/ManilaHDSwitch` addon (minimap button, `/hd`), which has to be copied into
+  `benilla-config/AddOns`. `$WOW_HD_PATCHES` overrides the saved value for a session.
 

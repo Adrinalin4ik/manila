@@ -12,6 +12,8 @@ use benilla_dbc::{DbcParser, FieldType, Schema, SchemaField};
 pub use benilla_blp::BlpTexels;
 
 mod chain;
+#[cfg(not(target_arch = "wasm32"))]
+pub use chain::{letter_patches, set_letter_patches};
 pub use chain::{Chain, ChainEntry, take_read_counts};
 /// Loose `.tga` art, as addon folders ship it.
 mod tga;
