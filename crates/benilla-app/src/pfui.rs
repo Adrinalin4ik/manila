@@ -174,7 +174,13 @@ impl Plugin for PfuiPlugin {
         crate::target::pfui::register(app);
         app.add_systems(Update, feed_clock.in_set(InputSnapshots));
         app.init_resource::<WindowPixels>();
-        app.add_systems(Update, (track_window_pixels, feed_window_pixels).chain());
+        app.add_systems(Update, track_window_pixels);
+        app.add_systems(
+            Update,
+            feed_window_pixels
+                .in_set(InputSnapshots)
+                .after(track_window_pixels),
+        );
         app.add_systems(
             Update,
             inventory_events
