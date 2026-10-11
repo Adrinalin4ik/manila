@@ -270,8 +270,13 @@
         function BenillaOptionsScroll_Fit()
             local sf = BenillaOptionsFrameContainerScroll
             local body = BenillaOptionsFrameContainerBody
-            local fw, fh = sf:GetWidth(), sf:GetHeight()
-            if not fw or fw <= 0 or not fh or fh <= 0 then return end
+            -- The scroll frame is sized by its anchors, and `GetWidth` answers such a span with
+            -- the effective scale still in it (`0x7a1e00`). The edges are in the frame's own
+            -- units, which is what `SetWidth` takes.
+            local left, right, top_, bottom_ = sf:GetLeft(), sf:GetRight(), sf:GetTop(), sf:GetBottom()
+            if not left or not right or not top_ or not bottom_ then return end
+            local fw, fh = right - left, top_ - bottom_
+            if fw <= 0 or fh <= 0 then return end
             if math.abs(body:GetWidth() - fw) >= 0.5 then body:SetWidth(fw) end
             local h = fh
             local top, bottom = body:GetTop(), BenillaOptionsScroll_ContentBottom()
