@@ -162,6 +162,9 @@ pub(crate) struct Model {
     /// Named `<Font>` objects by lowercased name, as 1.12 matches them with `SStrCmpI` (`0x783870`,
     /// `0x7838c7`); read them only through `font_object`, where the fold lives.
     pub(crate) font_objects_by_lower: HashMap<String, FontObject>,
+    /// A declared font's `inherits=` parent and what it sets itself, by lowercased name: the
+    /// live link a parent's setter walks ([`super::font::cascade`]).
+    pub(crate) font_links: HashMap<String, super::font::FontLink>,
     /// Anchored regions' owner-relative rects from the last resolve; anchor-less ones are absent.
     pub(crate) region_resolved: HashMap<RegionHandle, Rect>,
 
@@ -1115,6 +1118,7 @@ impl Model {
             backdrops: HashMap::new(),
             simple_html: simplehtml::SimpleHtmlStates::new(),
             font_objects_by_lower: HashMap::new(),
+            font_links: HashMap::new(),
             region_resolved: HashMap::new(),
             next_id: 1,
             id_to_frame: IdMap::default(),
