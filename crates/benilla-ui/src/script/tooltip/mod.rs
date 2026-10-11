@@ -17,7 +17,7 @@ use super::object::{frame_handle_of, publish_global};
 use super::region::region_wrapper;
 use super::visibility;
 use super::{FontObject, Model, RegionData};
-use crate::layout::{Anchor, Point};
+use crate::layout::{Anchor, Anchors, Point};
 use crate::order::DrawLayer;
 use crate::widget::{
     FrameHandle, KindState, RegionKind, TooltipAnchor, TooltipState, TOOLTIP_DOUBLE_GAP,
@@ -168,7 +168,7 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                 d.hidden = true;
                 // Left-justified as in the template; it shows once a wrap line pins its width.
                 d.justify.set_h(super::JustifyH::Left);
-                d.anchors = vec![match prev_left {
+                d.anchors = Anchors::from([match prev_left {
                     None => Anchor::new(
                         Point::TopLeft,
                         frame_id,
@@ -186,7 +186,7 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                             -TOOLTIP_LINE_GAP,
                         )
                     }
-                }];
+                }]);
                 model.region_data.insert(left, d);
                 model.touch_measure(left); // an adopted cell can arrive text-in-hand
                 model.touch_layout_region(left); // a line row entered the layout graph
@@ -214,7 +214,10 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                 };
                 d.hidden = true;
                 d.justify.set_h(super::JustifyH::Right);
-                d.anchors = vec![Anchor::new(Point::Right, left_id, Point::Right, 0.0, 0.0)];
+                // RIGHT on the left cell's LEFT, the point the layout re-sets with the plate
+                // width as x (`0x53094f`), as the template's `$parentTextRight1` declares it.
+                d.anchors =
+                    Anchors::from([Anchor::new(Point::Right, left_id, Point::Left, 0.0, 0.0)]);
                 model.region_data.insert(right, d);
                 model.touch_measure(right); // an adopted cell can arrive text-in-hand
                 model.touch_layout_region(right); // a line row entered the layout graph
@@ -452,26 +455,21 @@ fn apply_anchor(
         TooltipAnchor::Cursor | TooltipAnchor::None | TooltipAnchor::Preserve => None,
     };
     if matches!(anchor, TooltipAnchor::Cursor | TooltipAnchor::None) {
-        let dropped = match model.layout_inputs.get_mut(&h) {
-            Some(input) if !input.anchors.is_empty() => {
-                input.anchors.clear();
-                true
-            }
-            _ => false,
-        };
+        let dropped = model
+            .layout_inputs
+            .get_mut(&h)
+            .is_some_and(|input| input.anchors.clear());
         if dropped {
             model.touch_layout_frame(h);
         }
     }
     if let Some((own, rel)) = pts {
         let owner_id = model.frame_id(owner);
-        let new = Anchor::new(own, owner_id, rel, x, y);
+        let new = Anchors::from([Anchor::new(own, owner_id, rel, x, y)]);
         let input = model.layout_inputs.entry(h).or_default();
         // No-op when unchanged, so the bag hover's per-frame SetOwner does not dirty the layout.
-        let same = input.anchors.len() == 1
-            && crate::script::object::anchor_bits_eq(&input.anchors[0], &new);
-        if !same {
-            input.anchors = vec![new];
+        if !input.anchors.bits_eq(&new) {
+            input.anchors = new;
             model.touch_layout_frame(h);
         }
     }
@@ -710,15 +708,12 @@ fn cursor_anchor(model: &mut Model, h: FrameHandle) {
         cx / scale,
         cy / scale,
     );
+    let units = model.layout_units();
     let input = model.layout_inputs.entry(h).or_default();
-    // `0x767c70`'s change detect: the one slot is replaced only on a real change.
-    let same =
-        input.anchors.len() == 1 && crate::script::object::anchor_bits_eq(&input.anchors[0], &new);
-    if same {
-        return;
+    // `0x767c70`'s change detect: the BOTTOM slot is replaced only on a real change.
+    if input.anchors.set(new, units) {
+        model.touch_layout_frame(h);
     }
-    input.anchors = vec![new];
-    model.touch_layout_frame(h);
 }
 
 pub(super) fn layout_tooltips(model: &mut Model) {
@@ -787,20 +782,22 @@ pub(super) fn layout_tooltips(model: &mut Model) {
         // Inside the resolve, so a note and not a touch; the incremental pass still has to hear
         // that these inputs changed.
         model.note_layout_frame_write(h);
-        // Right-flush each double line: left.right + (maxw - left.width) is the text inset.
-        for (i, (l, r)) in rows.iter().enumerate() {
+        // Right-flush each shown right cell: one `SetPoint(RIGHT, leftCell, LEFT, width, 0)`
+        // (`0x530910`..`0x53094f`), which leaves any other point the cell holds alone.
+        let units = model.layout_units();
+        for (i, (_, r)) in rows.iter().enumerate() {
             if r.is_none() {
                 continue;
             }
-            let lw = l.map_or(0.0, |(w, _)| w);
-            let mut wrote = false;
-            if let Some(d) = model.region_data.get_mut(&rights[i]) {
-                if let Some(a) = d.anchors.first_mut() {
-                    a.x_off = maxw - lw;
-                    wrote = true;
-                }
-            }
-            if wrote {
+            let Some(&left_id) = model.region_to_id.get(&lefts[i]) else {
+                continue;
+            };
+            let new = Anchor::new(Point::Right, left_id, Point::Left, maxw, 0.0);
+            let stored = model
+                .region_data
+                .get_mut(&rights[i])
+                .is_some_and(|d| d.anchors.set(new, units));
+            if stored {
                 model.note_layout_region_write(rights[i]);
             }
         }

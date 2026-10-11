@@ -41,6 +41,14 @@ impl Model {
         crate::layout::SIZE_EPS * f64::from(self.layout_unit())
     }
 
+    /// The aspect globals `SetPoint`'s unchanged-anchor test quantizes offsets by
+    /// ([`crate::layout::Anchors::set`]), for the screen aspect [`Self::layout_unit`] reads.
+    pub(crate) fn layout_units(&self) -> crate::layout::LayoutUnits {
+        let (w, h) = (self.screen.width(), self.screen.height());
+        let a = if h > 0.0 && w > 0.0 { w / h } else { 4.0 / 3.0 };
+        crate::layout::LayoutUnits::from_aspect(a)
+    }
+
     /// The drain's keep threshold, 1e-5 in the reference's layout units (`[0x80c5c8]`, tested in
     /// `0x768d20`), in ours: [`crate::layout::RESOLVE_EPS`] times the layout unit.
     pub(crate) fn resolve_eps(&self) -> f64 {
