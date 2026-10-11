@@ -738,4 +738,9 @@ across upstream merges.
 - **The `event` objective line (engine fix, own commit).** `GetQuestLogLeaderBoard` gives a
   quest's end text as its first line, typed `"event"` (`0x4e0278`..`0x4e02a2`). Without it a
   quest whose only objective is an event had no lines, and pfQuest showed it as complete.
+- **Ships and zeppelins on the Turtle core (engine fix, own commit).** That core sends every
+  MO transport at login with its path progress and no pose, and numbers them 1..14 in the guid
+  where vmangos puts the template entry. Both dropped the object: a create with no pose was
+  discarded, and the template was asked for by the guid's counter. A transport is now created
+  without a pose, and its template follows `OBJECT_FIELD_ENTRY`.
 
