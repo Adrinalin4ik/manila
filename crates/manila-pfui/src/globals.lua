@@ -182,4 +182,12 @@ menu:SetScript('OnEvent', function()
   for _, name in ipairs({ 'BenillaGameMenuButtonEditMode', 'BenillaGameMenuButtonSupport' }) do
     if _G[name] then pfUI.api.SkinButton(_G[name]) end
   end
+  -- The client shrinks its own menu at every show. A skinned menu belongs to pfUI's layout,
+  -- which draws at UIParent's scale as on the original client, where its one-pixel borders
+  -- land on whole pixels.
+  local shown = GameMenuFrame:GetScript('OnShow')
+  GameMenuFrame:SetScript('OnShow', function()
+    if shown then shown() end
+    this:SetScale(1)
+  end)
 end)

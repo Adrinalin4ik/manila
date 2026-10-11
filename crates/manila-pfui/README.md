@@ -352,6 +352,8 @@ member, a focus or any unit without a round-portrait bake draws nothing.
 
 The client's game menu has two rungs of its own, Edit Mode and Support. When pfUI's game-menu
 skin has run they take the same button skin, so the menu reads as one.
+The client also shrinks its own menu to 0.78 at every show; a skinned menu is put back to
+UIParent's scale, where pfUI's one-pixel borders land on whole pixels.
 
 The state events compare the stock snapshots after their feeds, with a baseline per VM and
 character: a login, a reload and a relisted reputation table announce nothing.
