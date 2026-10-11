@@ -38,6 +38,10 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 // The gate is `lua_isstring` (`0x6f3510`): a string or number is read, and any
                 // other type counts as absent rather than raising.
                 let anchor = optional_string(lua, &anchor);
+                // The binding hides the tooltip before the core runs (`0x531179` clears `+0xd0`,
+                // `0x531183` calls the hide slot `vtbl+0x84`), so the show that follows is a
+                // fresh one: `OnHide` and `OnShow` fire, on the tooltip and on its children.
+                hide_tooltip(lua, h);
                 {
                     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                     clear_content(&mut model, h);

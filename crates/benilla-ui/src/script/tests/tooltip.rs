@@ -911,3 +911,37 @@ fn tooltip_anchor_type_round_trips_every_reachable_mode() {
         s.warnings()
     );
 }
+
+/// `SetOwner`'s binding hides the tooltip before it re-owns it (`0x531183`), so re-owning a shown
+/// tooltip and filling it again is a fresh show: a child's `OnShow` fires again, which is where
+/// an addon that positions the tooltip does it.
+#[test]
+fn set_owner_hides_a_shown_tooltip_so_the_next_show_is_fresh() {
+    let mut s = script();
+    s.run(
+        r#"
+        local tip = CreateFrame("GameTooltip", "FreshTip")
+        local owner = CreateFrame("Frame", "FreshOwner", UIParent)
+        owner:SetPoint("CENTER", 0, 0); owner:SetWidth(10); owner:SetHeight(10)
+        shows, hides = 0, 0
+        local child = CreateFrame("Frame", nil, tip)
+        child:SetScript("OnShow", function() shows = shows + 1 end)
+        child:SetScript("OnHide", function() hides = hides + 1 end)
+        tip:SetOwner(owner, "ANCHOR_NONE")
+        tip:AddLine("first"); tip:Show()
+        after_first, hides_first = shows, hides
+        tip:SetOwner(owner, "ANCHOR_NONE")
+        hidden_between = not tip:IsVisible()
+        tip:AddLine("second"); tip:Show()
+    "#,
+    )
+    .unwrap();
+    assert_eq!(s.eval::<i64>("return after_first").unwrap(), 1);
+    assert!(s.eval::<bool>("return hidden_between").unwrap());
+    assert_eq!(
+        s.eval::<(i64, i64)>("return shows, hides - hides_first")
+            .unwrap(),
+        (2, 1)
+    );
+    assert!(s.eval::<bool>("return FreshTip:IsVisible() == 1").unwrap());
+}
