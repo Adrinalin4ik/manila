@@ -339,6 +339,37 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetRaidTargetIndex",
     ] {
         let original: Function = globals.get(name)?;
+        if name == "UnitName" {
+            // A token that names a unit by guid has a name on the reference even when no object
+            // is held for it: the name cache's, else `UNKNOWNOBJECT` (`0x517216`); nil is for
+            // GUID 0 alone. The stock binding answers nil there, and pfUI, having resolved a
+            // token from a tooltip's guid, passes the name straight to `gsub`.
+            globals.set(
+                name,
+                lua.create_function(move |lua, args: MultiValue| {
+                    let token = match args.front() {
+                        Some(Value::String(token)) => Some(token.to_string_lossy()),
+                        _ => None,
+                    };
+                    let results = call(lua, &original, args)?;
+                    if !matches!(results.front(), None | Some(Value::Nil)) {
+                        return Ok(results);
+                    }
+                    let named = token.is_some_and(|token| {
+                        super::guid(lua, &token).is_ok_and(|g| g.is_some_and(|g| g != 0))
+                    });
+                    if !named {
+                        return Ok(results);
+                    }
+                    let unknown = lua.globals().get::<Value>("UNKNOWNOBJECT")?;
+                    Ok(match unknown {
+                        Value::String(_) => MultiValue::from_vec(vec![unknown, Value::Nil]),
+                        _ => results,
+                    })
+                })?,
+            )?;
+            continue;
+        }
         globals.set(
             name,
             lua.create_function(move |lua, args: MultiValue| call(lua, &original, args))?,

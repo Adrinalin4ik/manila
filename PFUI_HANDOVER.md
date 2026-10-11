@@ -767,4 +767,10 @@ across upstream merges.
   answers that CVar with the window's real pixels (`manila-pfui/src/display.rs`, fed from
   `benilla-app/src/pfui.rs` when a VM is enabled and on resize). The owner's UI scale itself
   already matched the original client (0.83).
+- **pfUI tooltip error `string.gsub` at `tooltip.lua:299`.** `UnitName(token)` answered nil for
+  a token that names a unit by guid with no held state; the reference answers `UNKNOWNOBJECT`
+  there and nil for GUID 0 alone. The stock binding's tests pin nil (`unit/chain_tests.rs`), so
+  the fallback lives in the extension's `UnitName` wrapper (`pfui_host/focus.rs`). The exact
+  token in the owner's session was not captured; a stale `npc` or `focus` guid is the likely
+  one. The normal mouseover path was reproduced live through a nameplate hover without error.
 

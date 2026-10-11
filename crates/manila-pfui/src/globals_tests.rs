@@ -608,3 +608,28 @@ fn the_resolution_query_answers_the_windows_real_pixels() {
         stock
     );
 }
+
+/// A token that names a unit by guid always has a name, `UNKNOWNOBJECT` when nothing is held for
+/// it; only a token that names nobody answers nil. pfUI's tooltip resolves a token from a guid
+/// and passes the name straight to `gsub`.
+#[test]
+fn a_named_but_unheld_unit_reads_as_unknown_and_nobody_as_nil() {
+    use benilla_ui::script::UnitGuids;
+
+    let mut script = extended();
+    script.run(r#"UNKNOWNOBJECT = "Unknown""#).unwrap();
+    script.set_unit_guids(&UnitGuids {
+        player: 1,
+        party: [5, 0, 0, 0],
+        ..Default::default()
+    });
+    let (held_by_guid_only, nobody): (Option<String>, Option<String>) = script
+        .eval(r#"return (UnitName("party1")), (UnitName("party2"))"#)
+        .unwrap();
+    assert_eq!(held_by_guid_only.as_deref(), Some("Unknown"));
+    assert_eq!(nobody, None);
+    // The way pfUI uses it must not raise.
+    script
+        .run(r#"local name = UnitName(UnitTokenFromGUID("0x0000000000000005")); string.gsub(name, name, "", 1)"#)
+        .unwrap();
+}
