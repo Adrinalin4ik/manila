@@ -34,6 +34,8 @@ mod calls;
 mod camera_view;
 mod channel;
 mod char_stats;
+pub mod chat_bubble;
+pub use chat_bubble::{BubbleGeometry, BubbleState};
 mod chat_misc;
 mod chat_send;
 mod chat_types;
@@ -158,7 +160,7 @@ pub use auction::{
     AuctionStartRequest, AuctionState, AuctionSubCategory, BIDDER, LIST, OWNER, SORT_KEYS,
 };
 pub use aura::{AuraState, TrackingState};
-pub use backdrop::{inset_atlas_bleed, pieces, Backdrop, BackdropPiece, Insets};
+pub use backdrop::{Backdrop, Insets};
 pub use bank::BankState;
 pub use battlefield_positions::{BattlefieldFlagView, BattlefieldPositionView};
 pub use battlefield_queue::{BattlefieldListView, BattlefieldMapInfo, BattlefieldQueueSlot};
