@@ -7,12 +7,11 @@ use crate::script::binding_abi::optional_string;
 use crate::script::object::frame_handle_of;
 use crate::script::region::region_handle_of;
 use crate::script::Model;
-use crate::widget::{KindState, TooltipAnchor, TOOLTIP_LINE_GAP, TOOLTIP_PAD};
+use crate::widget::{KindState, TooltipAnchor, TOOLTIP_FADE_SECS, TOOLTIP_LINE_GAP, TOOLTIP_PAD};
 
 use super::{
-    append_line, bool_arg, clear_content, fire_cleared, full_alpha, hide_tooltip, now,
-    parse_line_color, parse_line_tail, set_shown, text_of, tip_mut, with_tip, write_cell,
-    REG_TOOLTIP_METHODS,
+    append_line, bool_arg, clear_content, fire_cleared, full_alpha, parse_line_color,
+    parse_line_tail, set_shown, text_of, tip_mut, with_tip, write_cell, REG_TOOLTIP_METHODS,
 };
 
 pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -322,45 +321,13 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "FadeOut",
         lua.create_function(|lua, this: Table| {
-            let t = now(lua);
             with_tip(lua, &this, |tip| {
-                if tip.fade_start.is_none() {
-                    tip.fade_start = Some(t);
+                if tip.fade_left.is_none() {
+                    tip.fade_left = Some(TOOLTIP_FADE_SECS);
                 }
             })
         })?,
     )?;
-    // Show and Hide shadow the shared pair. Show (`0x530a80`, the override the generic Show at
-    // `0x7a3350` calls) shows only a plate with an owner and at least one line, checked at Show
-    // time only; otherwise it takes the full hide (`0x530a60`): un-owned, cleared,
-    // OnTooltipCleared fired. Hide is the full hide.
-    m.set(
-        "Show",
-        lua.create_function(|lua, this: Table| {
-            let h = frame_handle_of(lua, &this)?;
-            let live = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                full_alpha(&mut model, h);
-                tip_mut(&mut model, h)
-                    .map(|t| t.owner.is_some() && t.num_lines > 0)
-                    .unwrap_or(false)
-            };
-            match live {
-                true => set_shown(lua, h, true),
-                false => hide_tooltip(lua, h),
-            }
-            Ok(())
-        })?,
-    )?;
-    m.set(
-        "Hide",
-        lua.create_function(|lua, this: Table| {
-            let h = frame_handle_of(lua, &this)?;
-            hide_tooltip(lua, h);
-            Ok(())
-        })?,
-    )?;
-
     // The content methods: items, spells and auras, talents, units.
     crate::script::tooltip_item::install_methods(lua, &m)?;
     crate::script::tooltip_spell::install_methods(lua, &m)?;
