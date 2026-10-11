@@ -19,6 +19,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let data = model.region_data.entry(rh).or_default();
             let was_shown = data.text.as_deref().is_some_and(|t| !t.is_empty());
+            let same = data.text == text;
             data.text = text;
             // Fresh text draws whole: an armed write-on gradient belongs to the old string.
             data.alpha_gradient = None;
@@ -26,6 +27,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // or fills, which drops or takes up the measure the sweep reads.
             model.touch_measure(rh);
             model.touch_layout_text(rh, was_shown);
+            // A new string clears the valid bit and invalidates (`0x771ea4`); the same one returns
+            // first (`0x771df1`).
+            if !same {
+                model.clear_region_valid(rh);
+            }
             Ok(())
         })?,
     )?;

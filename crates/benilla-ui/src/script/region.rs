@@ -678,6 +678,7 @@ pub(super) fn region_type_name(model: &Model, rh: RegionHandle) -> &'static str 
 pub(crate) fn free_region(model: &mut Model, rh: RegionHandle) {
     model.region_data.remove(&rh);
     model.region_resolved.remove(&rh);
+    model.region_kept.remove(&rh);
     let name = model.arena.region(rh).and_then(|r| r.name.clone());
     if let Some(id) = model.region_to_id.remove(&rh) {
         model.id_to_region.remove(&id);
@@ -688,8 +689,9 @@ pub(crate) fn free_region(model: &mut Model, rh: RegionHandle) {
                 model.region_by_name.remove(&name);
             }
         }
-        // Its node leaves the cached graph with its edges at the next resolve, and whatever
-        // anchored to it re-resolves without it.
+        // Its node leaves the cached graph with its edges at the next resolve. What anchored to
+        // it is not invalidated (`0x768e20` unhooks each with `0x767e70`, flag 0), so it keeps
+        // its state.
         model.name_layout_node(id);
     }
     model.arena.destroy_region(rh);
@@ -810,14 +812,14 @@ pub(super) fn region_set_point(lua: &Lua, this: &Table, args: &MultiValue) -> ml
     let rel_to_id = resolve_rel_target(&model, &p.target, &who, "SetPoint", me, owner)?;
     let (point, rel_point, x, y) = (p.point, p.rel_point, p.x, p.y);
 
-    // The frame's store and its unchanged-anchor test (`0x767c70`).
+    // The frame's store and its unchanged-anchor test (`0x767c70`), which queues no resolve.
     let units = model.layout_units();
     let data = model.region_data.entry(rh).or_default();
     if data
         .anchors
         .set(Anchor::new(point, rel_to_id, rel_point, x, y), units)
     {
-        model.touch_layout_region(rh);
+        model.invalidate_region(rh, true);
     }
     Ok(())
 }
