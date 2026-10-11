@@ -743,4 +743,10 @@ across upstream merges.
   where vmangos puts the template entry. Both dropped the object: a create with no pose was
   discarded, and the template was asked for by the guid's counter. A transport is now created
   without a pose, and its template follows `OBJECT_FIELD_ENTRY`.
+- **Nameplates name an unanswered unit `UNKNOWNOBJECT`** (engine fix, own commit): pfUI's
+  nameplates raised "table index is nil" on a plate with no name.
+- **Rebased on `origin/main` `7e71f725` on 2026-10-11.** Upstream's Lamp Fog commits left the
+  app tests not compiling (fixed, own commit) and two of their own tests failing (not fixed),
+  so the no-install baseline is now ten failures. `PFUI_UPSTREAM_FIXES.md` lists every client
+  fix on this branch for the maintainers, split into benilla and manila.
 
