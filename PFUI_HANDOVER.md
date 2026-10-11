@@ -757,4 +757,9 @@ across upstream merges.
   quits and starts the client again (`/console restartClient 1`). The one surface is a checkbox
   on the Graphics options page; a minimap-button addon was written and removed again at the
   owner's request. `$WOW_HD_PATCHES` overrides the saved value for a session.
+- **A ship's sail stayed behind** (engine fix `886e7f80`): a transport's animated props were parked
+  on a draw sphere fixed at spawn. Not yet confirmed in game by the owner.
+- **Options labels were cut short** (`f9d10fa7`): benilla's own options page relied on the old
+  `GetWidth` answer. Any other in-tree Lua that sizes from `GetWidth`/`GetHeight` of an
+  anchor-sized frame under a scale needs the same care; `OptionsFrame.xml` was the only user.
 
