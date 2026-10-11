@@ -732,4 +732,10 @@ across upstream merges.
   the tooltip: moving from one mob to the next left it in the stock corner.
 - **Game menu under pfUI.** The extension keeps the skinned menu at UIParent's scale and puts
   back the stock one-unit gap between rungs.
+- **Declared fonts are now linked to the font they inherit (engine fix, own commit).** A
+  `<Font inherits=…>` chain was flattened at load, so pfUI's `GameFontNormal:SetFont` never
+  reached `GameFontHighlight`: a highlighted quest-log row switched face and no longer fitted.
+- **The `event` objective line (engine fix, own commit).** `GetQuestLogLeaderBoard` gives a
+  quest's end text as its first line, typed `"event"` (`0x4e0278`..`0x4e02a2`). Without it a
+  quest whose only objective is an event had no lines, and pfQuest showed it as complete.
 
