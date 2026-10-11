@@ -1643,7 +1643,7 @@ mod tests {
         let shadows = VideoConfig::default();
         let flag = |b: bool| if b { 1.0 } else { 0.0 };
         // MONKEY (volumetric fog): include the atmospheric tier in this fixed-size default table.
-        let lighting: [(&str, f32); 41] = [
+        let lighting: [(&str, f32); 42] = [
             // GFX (volumetric light) / (moonlight): the three new rows.
             ("volumetricLight", shadows.volumetric_light as f32),
             ("volumetricLightStrength", shadows.volumetric_light_strength),
