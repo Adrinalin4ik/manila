@@ -1019,8 +1019,21 @@ pub(crate) struct Model {
     pub(crate) chat_bubbles: super::chat_bubble::ChatBubbles,
     /// The world-state readout's rows, gated and resolved by the app.
     pub(crate) worldstate: super::worldstate::WorldStateUiState,
-    /// Events bindings raise. Deviation: fired at the next tick, not synchronously as in the
-    /// reference, because a binding runs inside Lua and cannot re-enter handler dispatch.
+    /// Events raised outside a dispatch, fired at the start of the next tick ahead of its `OnUpdate`
+    /// pass (`UiScript::tick`). The reference queues nothing here: a fire site calls
+    /// `SignalEvent` (`0x703e50`, `0x703f50`), which runs every handler before it returns, so a
+    /// verb's event reaches its listeners inside the call.
+    ///
+    /// A binding can do the same: `tick::fire_event_into` re-enters dispatch from inside Lua, as
+    /// `SetCVar`'s `CVAR_UPDATE` does, once the binding holds no model borrow. So the queue is no
+    /// limit, and a Lua verb that pushes here instead is a gap against the reference: the cursor
+    /// verbs' `CURSOR_UPDATE`, grid, `ITEM_LOCK_CHANGED`, `DELETE_ITEM_CONFIRM` and
+    /// `PLAYER_MONEY`, the send-mail verbs' events, `SetGuildRecruitmentMode`'s
+    /// `UPDATE_CHAT_WINDOWS`, `SetBattlefieldScoreFaction`'s `UPDATE_BATTLEFIELD_SCORE`,
+    /// `UpdateInventoryAlertStatus`'s `UPDATE_INVENTORY_ALERTS`, `CancelAreaSpiritHeal`'s
+    /// `AREA_SPIRIT_HEALER_OUT_OF_RANGE` and the trainer verbs' `TRAINER_UPDATE`. The host's own
+    /// setters (the world map's, the world-state rows, a dropped mail attachment) and
+    /// `UiScript::queue_event` have no verb to fire inside and queue by design.
     pub(crate) pending_events: Vec<(String, Vec<ScriptValue>)>,
     /// The last cursor position in UI space (logical px, y-up), behind `GetCursorPosition()`.
     pub(crate) cursor_pos: (f32, f32),
@@ -2082,24 +2095,35 @@ impl Model {
 
     /// The post-load hook's step (`0x76a2f0`): a visible frame undefers, with its title region and
     /// each region it draws (`0x76a310`, `0x76a324`, `0x76a35b`). A hidden one stays deferred.
-    pub(crate) fn layout_load_end(&mut self, h: FrameHandle) {
+    /// Whether any owes a resolve now, as [`Self::layout_on_show_frame`]; the caller runs it
+    /// before the frame's `<Frames>` are built.
+    pub(crate) fn layout_load_end(&mut self, h: FrameHandle) -> bool {
         let Some(f) = self.arena.frame(h) else {
-            return;
+            return false;
         };
         if !f.effective_visible {
-            return;
+            return false;
         }
         let title = f.title_region;
         let regions: Vec<RegionHandle> = f.regions.clone();
-        self.undefer_frame(h);
+        let mut owed = self.undefer_frame(h);
         if let Some(t) = title {
-            self.undefer_region(t);
+            owed |= self.undefer_region(t);
         }
         for rh in regions {
             if Some(rh) != title && self.region_draws(rh) {
-                self.undefer_region(rh);
+                owed |= self.undefer_region(rh);
             }
         }
+        owed || !self.layout_pass.is_empty()
+    }
+
+    /// The layout ids [`Self::layout_load_end`] undeferred: the frame, its title region and the
+    /// regions it draws.
+    pub(crate) fn load_end_roots(&self, h: FrameHandle) -> Vec<u32> {
+        let mut out = self.show_frame_roots(h);
+        out.extend(self.show_region_roots(h));
+        out
     }
 
     /// The region's own shown bit (`+0xc4`): not hidden, and linked to its owner.
