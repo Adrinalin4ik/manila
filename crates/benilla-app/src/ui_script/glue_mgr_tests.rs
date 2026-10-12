@@ -782,6 +782,119 @@ fn a_delete_with_no_link_fails_and_a_cancelled_one_shows_nothing() {
     assert!(m.outbox.is_empty());
 }
 
+/// A create request with the name and the bytes as `CreateCharacter` reads them.
+fn create_request(name: &str) -> benilla_ui::script::GlueCreateRequest {
+    benilla_ui::script::GlueCreateRequest {
+        name: name.into(),
+        race: 2,
+        class: 3,
+        sex: 1,
+        skin: 4,
+        face: 5,
+        hair_style: 6,
+        hair_color: 7,
+        facial_hair: 0,
+    }
+}
+
+/// `0x46b290` and state 5: the dialog and the `CMSG_CHAR_CREATE`, the dialog re-texted once the
+/// reply is in; a success (`0x2e`) goes to state 0, closes the dialog, fires
+/// `SELECT_LAST_CHARACTER` and puts `charselect` up (`0x46c11e`-`0x46c13d`), a failure opens
+/// `OKAY` with its status's text and goes to state 0 (`0x46c118` → `0x46c177`).
+#[test]
+fn a_create_runs_state_5_to_the_select_screen_or_to_okay() {
+    let mut m = accepted();
+    m.connected = true;
+    m.create_character(create_request("Newbie"));
+    assert_eq!(m.state, ScreenState::Create);
+    assert_eq!(m.outbox, [open("CANCEL", Some("CHAR_CREATE_IN_PROGRESS"))]);
+    assert!(matches!(
+        m.park_out.as_slice(),
+        [ParkRequest::Char(CharRequest::Create(r))]
+            if r.name == "Newbie"
+                && (r.race, r.class, r.gender, r.skin, r.face) == (2, 3, 1, 4, 5)
+                && (r.hair_style, r.hair_color, r.facial_hair) == (6, 7, 0)
+    ));
+    m.park_out.clear();
+    m.outbox.clear();
+    m.tick();
+    assert!(m.outbox.is_empty(), "no text while the reply is out");
+    // Another operation's reply is not the create's.
+    m.on_char_deleted(0x39);
+    m.tick();
+    assert!(m.outbox.is_empty());
+    m.on_char_created(0x2e);
+    m.tick();
+    assert_eq!(
+        m.outbox,
+        [
+            Outgoing::Update {
+                text: Text::Key("CHAR_CREATE_SUCCESS"),
+                button: None,
+            },
+            Outgoing::Close,
+            Outgoing::SelectLast,
+            Outgoing::Screen("charselect"),
+        ]
+    );
+    assert_eq!(m.state, ScreenState::Idle);
+    assert!(m.park_out.is_empty(), "the screen asks for the list itself");
+
+    // vmangos's taken name, `CHAR_CREATE_NAME_IN_USE` (0x31), and a name it refuses, by its
+    // own `CHAR_NAME_*` code.
+    for (code, key) in [
+        (0x31, "CHAR_CREATE_NAME_IN_USE"),
+        (0x30, "CHAR_CREATE_FAILED"),
+        (0x4e, "CHAR_NAME_THREE_CONSECUTIVE"),
+    ] {
+        let mut m = accepted();
+        m.connected = true;
+        m.create_character(create_request("Newbie"));
+        m.outbox.clear();
+        m.on_char_created(code);
+        m.tick();
+        assert_eq!(
+            m.outbox,
+            [
+                Outgoing::Update {
+                    text: Text::Key(key),
+                    button: None,
+                },
+                open("OKAY", Some(key)),
+            ],
+            "{code:#x}"
+        );
+        assert_eq!(m.state, ScreenState::Idle);
+    }
+}
+
+/// With no link the create fails `RESPONSE_FAILED_TO_CONNECT` at once (`0x5aac72`) and sends
+/// nothing; the dialog's button in state 5 cancels it to state 0 (`0x46b776`), and a reply that
+/// lands after shows nothing.
+#[test]
+fn a_create_with_no_link_fails_and_a_cancelled_one_shows_nothing() {
+    let mut m = accepted();
+    m.create_character(create_request("Newbie"));
+    assert!(m.park_out.is_empty());
+    m.outbox.clear();
+    m.tick();
+    assert_eq!(
+        m.outbox.last(),
+        Some(&open("OKAY", Some("RESPONSE_FAILED_TO_CONNECT")))
+    );
+    assert_eq!(m.state, ScreenState::Idle);
+
+    let mut m = accepted();
+    m.connected = true;
+    m.create_character(create_request("Newbie"));
+    m.outbox.clear();
+    m.status_dialog_click(&mut Vec::new());
+    assert_eq!(m.state, ScreenState::Idle);
+    m.on_char_created(0x2e);
+    m.tick();
+    assert!(m.outbox.is_empty());
+}
+
 /// State 7: the dialog and the `CMSG_CHAR_RENAME` (`0x46b39b`), sent only on a live link; no
 /// frame arm; the button goes to state 0 and sends nothing (`0x46b79d`).
 #[test]
@@ -1497,6 +1610,9 @@ fn live_app_with(
         ))
         .insert_resource(crate::chr_classes::ChrClassTable(
             benilla_formats::load_chr_classes(&mut chain).expect("ChrClasses"),
+        ))
+        .insert_resource(crate::target::Factions::from_catalog(
+            benilla_formats::load_faction_catalog(&mut chain).expect("factions"),
         ))
         .insert_resource(crate::area::AreaTableRes(
             benilla_formats::AreaTableCatalog::from_rows(vec![
@@ -3409,5 +3525,237 @@ fn a_refusal_in_the_entrys_drain_keeps_the_stock_select() {
     assert_eq!((world.authentications(), world.enumerations_in(0)), (1, 2));
     assert_eq!(vm(&app).glue_selected_guid(), Some(0x12));
     assert_eq!(dialog(&app), None);
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+}
+
+// ── The create under the stock glue (`CharacterCreate.xml`) ──
+
+/// The stock select over `roster3`, at the loaded roster, with `SELECT_LAST_CHARACTER` and the
+/// status dialog's opening logged into `EVENTS`; the create screen's first draws are all 0 (the
+/// reset's sex, race and five customizations: a male Human).
+fn create_screen() -> (App, fake::Realmd, fake::World) {
+    let (mut app, realmd, world) = select_screen(&roster3(), None);
+    vm(&app)
+        .run(
+            "RosterListener:RegisterEvent('SELECT_LAST_CHARACTER') \
+             RosterListener:RegisterEvent('OPEN_STATUS_DIALOG')",
+        )
+        .unwrap();
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .script_glue_create_draws(&[0; 7]);
+    vm(&app)
+        .run("CharSelectCreateCharacterButton:Click()")
+        .unwrap();
+    app.update();
+    (app, realmd, world)
+}
+
+/// The preview character the create verbs stand.
+fn create_look(app: &App) -> benilla_ui::script::GlueCreateLook {
+    vm(app).glue_create_look().expect("a character stands")
+}
+
+/// The stock create end to end: the select's Create button shows the create screen, whose `OnShow`
+/// resets the character (a male Human here) and stands it in the glue booth; a race, a sex and a
+/// class picked and a customization cycled on the screen's own buttons change the character and
+/// the booth's look; Okay with a name shows `CHAR_CREATE_IN_PROGRESS` and sends
+/// `CMSG_CHAR_CREATE` with the name and the character's bytes; the success puts the select back
+/// up, which asks for the list again and selects the new last row (`SELECT_LAST_CHARACTER`).
+#[test]
+fn the_stock_create_makes_the_character_and_selects_it() {
+    use crate::portrait::{CreateLook, GlueLook, GlueScene};
+    let _ = benilla_formats::wow_data_or_skip!();
+    let (mut app, _realmd, world) = create_screen();
+    assert!(shown(&app, "CharacterCreate") && !shown(&app, "CharacterSelect"));
+    let start = create_look(&app);
+    assert_eq!(
+        (start.race, start.sex, start.class),
+        (1, 0, 1),
+        "the reset's draws"
+    );
+    assert_eq!(
+        vm(&app)
+            .eval::<(String, String, String)>(
+                "return CharacterCreateRaceLabel:GetText(), CharacterCreateClassLabel:GetText(), \
+                 CharacterCreateFactionLabel:GetText()"
+            )
+            .unwrap(),
+        ("Human".into(), "Warrior".into(), "Alliance".into())
+    );
+    let p = preview(&app);
+    assert!(
+        p.look
+            == Some(GlueLook::Create(CreateLook {
+                race: 1,
+                sex: 0,
+                class: 1,
+                skin: 0,
+                face: 0,
+                hair_style: 0,
+                hair_color: 0,
+                facial_hair: 0,
+            }))
+    );
+    assert_eq!(p.scene, Some(GlueScene::Human));
+    assert!((p.yaw + 15f32.to_radians()).abs() < 1e-5, "{}", p.yaw);
+
+    // Orc (the list's fifth), female, Hunter (the Orc list's second), one skin colour on.
+    vm(&app)
+        .run(
+            "CharacterCreateRaceButton5:Click() CharacterCreateGenderButtonFemale:Click() \
+             CharacterCreateClassButton2:Click()",
+        )
+        .unwrap();
+    let picked = create_look(&app);
+    assert_eq!((picked.race, picked.sex, picked.class), (2, 1, 3));
+    vm(&app)
+        .run("CharacterCustomizationButtonFrame1RightButton:Click()")
+        .unwrap();
+    let cycled = create_look(&app);
+    let skins = app
+        .world()
+        .resource::<crate::entities::CharCreate>()
+        .0
+        .ranges(2, 1)
+        .unwrap()
+        .skin;
+    assert_eq!(cycled.skin, (picked.skin + 1) % skins);
+    assert_eq!(
+        vm(&app)
+            .eval::<String>("return CharacterCreateClassLabel:GetText()")
+            .unwrap(),
+        "Hunter"
+    );
+    app.update();
+    let p = preview(&app);
+    assert!(
+        p.look
+            == Some(GlueLook::Create(CreateLook {
+                race: 2,
+                sex: 1,
+                class: 3,
+                skin: cycled.skin,
+                face: cycled.face,
+                hair_style: cycled.hair_style,
+                hair_color: cycled.hair_color,
+                facial_hair: cycled.facial_hair,
+            }))
+    );
+    assert_eq!(p.scene, Some(GlueScene::Orc));
+    let fog = p.fog.expect("the create scene keeps its fog");
+    assert_eq!((fog.near, fog.far), (0.0, 270.0));
+
+    vm(&app)
+        .run("CharacterCreateNameEdit:SetText('Newbie') CharCreateOkayButton:Click()")
+        .unwrap();
+    let lists = seen(&app, "CHARACTER_LIST_UPDATE");
+    app.update();
+    assert_eq!(
+        dialog(&app),
+        Some(("CANCEL".into(), "Creating character".into()))
+    );
+    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Create);
+    until(&mut app, "the list with Newbie", |app| {
+        seen(app, "CHARACTER_LIST_UPDATE") > lists
+            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+    });
+    let mut sent = b"Newbie\0".to_vec();
+    sent.extend([
+        2,
+        3,
+        1,
+        cycled.skin,
+        cycled.face,
+        cycled.hair_style,
+        cycled.hair_color,
+        cycled.facial_hair,
+        0,
+    ]);
+    assert_eq!(
+        world.bodies(benilla_protocol::messages::opcode::CMSG_CHAR_CREATE),
+        [sent]
+    );
+    assert!(shown(&app, "CharacterSelect") && !shown(&app, "CharacterCreate"));
+    assert_eq!(
+        world.enumerations(),
+        2,
+        "the select asked for the list again"
+    );
+    assert_eq!(seen(&app, "SELECT_LAST_CHARACTER"), 1);
+    assert_eq!(row_names(&app), ["Alpha", "Bravo", "Charlie", "Newbie"]);
+    assert_eq!(
+        vm(&app)
+            .eval::<f64>("return CharacterSelect.selectedIndex")
+            .unwrap(),
+        4.0,
+        "the new character, the last row, is selected"
+    );
+    assert_eq!(vm(&app).glue_selected_guid(), Some(0x14));
+    assert_eq!(dialog(&app), None);
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+}
+
+/// A create the server refuses (vmangos's taken name, `CHAR_CREATE_NAME_IN_USE`) opens `OKAY`
+/// with its text over the create screen, which stays, and asks for no list.
+#[test]
+fn a_refused_stock_create_shows_its_text() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let (mut app, _realmd, world) = create_screen();
+    world.answer_creates(0x31);
+    vm(&app)
+        .run("CharacterCreateNameEdit:SetText('Alpha') CharCreateOkayButton:Click()")
+        .unwrap();
+    app.update();
+    assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Create);
+    until(&mut app, "the refusal", |app| {
+        app.world().resource::<GlueMgr>().state == ScreenState::Idle
+    });
+    assert_eq!(
+        dialog(&app),
+        Some(("OKAY".into(), "That name is unavailable".into()))
+    );
+    assert!(shown(&app, "CharacterCreate"));
+    assert_eq!(
+        world
+            .bodies(benilla_protocol::messages::opcode::CMSG_CHAR_CREATE)
+            .len(),
+        1
+    );
+    assert_eq!(world.enumerations(), 1);
+    assert_eq!(seen(&app, "SELECT_LAST_CHARACTER"), 0);
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+}
+
+/// A name the client's check fails (`0x4711e2`) opens `OKAY` with the check's text and sends
+/// nothing, with no screen state; so does an empty one.
+#[test]
+fn a_stock_create_whose_name_fails_the_check_sends_nothing() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let (mut app, _realmd, world) = create_screen();
+    for (name, text) in [
+        (
+            "Abbbc",
+            "You cannot use the same letter three times consecutively",
+        ),
+        ("", "Enter a name for your character"),
+    ] {
+        vm(&app)
+            .run(&format!(
+                "CharacterCreateNameEdit:SetText('{name}') CharCreateOkayButton:Click()"
+            ))
+            .unwrap();
+        assert_eq!(dialog(&app), Some(("OKAY".into(), text.into())), "{name:?}");
+        app.update();
+        assert_eq!(app.world().resource::<GlueMgr>().state, ScreenState::Idle);
+        vm(&app).run("GlueDialog:Hide()").unwrap();
+    }
+    for _ in 0..5 {
+        app.update();
+    }
+    assert!(world
+        .bodies(benilla_protocol::messages::opcode::CMSG_CHAR_CREATE)
+        .is_empty());
+    assert!(shown(&app, "CharacterCreate"));
     assert_eq!(vm(&app).errors(), Vec::<String>::new());
 }
