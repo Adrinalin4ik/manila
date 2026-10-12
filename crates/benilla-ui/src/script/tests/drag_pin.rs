@@ -3,7 +3,7 @@
 //! anchor and size.
 
 use super::common::script;
-use crate::script::{FrameLayout, LayoutPoint, UiScript};
+use crate::script::{FrameLayout, UiScript};
 
 /// A 200×100 frame CENTER-anchored in a full-screen holder on an 800×600 screen: its rect is
 /// left 300, right 500, bottom 250, top 350.
@@ -261,25 +261,23 @@ fn a_frame_with_no_rect_starts_no_drag() {
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
-/// After a drag the layout cache holds the one TOPLEFT anchor and the size, the reference's `X:`,
-/// `Y:`, `W:` and `H:` (`0x490e60`), and its apply seats that back.
+/// After a drag the layout cache holds the pin as the reference's `X:`, `Y:`, `W:` and `H:`, with
+/// the frame level (`0x490e60`), and its apply seats all of that back (`0x4905e0`).
 #[test]
 fn the_layout_cache_round_trips_the_pin() {
     let mut s = centred_box();
     s.run("Box:StartMoving()").unwrap();
     s.mouse_move(430.0, 280.0);
-    s.run("Box:StopMovingOrSizing()").unwrap();
+    s.run("Box:StopMovingOrSizing() Box:SetFrameLevel(7)")
+        .unwrap();
+    s.resolve(); // drawn there before the save reads its held rect
     let want = FrameLayout {
         name: "Box".into(),
-        width: 200.0,
-        height: 100.0,
-        points: vec![LayoutPoint {
-            point: "TOPLEFT".into(),
-            relative_to: None,
-            relative_point: "TOPLEFT".into(),
-            x: 330.0,
-            y: -270.0,
-        }],
+        level: Some(7),
+        x: Some(330),
+        y: Some(-270),
+        width: Some(200),
+        height: Some(100),
     };
     let saved = s.user_placed_layouts();
     assert_eq!(saved, std::slice::from_ref(&want));
@@ -288,6 +286,196 @@ fn the_layout_cache_round_trips_the_pin() {
     fresh.restore_user_placed_layouts(saved);
     assert_eq!(edges(&mut fresh), (330.0, 530.0, 230.0, 330.0));
     assert_eq!(anchor(&fresh), pinned_at(330.0, -270.0));
+    assert_eq!(
+        fresh.eval::<i64>("return Box:GetFrameLevel()").unwrap(),
+        7,
+        "the level is applied too (`0x4905f5`)"
+    );
     assert_eq!(fresh.user_placed_layouts(), [want]);
     assert!(fresh.errors().is_empty(), "{:?}", fresh.errors());
+}
+
+/// A drag that leaves the frame off the unit grid saves whole units: `X:`/`Y:` round half away
+/// from zero (`0x490fc4`–`0x490fdf`), and the apply seats the rounded spot.
+#[test]
+fn a_sub_unit_drag_saves_and_restores_rounded() {
+    let mut s = centred_box();
+    s.run("Box:StartMoving()").unwrap();
+    s.mouse_move(430.25, 279.5);
+    s.run("Box:StopMovingOrSizing()").unwrap();
+    assert_eq!(
+        anchor(&s),
+        pinned_at(330.25, -270.5),
+        "the live pin is exact"
+    );
+    s.resolve();
+    let saved = s.user_placed_layouts();
+    assert_eq!(
+        (saved[0].x, saved[0].y),
+        (Some(330), Some(-271)),
+        "330.25 rounds down, -270.5 away from zero"
+    );
+
+    let mut fresh = centred_box();
+    fresh.restore_user_placed_layouts(saved);
+    assert_eq!(anchor(&fresh), pinned_at(330.0, -271.0));
+}
+
+/// A frame set user-placed without a drag keeps its authored anchors while it lives, but its row
+/// is its rect, and the apply clears those anchors (`0x49061a`) and pins TOPLEFT on the screen
+/// (`0x490670`): restored, it no longer follows the frame it was authored against.
+#[test]
+fn a_frame_placed_without_a_drag_restores_at_its_saved_top_left() {
+    let s = centred_box();
+    s.run("Box:SetUserPlaced(true)").unwrap();
+    let saved = s.user_placed_layouts();
+    assert_eq!(
+        (saved[0].x, saved[0].y, saved[0].width, saved[0].height),
+        (Some(300), Some(-250), Some(200), Some(100)),
+        "the rect, not the CENTER anchor"
+    );
+
+    let mut fresh = centred_box();
+    fresh
+        .run("Holder:ClearAllPoints() Holder:SetPoint('BOTTOMLEFT', 100, 0)")
+        .unwrap();
+    fresh.restore_user_placed_layouts(saved);
+    assert_eq!(
+        edges(&mut fresh),
+        (300.0, 500.0, 250.0, 350.0),
+        "where it was saved, though its holder moved"
+    );
+    assert_eq!(anchor(&fresh), pinned_at(300.0, -250.0));
+    assert!(fresh.errors().is_empty(), "{:?}", fresh.errors());
+}
+
+/// The rows are written in creation order, the writer's walk of every frame (`0x490e24`), and
+/// applied in file order, each level carried to same-strata children (`0x76a4f0`): the parent's
+/// row lands before its child's, so both come back at their saved levels whatever their names.
+#[test]
+fn a_parent_and_child_restore_their_saved_levels() {
+    let make = || {
+        let mut s = script();
+        s.set_screen_size(800.0, 600.0);
+        s.run(
+            r#"
+            Zed = CreateFrame("Frame", "Zed")
+            Zed:SetPoint("TOPLEFT", 100, -100); Zed:SetWidth(200); Zed:SetHeight(200)
+            Zed:SetMovable(true); Zed:SetUserPlaced(true)
+            Alpha = CreateFrame("Frame", "Alpha", Zed)
+            Alpha:SetPoint("TOPLEFT", 10, -10); Alpha:SetWidth(50); Alpha:SetHeight(50)
+            Alpha:SetMovable(true); Alpha:SetUserPlaced(true)
+            "#,
+        )
+        .unwrap();
+        s.resolve();
+        s
+    };
+    let s = make();
+    s.run("Zed:SetFrameLevel(5) Alpha:SetFrameLevel(9)")
+        .unwrap();
+    let saved = s.user_placed_layouts();
+    assert_eq!(
+        saved.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
+        ["Zed", "Alpha"],
+        "creation order, not name order"
+    );
+
+    let mut fresh = make();
+    fresh.restore_user_placed_layouts(saved);
+    assert_eq!(
+        fresh
+            .eval::<(i64, i64)>("return Zed:GetFrameLevel(), Alpha:GetFrameLevel()")
+            .unwrap(),
+        (5, 9)
+    );
+    assert!(fresh.errors().is_empty(), "{:?}", fresh.errors());
+}
+
+/// Each row ends in a forced resolve of its frame (`0x490710`, `0x7680e0(1)`), hidden or not, so
+/// its `OnSizeChanged` runs inside the restore.
+#[test]
+fn the_restore_resolves_each_frame_at_once_even_hidden() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        fires = 0
+        Panel = CreateFrame("Frame", "Panel")
+        Panel:SetPoint("TOPLEFT", 10, -10); Panel:SetWidth(50); Panel:SetHeight(50)
+        Panel:SetResizable(true)
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+    s.run(
+        r#"
+        Panel:Hide()
+        Panel:SetScript("OnSizeChanged", function() fires = fires + 1; last_w = arg1 end)
+        "#,
+    )
+    .unwrap();
+    s.restore_user_placed_layouts([FrameLayout {
+        name: "Panel".into(),
+        width: Some(120),
+        height: Some(80),
+        ..FrameLayout::default()
+    }]);
+    assert_eq!(
+        s.eval::<(i64, f64)>("return fires, last_w").unwrap(),
+        (1, 120.0),
+        "fired inside the restore, though the frame is hidden"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The writer reads the rect the frame holds, stale or not (`0x768320`, its valid bit), and
+/// resolves only a frame that holds none (`0x490eed`): a size set since the last resolve is not
+/// saved, and the save runs no script.
+#[test]
+fn the_save_reads_the_held_rect_and_runs_no_script() {
+    let mut s = centred_box();
+    s.run(
+        r#"
+        fires = 0
+        Box:SetUserPlaced(true)
+        Box:SetScript("OnSizeChanged", function() fires = fires + 1 end)
+        Box:SetWidth(300)
+        "#,
+    )
+    .unwrap();
+    let saved = s.user_placed_layouts();
+    assert_eq!(
+        (saved[0].x, saved[0].width),
+        (Some(300), Some(200)),
+        "the held rect, from before the width moved"
+    );
+    assert_eq!(s.eval::<i64>("return fires").unwrap(), 0, "nothing fired");
+    s.resolve();
+    assert_eq!(s.user_placed_layouts()[0].width, Some(300));
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// A frame with no rect is resolved inside the save (`0x490eed`), which can run its script; the
+/// flags are read after that (`0x490f93`, `0x491099`), so what the script set is what is written.
+#[test]
+fn the_save_reads_the_flags_after_the_rect() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        Late = CreateFrame("Frame", "Late")
+        Late:SetMovable(true); Late:SetUserPlaced(true)
+        Late:SetScript("OnSizeChanged", function() this:SetResizable(true) end)
+        Late:SetPoint("TOPLEFT", 40, -60); Late:SetWidth(70); Late:SetHeight(30)
+        "#,
+    )
+    .unwrap();
+    let saved = s.user_placed_layouts();
+    assert_eq!(
+        (saved[0].x, saved[0].y, saved[0].width, saved[0].height),
+        (Some(40), Some(-60), Some(70), Some(30)),
+        "resized by its own OnSizeChanged inside the save, so W and H are written"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
