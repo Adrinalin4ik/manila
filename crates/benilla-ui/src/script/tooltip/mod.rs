@@ -371,6 +371,8 @@ pub(super) fn show_or_hide_empty(lua: &Lua, h: FrameHandle) {
         visibility::base_hide(lua, h);
     } else {
         visibility::set_shown(lua, h, true);
+        // A content setter sizes the plate in its own call, as `Show` does.
+        measure_lines(lua, h);
     }
 }
 
@@ -420,6 +422,13 @@ pub(super) fn measure_lines(lua: &Lua, h: FrameHandle) {
     for line in lines {
         super::measure::ensure_measured(lua, line);
     }
+    // The plate's size is the layout's to write from those measures; pay it now, so the size a
+    // script reads next is this content's and not the content it replaced.
+    {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        owe_relayout(&mut model, h);
+    }
+    crate::script::object::settle_frame(lua, h);
 }
 
 /// The tooltip's hide (`0x530a60`, slot `+0x84`), however the hide comes, its parent's included:
