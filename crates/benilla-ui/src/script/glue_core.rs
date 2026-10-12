@@ -128,6 +128,110 @@ pub enum GlueRequest {
     /// `LaunchAddOnURL(index)` (`0x46d5e0` → `0x429ff0`, no whitelist) for a URL that passed
     /// [`launch_addon_url`]: already decoded, ready for the player's browser.
     LaunchAddonUrl(String),
+    /// `DeleteCharacter(index)` (`0x4734c0` → `0x46b2e0`) for a record with a guid: the host takes
+    /// screen state 6, the `CHAR_DELETE_IN_PROGRESS` dialog and the `CMSG_CHAR_DELETE`.
+    DeleteCharacter(u64),
+    /// `RenameCharacter(index, name)` past its checks and the name check (`0x46b340` at
+    /// `0x46b39b`): the host takes screen state 7, the `CHAR_RENAME_IN_PROGRESS` dialog and the
+    /// `CMSG_CHAR_RENAME`.
+    RenameCharacter { guid: u64, name: String },
+}
+
+/// The `ClientServices` status keys (`0x85cae8`, 83 entries), the `ResponseCodes` the world
+/// server's `SMSG_AUTH_RESPONSE` byte indexes directly, and the `CHAR_NAME_*` block the name check
+/// answers in (`0x45`-`0x52`).
+pub const GLUE_STATUS_KEYS: [&str; 0x53] = [
+    "RESPONSE_SUCCESS",
+    "RESPONSE_FAILURE",
+    "RESPONSE_CANCELLED",
+    "RESPONSE_DISCONNECTED",
+    "RESPONSE_FAILED_TO_CONNECT",
+    "RESPONSE_CONNECTED",
+    "RESPONSE_VERSION_MISMATCH",
+    "CSTATUS_CONNECTING",
+    "CSTATUS_NEGOTIATING_SECURITY",
+    "CSTATUS_NEGOTIATION_COMPLETE",
+    "CSTATUS_NEGOTIATION_FAILED",
+    "CSTATUS_AUTHENTICATING",
+    "AUTH_OK",
+    "AUTH_FAILED",
+    "AUTH_REJECT",
+    "AUTH_BAD_SERVER_PROOF",
+    "AUTH_UNAVAILABLE",
+    "AUTH_SYSTEM_ERROR",
+    "AUTH_BILLING_ERROR",
+    "AUTH_BILLING_EXPIRED",
+    "AUTH_VERSION_MISMATCH",
+    "AUTH_UNKNOWN_ACCOUNT",
+    "AUTH_INCORRECT_PASSWORD",
+    "AUTH_SESSION_EXPIRED",
+    "AUTH_SERVER_SHUTTING_DOWN",
+    "AUTH_ALREADY_LOGGING_IN",
+    "AUTH_LOGIN_SERVER_NOT_FOUND",
+    "AUTH_WAIT_QUEUE",
+    "AUTH_BANNED",
+    "AUTH_ALREADY_ONLINE",
+    "AUTH_NO_TIME",
+    "AUTH_DB_BUSY",
+    "AUTH_SUSPENDED",
+    "AUTH_PARENTAL_CONTROL",
+    "REALM_LIST_IN_PROGRESS",
+    "REALM_LIST_SUCCESS",
+    "REALM_LIST_FAILED",
+    "REALM_LIST_INVALID",
+    "REALM_LIST_REALM_NOT_FOUND",
+    "ACCOUNT_CREATE_IN_PROGRESS",
+    "ACCOUNT_CREATE_SUCCESS",
+    "ACCOUNT_CREATE_FAILED",
+    "CHAR_LIST_RETRIEVING",
+    "CHAR_LIST_RETRIEVED",
+    "CHAR_LIST_FAILED",
+    "CHAR_CREATE_IN_PROGRESS",
+    "CHAR_CREATE_SUCCESS",
+    "CHAR_CREATE_ERROR",
+    "CHAR_CREATE_FAILED",
+    "CHAR_CREATE_NAME_IN_USE",
+    "CHAR_CREATE_DISABLED",
+    "CHAR_CREATE_PVP_TEAMS_VIOLATION",
+    "CHAR_CREATE_SERVER_LIMIT",
+    "CHAR_CREATE_ACCOUNT_LIMIT",
+    "CHAR_CREATE_SERVER_QUEUE",
+    "CHAR_CREATE_ONLY_EXISTING",
+    "CHAR_DELETE_IN_PROGRESS",
+    "CHAR_DELETE_SUCCESS",
+    "CHAR_DELETE_FAILED",
+    "CHAR_DELETE_FAILED_LOCKED_FOR_TRANSFER",
+    "CHAR_LOGIN_IN_PROGRESS",
+    "CHAR_LOGIN_SUCCESS",
+    "CHAR_LOGIN_NO_WORLD",
+    "CHAR_LOGIN_DUPLICATE_CHARACTER",
+    "CHAR_LOGIN_NO_INSTANCES",
+    "CHAR_LOGIN_FAILED",
+    "CHAR_LOGIN_DISABLED",
+    "CHAR_LOGIN_NO_CHARACTER",
+    "CHAR_LOGIN_LOCKED_FOR_TRANSFER",
+    "CHAR_NAME_NO_NAME",
+    "CHAR_NAME_TOO_SHORT",
+    "CHAR_NAME_TOO_LONG",
+    "CHAR_NAME_INVALID_CHARACTER",
+    "CHAR_NAME_MIXED_LANGUAGES",
+    "CHAR_NAME_PROFANE",
+    "CHAR_NAME_RESERVED",
+    "CHAR_NAME_INVALID_APOSTROPHE",
+    "CHAR_NAME_MULTIPLE_APOSTROPHES",
+    "CHAR_NAME_THREE_CONSECUTIVE",
+    "CHAR_NAME_INVALID_SPACE",
+    "CHAR_NAME_CONSECUTIVE_SPACES",
+    "CHAR_NAME_FAILURE",
+    "CHAR_NAME_SUCCESS",
+];
+
+/// `0x5abd20`: a status's key, the empty string (`0x882748`) for 0 and for anything past the table.
+pub fn glue_status_key(code: i32) -> &'static str {
+    match usize::try_from(code) {
+        Ok(i @ 1..0x53) => GLUE_STATUS_KEYS[i],
+        _ => "",
+    }
 }
 
 /// The hosts `LaunchURL` opens, the 10-entry table at `0x85cc34`: a leading `*` stands for one
@@ -324,6 +428,17 @@ pub(crate) struct GlueCore {
     pub(super) roster: super::glue_select::GlueRoster,
     /// The AddOns screen's enable nodes ([`super::glue_addons`]).
     pub(super) addons: super::glue_addons::GlueAddons,
+    /// The character name check's lists ([`super::char_name`]), as the host seated them.
+    name_lists: Option<std::rc::Rc<dyn super::NameLists>>,
+}
+
+impl GlueCore {
+    /// The name check's lists; with none seated, nothing is reserved.
+    pub(super) fn name_lists(&self) -> std::rc::Rc<dyn super::NameLists> {
+        self.name_lists
+            .clone()
+            .unwrap_or_else(|| std::rc::Rc::new(super::NoNameLists))
+    }
 }
 
 /// `SetCurrentScreen`'s buffer, 0x40 bytes with its terminator (`0x46b860`, `SStrCopy`).
@@ -333,6 +448,11 @@ impl super::UiScript {
     /// Drain the glue verbs' requests since the last call.
     pub fn take_glue_requests(&mut self) -> Vec<GlueRequest> {
         std::mem::take(&mut self.model_mut().glue.requests)
+    }
+
+    /// Seat the lists the character name check searches (`0x6c91a0` compiles them at startup).
+    pub fn set_glue_name_lists(&mut self, lists: std::rc::Rc<dyn super::NameLists>) {
+        self.model_mut().glue.name_lists = Some(lists);
     }
 
     /// Seed the saved account name `GetSavedAccountName` answers.
