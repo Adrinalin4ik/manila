@@ -151,6 +151,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 None => (String::new(), [1.0, 1.0, 1.0, 1.0]),
             };
             write_cell(&mut model, lh, &(current + &extra), color);
+            super::owe_relayout(&mut model, h);
             Ok(())
         })?,
     )?;
@@ -242,8 +243,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 d.anchors =
                     Anchors::from([Anchor::new(Point::Right, left_id, Point::Right, 0.0, 0.0)]);
             }
-            model.touch_layout_region(lh); // two line rows entered the layout graph
-            model.touch_layout_region(rh);
+            // Two line rows, their points set with the invalidate flag.
+            model.invalidate_region(lh, true);
+            model.invalidate_region(rh, true);
             let t = tip_mut(&mut model, h)?;
             t.left_lines.push(lh);
             t.right_lines.push(rh);

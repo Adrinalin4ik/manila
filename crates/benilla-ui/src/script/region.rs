@@ -78,8 +78,9 @@ pub(super) fn link_region(
     shown: bool,
 ) {
     if model.arena.set_region_owner(rh, Some(owner)) {
-        // The owner supplies the region's scale to layout, so a re-link is a layout change.
-        model.touch_layout_region(rh);
+        // The owner supplies the region's scale to layout; the re-link invalidates nothing, so
+        // the region keeps its rect until the resolve reaches it.
+        model.unsettle_region(rh);
     }
     if let Some(r) = model.arena.region_mut(rh) {
         r.draw_layer = layer;
@@ -207,7 +208,7 @@ pub(super) fn set_texture_path(model: &mut Model, rh: RegionHandle, path: &str) 
     let data = model.region_data.entry(rh).or_default();
     data.texture = (!path.is_empty()).then(|| path.to_string());
     data.fill = None;
-    model.touch_layout_art(rh);
+    model.note_art(rh);
 }
 
 /// The loader's install of the texture a `<BarTexture>`, `<ThumbTexture>`, Button state-texture or
@@ -274,7 +275,7 @@ pub(super) fn clear_texture(model: &mut Model, rh: RegionHandle) {
     data.texture = None;
     data.fill = None;
     data.portrait_unit = None;
-    model.touch_layout_art(rh);
+    model.note_art(rh);
 }
 
 /// Apply the font parts an XML element supplies (`font=`, `<FontHeight>`, `outline=`), any of
@@ -379,7 +380,7 @@ pub(super) fn install_in_game(lua: &Lua) -> mlua::Result<()> {
             data.texture = None;
             data.fill = None;
             data.circular = true;
-            model.touch_layout_art(rh);
+            model.note_art(rh);
             Ok(())
         })?,
     )?;
@@ -402,7 +403,7 @@ pub(super) fn install_in_game(lua: &Lua) -> mlua::Result<()> {
             data.texture = Some(path);
             data.circular = true;
             data.portrait_unit = None;
-            model.touch_layout_art(rh);
+            model.note_art(rh);
             Ok(())
         })?,
     )?;
@@ -527,8 +528,9 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                 _ => return Err(wrong_type()),
             };
             if model.arena.set_region_owner(rh, new_owner) {
-                // The owner supplies the region's scale to layout, so a re-link is a layout change.
-                model.touch_layout_region(rh);
+                // The owner supplies the region's scale to layout; the re-link invalidates nothing
+                // (`0x77fd10`), so the region keeps its rect until the resolve reaches it.
+                model.unsettle_region(rh);
             }
             Ok(())
         },
@@ -677,29 +679,108 @@ pub(super) fn region_type_name(model: &Model, rh: RegionHandle) -> &'static str 
     }
 }
 
-/// Free a region and every trace of its identity (arena slot, paint, rect, name, id), so a held
-/// wrapper raises as stale; the reference frees too, as `CSimpleButton::SetFontString 0x778d20`
-/// deletes the label it replaces.
+/// Free a region; see [`free_regions`].
 pub(crate) fn free_region(model: &mut Model, rh: RegionHandle) {
-    model.region_data.remove(&rh);
-    model.region_resolved.remove(&rh);
-    model.region_kept.remove(&rh);
-    let name = model.arena.region(rh).and_then(|r| r.name.clone());
-    if let Some(id) = model.region_to_id.remove(&rh) {
-        model.id_to_region.remove(&id);
-        // The lookup entry goes only if this region is the one it holds; a later holder of the
-        // same name was never in it.
-        if let Some(name) = name {
-            if model.region_by_name.get(&name) == Some(&id) {
-                model.region_by_name.remove(&name);
+    free_regions(model, &[rh]);
+}
+
+/// Free regions and every trace of their identity (arena slot, paint, rect, name, id), so a held
+/// wrapper raises as stale. The reference destroys them: `CSimpleButton::SetFontString` the label
+/// it replaces (`0x778d3c`), a state-texture setter the texture it displaces (`0x77900a`), a
+/// backdrop teardown its pieces (`0x77f4d0`), a SimpleHTML parse its old blocks (`0x78a5aa`). The
+/// destructor (`0x767720` → `0x768e20`) unhooks every object anchored to a dying one with
+/// `0x767e70(dependent, dying, 0)`: each anchor naming it is freed, and the zero flag queues no
+/// resolve, so the dependent keeps its state until the resolve reaches it.
+pub(crate) fn free_regions(model: &mut Model, dying: &[RegionHandle]) {
+    let mut ids = Vec::with_capacity(dying.len());
+    for &rh in dying {
+        model.region_data.remove(&rh);
+        model.region_resolved.remove(&rh);
+        model.region_kept.remove(&rh);
+        let name = model.arena.region(rh).and_then(|r| r.name.clone());
+        if let Some(id) = model.region_to_id.remove(&rh) {
+            model.id_to_region.remove(&id);
+            model.layout_unsettled.remove(&id);
+            // The lookup entry goes only if this region is the one it holds; a later holder of the
+            // same name was never in it.
+            if let Some(name) = name {
+                if model.region_by_name.get(&name) == Some(&id) {
+                    model.region_by_name.remove(&name);
+                }
+            }
+            // Its node leaves the cached graph with its edges at the next resolve.
+            model.name_layout_node(id);
+            ids.push(id);
+        }
+        model.arena.destroy_region(rh);
+    }
+    // Only a region with an id can be an anchor target.
+    if ids.is_empty() {
+        return;
+    }
+    let mut regions: Vec<RegionHandle> = Vec::new();
+    let mut frames: Vec<crate::widget::FrameHandle> = Vec::new();
+    match &model.layout_touched {
+        // The cached graph's readers of each dying id, and every node a write named since it was
+        // built, are all that can anchor to one.
+        Some(named) => {
+            let mut maybe = named.clone();
+            for &id in &ids {
+                maybe.extend(model.layout_scope.readers_of(id));
+            }
+            maybe.sort_unstable();
+            maybe.dedup();
+            for id in maybe {
+                if let Some(&rh) = model.id_to_region.get(&id) {
+                    if let Some(d) = model.region_data.get_mut(&rh) {
+                        if d.anchors.release_targets(&ids) {
+                            regions.push(rh);
+                        }
+                    }
+                } else if let Some(&h) = model.id_to_frame.get(&id) {
+                    if let Some(i) = model.layout_inputs.get_mut(&h) {
+                        if i.anchors.release_targets(&ids) {
+                            frames.push(h);
+                        }
+                    }
+                }
             }
         }
-        // Its node leaves the cached graph with its edges at the next resolve. What anchored to
-        // it is not invalidated (`0x768e20` unhooks each with `0x767e70`, flag 0), so it keeps
-        // its state.
-        model.name_layout_node(id);
+        // No graph to vouch for: every object.
+        None => {
+            for (&rh, d) in model.region_data.iter_mut() {
+                if d.anchors.release_targets(&ids) {
+                    regions.push(rh);
+                }
+            }
+            for (&h, i) in model.layout_inputs.iter_mut() {
+                if i.anchors.release_targets(&ids) {
+                    frames.push(h);
+                }
+            }
+        }
     }
-    model.arena.destroy_region(rh);
+    // Under `WOW_LAYOUT_VERIFY` the graph's answer is checked against every object.
+    if model.layout_touched.is_some() && super::layout::layout_verify_enabled() {
+        let missed = model
+            .region_data
+            .values()
+            .map(|d| &d.anchors)
+            .chain(model.layout_inputs.values().map(|i| &i.anchors))
+            .any(|a| a.iter().any(|a| ids.contains(&a.relative_to)));
+        assert!(
+            !missed,
+            "WOW_LAYOUT_VERIFY: an object anchored to a freed region was not among the cached \
+             graph's readers of it or the nodes named since"
+        );
+    }
+    // Each dependent re-derives its edges and keeps the state it has.
+    for rh in regions {
+        model.unsettle_region(rh);
+    }
+    for h in frames {
+        model.unsettle_frame(h);
+    }
 }
 
 pub(super) fn region_owner_id(model: &mut Model, rh: RegionHandle) -> u32 {
@@ -738,7 +819,8 @@ pub(crate) fn implicit_creation_anchor(model: &mut Model, rh: RegionHandle) {
         }
         RegionKind::Title => return,
     }
-    model.touch_layout_region(rh);
+    // Both set their points with the invalidate flag (`0x7701ec`, `0x7714bc`).
+    model.invalidate_region(rh, true);
 }
 
 /// The middle-row point a justify word selects, as the FontString post-step (`0x771480`) and the
@@ -767,7 +849,8 @@ pub(crate) fn anchor_unanchored_at(
         return;
     }
     data.anchors = Anchors::from([Anchor::new(point, owner_id, point, 0.0, 0.0)]);
-    model.touch_layout_region(rh);
+    // The adopter's `SetPoint` invalidates (`0x778d96`, flag 1).
+    model.invalidate_region(rh, true);
 }
 
 /// [`implicit_creation_anchor`] for the loader, which holds region wrappers.
