@@ -90,6 +90,7 @@ pub(super) fn doll_click(model: &mut Model, id: u32) -> DollClick {
                     quality: Some(u32::try_from(s.quality).unwrap_or(0)),
                     count: None,
                     bar_placeable: s.bar_placeable,
+                    consumable: s.consumable,
                     equip_slots: s.equip_slots.clone(),
                 });
             match picked {
@@ -355,6 +356,7 @@ mod tests {
             duration_ms: None,
             already_bound: false,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             flags: 0,
             item_id: 1234,
@@ -373,6 +375,7 @@ mod tests {
             duration_ms: None,
             already_bound: false,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             flags: 0,
             item_id: 555,
@@ -391,6 +394,7 @@ mod tests {
             duration_ms: None,
             already_bound: false,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             flags: 0,
             item_id: 999,
@@ -419,6 +423,7 @@ mod tests {
                 petition: None,
                 already_bound: false,
                 bar_placeable: true,
+                consumable: false,
                 durability: None,
                 texture: Some("Interface\\Icons\\INV_Helmet_02".into()),
                 count: 1,
@@ -572,6 +577,7 @@ mod tests {
             duration_ms: None,
             already_bound: false,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             flags: 0,
             item_id: 4496,
@@ -612,6 +618,7 @@ mod tests {
                 petition: None,
                 already_bound: false,
                 bar_placeable: true,
+                consumable: false,
                 durability: None,
                 texture: Some("Interface\\Icons\\INV_Misc_Bag_08".into()),
                 count: 1,
@@ -677,6 +684,8 @@ mod tests {
             kind: 0,
             action: 1,
             texture: None,
+            count: 0,
+            consumable: false,
         }));
         assert!(!s.eval::<bool>("return CursorCanGoInSlot(1)").unwrap());
     }
@@ -1025,6 +1034,8 @@ mod tests {
                 kind: 0x80,
                 action: 4540,
                 texture: None,
+                count: 0,
+                consumable: false,
             }),
             CursorPayload::Merchant(CursorMerchantItem {
                 item_id: 159,
@@ -1077,6 +1088,7 @@ mod tests {
             count: None,
             quality: None,
             bar_placeable: false,
+            consumable: false,
             equip_slots: vec![20, 21, 22, 23],
         }));
         assert!(auto_equip_cursor_item(&mut s.model_mut()));

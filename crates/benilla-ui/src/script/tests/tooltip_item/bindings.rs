@@ -70,6 +70,7 @@ fn merchant_compare_renders_the_compare_shape_and_no_hover_seats_a_plate() {
             petition: None,
             already_bound: false,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             texture: None,
             count: 1,
@@ -447,7 +448,6 @@ fn set_trade_skill_item_indexes_visible_rows_not_raw_recipes() {
             ts_recipe(3, "Beta Cloak", (2, 1, "Cloak")),
             ts_recipe(4, "Alpha Cloak", (2, 1, "Cloak")),
         ],
-        repeat_count: 1,
     }));
     assert_eq!(s.eval::<i64>("return GetNumTradeSkills()").unwrap(), 6);
 

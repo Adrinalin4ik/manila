@@ -68,6 +68,7 @@ impl CursorPayload {
                 quality: None,
                 equip_slots: Vec::new(),
                 bar_placeable: false,
+                consumable: false,
             }),
             CursorPayload::Spell(_) => CursorPayload::Spell(CursorSpell {
                 spell_id: 0,
@@ -79,6 +80,8 @@ impl CursorPayload {
                 kind: a.kind,
                 action: 0,
                 texture: None,
+                count: 0,
+                consumable: false,
             }),
             CursorPayload::Macro(_) => CursorPayload::Macro(CursorMacro {
                 index: 0,
@@ -89,6 +92,7 @@ impl CursorPayload {
                 packed: 0,
                 passive: false,
                 texture: None,
+                view: Default::default(),
             }),
             CursorPayload::Merchant(_) => CursorPayload::Merchant(CursorMerchantItem {
                 item_id: 0,
@@ -180,6 +184,9 @@ pub struct CursorItem {
     pub equip_slots: Vec<u8>,
     /// Whether `PlaceAction` accepts it, its only item filter.
     pub bar_placeable: bool,
+    /// The source record's `IsConsumableAction` gate (`0x4e5250`), which a place onto the bar
+    /// writes with the slot.
+    pub consumable: bool,
 }
 
 /// How many items the cursor holds. A whole-stack pickup has `count: None`, so the size is read
@@ -216,6 +223,10 @@ pub struct CursorAction {
     pub kind: u8,
     pub action: u32,
     pub texture: Option<String>,
+    /// The source slot's [`super::ActionSlot::count`] and `consumable`, which a place writes back,
+    /// so the slot's `ACTIONBAR_SLOT_CHANGED` handler reads them before the app's re-feed.
+    pub count: u32,
+    pub consumable: bool,
 }
 
 /// A pet-bar payload, mode 4, from `PickupPetAction` or the pet spellbook: the packed action word
@@ -230,6 +241,9 @@ pub struct CursorPetAction {
     /// `Attributes & 0x40` of a spell word, tested at the drop, not the pickup (`0x4bc9f8`).
     pub passive: bool,
     pub texture: Option<String>,
+    /// The bar's paint of the word, which a drop writes with it, so the drop's `PET_BAR_UPDATE`
+    /// handler reads the slot as it now stands.
+    pub view: super::PetActionView,
 }
 
 /// A macro payload from `PickupMacro`, mode 8: the bare macro id (`[0xb4e2fc]`), which
@@ -561,6 +575,7 @@ pub(crate) fn split_container_item(lua: &Lua, bag: i64, slot: u32, count: i64) -
             quality: s.quality,
             count: if whole { None } else { Some(n) },
             bar_placeable: s.bar_placeable,
+            consumable: s.consumable,
             equip_slots: s.equip_slots.clone(),
         }
     };
@@ -978,6 +993,7 @@ mod tests {
                 petition: None,
                 already_bound: false,
                 bar_placeable: true,
+                consumable: false,
                 durability: None,
                 texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
                 count: 5,
@@ -1075,6 +1091,7 @@ mod tests {
             item_class: None,
             guid: 0x106,
             bar_placeable: true,
+            consumable: false,
             bag: 0,
             slot: 1,
             item_id: 117,
@@ -1100,6 +1117,8 @@ mod tests {
             kind: 0,
             action: 133,
             texture: None,
+            count: 0,
+            consumable: false,
         }));
         assert_eq!(ask(&mut s, "CursorHasItem"), NO);
         assert_eq!(ask(&mut s, "CursorHasSpell"), NO);
@@ -1279,6 +1298,7 @@ mod tests {
             item_class: None,
             guid: 0x107,
             bar_placeable: true,
+            consumable: false,
             bag: 0,
             slot: 1,
             item_id: 117,
@@ -1366,6 +1386,8 @@ mod tests {
             kind: 0,
             action: 1,
             texture: None,
+            count: 0,
+            consumable: false,
         }));
         s.run("DeleteCursorItem()").unwrap();
         assert!(
