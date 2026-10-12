@@ -649,6 +649,9 @@ pub(crate) struct Model {
     /// `HasFullControl`, the reference's `[0xb4b3e4]`: set by `SMSG_CLIENT_CONTROL_UPDATE` for the
     /// player, boots 1, and every cast, item and cursor gate refuses at 0.
     pub(crate) player_control: bool,
+    /// The on-use spells that pass the item dispatcher's control gate without control of the
+    /// character (`0x5d8ec0`-`0x5d8f6a`), fed by the app.
+    pub(crate) control_bypass: HashSet<u32>,
     /// One `CMSG_PET_SET_ACTION` per entry, its one or two `(position, packed word)` pairs: the
     /// server tells the forms apart by body size, so a move's two pairs must not be flattened.
     pub(crate) pet_set_actions: Vec<Vec<(u32, u32)>>,
@@ -697,6 +700,8 @@ pub(crate) struct Model {
     pub(crate) ui_cursor_dirty: bool,
     /// `AutoEquipCursorItem`'s `(bag, slot)` sources, sent as `CMSG_AUTOEQUIP_ITEM`.
     pub(crate) container_autoequips: Vec<(i64, u32)>,
+    /// `AutoEquipCursorItem`'s bind-on-equip questions, `(bag, slot, guid)`: the item stays held.
+    pub(crate) container_equip_asks: Vec<(i64, u32, u64)>,
     /// `PutItemInBag` and `PutItemInBackpack` stores, sent as `CMSG_AUTOSTORE_BAG_ITEM`, or
     /// `CMSG_SPLIT_ITEM` for a split stack.
     pub(crate) bag_autostores: Vec<container::BagAutoStore>,
@@ -1431,6 +1436,7 @@ impl Model {
             pet_autocast_toggles: Vec::new(),
             pet_stop_attacks: 0,
             player_control: true,
+            control_bypass: HashSet::new(),
             pet_set_actions: Vec::new(),
             pet_abandons: 0,
             pet_dismisses: 0,
@@ -1452,6 +1458,7 @@ impl Model {
             ui_cursor: None,
             ui_cursor_dirty: false,
             container_autoequips: Vec::new(),
+            container_equip_asks: Vec::new(),
             bag_autostores: Vec::new(),
             drag_registered: HashMap::new(),
             drag: None,

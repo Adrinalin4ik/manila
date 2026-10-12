@@ -104,6 +104,7 @@ mod item_stats;
 mod item_text;
 pub mod keybind;
 mod keyboard;
+pub(crate) mod use_gates;
 pub(crate) use keyboard::enable_for_script;
 pub use keyboard::{KeyUp, KeyWalk};
 mod layout;
@@ -209,6 +210,7 @@ pub use container::{
     PendingWrap, PetitionSlotView, RandomPropertyView, UiCursorMode, UseArm, UseFork,
 };
 pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
+pub use cursor::equip::{AutoEquip, BIND_WHEN_EQUIPPED};
 pub use cursor::money::coin_icon;
 pub use cursor::{
     CursorAction, CursorItem, CursorMacro, CursorMerchantItem, CursorMoney, CursorPayload,
