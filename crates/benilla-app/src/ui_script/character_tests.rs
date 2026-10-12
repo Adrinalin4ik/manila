@@ -64,7 +64,7 @@ fn inventory_with_head_item() -> InventorySlots {
         quality: 2,
         name: Some("Test Helm".into()),
         link: Some("|cff1eff00|Hitem:1234:0:0:0|h[Test Helm]|h|r".into()),
-        locked: false,
+        guid: 0x70e,
         equip_slots: vec![1],
         creator: None,
         enchants: Vec::new(),
@@ -78,6 +78,8 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
     slots.insert(
         1,
         benilla_ui::script::ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
@@ -89,7 +91,7 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
             inventory_type: 0,
             item_id: 2000,
             link: Some("|cff0070dd|Hitem:2000:0:0:0|h[Another Helm]|h|r".into()),
-            locked: false,
+            guid: 0x70f,
             equip_slots: vec![1],
             cooldown: None,
             readable: false,

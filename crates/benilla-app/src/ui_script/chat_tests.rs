@@ -352,6 +352,8 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
     slots.insert(
         1,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
@@ -363,7 +365,7 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
             inventory_type: 0,
             item_id: 117,
             link: None,
-            locked: false,
+            guid: 0x710,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,

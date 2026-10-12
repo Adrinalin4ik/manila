@@ -12,6 +12,8 @@ fn one_item_backpack() -> ContainerState {
     slots.insert(
         1,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
@@ -23,7 +25,7 @@ fn one_item_backpack() -> ContainerState {
             inventory_type: 0,
             item_id: 117,
             link: Some("|cffffffff|Hitem:117|h[Tough Jerky]|h|r".into()),
-            locked: false,
+            guid: 0x712,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,
@@ -253,6 +255,8 @@ fn escape_closes_an_open_stack_split_frame() {
     slots.insert(
         1,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
@@ -264,7 +268,7 @@ fn escape_closes_an_open_stack_split_frame() {
             inventory_type: 0,
             item_id: 117,
             link: Some("|cffffffff|Hitem:117|h[Tough Jerky]|h|r".into()),
-            locked: false,
+            guid: 0x713,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,

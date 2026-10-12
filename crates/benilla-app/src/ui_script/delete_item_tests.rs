@@ -14,6 +14,8 @@ fn one_item_backpack(item_id: u32, name: &str, quality: u32) -> ContainerState {
     slots.insert(
         1,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
@@ -25,7 +27,7 @@ fn one_item_backpack(item_id: u32, name: &str, quality: u32) -> ContainerState {
             inventory_type: 0,
             item_id,
             link: Some(format!("|cffffffff|Hitem:{item_id}|h[{name}]|h|r")),
-            locked: false,
+            guid: 0x711,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,

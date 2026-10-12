@@ -1175,6 +1175,8 @@ fn shipped_bag_frame_drives_end_to_end() {
     slots.insert(
         1,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
@@ -1186,7 +1188,7 @@ fn shipped_bag_frame_drives_end_to_end() {
             inventory_type: 0,
             item_id: 117,
             link: None,
-            locked: false,
+            guid: 0x705,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,
