@@ -15,6 +15,13 @@ Nothing was copied from it.
 
 ## benilla: the client disagrees with the 1.12 reference
 
+**Checked against `samwhosung/benilla` `main` at `0127b869` on 2026-10-12.** Upstream has already
+fixed items 1 and 2 itself, with the same reading of the reference, and item 16 with them. Items
+3 to 6 and 15 are still open there and are offered as five single-fix branches (see
+`PR_DRAFTS.md`). Items 7 and 9 and the two test repairs turned out to fix failures in manila's
+own `main`, so they travel with the manila fixes; item 9 also runs against a choice upstream made
+on purpose (its comment prefers a plain `Local` there). Item 8 was not ported.
+
 | # | Commit | Fault | Fix | Files |
 |---|--------|-------|-----|-------|
 | 1 | `ff25c682` | `Frame:GetWidth()` and `GetHeight()` divided the resolved span by the effective scale and preferred it over an authored size. The reference (`0x7a1e00`, `0x7a2030`) returns the authored size unless it is exactly 0, else the resolved span with the scale still in it. Addons written for 1.12 divide the scale out themselves, so under any UI scale other than 1 their bars overfill and an empty bar resolves inside out. | Return the authored size when non-zero, else the resolved span undivided. | `benilla-ui/src/script/object/layout_methods.rs` |
