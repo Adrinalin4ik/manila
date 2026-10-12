@@ -22,8 +22,7 @@ Nothing was copied from it.
 
 **Checked against `samwhosung/benilla` `main` at `0127b869` on 2026-10-12.** Upstream has already
 fixed items 1 and 2 itself, with the same reading of the reference, and item 16 with them. Items
-3 to 6 and 15 are still open there and are offered as five single-fix branches (see
-`PR_DRAFTS.md`). Items 7 and 9 and the two test repairs turned out to fix failures in manila's
+3 to 6 and 15 are still open there. Items 7 and 9 and the two test repairs turned out to fix failures in manila's
 own `main`, so they travel with the manila fixes; item 9 also runs against a choice upstream made
 on purpose (its comment prefers a plain `Local` there). Item 8 was not ported.
 
