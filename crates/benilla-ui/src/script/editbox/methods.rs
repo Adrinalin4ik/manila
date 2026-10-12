@@ -57,13 +57,13 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
-    // GetNumber: the real text as a number, else 0. The reference (`0x798790`) is atof, which also
-    // reads the leading number of a text like "12abc".
+    // GetNumber (`0x798790`): the real text through Storm's `SStrToFloat` (`0x64aaa0`), a prefix
+    // parse, so "12abc" is 12 and " 12", "+12" and "inf" are 0.
     m.set(
         "GetNumber",
         lua.create_function(|lua, this: Table| {
             let text = with_editbox(lua, &this, |eb| eb.text.clone())?;
-            Ok(text.trim().parse::<f64>().unwrap_or(0.0))
+            Ok(crate::script::binding_abi::s_str_to_float(&text))
         })?,
     )?;
     // Insert: a nil is a no-op, not an error, since the reference reads the argument through
@@ -293,8 +293,10 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         let refresh_text = name == "SetMultiLine";
         m.set(
             name,
-            lua.create_function(move |lua, (this, v): (Table, Value)| {
-                let on = !matches!(v, Value::Nil | Value::Boolean(false));
+            lua.create_function(move |lua, (this, args): (Table, mlua::MultiValue)| {
+                // `GetBoolOrDefault` (`0x6f1c10`) with default 1 (`0x797d1e`, `0x797e8e`,
+                // `0x797ffe`, `0x79816e`): a bare call enables, `"0"` and `nil` disable.
+                let on = crate::script::binding_abi::bool_or_default(args.front(), true);
                 with_editbox(lua, &this, |eb| set(eb, on))?;
                 if refresh_text {
                     // A multi-line box seats its text TOP and as tall as the text, a single-line
@@ -372,7 +374,7 @@ fn install_font_block(lua: &Lua, m: &Table) -> mlua::Result<()> {
 /// A `Set<Flag>` method name and the field write it drives.
 type FlagSetter = (&'static str, fn(&mut EditBoxState, bool));
 
-/// The four config-flag setters, each taking Lua truthiness.
+/// The four config-flag setters, each reading its flag with `GetBoolOrDefault`.
 fn flag_setters() -> [FlagSetter; 4] {
     [
         ("SetAutoFocus", |eb, on| eb.auto_focus = on),

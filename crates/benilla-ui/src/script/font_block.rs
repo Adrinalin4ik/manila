@@ -314,16 +314,17 @@ pub(super) fn install(
     m.set(
         "SetTextColor",
         lua.create_function(
-            move |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
+            move |lua, (this, r, g, b, a): (Table, Value, Value, Value, Value)| {
+                let a = super::object::alpha_f32(lua, &a);
                 let (r, g, b) = (
-                    super::object::as_f32(&r),
-                    super::object::as_f32(&g),
-                    super::object::as_f32(&b),
+                    super::object::tonumber_f32(lua, &r),
+                    super::object::tonumber_f32(lua, &g),
+                    super::object::tonumber_f32(lua, &b),
                 );
                 let rh = resolve(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let d = model.region_data.entry(rh).or_default();
-                d.vertex_color = Some([r, g, b, a.unwrap_or(1.0)]);
+                d.vertex_color = Some([r, g, b, a]);
                 // Clears the colour inherit bit (`0x79dbd0`): it survives a font-object repaint.
                 d.font_explicit.color = true;
                 Ok(())
@@ -353,11 +354,12 @@ pub(super) fn install(
         "SetShadowColor",
         lua.create_function(
             // r, g and b are a bare `lua_tonumber` (`0x79dd40`), as in `SetTextColor`.
-            move |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
+            move |lua, (this, r, g, b, a): (Table, Value, Value, Value, Value)| {
+                let a = super::object::alpha_f32(lua, &a);
                 let (r, g, b) = (
-                    super::object::as_f32(&r),
-                    super::object::as_f32(&g),
-                    super::object::as_f32(&b),
+                    super::object::tonumber_f32(lua, &r),
+                    super::object::tonumber_f32(lua, &g),
+                    super::object::tonumber_f32(lua, &b),
                 );
                 let rh = resolve(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
@@ -365,7 +367,7 @@ pub(super) fn install(
                 let offset = d.font_shadow.map_or([0.0, 0.0], |s| s.offset);
                 d.font_shadow = Some(FontShadow {
                     offset,
-                    color: [r, g, b, a.unwrap_or(1.0)],
+                    color: [r, g, b, a],
                 });
                 d.font_explicit.shadow = true;
                 Ok(())
