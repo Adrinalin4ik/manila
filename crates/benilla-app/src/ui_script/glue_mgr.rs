@@ -96,9 +96,9 @@ use benilla_ui::script::{
 use crate::login::queue::QueueEstimate;
 use crate::login::GlueLogin;
 use crate::net::{
-    CharListMessage, CharRequest, DisconnectedMessage, LoginFailedMessage, LoginQueuedMessage,
-    LoginStageMessage, ParkRequest, RealmListMessage, RealmRequest, RosterFailedMessage,
-    WorldAuthMessage,
+    AddonInfoMessage, AddonInfoReply, CharListMessage, CharRequest, DisconnectedMessage,
+    LoginFailedMessage, LoginQueuedMessage, LoginStageMessage, ParkRequest, RealmListMessage,
+    RealmRequest, RosterFailedMessage, WorldAuthMessage,
 };
 
 /// `CGlueMgr`'s `screenState` (`0xb41da0`), named by the functions that set each value: the
@@ -1125,6 +1125,8 @@ pub(crate) struct LoginNews<'w, 's> {
     roster_failures: MessageReader<'w, 's, RosterFailedMessage>,
     realm_lists: MessageReader<'w, 's, RealmListMessage>,
     disconnects: MessageReader<'w, 's, DisconnectedMessage>,
+    addon_infos: MessageReader<'w, 's, AddonInfoMessage>,
+    addon_reply: Option<Res<'w, AddonInfoReply>>,
 }
 
 /// What the manager asks of the rest of the app.
@@ -1133,6 +1135,7 @@ pub(crate) struct GlueAsks<'w> {
     login: MessageWriter<'w, GlueLogin>,
     music: MessageWriter<'w, crate::sound::GlueMusicRequest>,
     launch: MessageWriter<'w, super::server_alert::LaunchUrl>,
+    launch_addon: MessageWriter<'w, super::server_alert::LaunchAddonUrl>,
     realm: Option<Res<'w, crate::net::RealmChoice>>,
     abandon: Option<Res<'w, crate::net::LoginAbandon>>,
 }
@@ -1212,6 +1215,12 @@ pub(crate) fn drive_glue_mgr(
             s.set_glue_saved_account(&crate::login::load_saved_account());
             s.set_glue_realm_cells(mgr.realm_cells);
             s.set_glue_select_cells(mgr.select_cells);
+            // The AddOn registry and the reply the session has read; the reference's C globals
+            // outlive the glue's Lua state.
+            super::addons::seat_glue_addons(
+                s,
+                news.addon_reply.as_deref().and_then(|r| r.0.as_deref()),
+            );
             mgr.holder_moved = true;
             fresh_vm = true;
         }
@@ -1274,6 +1283,10 @@ pub(crate) fn drive_glue_mgr(
                 }
                 GlueRequest::QuitGame => logins.push(GlueLogin::Quit),
                 // `0x5abd00`, past the whitelist the verb applied (`0x5abc10`).
+                GlueRequest::LaunchAddonUrl(url) => {
+                    asks.launch_addon
+                        .write(super::server_alert::LaunchAddonUrl(url));
+                }
                 GlueRequest::LaunchUrl(url) => {
                     asks.launch.write(super::server_alert::LaunchUrl(url));
                 }
@@ -1287,6 +1300,17 @@ pub(crate) fn drive_glue_mgr(
             }
         }
         mgr.realm_cells = s.glue_realm_cells();
+    }
+
+    // `SMSG_ADDON_INFO` read (`0x5b4260`): the index rebuilt from the reply (`0x51da70`), then
+    // the listener's `ADDON_LIST_UPDATE` (`0x5b4290`).
+    for msg in news.addon_infos.read() {
+        // Only the glue VM (`script` is filtered to it above); with none up, `AddonInfoReply`
+        // holds the list for the next one.
+        if let Some(s) = script.as_deref_mut() {
+            s.note_addon_info_records(super::addons::addon_replies(&msg.records));
+            s.fire_event("ADDON_LIST_UPDATE", Vec::new());
+        }
     }
 
     // The native login's news.

@@ -3,7 +3,10 @@ use std::sync::Arc;
 
 use super::*;
 use crate::char_select::ClientState;
-use crate::net::{LoginAbandon, LoginRequest, LoginSubmit, RosterFailedMessage, WorldAuthMessage};
+use crate::net::{
+    AddonInfoMessage, AddonInfoReply, LoginAbandon, LoginRequest, LoginSubmit, RosterFailedMessage,
+    WorldAuthMessage,
+};
 use benilla_protocol::{RealmInfo, SessionEnd};
 
 /// The manager with both agreements accepted, the way a returning player's CVars seed it.
@@ -766,11 +769,14 @@ fn stock_app() -> (
         .add_message::<CharListMessage>()
         .add_message::<WorldAuthMessage>()
         .add_message::<RosterFailedMessage>()
+        .add_message::<AddonInfoMessage>()
+        .init_resource::<AddonInfoReply>()
         .add_message::<RealmListMessage>()
         .add_message::<DisconnectedMessage>()
         .add_message::<GlueLogin>()
         .add_message::<crate::sound::GlueMusicRequest>()
         .add_message::<crate::ui_script::server_alert::LaunchUrl>()
+        .add_message::<crate::ui_script::server_alert::LaunchAddonUrl>()
         .add_message::<AppExit>()
         .init_resource::<crate::portrait::GluePreview>()
         .add_systems(
@@ -1014,6 +1020,8 @@ fn pump(
     mut auths: MessageWriter<WorldAuthMessage>,
     mut failed_rosters: MessageWriter<RosterFailedMessage>,
     mut queued: MessageWriter<LoginQueuedMessage>,
+    mut addon_infos: MessageWriter<AddonInfoMessage>,
+    mut addon_reply: ResMut<AddonInfoReply>,
 ) {
     use benilla_protocol::SessionEvent as E;
     for ev in events.0.try_iter() {
@@ -1071,6 +1079,10 @@ fn pump(
             }
             E::LoginQueued { position, realm } => {
                 queued.write(LoginQueuedMessage { position, realm });
+            }
+            E::AddonInfo { records } => {
+                addon_reply.0 = Some(records.clone());
+                addon_infos.write(AddonInfoMessage { records });
             }
             _ => {}
         }
@@ -1131,11 +1143,14 @@ fn live_app_with(
         .add_message::<CharListMessage>()
         .add_message::<WorldAuthMessage>()
         .add_message::<RosterFailedMessage>()
+        .add_message::<AddonInfoMessage>()
+        .init_resource::<AddonInfoReply>()
         .add_message::<RealmListMessage>()
         .add_message::<DisconnectedMessage>()
         .add_message::<GlueLogin>()
         .add_message::<crate::sound::GlueMusicRequest>()
         .add_message::<crate::ui_script::server_alert::LaunchUrl>()
+        .add_message::<crate::ui_script::server_alert::LaunchAddonUrl>()
         .add_message::<AppExit>()
         .init_resource::<crate::portrait::GluePreview>()
         .add_systems(
@@ -1401,9 +1416,8 @@ fn roster3() -> Vec<benilla_protocol::Character> {
 /// The stock login for `roster`, `lastCharacterIndex` as given, a realm chosen or not, with the
 /// events the roster fires logged into the VM's `EVENTS`.
 ///
-/// `GetNumAddOns` is the add-on list's verb, which this screen's `OnShow` reaches first
-/// (`UpdateAddonButton`, `AddonList.lua:4`) and which the glue VM does not have yet; the test
-/// defines it empty, or the show raises there and never asks for the list.
+/// Nothing is stubbed: the screen's `OnShow` reaches the add-on list's verbs first
+/// (`UpdateAddonButton`, `AddonList.lua:4`) and the glue VM answers them.
 fn char_select_app(
     roster: &[benilla_protocol::Character],
     last: &str,
@@ -1414,19 +1428,25 @@ fn char_select_app(
         &[roster],
         last,
         chosen,
+        None,
     )
 }
 
 /// [`char_select_app`] over `realms`, the account holding `rosters[n]` on the world session
-/// that begins `n`th (the last repeats).
+/// that begins `n`th (the last repeats). `reply` seats the `SMSG_ADDON_INFO` every session is
+/// sent on the fake world, before the login dials; none is no reply at all.
 fn char_select_app_on(
     realms: impl FnOnce(&str) -> Vec<FakeRealm>,
     rosters: &[&[benilla_protocol::Character]],
     last: &str,
     chosen: bool,
+    reply: Option<&dyn Fn(&fake::World)>,
 ) -> (App, fake::Realmd, fake::World) {
     let (mut app, realmd, world) = live_app_with(realms, "Alpha", rosters[0]);
     world.set_rosters(rosters);
+    if let Some(seat) = reply {
+        seat(&world);
+    }
     if chosen {
         app.world_mut().resource_mut::<GlueMgr>().realm_cells.chosen = Some(0);
         // The fresh VM takes the cells on the next frame.
@@ -1437,11 +1457,13 @@ fn char_select_app_on(
         script.set_cvar_engine("lastCharacterIndex", last);
         script
             .run(
-                "function GetNumAddOns() return 0 end \
-                 EVENTS = {} \
+                "EVENTS = {} \
                  local f = CreateFrame('Frame', 'RosterListener') \
                  f:SetScript('OnEvent', function() \
-                   table.insert(EVENTS, event .. ' ' .. tostring(arg1)) end) \
+                   local a = arg1 \
+                   if event == 'ADDON_LIST_UPDATE' then a = GetNumAddOns() end \
+                   table.insert(EVENTS, event .. ' ' .. tostring(a)) end) \
+                 f:RegisterEvent('ADDON_LIST_UPDATE') \
                  f:RegisterEvent('CHARACTER_LIST_UPDATE') \
                  f:RegisterEvent('UPDATE_SELECTED_CHARACTER')",
             )
@@ -1830,6 +1852,7 @@ fn showing_the_screen_then_changing_realm_asks_the_old_link_once() {
             &[&alpha, &bravo],
             "0",
             true,
+            None,
         );
         until(&mut app, "the first roster", |app| {
             seen(app, "CHARACTER_LIST_UPDATE") >= 2
@@ -2046,4 +2069,377 @@ fn launch_url_reaches_the_host_for_a_whitelisted_url() {
         .map(|m| m.0.clone())
         .collect();
     assert_eq!(launched, ["http://www.worldofwarcraft.com/news"]);
+}
+
+// ── The AddOns screen under the stock select (`AddonList.lua`) ──
+
+/// An AddOns folder under a temp `benilla-config`, `BENILLA_HOME` on it while the guard lives.
+fn addon_home(tag: &str) -> (std::path::PathBuf, crate::local_state::test_env::EnvGuard) {
+    let tmp =
+        std::env::temp_dir().join(format!("benilla-glue-addons-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let home = tmp.join("benilla-config");
+    std::fs::create_dir_all(home.join("AddOns")).unwrap();
+    let guard = crate::local_state::test_env::EnvGuard::set("BENILLA_HOME", home.to_str().unwrap());
+    (home, guard)
+}
+
+fn write_addon(home: &std::path::Path, name: &str, toc: &str) {
+    let dir = home.join("AddOns").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{name}.toc")), toc).unwrap();
+}
+
+/// Three addons by title: Alpha ("Alpha Title"), Beta, and Gamma, which is out of date. The
+/// realm `Alpha`'s characters: Alpha has Alpha on, Bravo has it off, Charlie has no file.
+fn three_addons(home: &std::path::Path) {
+    write_addon(
+        home,
+        "Alpha",
+        "## Interface: 11200\n## Title: Alpha Title\n## Notes: the first\n",
+    );
+    write_addon(
+        home,
+        "Beta",
+        "## Interface: 11200\n## Dependencies: Alpha\n",
+    );
+    write_addon(home, "Gamma", "## Interface: 11100\n");
+    let dir = home.join("addon-state");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Alpha-Alpha.txt"), "Alpha: enabled\n").unwrap();
+    std::fs::write(dir.join("Alpha-Bravo.txt"), "Alpha: disabled\n").unwrap();
+}
+
+/// Every enable file under `home/addon-state`, by file name.
+fn enable_files(home: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    std::fs::read_dir(home.join("addon-state"))
+        .map(|d| {
+            d.flatten()
+                .map(|e| {
+                    (
+                        e.file_name().to_string_lossy().into_owned(),
+                        std::fs::read(e.path()).unwrap(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Up to the loaded roster.
+fn at_the_roster(app: &mut App) {
+    until(app, "the roster", |app| {
+        seen(app, "CHARACTER_LIST_UPDATE") >= 2
+            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+    });
+}
+
+/// The stock select over `roster3`'s account on realm `Alpha`, `three_addons`' folder under the
+/// current `BENILLA_HOME`, and `reply` the server's `SMSG_ADDON_INFO`.
+fn three_addon_app(reply: Option<&dyn Fn(&fake::World)>) -> (App, fake::Realmd, fake::World) {
+    char_select_app_on(
+        |world| vec![FakeRealm::new("Alpha", world)],
+        &[&roster3()],
+        "1",
+        false,
+        reply,
+    )
+}
+
+/// The stock select runs end to end with nothing stubbed: its `OnShow` reaches
+/// `GetCharacterListUpdate` past `UpdateAddonButton`, the add-ons button shows for the registry
+/// the server's reply left, and the stock `AddonList` opens, shows each row through the glue
+/// verbs, toggles through its checkboxes, and Okay writes the files the native screen writes.
+#[test]
+fn the_stock_addon_list_opens_toggles_and_saves_like_the_native_screen() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let _l = crate::local_state::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (home, _guard) = addon_home("stock");
+    three_addons(&home);
+
+    let (mut app, _realmd, world) = three_addon_app(Some(&|w| w.set_addon_info(&[2; 12], false)));
+    at_the_roster(&mut app);
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+    assert_eq!(world.enumerations(), 1, "OnShow reached the list ask");
+    assert!(shown(&app, "CharacterSelect"));
+    assert!(
+        shown(&app, "CharacterSelectAddonsButton"),
+        "three addons are installed: UpdateAddonButton shows the button"
+    );
+    assert_eq!(
+        vm(&app).eval::<f64>("return GetNumAddOns()").unwrap(),
+        3.0,
+        "the twelve Blizzard addons are hidden by the reply"
+    );
+
+    // Open the list: the rows are the glue verbs' answers.
+    vm(&app).run("AddonList:Show()").unwrap();
+    app.update();
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+    let text = |app: &App, name: &str| {
+        vm(app)
+            .eval::<String>(&format!("return {name}:GetText() or ''"))
+            .unwrap()
+    };
+    assert_eq!(text(&app, "AddonListEntry1Title"), "Alpha Title");
+    assert_eq!(text(&app, "AddonListEntry2Title"), "Beta");
+    assert_eq!(text(&app, "AddonListEntry3Status"), "Out of date");
+    let states = |app: &App| {
+        vm(app)
+            .eval::<Vec<f64>>(
+                "return { AddonListEntry1Enabled.state, AddonListEntry2Enabled.state, \
+                          AddonListEntry3Enabled.state }",
+            )
+            .unwrap()
+    };
+    // Alpha is on for one character, off for another and, with no file for the third, the
+    // others' mixed answer's default: some. Beta and Gamma nobody set: their DefaultState.
+    assert_eq!(states(&app), [1.0, 2.0, 2.0]);
+
+    // The boxes toggle for All (nil): the checked mixed box clears, and so does Beta's.
+    vm(&app)
+        .run("AddonListEntry1Enabled:Click() AddonListEntry2Enabled:Click()")
+        .unwrap();
+    assert_eq!(states(&app), [0.0, 0.0, 2.0]);
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+
+    // One character's view: its own state, from the dropdown's selection.
+    vm(&app)
+        .run(
+            "GlueDropDownMenu_SetSelectedValue(AddonCharacterDropDown, 'Alpha') AddonList_Update()",
+        )
+        .unwrap();
+    vm(&app).run("AddonListEntry2Enabled:Click()").unwrap();
+    assert_eq!(states(&app), [0.0, 2.0, 2.0], "Alpha alone has Beta on");
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+
+    // Okay: SaveAddOns writes the changed nodes, then the list hides.
+    let before = enable_files(&home);
+    vm(&app).run("AddonList_OnOk()").unwrap();
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+    assert!(!shown(&app, "AddonList"));
+    let stock = enable_files(&home);
+    assert_ne!(before, stock);
+    let text = |name: &str| String::from_utf8(stock[name].clone()).unwrap();
+    assert_eq!(text("Alpha-Alpha.txt"), "Alpha: disabled\nBeta: enabled\n");
+    assert_eq!(text("Alpha-Bravo.txt"), "Alpha: disabled\nBeta: disabled\n");
+    assert_eq!(
+        text("Alpha-Charlie.txt"),
+        "Alpha: disabled\nBeta: disabled\n",
+        "a character with no file gets one, as every node the All view set is dirty"
+    );
+
+    // The native screen, given the same clicks on the same files, writes the same bytes.
+    let (native_home, _native_guard) = addon_home("native");
+    three_addons(&native_home);
+    let chars: Vec<String> = roster3().iter().map(|c| c.name.clone()).collect();
+    // All view: Alpha off and Beta off, then the view on Alpha with Beta on, as above.
+    crate::char_select::okay_after_clicks(
+        "Alpha",
+        &chars,
+        &[(None, 0, false), (None, 1, false), (Some(0), 1, true)],
+    );
+    assert_eq!(
+        stock,
+        enable_files(&native_home),
+        "the stock AddOns screen's files are the native screen's, byte for byte"
+    );
+}
+
+/// `ADDON_LIST_UPDATE` fires where the reference's handler for `SMSG_ADDON_INFO` does
+/// (`0x5b4260`, listener slot `0x5ab2f0`): once, when the reply has been read, with the index it
+/// rebuilt already in place, and ahead of the roster. A reply that trails the authentication
+/// answer fires it when it is read, behind the first list ask; one that never comes fires nothing
+/// and leaves the add-ons button hidden.
+#[test]
+fn addon_list_update_fires_once_when_the_reply_is_read() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let _l = crate::local_state::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (home, _guard) = addon_home("timing");
+    three_addons(&home);
+    let events = |app: &App| {
+        vm(app)
+            .eval::<Vec<String>>("return EVENTS")
+            .unwrap()
+            .into_iter()
+            .filter(|e| {
+                e.starts_with("ADDON_LIST_UPDATE") || e.starts_with("CHARACTER_LIST_UPDATE")
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // Ahead of the authentication answer (vmangos builds it in the auth handler): the count the
+    // event carries is the rebuilt index's, three, and the entry's teardown update and the
+    // roster come after.
+    let (mut app, _r, _w) = three_addon_app(Some(&|w| w.set_addon_info(&[2; 12], false)));
+    at_the_roster(&mut app);
+    assert_eq!(
+        events(&app)[..3],
+        [
+            "ADDON_LIST_UPDATE 3",
+            "CHARACTER_LIST_UPDATE nil",
+            "CHARACTER_LIST_UPDATE nil"
+        ],
+        "the reply, then the teardown and the roster"
+    );
+    assert_eq!(seen(&app, "ADDON_LIST_UPDATE"), 1, "once for the session");
+    // A second list ask on the same link does not read it again.
+    let before = seen(&app, "CHARACTER_LIST_UPDATE");
+    vm(&app).run("GetCharacterListUpdate()").unwrap();
+    until(&mut app, "the second roster", |app| {
+        seen(app, "CHARACTER_LIST_UPDATE") > before
+            && app.world().resource::<GlueMgr>().state == ScreenState::Idle
+    });
+    assert_eq!(
+        seen(&app, "ADDON_LIST_UPDATE"),
+        1,
+        "…and the event does not repeat"
+    );
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+    drop(app);
+
+    // Behind the answer: read with the first list ask, so after the entry's teardown update
+    // (`0x472580`) and before the roster's.
+    let (mut app, _r, _w) = three_addon_app(Some(&|w| w.set_addon_info(&[2; 12], true)));
+    at_the_roster(&mut app);
+    assert_eq!(
+        events(&app)[..3],
+        [
+            "CHARACTER_LIST_UPDATE nil",
+            "ADDON_LIST_UPDATE 3",
+            "CHARACTER_LIST_UPDATE nil"
+        ]
+    );
+    assert_eq!(seen(&app, "ADDON_LIST_UPDATE"), 1);
+    drop(app);
+
+    // No reply: no index space (`[0xbe1b90]` stays 0), no event, no button.
+    let (mut app, _r, _w) = three_addon_app(None);
+    at_the_roster(&mut app);
+    assert_eq!(seen(&app, "ADDON_LIST_UPDATE"), 0);
+    assert_eq!(vm(&app).eval::<f64>("return GetNumAddOns()").unwrap(), 0.0);
+    assert!(!shown(&app, "CharacterSelectAddonsButton"));
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+}
+
+/// The server's `SMSG_ADDON_INFO` records reach the registry the stock list reads (`0x51da70`):
+/// the url and the new-version byte beside a listed addon, BANNED for status 0 (refused, no url),
+/// and SECURE once the reply has run the signature check, which benilla answers 3 for an addon
+/// of the player's own chain that claims `## Secure`. A folder addon the reply never names stays
+/// INSECURE.
+#[test]
+fn the_server_reply_sets_the_security_url_and_new_version() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let _l = crate::local_state::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (home, _guard) = addon_home("reply");
+    three_addons(&home);
+    // The twelve in the order they were sent: the first listed with a url and a revision, the
+    // second banned with a url, the rest hidden.
+    let mut records: Vec<(u8, Option<u32>, Option<&str>)> = vec![(2, Some(0), None); 12];
+    records[0] = (1, Some(9), Some("http://example.com/auc"));
+    records[1] = (0, None, Some("http://example.com/bf"));
+    let (mut app, _realmd, _world) =
+        three_addon_app(Some(&|w| w.set_addon_records(&records, false)));
+    at_the_roster(&mut app);
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+    assert_eq!(
+        vm(&app).eval::<f64>("return GetNumAddOns()").unwrap(),
+        5.0,
+        "three folder addons and the two the reply left listed"
+    );
+    type Row = (
+        Option<String>,
+        Option<f64>,
+        Option<String>,
+        String,
+        Option<f64>,
+    );
+    let row = |name: &str| -> Row {
+        vm(&app)
+            .eval::<Row>(&format!(
+                "for i = 1, GetNumAddOns() do \
+                   local n, _, _, url, loadable, reason, security, new = GetAddOnInfo(i) \
+                   if n == '{name}' then return url, loadable, reason, security, new end \
+                 end"
+            ))
+            .unwrap()
+    };
+    assert_eq!(
+        row("Blizzard_AuctionUI"),
+        (
+            Some("http://example.com/auc".into()),
+            Some(1.0),
+            None,
+            "SECURE".into(),
+            Some(1.0)
+        ),
+        "revision 9 is past the installed, and the chain's signed addon passes the check"
+    );
+    assert_eq!(
+        row("Blizzard_BattlefieldMinimap"),
+        (None, None, Some("BANNED".into()), "BANNED".into(), None),
+        "status 0 bans it without the check, and a banned addon has no url"
+    );
+    assert_eq!(row("Alpha").3, "INSECURE");
+
+    // The stock confirm dialog's `LaunchAddOnURL(AddonList.selectedID)`: the listed addon's url
+    // reaches the host's launcher, the banned one's (nil) nothing.
+    let index = |name: &str| {
+        vm(&app)
+            .eval::<f64>(&format!(
+                "for i = 1, GetNumAddOns() do \
+                   if (GetAddOnInfo(i)) == '{name}' then return i end end"
+            ))
+            .unwrap()
+    };
+    let (auction, minimap) = (
+        index("Blizzard_AuctionUI"),
+        index("Blizzard_BattlefieldMinimap"),
+    );
+    vm(&app)
+        .run(&format!(
+            "LaunchAddOnURL({auction}) LaunchAddOnURL({minimap})"
+        ))
+        .unwrap();
+    app.update();
+    let launched: Vec<String> = app
+        .world()
+        .resource::<Messages<crate::ui_script::server_alert::LaunchAddonUrl>>()
+        .iter_current_update_messages()
+        .map(|m| m.0.clone())
+        .collect();
+    assert_eq!(launched, ["http://example.com/auc"]);
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+}
+
+/// Until the reply runs the handler, a chain addon that claims `## Secure` is INSECURE as the
+/// constructor leaves it (`0x5205b6`), and loads under its own context; the reply's signature
+/// answer makes it SECURE.
+#[test]
+fn a_secure_claim_reads_insecure_until_the_reply_has_run() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let _l = crate::local_state::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (_home, _guard) = addon_home("claim");
+    let mut script = UiScript::new_glue().unwrap();
+    crate::ui_script::addons::seat_glue_addons(&mut script, None);
+    assert!(!script.addon_is_secure("Blizzard_TalentUI"));
+    let all: Vec<_> = benilla_protocol::messages::STOCK_SECURE_ADDONS
+        .iter()
+        .map(|a| benilla_protocol::messages::AddonRecord {
+            name: a.name.to_string(),
+            status: 2,
+            ..Default::default()
+        })
+        .collect();
+    crate::ui_script::addons::seat_glue_addons(&mut script, Some(&all));
+    assert!(script.addon_is_secure("Blizzard_TalentUI"));
+    assert!(!script.addon_is_secure("Alpha"));
 }

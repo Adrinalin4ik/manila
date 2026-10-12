@@ -65,12 +65,14 @@ pub(crate) mod font;
 mod font_block;
 mod frame_enum;
 mod glue;
+mod glue_addons;
 mod glue_core;
 mod glue_realm;
 mod glue_select;
 pub use glue::{VmKind, GLUE_EVENTS};
 pub use glue_core::{
-    launch_url_allowed, GlueCredentials, GlueNotice, GlueRequest, GlueServer, NoticeState,
+    launch_addon_url, launch_addon_url_allowed, launch_url_allowed, GlueCredentials, GlueNotice,
+    GlueRequest, GlueServer, NoticeState,
 };
 pub use glue_realm::{
     realm_load_classify, realm_load_stats, GlueRealm, GlueRealmCategory, GlueRealmCells,
@@ -170,8 +172,8 @@ mod worn_display;
 mod zone_text;
 
 pub use action::{ActionSlot, ActionState, ActionUse};
-pub use addon::{addon_load_context, AddOnInfo, AddonLoad};
-pub use addon_enable::EnableHash;
+pub use addon::{addon_load_context, AddOnInfo, AddonLoad, AddonReply, AddonSecurity};
+pub use addon_enable::{AddonStateFiles, EnableHash, EnableStore};
 pub use addon_message::{AddonDistribution, AddonSend};
 pub use auction::{
     AuctionBid, AuctionCategory, AuctionHighBidder, AuctionItemRow, AuctionListState, AuctionQuery,
