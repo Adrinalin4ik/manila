@@ -169,7 +169,11 @@ pub(super) fn is_pet_book(book_type: &str) -> bool {
 /// The reference's shared spell-slot marshaller (`0x4b3ec0`): arg 1 a number, arg 2 a number or
 /// string (`0x4b3ee8`), and the index `trunc(arg1 - 1)` in `[0, 0x400)`, else the binding raises
 /// `Invalid spell slot in <Verb>`. Answers the 1-based id and the normalised book type.
-fn spell_slot_args(id: Value, book_type: Value, verb: &str) -> mlua::Result<(u32, String)> {
+pub(super) fn spell_slot_args(
+    id: Value,
+    book_type: Value,
+    verb: &str,
+) -> mlua::Result<(u32, String)> {
     let invalid = || mlua::Error::runtime(format!("Invalid spell slot in {verb}"));
     // `lua_isnumber` + `lua_tonumber` (`0x6f34d0`/`0x6f3620`): a numeric string is a number.
     let index = match id {
@@ -187,8 +191,10 @@ fn spell_slot_args(id: Value, book_type: Value, verb: &str) -> mlua::Result<(u32
         Value::Integer(_) | Value::Number(_) => String::new(),
         _ => return Err(invalid()),
     };
-    let index = (index - 1.0).trunc();
-    if !(0.0..1024.0).contains(&index) {
+    // `fsub 1.0` then `_ftol` (`0x4b3efd`, `0x532dd9`): the cast wraps to its low dword, so
+    // 4294967297 is slot 1, and the signed result must lie in `[0, 0x400)`.
+    let index = super::binding_abi::ftol(index - 1.0);
+    if !(0..1024).contains(&index) {
         return Err(invalid());
     }
     let book = if is_pet_book(&book) {
