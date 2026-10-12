@@ -4,6 +4,8 @@ GitHub pull requests cannot be opened over SSH, so each branch below is pushed t
 `Thorsten42/manila` and has a link that opens the pull request form with the right base. Paste the
 title and text.
 
+Every draft ends with the same disclaimer: the work is AI-generated and was verified locally.
+
 benilla asks for one change per pull request (`docs/CONTRIBUTING.md`), so its fixes are five
 small branches, each one commit on `samwhosung/benilla` `main` at `0127b869`.
 
@@ -33,6 +35,8 @@ region the frame it appears. A nameplate addon that keys a table on the name rai
 
 **Change:** `benilla-app/src/vplates.rs` uses the `UNKNOWNOBJECT` global until the name resolves.
 
+**Disclaimer:** this change and its description were written by an AI assistant (Claude), directed by me. It was verified locally on Linux: it builds, the test suites named above were run, and the behaviour was checked against a local server where the text says so. Please review it as you would any outside contribution.
+
 ---
 
 ## benilla 2: quest log event objective
@@ -53,6 +57,8 @@ Quest addons that count lines showed the quest as complete.
 
 **Change:** the end text is pushed as the first line. It carries no count, so the progress toast
 does not read it as a line that advanced. Test included.
+
+**Disclaimer:** this change and its description were written by an AI assistant (Claude), directed by me. It was verified locally on Linux: it builds, the test suites named above were run, and the behaviour was checked against a local server where the text says so. Please review it as you would any outside contribution.
 
 ---
 
@@ -76,6 +82,8 @@ client this way left every highlighted button label in the stock face.
 re-derives the chain and repaints the regions. A property set on a child directly is no longer
 supplied by its parent. Test included.
 
+**Disclaimer:** this change and its description were written by an AI assistant (Claude), directed by me. It was verified locally on Linux: it builds, the test suites named above were run, and the behaviour was checked against a local server where the text says so. Please review it as you would any outside contribution.
+
 ---
 
 ## benilla 4: tooltip size inside Show
@@ -97,6 +105,8 @@ beside the first in the same script overlapped them.
 **Change:** `show_override` measures the plate's lines. A no-op without a host font engine. Test
 included. Reference evidence here is observed behaviour, not a traced address.
 
+**Disclaimer:** this change and its description were written by an AI assistant (Claude), directed by me. It was verified locally on Linux: it builds, the test suites named above were run, and the behaviour was checked against a local server where the text says so. Please review it as you would any outside contribution.
+
 ---
 
 ## benilla 5: transport props
@@ -117,6 +127,8 @@ verdict and stayed behind in the world until the old spot came back into view.
 **Change:** a prop spawned under a WMO GameObject is marked as carried, and a carried host is
 judged by its parts' visibility alone. No test: it needs a moving transport. Seen on a Turtle
 core; not re-checked on vmangos.
+
+**Disclaimer:** this change and its description were written by an AI assistant (Claude), directed by me. It was verified locally on Linux: it builds, the test suites named above were run, and the behaviour was checked against a local server where the text says so. Please review it as you would any outside contribution.
 
 ---
 
@@ -158,3 +170,5 @@ those ten come from the Lamp Fog commits and are not fixed here
 Not in this pull request: the client fixes that belong to benilla (nameplate name, quest event
 objective, font inheritance, tooltip size, transport props). They are offered to
 `samwhosung/benilla` separately and will arrive with an upstream merge.
+
+**Disclaimer:** this change and its description were written by an AI assistant (Claude), directed by me. It was verified locally on Linux: it builds, the test suites named above were run, and the behaviour was checked against a local server where the text says so. Please review it as you would any outside contribution.
