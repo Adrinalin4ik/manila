@@ -311,7 +311,7 @@ fn the_ground_dim_draws_over_the_tile_and_clear_of_the_rope() {
     let ground = quads
         .iter()
         .position(|q| match &q.content {
-            QuadContent::Backdrop { path, .. } => path.contains("UI-DialogBox-Background"),
+            QuadContent::Texture { path: Some(p), .. } => p.contains("UI-DialogBox-Background"),
             _ => false,
         })
         .expect("the window still wears the 1.14 dialog ground");
@@ -2416,16 +2416,23 @@ fn a_broad_search_scrolls_the_page_instead_of_overflowing_it() {
             "{f} stays away while the page fits"
         );
     }
-    let page_h: f32 = s
-        .eval("return BenillaOptionsFrameContainerScroll:GetHeight()")
+    // The page rect in the window's units, from its edges: the scroll is sized by its anchors,
+    // so its `GetWidth`/`GetHeight` answer the span before the window's scale divides it.
+    let (page_w, page_h): (f32, f32) = s
+        .eval(
+            "local sf = BenillaOptionsFrameContainerScroll \
+             return sf:GetRight() - sf:GetLeft(), sf:GetTop() - sf:GetBottom()",
+        )
+        .unwrap();
+    let (body_w, body_h): (f32, f32) = s
+        .eval(
+            "return BenillaOptionsFrameContainerBody:GetWidth(), \
+             BenillaOptionsFrameContainerBody:GetHeight()",
+        )
         .unwrap();
     assert!(
-        (s.eval::<f32>("return BenillaOptionsFrameContainerBody:GetHeight()")
-            .unwrap()
-            - page_h)
-            .abs()
-            < 0.5,
-        "the body is the page rect when nothing overflows"
+        (body_w - page_w).abs() < 0.5 && (body_h - page_h).abs() < 0.5,
+        "the body is the page rect when nothing overflows: {body_w}x{body_h} vs {page_w}x{page_h}"
     );
 
     s.run("BenillaOptionsFrameSearchBox:SetText(\"e\")")
@@ -2623,7 +2630,8 @@ fn hover_label(s: &mut UiScript, frame: &str) {
 
 /// Scroll `frame` into the page's rect: past the fold a row is clipped and cannot be hovered.
 fn scroll_into_view(s: &mut UiScript, frame: &str) {
-    s.resolve();
+    // The page's fit and the range it marks land in the walk.
+    settle(s);
     s.run(&format!(
         "local sf = BenillaOptionsFrameContainerScroll \
          local range = sf:GetVerticalScrollRange() \
@@ -3346,6 +3354,7 @@ fn the_action_bars_page_locks_the_real_bar() {
             action: 111,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);

@@ -86,6 +86,7 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
             texture: Some("Interface\\Icons\\INV_Helmet_02".into()),
             count: 1,
             quality: Some(3),
+            inventory_type: 0,
             item_id: 2000,
             link: Some("|cff0070dd|Hitem:2000:0:0:0|h[Another Helm]|h|r".into()),
             locked: false,
@@ -509,8 +510,20 @@ fn cursor_update_highlights_fitting_doll_slots_while_holding_a_bag_item() {
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 
     // The predicate the arm branches on, pinned beside the effect.
-    assert!(s.eval::<bool>("return CursorCanGoInSlot(1)").unwrap());
-    assert!(!s.eval::<bool>("return CursorCanGoInSlot(2)").unwrap());
+    // `CursorCanGoInSlot` (`0x4c8ff0`) pushes the number 1 (`0x4c9063`) or nil (`0x4c909e`) and
+    // returns one value (`arg.n` counts the returns).
+    let ask =
+        "local function c(...) return arg.n .. ':' .. type(arg[1]) .. ':' .. tostring(arg[1]) end";
+    assert_eq!(
+        s.eval::<String>(&format!("{ask} return c(CursorCanGoInSlot(1))"))
+            .unwrap(),
+        "1:number:1"
+    );
+    assert_eq!(
+        s.eval::<String>(&format!("{ask} return c(CursorCanGoInSlot(2))"))
+            .unwrap(),
+        "1:nil:nil"
+    );
 
     assert!(
         ring_lit(&mut s, "CharacterHeadSlot"),

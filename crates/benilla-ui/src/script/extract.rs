@@ -89,7 +89,8 @@ impl UiScript {
                             icon: m.icon.clone(),
                             camera: m.camera,
                             light: m.light,
-                            fog: m.armed_fog(),
+                            fog: m.scene_fog(),
+                            ffx: m.ffx,
                         },
                         _ => QuadContent::Frame,
                     };
@@ -179,7 +180,7 @@ impl UiScript {
                             });
                         }
                     }
-                    // A Button's non-current state textures emit no quad, and its ButtonText takes
+                    // A Button's state textures draw by their shown bit like any region, and its ButtonText takes
                     // the current state's font instance (disabled > highlighted > normal).
                     let mut state_font: Option<&FontObject> = None;
                     let mut state_color: Option<[f32; 4]> = None;
@@ -191,7 +192,7 @@ impl UiScript {
                         let hovered = owner.is_some() && model.mouseover == owner;
                         // The press is not read here: the state texture latches on the transition
                         // (`ButtonState::set_state`). Only the Highlight, unlatched, reads hover.
-                        if !bs.region_visible(rh, hovered) {
+                        if !bs.highlight_draws(rh, hovered) {
                             continue;
                         }
                         if bs.text == Some(rh) {
@@ -302,26 +303,33 @@ impl UiScript {
                     if let Some(c) = state_color {
                         data.vertex_color = Some(c);
                     }
-                    // A region draws at its resolved rect only: drawable regions carry anchors
-                    // (authored, or `region::implicit_creation_anchor`) and a failed resolve
-                    // latches unresolvable (`0x768d55`), so an unanchored Lua region draws nowhere,
-                    // as in the reference. The bar fill and thumbs keep their fraction geometry.
+                    // A region draws at its resolved rect: drawable regions carry anchors
+                    // (authored, or `region::implicit_creation_anchor`), so a region that never
+                    // resolved draws nowhere, as in the reference. After a failed resolve
+                    // (`0x768d55`) a FontString stops (`0x7730b7` needs the valid bit) and a
+                    // Texture keeps the quad its last good resolve wrote (`0x7706e0`). The bar
+                    // fill and thumbs keep their fraction geometry.
                     if let Some(sb) = bar_fill {
                         data.tex_coords = Some(bar_fill_uv(data.tex_coords, sb));
-                    }
-                    if bar_fill.is_none() && !thumb_fill && !color_thumb {
-                        rect = model.region_resolved.get(&rh).copied();
                     }
                     let is_text = matches!(
                         region.map(|r| r.kind),
                         Some(crate::widget::RegionKind::FontString)
                     );
+                    if bar_fill.is_none() && !thumb_fill && !color_thumb {
+                        rect = model.region_resolved.get(&rh).copied().or_else(|| {
+                            (!is_text)
+                                .then(|| model.region_kept.get(&rh).copied())
+                                .flatten()
+                        });
+                    }
                     // Generated art fills only an empty slot (`ColorPickerFrame.xml` sets none).
                     let content = if let Some(art) =
                         color_art.filter(|_| data.texture.is_none() && data.fill.is_none())
                     {
                         art
                     } else if is_text {
+                        let spacing = data.line_gap();
                         QuadContent::Text {
                             text: data.text,
                             color: data.vertex_color,
@@ -334,6 +342,7 @@ impl UiScript {
                             text_height: data.text_height,
                             shadow: data.font_shadow,
                             outline: data.outline,
+                            spacing,
                             alpha_gradient: data.alpha_gradient,
                             // The owner's property: an addon's strings on a plate slide with it.
                             world_seat: owner
@@ -389,10 +398,9 @@ impl UiScript {
             // A ScrollingMessageFrame adds one Text quad per visible ring line, stacked bottom-up
             // with each line's fade alpha; the ring lives in its kind state, not in FontStrings.
             if let (ZTarget::Frame(fh), Some(fr)) = (target, rect) {
-                // The Backdrop draws at the frame slot; the lines take the ARTWORK content key,
-                // where the client's message strings live, over the BACKGROUND (hover box) art.
+                // The lines take the ARTWORK content key, where the client's message strings
+                // live, over the BACKGROUND (hover box) art.
                 let paint = super::layout::FramePaint { alpha, scale };
-                Self::emit_backdrop(&model, fh, fr, zkey.raw(), paint, clip, &mut out);
                 Self::emit_message_lines(
                     &model,
                     fh,

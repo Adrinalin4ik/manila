@@ -6,10 +6,15 @@ use crate::transport::{ConnReader, ReadExactAsync};
 
 use super::recv_packet;
 
-/// The read half of a split [`WorldSession`](super::WorldSession): cloned socket and decrypter.
+/// The read half of a split [`WorldSession`](super::WorldSession): cloned socket and decrypter,
+/// and what the connection learned before the split, for
+/// [`WorldSession::rejoin`](super::WorldSession::rejoin).
 pub struct WorldReader {
     pub(super) reader: ConnReader,
     pub(super) decrypter: DecrypterHalf,
+    pub(super) link: super::session::LinkFacts,
+    /// The connection's Warden state, held for the same rejoin.
+    pub(super) warden: super::session::WardenCarry,
 }
 
 impl WorldReader {
@@ -56,6 +61,7 @@ impl WorldReader {
                 opcode,
                 events: crate::decode(packet),
                 tail,
+                body,
             }),
             Err(e) => Ok(crate::Poll::Skipped {
                 opcode,
@@ -64,6 +70,7 @@ impl WorldReader {
                     messages::opcode_name(opcode).unwrap_or("?"),
                     hex_preview(&body, 64)
                 ),
+                body,
             }),
         }
     }

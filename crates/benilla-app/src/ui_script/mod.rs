@@ -16,7 +16,16 @@ use benilla_world::schedule::WorldStage;
 pub(crate) mod addons;
 mod content;
 pub(crate) mod extract;
+/// The stock glue screens behind `WOW_GLUE_STOCK=1`.
+pub(crate) mod glue;
+/// `CGlueMgr`'s screen states over the native login, for the stock glue screens.
+pub(crate) mod glue_mgr;
+pub(crate) mod glue_scene;
 mod input;
+/// The server alert's fetch and `LaunchURL`'s browser, for the stock glue screens.
+pub(crate) mod server_alert;
+#[cfg(test)]
+pub(crate) use input::feed_keys;
 #[cfg(test)]
 mod layer_tests;
 mod load_log;
@@ -121,6 +130,12 @@ pub(crate) struct UiKeyboardCapture {
 /// payload and runs SELECT instead.
 #[derive(Resource, Default)]
 pub(crate) struct PlayerUiClickConsumed(pub(crate) bool);
+
+/// A press the UI consumed this frame, whatever is under the pointer: the layout drag's press
+/// returns at `0x766353`–`0x76635b`, before any frame, the world frame included, sees it, so the
+/// world latch takes no press this frame even with no UI frame hovered.
+#[derive(Resource, Default)]
+pub(crate) struct PlayerUiPressConsumed(pub(crate) bool);
 
 /// Whether the cursor carries a payload, a `Send` mirror. A click on sky with one held never
 /// deselects: the reference gates its nothing-leg `SetSelection(0,0)` on no payload (`0x492d30`).
@@ -288,6 +303,8 @@ impl Plugin for UiScriptPlugin {
         // The quit root runs in `Last`: the close button's `AppExit` is written in `PostUpdate`.
         crate::shutdown::on_app_exit(app, shutdown_on_exit.into_configs());
         app.insert_resource(UiScaleCvar(default_ui_scale()))
+            .insert_resource(glue::GlueStock::from_env())
+            .init_resource::<glue_mgr::GlueMgr>()
             .init_resource::<UiAutoScaleCache>()
             .init_resource::<UiFrameCost>()
             .init_resource::<crate::bindings::WheelNotches>()
@@ -303,11 +320,18 @@ impl Plugin for UiScriptPlugin {
             .init_resource::<PlayerUiHover>()
             .init_resource::<UiKeyboardCapture>()
             .init_resource::<PlayerUiClickConsumed>()
+            .init_resource::<PlayerUiPressConsumed>()
             .init_resource::<CursorPayloadHeld>()
             .init_resource::<UiClock>()
             .init_resource::<AddOnIdentity>()
             // After `AssetSet::Open`: the VM's first load is the chain's `GlobalStrings.lua`.
-            .add_systems(Startup, setup_script.after(benilla_assets::AssetSet::Open))
+            .add_systems(
+                Startup,
+                // After the CVars load: the glue screens read the agreements as they come up.
+                setup_script
+                    .after(benilla_assets::AssetSet::Open)
+                    .after(crate::cvars::CvarLoad),
+            )
             // The in-game UI loads on world entry, as the reference's does, once the loading cover
             // has presented, so its ~0.5 s never stalls the cover's first frame.
             .add_systems(
@@ -343,14 +367,19 @@ impl Plugin for UiScriptPlugin {
             )
             // In the feed phase, so an `OnUpdate` reads this frame's `GetFramerate()`.
             .add_systems(Update, feed_framerate.in_set(UiFeed))
-            // The input pass hit-tests the rects the tick just resolved, and runs in-world only.
+            // The input pass hit-tests the rects the tick just resolved, and runs in-world only or
+            // on the stock glue screens.
             .init_resource::<UiPassState>()
             .init_resource::<PointerOverUiPanel>()
             .add_systems(
                 Update,
                 (
                     extract::tick_script,
-                    input::feed_ui_input.in_set(crate::char_select::InWorldGated),
+                    input::feed_ui_input.run_if(
+                        in_state(crate::char_select::ClientState::InWorld).or(glue::glue_ui_up),
+                    ),
+                    // Off the walk that just ran, for the pick and the arbiter after the pass.
+                    crate::vplates::seed_plate_hover,
                 )
                     .chain()
                     .in_set(UiInput)
@@ -401,15 +430,16 @@ fn arbitrate_pointer_over_ui(
 ) {
     // No cinematic term: the hit test finds the full-screen, mouse-enabled `CinematicFrame`.
     over.0 = egui.is_some_and(|e| e.0) || hover.0.is_some();
-    // Chrome excludes the plates; the plate hover is last frame's, as the plate driver runs later.
+    // Chrome excludes the plates, whose hover is this frame's walk's.
     panel.0 = over.0 && plate_hover.0.is_none();
 }
 
 /// The session lifecycle: the VM's birth, identity, death and reload.
 pub(crate) mod lifecycle;
 pub(crate) use lifecycle::{
-    end_ui_session, ingame_ui_up, run_pending_reload, setup_script, AddOnIdentity, LeaveWorldSweep,
-    LeavingWorldArmed, PendingEntryUiLoad, ReloadUiPending, WorldLeaveSweepMessage,
+    end_ui_session, ingame_ui_up, run_pending_reload, setup_script, strings_vm, AddOnIdentity,
+    LeaveWorldSweep, LeavingWorldArmed, PendingEntryUiLoad, ReloadUiPending,
+    WorldLeaveSweepMessage,
 };
 // Test-only: other modules' tests consume these, and a plain re-export would warn unused.
 #[cfg(test)]
@@ -591,6 +621,7 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<
                     count,
                     // The seed's only item slot is the food stack, which is consumable.
                     consumable: kind == 0x80,
+                    use_spell: None,
                 }),
             );
             // Server-less a slot has no usable state; a live bar's resting state is usable.
@@ -711,6 +742,10 @@ pub(crate) fn load_ui_for_test(script: &benilla_ui::script::UiScript, entry: &st
 
 #[cfg(test)]
 mod cinematic_tests;
+#[cfg(test)]
+mod glue_input_tests;
+#[cfg(test)]
+mod key_walk_tests;
 
 #[cfg(test)]
 mod cast_tests;

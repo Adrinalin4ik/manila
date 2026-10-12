@@ -206,7 +206,7 @@ fn shipped_spellbook_drives_end_to_end() {
     assert!(
         matches!(
             s.cursor_payload(),
-            Some(benilla_ui::script::CursorPayload::Spell(c)) if c.book_type == "spell" && c.spell_id == 133
+            Some(benilla_ui::script::CursorPayload::Spell(c)) if c.spell_id == 133
         ),
         "the cursor holds spell 133 from the spell book: {:?}",
         s.cursor_payload()
@@ -346,7 +346,10 @@ fn set_checked_uses_blizzard_bool_coercion() {
         ("\"false\"", false),
         ("\"1\"", true),
         ("\"0\"", false),
-        ("\"junk\"", false),
+        // An unknown first byte takes the default, 1 (`0x6f1c81`-`0x6f1cdc`).
+        ("\"junk\"", true),
+        ("\"off\"", false),
+        ("", true),
     ] {
         let got = s
             .eval::<bool>(&format!(

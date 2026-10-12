@@ -5,8 +5,9 @@
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::flag;
-use super::cursor::{self, CursorPayload};
+use super::cursor;
 use super::Model;
+use crate::script::binding_abi::Idx;
 
 /// One inbox row, resolved by the app from a wire `MailListEntry`; its 1-based index is its
 /// position in [`MailState::inbox`].
@@ -128,18 +129,11 @@ pub struct MailSendRequest {
     pub package: u32,
 }
 
-/// `0x4acdc0`'s clears: the attachment, whose lock it lifts (`0x495420`, firing
-/// `ITEM_LOCK_CHANGED`), then money, COD, stationery and package. Returns the lock event to fire.
-fn clear_compose(model: &mut Model) -> Option<(String, Vec<super::ScriptValue>)> {
-    let lock = model.mail_send_item.take().map(|item| {
-        (
-            "ITEM_LOCK_CHANGED".to_string(),
-            vec![
-                super::ScriptValue::Int(item.bag),
-                super::ScriptValue::Int(i64::from(item.slot)),
-            ],
-        )
-    });
+/// `0x4acdc0`'s clears: the attachment, whose lock it lifts (`0x495420`, firing an argless
+/// `ITEM_LOCK_CHANGED` at `0x495455`), then money, COD, stationery and package. Returns whether
+/// an attachment was lifted, so the caller fires that event.
+fn clear_compose(model: &mut Model) -> bool {
+    let lock = model.mail_send_item.take().is_some();
     model.mail_send_money = 0;
     model.mail_send_cod = 0;
     model.mail_stationery = 0;
@@ -220,8 +214,8 @@ impl super::UiScript {
     pub fn reset_compose_tab(&mut self) {
         let lock = clear_compose(&mut self.model_mut());
         // Fired now, not queued: the order against the caller's `MAIL_SHOW`/`MAIL_FAILED` matters.
-        if let Some((event, args)) = lock {
-            self.fire_event(&event, args);
+        if lock {
+            self.fire_event("ITEM_LOCK_CHANGED", Vec::new());
         }
         // One literal call each, as the event census (`ui_script::reference_ui`) reads them.
         self.fire_event("SEND_MAIL_MONEY_CHANGED", Vec::new()); // 0x4ace14
@@ -232,9 +226,8 @@ impl super::UiScript {
     /// The close core's silent reset (`0x4acdc0(0)`, from `0x4acd50`): the same clears, and only
     /// the attachment's `ITEM_LOCK_CHANGED`, which `0x495420` fires on either leg.
     pub fn reset_compose_tab_silently(&mut self) {
-        let lock = clear_compose(&mut self.model_mut());
-        if let Some((event, args)) = lock {
-            self.fire_event(&event, args);
+        if clear_compose(&mut self.model_mut()) {
+            self.fire_event("ITEM_LOCK_CHANGED", Vec::new());
         }
     }
 
@@ -287,16 +280,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetInboxHeaderInfo(index): the 13 values `MailFrame.lua:105` reads; nil out of range.
+    // GetInboxHeaderInfo(index): the 13 values `MailFrame.lua:105` reads. Out of range (or index
+    // 0, which `OpenMail_Update` asks after a letter closes) the reference still returns 13
+    // (`0x4aeff0`..`0x4af05e`): four nils, 0 for money, COD amount and days left, six nils.
     g.set(
         "GetInboxHeaderInfo",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let row = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 row_at(&model, index)
             };
             let Some(r) = row else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                let mut miss = vec![Value::Nil; 4];
+                miss.extend(vec![Value::Integer(0); 3]);
+                miss.extend(vec![Value::Nil; 6]);
+                return Ok(MultiValue::from_vec(miss));
             };
             let opt_str = |s: &Option<String>| -> mlua::Result<Value> {
                 Ok(match s {
@@ -337,7 +335,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // (`MailFrame.lua:366`), the pair vmangos requires (`MailHandler.cpp:867`).
     g.set(
         "GetInboxText",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let row = {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 let row = row_at(&model, index);
@@ -350,8 +348,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 }
                 row
             };
+            // A miss pushes four nils (`0x4af311`..`0x4af334`).
             let Some(r) = row else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                return Ok(MultiValue::from_vec(vec![Value::Nil; 4]));
             };
             Ok(MultiValue::from_vec(vec![
                 // An invoice's body is nil (`0x4af1cf`): its text is the auction house's
@@ -372,7 +371,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // being three nils and four zeros (`0x4af559`).
     g.set(
         "GetInboxInvoiceInfo",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let row = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 row_at(&model, index)
@@ -407,7 +406,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // the shared item-usable gate, true while the template is in flight.
     g.set(
         "GetInboxItem",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let (row, usable) = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 let row = row_at(&model, index);
@@ -537,16 +536,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 copper,
                 "Usage: SetSendMailMoney(amount)",
             )? as u32;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if u64::from(n) > model.money {
-                model.ui_errors.push("ERR_NOT_ENOUGH_MONEY");
-                return Ok(Value::Nil);
-            }
-            model.mail_send_money = n;
-            model
-                .pending_events
-                .push(("SEND_MAIL_MONEY_CHANGED".to_string(), Vec::new()));
-            Ok(Value::Integer(1))
+            Ok(super::tick::verb(lua, |model| {
+                if u64::from(n) > model.money {
+                    model.ui_errors.push("ERR_NOT_ENOUGH_MONEY");
+                    return Value::Nil;
+                }
+                // The write (`0x4adc39`), then the signal (`0x4adc44`).
+                model.mail_send_money = n;
+                model.raise("SEND_MAIL_MONEY_CHANGED", Vec::new());
+                Value::Integer(1)
+            }))
         })?,
     )?;
 
@@ -582,14 +581,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 copper,
                 "Usage: SetSendMailCOD(amount)",
             )? as u32;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if model.mail_send_item.is_none() {
-                return Ok(());
-            }
-            model.mail_send_cod = n;
-            model
-                .pending_events
-                .push(("SEND_MAIL_COD_CHANGED".to_string(), Vec::new()));
+            super::tick::verb(lua, |model| {
+                if model.mail_send_item.is_some() {
+                    // The write (`0x4adc7d`), then the signal (`0x4adc88`).
+                    model.mail_send_cod = n;
+                    model.raise("SEND_MAIL_COD_CHANGED", Vec::new());
+                }
+            });
             Ok(())
         })?,
     )?;
@@ -649,8 +647,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "ClickSendMailItemButton",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            click_send_mail_item(&mut model);
+            click_send_mail_item(lua);
             Ok(())
         })?,
     )?;
@@ -733,21 +730,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // ClearSendMail() (`0x4adee0`): the compose reset with its events (`0x4acdc0(1)`), queued in
-    // its order; zero returns.
+    // ClearSendMail() (`0x4adee0`): the compose reset with its events (`0x4acdc0(1)`), fired in
+    // place in its order: the attachment's unlock (`0x495455`), then `0x4ace19`, `0x4ace23` and
+    // `0x4ace2d`; zero returns.
     g.set(
         "ClearSendMail",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let lock = clear_compose(&mut model);
-            model.pending_events.extend(lock);
-            for event in [
-                "SEND_MAIL_MONEY_CHANGED",
-                "SEND_MAIL_COD_CHANGED",
-                "MAIL_SEND_SUCCESS",
-            ] {
-                model.pending_events.push((event.to_string(), Vec::new()));
-            }
+            super::tick::verb(lua, |model| {
+                if clear_compose(model) {
+                    model.raise("ITEM_LOCK_CHANGED", Vec::new());
+                }
+                model.raise("SEND_MAIL_MONEY_CHANGED", Vec::new());
+                model.raise("SEND_MAIL_COD_CHANGED", Vec::new());
+                model.raise("MAIL_SEND_SUCCESS", Vec::new());
+            });
             Ok(MultiValue::new())
         })?,
     )?;
@@ -802,36 +798,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// `ClickSendMailItemButton`: the send slot as a cursor drop target, firing `CURSOR_UPDATE` and
-/// `ITEM_LOCK_CHANGED` like a bag slot.
-fn click_send_mail_item(model: &mut Model) {
-    match model.cursor.take() {
-        // A held bag item attaches; it stays in its bag slot until the send.
-        Some(CursorPayload::Item(item)) => {
-            let (bag, slot) = (item.bag, item.slot);
-            // An earlier attachment is overwritten, as in the reference; its slot has no lock.
-            model.mail_send_item = Some(item);
-            cursor::queue_cursor_update(model);
-            cursor::queue_lock_changed(model, bag, slot);
-            // `MAIL_SEND_INFO_UPDATE` (`0x4ae0de`): the stock tab re-reads the item and postage.
-            model
-                .pending_events
-                .push(("MAIL_SEND_INFO_UPDATE".to_string(), Vec::new()));
-        }
-        None => {
-            if let Some(item) = model.mail_send_item.take() {
-                let (bag, slot) = (item.bag, item.slot);
-                model.cursor = Some(CursorPayload::Item(item));
-                cursor::queue_cursor_update(model);
-                cursor::queue_lock_changed(model, bag, slot);
-                model
-                    .pending_events
-                    .push(("MAIL_SEND_INFO_UPDATE".to_string(), Vec::new()));
-            }
-        }
-        Some(other) => {
-            model.cursor = Some(other);
-        }
+/// `ClickSendMailItemButton` (`0x4adef0`): the send slot as a cursor drop target, attaching the
+/// held item and putting an earlier attachment back on the cursor ([`cursor::click_attach_slot`]).
+/// A held item stays in its bag slot, locked, until the send. A changed attachment signals
+/// `MAIL_SEND_INFO_UPDATE` (`0x4ae0de`), whose stock handler re-reads the item and postage.
+fn click_send_mail_item(lua: &Lua) {
+    if cursor::click_attach_slot(lua, |model| &mut model.mail_send_item) {
+        super::tick::verb(lua, |model| {
+            model.raise("MAIL_SEND_INFO_UPDATE", Vec::new());
+        });
     }
 }
 
@@ -839,6 +814,40 @@ fn click_send_mail_item(model: &mut Model) {
 mod tests {
     use super::*;
     use crate::script::UiScript;
+
+    /// The compose verbs fire in place, each after its write (`0x4adc39` then `0x4adc44`), and
+    /// `ClearSendMail` after all its clears (`0x4acddf`-`0x4ace0c`, then `0x4ace19`, `0x4ace23`,
+    /// `0x4ace2d`): every handler reads the stored amount before the next Lua line runs.
+    #[test]
+    fn the_compose_verbs_fire_their_events_in_place() {
+        let mut s = UiScript::new().unwrap();
+        s.set_money(1_000);
+        crate::script::tick::heard::listen(
+            &s,
+            &[
+                "SEND_MAIL_MONEY_CHANGED",
+                "SEND_MAIL_COD_CHANGED",
+                "MAIL_SEND_SUCCESS",
+            ],
+            Some("GetSendMailMoney()"),
+        );
+        let seen: Vec<String> = s
+            .eval("SetSendMailMoney(250) local h = HEARD HEARD = {} return h")
+            .unwrap();
+        assert_eq!(seen, ["SEND_MAIL_MONEY_CHANGED 250"]);
+        let seen: Vec<String> = s
+            .eval("ClearSendMail() local h = HEARD HEARD = {} return h")
+            .unwrap();
+        assert_eq!(
+            seen,
+            [
+                "SEND_MAIL_MONEY_CHANGED 0",
+                "SEND_MAIL_COD_CHANGED 0",
+                "MAIL_SEND_SUCCESS 0"
+            ]
+        );
+        assert!(s.model_ref().pending_events.is_empty());
+    }
 
     /// A send needs a stationery: select the default, as the stock `SendMailFrame_Reset` does.
     fn select_default_stationery(s: &mut UiScript) {
@@ -1038,6 +1047,52 @@ mod tests {
                  return pkg == nil and has == nil",
             )
             .unwrap());
+    }
+
+    /// A row that does not exist still answers the full tuple: `GetInboxHeaderInfo` 13 values,
+    /// four nils, `0` money, COD and days left, six nils (`0x4aeff0`..`0x4af05e`), so a closed
+    /// letter's `GetInboxHeaderInfo(0)` can be compared with `CODAmount > 0` (`MailFrame.lua:399`);
+    /// `GetInboxText` four nils (`0x4af311`..`0x4af334`).
+    #[test]
+    fn a_missing_inbox_row_answers_the_references_miss_tuples() {
+        let mut s = UiScript::new().unwrap();
+        s.set_mail(Some(state()));
+        for index in [0, 3, 99] {
+            assert_eq!(
+                s.arity(&format!("GetInboxHeaderInfo({index})")).unwrap(),
+                13,
+                "header {index}"
+            );
+            assert_eq!(
+                s.arity(&format!("GetInboxText({index})")).unwrap(),
+                4,
+                "text {index}"
+            );
+            assert_eq!(
+                s.eval::<String>(&format!(
+                    "local t = {{GetInboxHeaderInfo({index})}} \
+                     local k = '' \
+                     for i = 1, 13 do k = k .. type(t[i]) .. ',' end \
+                     local _, _, _, _, m, c, d = GetInboxHeaderInfo({index}) \
+                     return k .. m .. ',' .. c .. ',' .. d .. ',' .. tostring(c > 0)"
+                ))
+                .unwrap(),
+                "nil,nil,nil,nil,number,number,number,nil,nil,nil,nil,nil,nil,0,0,0,false",
+                "header {index}"
+            );
+            assert!(
+                s.eval::<bool>(&format!(
+                    "local a, b, c, d = GetInboxText({index}) \
+                     return a == nil and b == nil and c == nil and d == nil"
+                ))
+                .unwrap(),
+                "text {index}"
+            );
+        }
+        assert!(
+            s.take_mail_opens().is_empty(),
+            "a miss opens nothing for the app to fetch"
+        );
     }
 
     #[test]
@@ -1310,6 +1365,104 @@ mod tests {
         assert!(s.eval::<bool>("return HasNewMail() == 1").unwrap());
         s.set_has_new_mail(false);
         assert!(s.eval::<bool>("return HasNewMail() == nil").unwrap());
+    }
+
+    /// The attach clears with `SetCursorItem(0, …)` (`0x4ae0d2`): no unlock and no
+    /// `ITEM_LOCK_CHANGED`, so the attached item stays locked in its bag and cannot be picked up
+    /// again, until the compose reset lifts the lock with its event (`0x4acdd6`).
+    #[test]
+    fn an_attached_item_keeps_its_lock_until_it_leaves_the_slot() {
+        use crate::script::cursor::{bag_lock_probe, two_item_bag};
+        use crate::script::tick::heard;
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(two_item_bag()));
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        heard::listen(
+            &s,
+            &["ITEM_LOCK_CHANGED", "CURSOR_UPDATE"],
+            Some(&bag_lock_probe(1)),
+        );
+        s.run("ClickSendMailItemButton()").unwrap();
+        assert_eq!(heard::take(&s), ["CURSOR_UPDATE 1"]);
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        assert!(
+            s.cursor_payload().is_none(),
+            "a locked item is not picked up"
+        );
+        assert!(heard::take(&s).is_empty());
+        s.reset_compose_tab();
+        assert_eq!(heard::take(&s), ["ITEM_LOCK_CHANGED nil"]);
+    }
+
+    /// An occupied attach slot puts the old attachment back on the cursor through
+    /// `SetCursorItem(0, …)` (`0x4ae05a`-`0x4ae0d4`): its inner clear's `CURSOR_UPDATE` reads the
+    /// emptied cursor, the set's the old item, and both items stay locked. An empty hand takes the
+    /// attachment back the same way. With nothing held and nothing attached the click is
+    /// `ClearCursor(1,1)` (`0x4ae08b`), which drops any other payload and signals nothing more.
+    #[test]
+    fn an_attach_onto_an_occupied_slot_puts_the_old_item_on_the_cursor() {
+        use crate::script::cursor::{
+            bag_lock_probe, install_kind_probe, two_item_bag, CursorMacro, CursorPayload,
+        };
+        use crate::script::tick::heard;
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(two_item_bag()));
+        install_kind_probe(&s);
+        s.run("PickupContainerItem(0, 1) ClickSendMailItemButton() PickupContainerItem(0, 2)")
+            .unwrap();
+        heard::listen(
+            &s,
+            &[
+                "ACTIONBAR_HIDEGRID",
+                "ACTIONBAR_SHOWGRID",
+                "CURSOR_UPDATE",
+                "ITEM_LOCK_CHANGED",
+                "MAIL_SEND_INFO_UPDATE",
+            ],
+            Some("CursorKind() .. ' ' .. tostring(GetSendMailItem())"),
+        );
+        s.run("ClickSendMailItemButton()").unwrap();
+        assert_eq!(
+            heard::take(&s),
+            [
+                "ACTIONBAR_HIDEGRID item Minor Healing Potion",
+                "CURSOR_UPDATE none Minor Healing Potion",
+                "ACTIONBAR_SHOWGRID item Minor Healing Potion",
+                "CURSOR_UPDATE item Minor Healing Potion",
+                "MAIL_SEND_INFO_UPDATE item Minor Healing Potion"
+            ]
+        );
+        assert_eq!(s.cursor_item().map(|i| i.slot), Some(1));
+        for slot in [1, 2] {
+            let probe = bag_lock_probe(slot);
+            assert!(s.eval::<bool>(&format!("return {probe} == 1")).unwrap());
+        }
+
+        // An empty hand takes the attachment back.
+        s.run("ClearCursor()").unwrap();
+        heard::take(&s);
+        s.run("ClickSendMailItemButton()").unwrap();
+        assert_eq!(
+            heard::take(&s),
+            [
+                "CURSOR_UPDATE none nil",
+                "ACTIONBAR_SHOWGRID item nil",
+                "CURSOR_UPDATE item nil",
+                "MAIL_SEND_INFO_UPDATE item nil"
+            ]
+        );
+        assert_eq!(s.cursor_item().map(|i| i.slot), Some(2));
+
+        // Nothing held and nothing attached: a plain clear, here of a held macro.
+        s.run("ClearCursor()").unwrap();
+        s.set_cursor_for_test(CursorPayload::Macro(CursorMacro {
+            index: 1,
+            texture: None,
+        }));
+        heard::take(&s);
+        s.run("ClickSendMailItemButton()").unwrap();
+        assert!(s.cursor_payload().is_none());
+        assert_eq!(heard::take(&s), ["CURSOR_UPDATE none nil"]);
     }
 }
 

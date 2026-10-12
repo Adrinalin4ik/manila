@@ -948,6 +948,8 @@ pub(super) fn seed_ui_fixture(
                 "mouseover",
                 Some(benilla_ui::script::UnitState {
                     exists: true,
+                    // A unit is found by its guid; the builder hides for guid 0 (`0x52a04e`).
+                    guid: 0xF130_0000_0044_0001,
                     name: Some("Stormwind Guard".into()),
                     health: 38,
                     max_health: 50,
@@ -975,6 +977,7 @@ pub(super) fn seed_ui_fixture(
                 "mouseover",
                 Some(benilla_ui::script::UnitState {
                     exists: true,
+                    guid: 0x0000_0000_0000_0B0B,
                     is_player: true,
                     name: Some("Bob".into()),
                     level: 60,
@@ -1650,6 +1653,7 @@ fn seed_cooldown_filmstrip(
                 texture: texture.clone(),
                 count: 1,
                 quality: Some(1),
+                inventory_type: 0,
                 item_id: 6948,
                 link: Some("|cffffffff|Hitem:6948|h[Hearthstone]|h|r".into()),
                 locked: false,
@@ -1702,6 +1706,7 @@ fn seed_bag_window(
             texture: icon(disp),
             count,
             quality: Some(quality),
+            inventory_type: 0,
             item_id: id,
             link: Some(format!("|cffffffff|Hitem:{id}|h[{name}]|h|r")),
             locked: false,
@@ -1788,6 +1793,7 @@ fn seed_equipped_bags(
             texture: icon(disp),
             count,
             quality: Some(quality),
+            inventory_type: 0,
             item_id: 0,
             link: Some(format!("|cffffffff|Hitem:0|h[{name}]|h|r")),
             locked: false,

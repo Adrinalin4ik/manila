@@ -20,6 +20,9 @@ trace_chrome = ["bevy/trace_chrome"]
 # needs WebGPU).
 webgl2 = ["bevy/webgl2", "benilla-world/webgl2"]
 webgpu = ["bevy/webgpu", "benilla-world/webgpu"]
+# Links Bevy as a shared library so an incremental rebuild relinks faster. The binary then starts
+# only through `cargo run`, which puts the toolchain's libstd on the loader path.
+bevy_dynamic_linking = ["bevy/dynamic_linking"]
 
 [dependencies]
 # Wall-clock reads (`SystemTime::now`) go through `web-time`: a re-export of std's on native, and

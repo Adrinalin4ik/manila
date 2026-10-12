@@ -226,6 +226,11 @@ impl Conn {
             },
         ))
     }
+
+    /// The halves [`Conn::split`] made, one connection again: both hold the same socket.
+    pub fn rejoin(_reader: ConnReader, writer: ConnWriter) -> Conn {
+        Conn { sock: writer.sock }
+    }
 }
 
 impl ReadExactAsync for Conn {

@@ -12,10 +12,10 @@ pub mod messages;
 pub mod transport;
 pub mod wire;
 pub mod world;
-pub use auth::AuthReject;
+pub use auth::{AuthReject, LogonReply};
 pub use events::{
-    decode, CharAction, EntityKind, LoginRefusal, LoginStage, MoveSpeeds, Poll, SessionEnd,
-    SessionEvent, SessionEventKind,
+    decode, CharAction, EntityKind, LoginRefusal, LoginStage, MoveSpeeds, Poll, RosterCause,
+    SessionEnd, SessionEvent, SessionEventKind,
 };
 pub use messages::field;
 pub use messages::{
@@ -25,8 +25,8 @@ pub use messages::{
     CHARACTER_FLAG_HIDE_CLOAK, CHARACTER_FLAG_HIDE_HELM, CHARACTER_FLAG_RENAME,
 };
 pub use world::{
-    observe_sends, SendObserver, WardenRequired, WorldAuthReject, WorldReader, WorldSession,
-    WorldWriter, WORLD_PORT,
+    observe_sends, SendObserver, Unparsed, WardenRequired, WorldAuthReject, WorldConnectEvent,
+    WorldReader, WorldSession, WorldWriter, WORLD_PORT,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -212,6 +212,12 @@ impl Logon {
     pub fn realmd_live(&self) -> bool {
         self.stream.is_some()
     }
+
+    /// `CLoginMgr::Cancel` (`0x5b3320`): the realmd socket closes; the session key and the last
+    /// list are kept.
+    pub fn close(&mut self) {
+        self.stream = None;
+    }
 }
 
 /// Perform the full SRP6 logon against a vanilla `realmd` and fetch the realm list — the blocking
@@ -255,9 +261,14 @@ async fn logon_with_build(host: &str, username: &str, password: &str, build: u16
             let mut stream = dial(host, port).await?;
             auth::write_logon_challenge(&mut stream, &username.to_uppercase(), build)
                 .context("sending logon challenge")?;
-            let reply = auth::read_challenge_reply(&mut stream)
+            let Some(reply) = auth::read_challenge_reply(&mut stream)
                 .await
-                .context("reading logon challenge reply")?;
+                .context("reading logon challenge reply")?
+            else {
+                // `SUCCESS_SURVEY` on the challenge authenticates with no SRP exchange; the
+                // reference's success arm copies no key (length 0 at `0x5b2e16`).
+                return finish_logon(stream, [0u8; SESSION_KEY_LENGTH]).await;
+            };
             let server_public_key = PublicKey::from_le_bytes(reply.server_public_key)
                 .map_err(|e| anyhow!("invalid server public key: {e}"))?;
             let stable = server_public_key.is_width_stable();
@@ -288,14 +299,23 @@ async fn logon_with_build(host: &str, username: &str, password: &str, build: u16
     .context("sending logon proof")?;
 
     // 5. Verify the server's proof (M2); on success we hold the session key.
-    let server_proof = auth::read_proof_reply(&mut stream)
+    let session_key = match auth::read_proof_reply(&mut stream)
         .await
-        .context("reading logon proof reply")?;
-    let client = challenge
-        .verify_server_proof(server_proof)
-        .map_err(|e| anyhow!("server proof mismatch (wrong password?): {e}"))?;
-    let session_key = *client.session_key();
+        .context("reading logon proof reply")?
+    {
+        Some(server_proof) => *challenge
+            .verify_server_proof(server_proof)
+            .map_err(|e| anyhow!("server proof mismatch (wrong password?): {e}"))?
+            .session_key(),
+        // `SUCCESS_SURVEY` on the proof authenticates with no `M2` to check; the key is the one
+        // this exchange derived.
+        None => challenge.into_unverified_session_key(),
+    };
+    finish_logon(stream, session_key).await
+}
 
+/// An authenticated logon's tail: the realm list over the same socket.
+async fn finish_logon(mut stream: Conn, session_key: [u8; SESSION_KEY_LENGTH]) -> Result<Logon> {
     auth::write_realm_list_request(&mut stream).context("requesting realm list")?;
     let realms = auth::read_realm_list(&mut stream)
         .await

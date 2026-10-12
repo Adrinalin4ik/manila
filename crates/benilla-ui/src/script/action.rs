@@ -7,8 +7,9 @@
 
 use mlua::{Lua, MultiValue, Value};
 
-use super::binding_abi::flag;
+use super::binding_abi::{bool_or_default, flag};
 use super::Model;
+use crate::script::binding_abi::Idx32;
 
 /// The kind byte, bits 24-31 of the packed slot word (vmangos `Player.h:133`). Must match
 /// `benilla_protocol`'s `ACTION_KIND_*`; this crate has no protocol dependency.
@@ -30,6 +31,10 @@ pub struct ActionSlot {
     /// `IsConsumableAction`: `0x4e5250` reads only the slot's item template, so this rides the
     /// icon's push, not [`ActionState`]'s.
     pub consumable: bool,
+    /// An item slot's ON_USE spell, the spell `0x4e5a50` resolves it to (`0x4e5ae0`): the
+    /// template's first block with a spell and trigger 0. `None` for no such block or another
+    /// kind; a macro slot's spell is its binding ([`super::MacroBinding`]).
+    pub use_spell: Option<u32>,
 }
 
 /// One action's per-frame state, read by `IsUsableAction`, `IsActionInRange`, `GetActionCooldown`
@@ -137,24 +142,13 @@ impl super::UiScript {
     }
 }
 
-/// `UseAction`'s flag test: `nil`, `false` and `0` are false, unlike Lua, where `0` is true.
-pub(super) fn truthy_nonzero(v: &Value) -> bool {
-    match v {
-        Value::Nil => false,
-        Value::Boolean(b) => *b,
-        Value::Integer(i) => *i != 0,
-        Value::Number(n) => *n != 0.0,
-        _ => true,
-    }
-}
-
 /// Register the action globals.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
     g.set(
         "HasAction",
-        lua.create_function(|lua, action: u32| {
+        lua.create_function(|lua, Idx32(action): Idx32| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(flag(model.actions.contains_key(&action)))
         })?,
@@ -204,7 +198,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "GetActionTexture",
-        lua.create_function(|lua, action: u32| {
+        lua.create_function(|lua, Idx32(action): Idx32| {
             let tex = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 model.actions.get(&action).and_then(|s| s.texture.clone())
@@ -252,12 +246,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UseAction",
         lua.create_function(|lua, (action, rest): (u32, MultiValue)| {
+            // Both flags go through `GetBoolOrDefault` (`0x4e717e`, `0x4e716f`), default 0.
+            let check_cursor = bool_or_default(rest.front(), false);
+            let on_self = bool_or_default(rest.get(1), false);
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let mut rest = rest.iter();
-            let check_cursor = rest.next().is_some_and(truthy_nonzero);
-            let on_self = rest.next().is_some_and(truthy_nonzero);
             if check_cursor && model.cursor.is_some() {
-                super::cursor::place_action(&mut model, action);
+                drop(model);
+                super::cursor::place_action(lua, action);
             } else {
                 model
                     .script_calls
@@ -269,7 +264,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "GetActionCount",
-        lua.create_function(|lua, action: u32| {
+        lua.create_function(|lua, Idx32(action): Idx32| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(model
                 .actions
@@ -310,7 +305,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "IsUsableAction",
-        lua.create_function(|lua, action: u32| {
+        lua.create_function(|lua, Idx32(action): Idx32| {
             Ok((
                 state_flag(lua, action, |s| s.usable),
                 state_flag(lua, action, |s| s.not_enough_mana),
@@ -320,7 +315,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "IsActionInRange",
-        lua.create_function(|lua, action: u32| {
+        lua.create_function(|lua, Idx32(action): Idx32| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(
                 match model
@@ -342,20 +337,26 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "IsCurrentAction",
-        lua.create_function(|lua, action: u32| Ok(state_flag(lua, action, |s| s.current)))?,
+        lua.create_function(|lua, Idx32(action): Idx32| {
+            Ok(state_flag(lua, action, |s| s.current))
+        })?,
     )?;
     g.set(
         "IsAutoRepeatAction",
-        lua.create_function(|lua, action: u32| Ok(state_flag(lua, action, |s| s.auto_repeat)))?,
+        lua.create_function(|lua, Idx32(action): Idx32| {
+            Ok(state_flag(lua, action, |s| s.auto_repeat))
+        })?,
     )?;
     g.set(
         "IsAttackAction",
-        lua.create_function(|lua, action: u32| Ok(state_flag(lua, action, |s| s.is_attack)))?,
+        lua.create_function(|lua, Idx32(action): Idx32| {
+            Ok(state_flag(lua, action, |s| s.is_attack))
+        })?,
     )?;
     // From the slot, not the state map: `0x4e5250` depends only on the item template.
     g.set(
         "IsConsumableAction",
-        lua.create_function(|lua, action: u32| {
+        lua.create_function(|lua, Idx32(action): Idx32| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             match model.actions.get(&action) {
                 Some(s) if s.consumable => Ok(Value::Integer(1)),
@@ -365,7 +366,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "IsEquippedAction",
-        lua.create_function(|lua, action: u32| Ok(state_flag(lua, action, |s| s.equipped)))?,
+        lua.create_function(|lua, Idx32(action): Idx32| {
+            Ok(state_flag(lua, action, |s| s.equipped))
+        })?,
     )?;
 
     // GetActionCooldown(action) → start, duration, enable, in `GetTime` seconds. An absent or
@@ -373,7 +376,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // replay the sweep and its finish flash.
     g.set(
         "GetActionCooldown",
-        lua.create_function(|lua, action: u32| {
+        lua.create_function(|lua, Idx32(action): Idx32| {
             let now = crate::script::clock::now(lua);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(
@@ -532,6 +535,7 @@ mod tests {
                 action: 133,
                 count: 0,
                 consumable: false,
+                use_spell: None,
             }),
         );
         s.set_bonus_bar_offset(1);
@@ -563,6 +567,7 @@ mod tests {
                 action: 117,
                 count: 4,
                 consumable: false,
+                use_spell: None,
             }),
         );
         assert_eq!(s.eval::<i64>("return GetActionCount(5)").unwrap(), 4);
@@ -621,6 +626,7 @@ mod tests {
                 action,
                 count: 0,
                 consumable: false,
+                use_spell: None,
             })
         };
         s.set_action(1, slot(0x40, 1)); // macro "Pull"

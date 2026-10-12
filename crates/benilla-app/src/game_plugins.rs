@@ -541,6 +541,125 @@ pub(crate) mod schedule_tests {
         c.systems.values().any(|s| s.name.contains("benilla_app::"))
     }
 
+    /// The systems of one schedule whose declared access writes the resource `T`, each with every
+    /// run condition on it or on a set it is under, by name.
+    fn resource_writers<T: Resource>(
+        app: &mut App,
+        label: impl ScheduleLabel,
+    ) -> Vec<(String, Vec<String>)> {
+        app.world_mut()
+            .schedule_scope(label.intern(), |world, schedule| {
+                schedule.graph_mut().systems.initialize(world);
+                let Some(id) = world.components().get_resource_id(TypeId::of::<T>()) else {
+                    return Vec::new();
+                };
+                let graph = schedule.graph();
+                let mut out = Vec::new();
+                for (key, system, conds) in graph.systems.iter() {
+                    let writes = graph
+                        .systems
+                        .get(key)
+                        .is_some_and(|s| s.access.combined_access().has_resource_write(id));
+                    if !writes {
+                        continue;
+                    }
+                    let mut conditions: Vec<String> = conds
+                        .iter()
+                        .map(|c| c.condition.name().to_string())
+                        .collect();
+                    let mut stack = vec![NodeId::System(key)];
+                    while let Some(node) = stack.pop() {
+                        for parent in graph
+                            .hierarchy()
+                            .graph()
+                            .neighbors_directed(node, Direction::Incoming)
+                        {
+                            if let NodeId::Set(set) = parent {
+                                if let Some((_, set_conds)) = graph
+                                    .system_sets
+                                    .iter()
+                                    .find(|(k, _, _)| *k == set)
+                                    .map(|(_, s, c)| (s, c))
+                                {
+                                    conditions.extend(
+                                        set_conds.iter().map(|c| c.condition.name().to_string()),
+                                    );
+                                }
+                                stack.push(parent);
+                            }
+                        }
+                    }
+                    out.push((system.name().to_string(), conditions));
+                }
+                out
+            })
+    }
+
+    /// The glue booth has one feeder per switch: under `WOW_GLUE_STOCK=1` only the glue VM's
+    /// writes `GluePreview`, and off it only the native screens' do. A writer of neither kind is
+    /// named here with why it cannot run against the other.
+    #[test]
+    fn the_glue_preview_has_one_feeder_per_switch() {
+        use crate::char_select::ClientState;
+        // The create screen's state, which only the native select screen enters, and its
+        // instrument.
+        const EITHER: [&str; 2] = ["benilla_app::char_create::", "drive_create_test"];
+        let mut app = headless_client();
+        let mut writers = Vec::new();
+        writers.extend(resource_writers::<crate::portrait::GluePreview>(
+            &mut app, Update,
+        ));
+        for state in [ClientState::Login, ClientState::CharSelect] {
+            writers.extend(resource_writers::<crate::portrait::GluePreview>(
+                &mut app,
+                OnEnter(state),
+            ));
+            writers.extend(resource_writers::<crate::portrait::GluePreview>(
+                &mut app,
+                OnExit(state),
+            ));
+        }
+        if !writers.iter().any(|(n, _)| n.contains("benilla_app::")) {
+            eprintln!(
+                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
+            );
+            return;
+        }
+        let has = |conds: &[String], c: &str| conds.iter().any(|n| n.ends_with(c));
+        let mut stock = Vec::new();
+        let mut native = Vec::new();
+        let mut neither = Vec::new();
+        for (name, conds) in &writers {
+            match (has(conds, "::stock_glue"), has(conds, "::native_glue")) {
+                (true, false) => stock.push(name.as_str()),
+                (false, true) => native.push(name.as_str()),
+                _ if EITHER.iter().any(|e| name.contains(e)) => {}
+                _ => neither.push(name.as_str()),
+            }
+        }
+        assert!(
+            neither.is_empty(),
+            "GluePreview writers on neither switch: {neither:?}"
+        );
+        assert_eq!(
+            stock,
+            ["benilla_app::ui_script::glue_scene::feed_stock_glue_preview"],
+            "the stock screens' one feeder"
+        );
+        for want in [
+            "benilla_app::char_select::refresh::feed_glue_preview",
+            "benilla_app::login::show_main_menu",
+            "benilla_app::login::screen::clear_login_scene",
+            "benilla_app::char_select::screen::enter_select",
+            "benilla_app::char_select::screen::clear_select_scene",
+        ] {
+            assert!(
+                native.contains(&want),
+                "{want} is not gated to the native screens: {native:?}"
+            );
+        }
+    }
+
     /// One row of the class table: the type's name for the message, and its `TypeId`.
     type ClassRow = (&'static str, fn() -> TypeId);
 
@@ -671,15 +790,20 @@ pub(crate) mod schedule_tests {
     }
 
     /// `PostUpdate`'s undeclared-order pairs on the declared graph; `GlobalTransform` and the
-    /// particle `EffectQuads` are most of it.
+    /// particle `EffectQuads` are most of it. Six are `glue::hide_native_glue`'s `Visibility`
+    /// against the world's and the fade cover's writers, populations it never shares an entity
+    /// with (the native glue roots alone).
     ///
-    /// MONKEY (lighting, water, fog): upstream's number is 371. This branch adds the carried-light
+    /// MONKEY (lighting, water, fog): upstream's number is 377. This branch adds the carried-light
     /// motion tracker, the light-lane classifier, the shadow rig, the lava light and the swim bob,
     /// all reading `GlobalTransform`/`Transform`/`Mesh3d` and re-derived every frame, so a
     /// frame-late read trails by one frame and corrects itself (`WOW_AMBIGUITY_DUMP_POST=1` lists
     /// them). KNOWN FOLLOW-UP: the swim bob writes a rig's visual offset with no order against
     /// `rig_anim::compose`.
-    const POST_UPDATE_CEILING: usize = 466;
+    ///
+    /// MONKEY (merge upstream e175209f, 2026-10-12): upstream 371 → 377, ours was 466 = 371 + 95,
+    /// so 377 + 95 by arithmetic. NOT yet read off a test run of the merged tree.
+    const POST_UPDATE_CEILING: usize = 472;
     const POST_UPDATE_SLACK: usize = 20;
     /// The actionable pairs in `Update`: conflicting access, no declared order, and nothing
     /// [`Classes`] explains, so the executor orders them however the graph falls. The count may
@@ -695,8 +819,9 @@ pub(crate) mod schedule_tests {
     ///   would, off the same clock;
     /// - the area-spirit-healer poll over `Transform` and `NetEntity`: it is level-triggered, so a
     ///   unit seen a frame early or late is decided again next frame;
-    /// - `ui_models::forget_dead_vm_tiles` against `portrait::glue_booth::sync_glue_scene` over
-    ///   `MatAnimTable`, a slot allocator whose owners touch disjoint slots;
+    /// - `ui_script::glue_scene::feed_stock_glue_preview` against the native glue screens'
+    ///   writers of `GluePreview`: the switch runs one side or the other (`stock_glue` against
+    ///   `native_glue`), never both;
     /// - the cursor classifier against `world_focus`'s focus publish and settle release over
     ///   `Player`: it reads `control_lost`, and they write only `settling` and `world_stale`;
     /// - `ui_quest::lines::feed_quest_lines` against `ui_items::feed_item_stats` and
@@ -744,7 +869,10 @@ pub(crate) mod schedule_tests {
     /// MONKEY (merge upstream b396bbf6, 2026-10-02): upstream's own declarations dropped its
     /// ceiling to 4,980; the merged tree reads 4,999 = upstream 4,980 + 19 of ours (the lanes'
     /// residual pairs above, unchanged in kind). Read off the merged tree's test run.
-    const UPDATE_ACTIONABLE_CEILING: usize = 4_999;
+    ///
+    /// MONKEY (merge upstream e175209f, 2026-10-12): upstream 4,980 → 4,689; 4,689 + 19 of ours by
+    /// arithmetic. NOT yet read off a test run of the merged tree.
+    const UPDATE_ACTIONABLE_CEILING: usize = 4_708;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -1253,6 +1381,8 @@ pub(crate) mod schedule_tests {
          "every line answers a charter action of ours; the window edges ride the `fed` memo"),
         ("ui_quest_share.rs", "feed_quest_share", Because::PlayerRoundTrip,
          "a verdict answers our own push and a confirm follows a party member's escort accept, both held until the name resolves (the confirm is another player's act: coincidence-only residual)"),
+        ("ui_script/glue_mgr.rs", "drive_glue_mgr", Because::Deliberate,
+         "it acts only on a glue-kind VM (`script.filter(vm_kind() == Glue)`, documented at the fire sites), never the entry VM the window leaves frameless; news that arrives with no glue VM is held in `AddonInfoReply` for the next one"),
         ("ui_script/extract/mod.rs", "paint_script", Because::Deliberate,
          "per-frame paint and cost state, not a queue"),
         ("ui_social/feed.rs", "feed_social", Because::MemoLatched,

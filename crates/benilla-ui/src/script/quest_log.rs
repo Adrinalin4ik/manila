@@ -15,6 +15,7 @@ use mlua::{Lua, MultiValue, Value};
 use super::binding_abi::{flag, number_arg};
 use super::quest::QuestItemView;
 use super::Model;
+use crate::script::binding_abi::{Idx, Idx32};
 
 /// One quest-log row; its 1-based position in [`QuestLogState::entries`] is the index every verb
 /// takes.
@@ -291,9 +292,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // (`QuestLogFrame.lua:616`).
     g.set(
         "GetNumQuestLeaderBoards",
-        lua.create_function(|lua, i: Option<u32>| {
+        lua.create_function(|lua, i: Option<Idx32>| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let index = i.unwrap_or(model.quest_log_selection) as usize;
+            let index = i.map_or(model.quest_log_selection, |i| i.0) as usize;
             Ok(index
                 .checked_sub(1)
                 .and_then(|n| model.quest_log.entries.get(n))
@@ -302,13 +303,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // `text, type, finished` of line `i`, for any row as above (`QuestLogFrame.lua:635`).
+    // `text, type, finished` of line `i`, for any row as above (`QuestLogFrame.lua:635`). Three
+    // values on every path (`mov eax,3` at `0x4e02ba`, `0x4e079b`, `0x4e07c8`): `finished` is the
+    // number 1 (`0x4e02ae`, `0x4e078f`) or nil (`0x4e07bc`), and a row or line that does not exist
+    // takes the tail at `0x4e07ac`, which pushes three nils.
     g.set(
         "GetQuestLogLeaderBoard",
-        lua.create_function(|lua, (i, quest): (usize, Option<u32>)| {
+        lua.create_function(|lua, (Idx(i), quest): (Idx, Option<Idx32>)| {
             let line = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                let index = quest.unwrap_or(model.quest_log_selection) as usize;
+                let index = quest.map_or(model.quest_log_selection, |q| q.0) as usize;
                 index
                     .checked_sub(1)
                     .and_then(|n| model.quest_log.entries.get(n))
@@ -316,12 +320,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     .cloned()
             };
             let Some(l) = line else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                return Ok(MultiValue::from_vec(vec![
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Nil,
+                ]));
             };
             Ok(MultiValue::from_vec(vec![
                 Value::String(lua.create_string(&l.text)?),
                 Value::String(lua.create_string(&l.kind)?),
-                Value::Boolean(l.finished),
+                flag(l.finished),
             ]))
         })?,
     )?;
@@ -547,7 +555,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // (`QuestTimerFrame.lua:43`, `QuestTimerFrame.xml:20`).
     g.set(
         "GetQuestIndexForTimer",
-        lua.create_function(|lua, t: usize| {
+        lua.create_function(|lua, Idx(t): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let now = model.server_unix_time;
             let index = t.checked_sub(1).and_then(|n| {
@@ -696,7 +704,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "IsQuestWatched",
-        lua.create_function(|lua, i: u32| {
+        lua.create_function(|lua, Idx32(i): Idx32| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(flag(
                 watch_id_at(&model, i).is_some_and(|id| model.quest_log_watched.contains(&id)),
@@ -728,7 +736,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // The watched quest's current 1-based row, nil when it is not a visible row.
     g.set(
         "GetQuestIndexForWatch",
-        lua.create_function(|lua, w: usize| {
+        lua.create_function(|lua, Idx(w): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let index = w
                 .checked_sub(1)
@@ -1042,15 +1050,38 @@ mod tests {
         assert!(s
             .eval::<bool>(
                 "local t, k, f = GetQuestLogLeaderBoard(1, 2)\n\
-                 return t == 'Kobold Worker slain: 10/10' and k == 'monster' and f == true"
+                 return t == 'Kobold Worker slain: 10/10' and k == 'monster' and f == 1"
             )
             .unwrap());
         assert!(s
             .eval::<bool>(
                 "local t, k, f = GetQuestLogLeaderBoard(1)\n\
-                 return t == 'Kobold Vermin slain: 3/10' and k == 'monster' and f == false"
+                 return t == 'Kobold Vermin slain: 3/10' and k == 'monster' and f == nil"
             )
             .unwrap());
+        // Three values on every path; a row or line with nothing answers three nils (`0x4e07ac`).
+        for call in [
+            "GetQuestLogLeaderBoard(1)",
+            "GetQuestLogLeaderBoard(1, 2)",
+            "GetQuestLogLeaderBoard(2)",
+            "GetQuestLogLeaderBoard(1, 9)",
+            "GetQuestLogLeaderBoard(0)",
+        ] {
+            assert_eq!(s.arity(call).unwrap(), 3, "{call}");
+        }
+        for call in [
+            "GetQuestLogLeaderBoard(2)",
+            "GetQuestLogLeaderBoard(1, 9)",
+            "GetQuestLogLeaderBoard(0)",
+        ] {
+            assert!(
+                s.eval::<bool>(&format!(
+                    "local a, b, c = {call} return a == nil and b == nil and c == nil"
+                ))
+                .unwrap(),
+                "{call}"
+            );
+        }
         assert_eq!(
             s.eval::<i64>("return GetQuestLogRewardMoney()").unwrap(),
             40
