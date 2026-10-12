@@ -19,6 +19,14 @@ pub struct FrameHandle {
     generation: u32,
 }
 
+impl FrameHandle {
+    /// Index and generation in one integer, for a deterministic order over a hashed set.
+    #[inline]
+    pub(crate) fn fingerprint_bits(self) -> u64 {
+        (u64::from(self.generation) << 32) | u64::from(self.index)
+    }
+}
+
 /// A generational handle to a [`Region`] (a texture or fontstring leaf).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RegionHandle {
@@ -167,6 +175,11 @@ pub struct Frame {
     /// the post-load hook starts (`0x76a2ff`). While it is set the frame's own OnShow and OnHide
     /// fire nothing (`0x76b270`/`0x76b2a0`); it still transitions and walks its children.
     pub load_window: bool,
+    /// The layout object's deferral flag (`0x2` of `G+0x3c`, written only by `0x768060`): set by a
+    /// hide (`0x76ad70`) and a load's start (`0x7697cc`), cleared by a show (`0x76ae58`), a load's
+    /// end while visible (`0x76a310`) and an anchor read (`0x7a2fc0`). While it is set the frame's
+    /// resolve waits; [`crate::script::Model`] keeps what it owes.
+    pub layout_deferred: bool,
     /// `EnableMouse`: the mouse bit (bit 2) of the input mask `[frame+0xcc]`.
     pub mouse_enabled: bool,
     /// `EnableMouseWheel`, or an `<OnMouseWheel>` script at XML load: the mask's wheel bit (3).
@@ -176,7 +189,7 @@ pub struct Frame {
     /// mask's char and key bits (`0x76af00`), which key delivery walks
     /// ([`crate::script::keyboard`]); a script-less frame there declines.
     pub keyboard_enabled: bool,
-    /// `SetClampedToScreen`, geometry flags bit 4: `0x767a20` shifts the rect back on screen.
+    /// `SetClampedToScreen`, geometry flags `0x10`: `0x767a20` shifts the rect back on screen.
     /// Every GameTooltip is born with it here; the stock tooltips get it from their template,
     /// `GameTooltipTemplate.xml:3`.
     pub clamped_to_screen: bool,
@@ -238,6 +251,10 @@ pub struct Region {
     /// while anonymous. Only the `_G` entry is first-come (`0x701bd0`), so two regions can hold
     /// one name, and `GetName` answers each its own.
     pub name: Option<String>,
+    /// The layout object's deferral bit, as [`Frame::layout_deferred`]: set when the region stops
+    /// drawing (`0x77fc82`) and at its owner's load (`0x769807`), cleared when it starts
+    /// (`0x77fce6`) and by an anchor read.
+    pub layout_deferred: bool,
 }
 
 /// A cursor over a frame's child list for [`WidgetArena::next_child`]: the child last returned and
@@ -513,6 +530,8 @@ impl WidgetArena {
             shown,
             effective_visible: shown && parent_visible,
             load_window: false,
+            // The ctor zeroes the layout flags (`0x767680`); the load sets the bit.
+            layout_deferred: false,
             mouse_enabled: mouse_enabled_by_ctor(kind),
             // The WorldFrame ctor takes the wheel (`0x481b1f`); the reference's ScrollFrame and
             // ScrollingMessageFrame ctors do not, and a stock one takes it from `<OnMouseWheel>`.
@@ -685,6 +704,11 @@ impl WidgetArena {
         sub_level: i8,
     ) -> Option<RegionHandle> {
         let decl_seq = self.take_decl(owner)?;
+        // The link takes the owner's bit (`0x77fd1e`), and the shown region's start clears it on a
+        // visible owner out of its load (`0x77fcb0`).
+        let layout_deferred = self
+            .frame(owner)
+            .is_some_and(|f| f.layout_deferred && !(f.effective_visible && !f.load_window));
         let (index, generation) = self.regions.insert(Region {
             kind,
             owner,
@@ -693,6 +717,7 @@ impl WidgetArena {
             decl_seq,
             detached: false,
             name: None,
+            layout_deferred,
         });
         let handle = RegionHandle { index, generation };
         self.frame_mut(owner)

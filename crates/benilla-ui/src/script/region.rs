@@ -77,7 +77,10 @@ pub(super) fn link_region(
     layer: crate::order::DrawLayer,
     shown: bool,
 ) {
-    if model.arena.set_region_owner(rh, Some(owner)) {
+    let drew = model.region_draws(rh);
+    let old_loading = model.region_owner_loading(rh);
+    let moved = model.arena.set_region_owner(rh, Some(owner));
+    if moved {
         // The owner supplies the region's scale to layout; the re-link invalidates nothing, so
         // the region keeps its rect until the resolve reaches it.
         model.unsettle_region(rh);
@@ -85,7 +88,7 @@ pub(super) fn link_region(
     if let Some(r) = model.arena.region_mut(rh) {
         r.draw_layer = layer;
     }
-    model.region_data.entry(rh).or_default().hidden = !shown;
+    model.relink_region_layout(rh, drew, old_loading, moved, Some(shown));
 }
 
 /// Apply a Button state machine's writes to the regions' shown bit, the one `Show`/`Hide` write.
@@ -93,7 +96,7 @@ pub(super) fn link_region(
 pub(super) fn apply_shown_writes(model: &mut Model, writes: crate::widget::ShownWrites) {
     for (rh, shown) in writes.0 {
         if model.arena.region(rh).is_some() {
-            model.region_data.entry(rh).or_default().hidden = !shown;
+            model.set_region_hidden(rh, !shown);
         }
     }
 }
@@ -527,11 +530,15 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                 }
                 _ => return Err(wrong_type()),
             };
-            if model.arena.set_region_owner(rh, new_owner) {
+            let drew = model.region_draws(rh);
+            let old_loading = model.region_owner_loading(rh);
+            let moved = model.arena.set_region_owner(rh, new_owner);
+            if moved {
                 // The owner supplies the region's scale to layout; the re-link invalidates nothing
                 // (`0x77fd10`), so the region keeps its rect until the resolve reaches it.
                 model.unsettle_region(rh);
             }
+            model.relink_region_layout(rh, drew, old_loading, moved, None);
             Ok(())
         },
     )?;
@@ -542,7 +549,7 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            model.region_data.entry(rh).or_default().hidden = false;
+            model.set_region_hidden(rh, false);
             Ok(())
         })?,
     )?;
@@ -552,7 +559,7 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            model.region_data.entry(rh).or_default().hidden = true;
+            model.set_region_hidden(rh, true);
             Ok(())
         })?,
     )?;
@@ -774,7 +781,12 @@ pub(crate) fn free_regions(model: &mut Model, dying: &[RegionHandle]) {
              graph's readers of it or the nodes named since"
         );
     }
-    // Each dependent re-derives its edges and keeps the state it has.
+    // Each dependent re-derives its edges and keeps the state it has, in handle order, as a naming
+    // can mint an id.
+    regions.sort_unstable_by_key(|rh| rh.fingerprint_bits());
+    regions.dedup();
+    frames.sort_unstable_by_key(|h| h.fingerprint_bits());
+    frames.dedup();
     for rh in regions {
         model.unsettle_region(rh);
     }
@@ -912,13 +924,13 @@ pub(super) fn region_set_point(lua: &Lua, this: &Table, args: &MultiValue) -> ml
     Ok(())
 }
 
-/// `Region:GetWidth()`/`GetHeight()` (`0x7a1e00`, `0x7a2030`): the geometry-vtable call the rect
-/// resolver also makes (`0x767579`), so the Lua size is the rect's. Per axis, a Texture answers
-/// its authored size unless exactly 0, else its texel extent (`0x770720`, `0x770790`). A
-/// FontString answers its authored size unless 0 (`0x77294a`), else its measure, either floored
-/// at one unit (`0x772930`, `0x772a60`); the width is unwrapped, as `GetStringWidth` gives it
-/// (`0x772890`, `0x79e510`), the height wrapped (`0x7729b0`). A title region answers its field
-/// (`0x768420`, `0x768410`).
+/// A region's own size, the geometry-vtable call (`+0x1c`/`+0x20`) the rect resolver also makes
+/// (`0x767579`), which `GetWidth`/`GetHeight` answer when non-zero (`0x7a1e00`, `0x7a2030`). Per
+/// axis, a Texture answers its authored size unless exactly 0, else its texel extent (`0x770720`,
+/// `0x770790`). A FontString answers its authored size unless 0 (`0x77294a`), else its measure,
+/// either floored at one unit (`0x772930`, `0x772a60`); the width is unwrapped, as
+/// `GetStringWidth` gives it (`0x772890`, `0x79e510`), the height wrapped (`0x7729b0`). A title
+/// region answers its field (`0x768420`, `0x768410`).
 pub(super) fn measured_wh(lua: &Lua, this: &Table) -> mlua::Result<(f32, f32)> {
     let rh = region_handle_of(lua, this)?;
     // Measures this tick when a host font engine is installed; a no-op for a Texture or a

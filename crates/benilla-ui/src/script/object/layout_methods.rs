@@ -155,22 +155,18 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // No `SetSize`: neither 1.12 method table has it.
     set_shared(lua, m, Side::Frame, "GetWidth", |lua, this: Table| {
         let h = frame_handle_of(lua, &this)?;
-        settle(lua);
-        let model = lua.app_data_ref::<Model>().expect("model");
-        Ok(size_read(&model, h, true))
+        Ok(size_read(lua, h, true))
     })?;
     set_shared(lua, m, Side::Frame, "GetHeight", |lua, this: Table| {
         let h = frame_handle_of(lua, &this)?;
-        settle(lua);
-        let model = lua.app_data_ref::<Model>().expect("model");
-        Ok(size_read(&model, h, false))
+        Ok(size_read(lua, h, false))
     })?;
 
     // GetCenter(): the resolved rect's centre in the frame's own units (screen ÷ effective scale,
     // y-up), as the reference's coordinate getters report; nil before the first resolve.
     set_shared(lua, m, Side::Frame, "GetCenter", |lua, this: Table| {
         let h = frame_handle_of(lua, &this)?;
-        settle(lua);
+        settle_frame(lua, h);
         let model = lua.app_data_ref::<Model>().expect("model");
         let inv = 1.0 / eff_scale(&model, h);
         Ok(match model.resolved.get(&h) {
@@ -204,7 +200,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     ] {
         set_shared(lua, m, Side::Frame, name, move |lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            settle(lua);
+            settle_frame(lua, h);
             let model = lua.app_data_mut::<Model>().expect("model");
             let inv = 1.0 / eff_scale(&model, h);
             Ok(model.resolved.get(&h).map(|r| {
@@ -221,13 +217,40 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 }
 
 /// Resolve the layout now if anything moved, as the reference answers a geometry query against
-/// current layout; a settled tree costs one epoch compare. Deviation: `OnSizeChanged` fires at the
-/// next layout drain (`UiScript::resolve`), not inside the getter as the reference's forced
-/// `ApplyRect 0x76b580` does, because running Lua handlers inside a binding risks a borrow panic
-/// or unbounded recursion.
-pub(in crate::script) fn settle(lua: &Lua) {
+/// current layout; a settled tree costs one epoch compare. The read frame `h`, if pending, resolves
+/// inside the read, its deferral bit left set (`0x7a1a0b` → `0x7680e0(1)`), and its `OnSizeChanged`
+/// fires here, as its `ApplyRect` (`0x76b580` → vt+0x48) runs inside the getter.
+pub(in crate::script) fn settle_frame(lua: &Lua, h: FrameHandle) {
+    let id = lua
+        .app_data_ref::<Model>()
+        .expect("model")
+        .frame_to_id
+        .get(&h)
+        .copied();
+    settle_node(lua, id);
+}
+
+/// [`settle_frame`] for a region's rect, through the same getters (`0x7a1980`..).
+pub(in crate::script) fn settle_region(lua: &Lua, rh: crate::widget::RegionHandle) {
+    let id = lua
+        .app_data_ref::<Model>()
+        .expect("model")
+        .region_to_id
+        .get(&rh)
+        .copied();
+    settle_node(lua, id);
+}
+
+fn settle_node(lua: &Lua, id: Option<u32>) {
     let mut model = lua.app_data_mut::<Model>().expect("model");
-    crate::script::UiScript::resolve_layout(&mut model);
+    match id {
+        Some(id) if model.node_pending(id) => {
+            model.pull_read(id);
+            drop(model);
+            crate::script::visibility::resolve_and_fire(lua, vec![id]);
+        }
+        _ => crate::script::UiScript::resolve_layout(&mut model),
+    }
 }
 
 pub(crate) fn eff_scale(model: &Model, h: FrameHandle) -> f32 {
@@ -243,18 +266,28 @@ pub(crate) fn eff_scale(model: &Model, h: FrameHandle) -> f32 {
     }
 }
 
-/// `GetWidth`/`GetHeight`: the resolved span in the frame's own units (screen ÷ effective scale),
-/// else the size it was given, where 0 means derived, as in the reference.
-fn size_read(model: &Model, h: FrameHandle, width: bool) -> f32 {
-    if let Some(r) = model.resolved.get(&h) {
-        let span = if width { r.width() } else { r.height() };
-        return span / eff_scale(model, h);
+/// `GetWidth`/`GetHeight` (`0x7a1e00`, `0x7a2030`): the size the frame was given (`+0x1c`/`+0x20`
+/// → `0x768420`/`0x768410`), with no resolve, whatever its anchors span (`0x7a1e99`–`0x7a1ea5`).
+/// Only a zero size resolves a pending frame (`0x7a1eb6`) and answers its rect's span, else 0. The
+/// span is not divided by the effective scale, though the rect carries it: the answer is only
+/// converted (`0x41ad70`, `0x41ae40`), where `GetLeft` divides (`0x7a1a63`).
+fn size_read(lua: &Lua, h: FrameHandle, width: bool) -> f32 {
+    let set = {
+        let model = lua.app_data_ref::<Model>().expect("model");
+        model
+            .layout_inputs
+            .get(&h)
+            .map_or(0.0, |i| if width { i.width } else { i.height })
+    };
+    if set != 0.0 {
+        return set;
     }
+    settle_frame(lua, h);
+    let model = lua.app_data_ref::<Model>().expect("model");
     model
-        .layout_inputs
+        .resolved
         .get(&h)
-        .map(|i| if width { i.width } else { i.height })
-        .unwrap_or(0.0)
+        .map_or(0.0, |r| if width { r.width() } else { r.height() })
 }
 
 /// `SetPoint` (`0x7a2540`) for a frame: the argument ladder is [`super::anchor_args`], shared with

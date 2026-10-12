@@ -191,6 +191,11 @@ fn the_stock_interface_inside_uiparent_is_unmoved_by_where_the_scale_lives() {
             "#,
         )
         .unwrap();
+    // A frame of the session: a hidden frame pending its resolve passes nothing on (`0x76814b`),
+    // and the stock `FCF_OnUpdate`'s `MouseIsOver` getters are what resolve the hidden Combat Log
+    // every frame (`0x7a1980`), which the tabs anchored through it read.
+    script.tick(0.016);
+    script.resolve();
     let _ = script.take_errors();
 
     // The old home: a root `1/S` larger, `UIParent` at scale 1.
