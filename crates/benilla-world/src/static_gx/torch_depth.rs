@@ -57,9 +57,12 @@ use crate::model_render::ModelKind;
 use bevy::math::Affine3A;
 use benilla_assets::materials::TorchBinds;
 
-/// MONKEY (live bank rank): each 512-square Depth32 face is 1 MiB. Sixteen static cubes plus
-/// eight compact live overlays cost 144 MiB; 384-square faces would cost 81 MiB.
-const TORCH_MAP_EDGE: u32 = 512;
+/// MONKEY (live bank rank): the cube-map edge. 512-square Depth32 faces cost 144 MiB for the whole
+/// bank; 256 squares cost 36 MiB. The torch receiver kernel (`torchShadowSoft`, contact-hardening
+/// penumbra) is far wider than one texel at 256 over the 48 yd cube (~5 texels/yd), so the softer
+/// edge is the same trade already accepted for the sun map (`shadow_core` 4096 → 2048) — the
+/// shipped default is the cheaper 256.
+const TORCH_MAP_EDGE: u32 = 256;
 pub(crate) const MAX_TORCH_MAPS: usize = 16;
 const MAX_TORCH_DYNAMIC: usize = 8;
 /// MONKEY (moving fixture): how many slots may be FULLY DYNAMIC in one frame - re-rendered from
@@ -279,7 +282,7 @@ impl Default for TorchShadowViews {
 }
 
 /// MONKEY (torch shadows Phase 3A): the ONE shared torch depth array — a `Depth32Float`
-/// MONKEY (live bank rank): 512×512×144-layer `Image` asset (render, sample, copy-src/dst),
+/// MONKEY (live bank rank): 256×256×144-layer `Image` asset (render, sample, copy-src/dst),
 /// no CPU data) whose sampler descriptor carries `compare: Some(GreaterEqual)`, so its `GpuImage`
 /// sampler is a real comparison sampler and its default view is a `D2Array` over all 144 layers
 /// (wgpu's default view dimension for a multi-layer 2D texture). Created ONCE at startup by
