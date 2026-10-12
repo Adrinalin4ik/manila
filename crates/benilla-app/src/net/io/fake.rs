@@ -324,6 +324,9 @@ type Rosters = Arc<Mutex<Vec<Vec<benilla_protocol::Character>>>>;
 /// Packets, by opcode and body, the fake world sends behind `SMSG_LOGOUT_COMPLETE`.
 type Trail = Arc<Mutex<Vec<(u16, Vec<u8>)>>>;
 
+/// Whether refusals are held, and the signal that releases them.
+type RefusalGate = Arc<(Mutex<bool>, std::sync::Condvar)>;
+
 /// The `SMSG_ADDON_INFO` body a fake world sends, and whether it trails the authentication answer.
 type AddonReply = Arc<Mutex<Option<(Vec<u8>, bool)>>>;
 
@@ -349,6 +352,8 @@ pub(crate) struct World {
     cut: Arc<AtomicBool>,
     /// Answer `CMSG_PLAYER_LOGIN` with `SMSG_CHARACTER_LOGIN_FAILED`.
     refuse: Arc<AtomicBool>,
+    /// Refusals wait while this holds, until [`World::release_refusals`].
+    refusal_gate: RefusalGate,
     /// Packets sent right behind `SMSG_LOGOUT_COMPLETE`, as the world session leaves them in flight.
     trail: Trail,
     /// The `SMSG_ADDON_INFO` body every session is sent, and whether it follows the authentication
@@ -404,6 +409,17 @@ impl World {
     /// vmangos's result 1).
     pub(crate) fn refuse_logins(&self) {
         self.refuse.store(true, Ordering::SeqCst);
+    }
+
+    /// Hold every refusal back until [`Self::release_refusals`].
+    pub(crate) fn hold_refusals(&self) {
+        *self.refusal_gate.0.lock().unwrap() = true;
+    }
+
+    /// Send the refusals [`Self::hold_refusals`] held, and every later one at once.
+    pub(crate) fn release_refusals(&self) {
+        *self.refusal_gate.0.lock().unwrap() = false;
+        self.refusal_gate.1.notify_all();
     }
 
     /// Send `SMSG_ADDON_INFO` with one record per status (`2` hides the addon) to every session
@@ -517,6 +533,8 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
     let cut_flag = Arc::clone(&cut);
     let refuse = Arc::new(AtomicBool::new(false));
     let refuse_flag = Arc::clone(&refuse);
+    let refusal_gate: RefusalGate = Arc::default();
+    let refuse_wait = Arc::clone(&refusal_gate);
     let trail: Trail = Arc::default();
     let trailing = Arc::clone(&trail);
     let addon_info: AddonReply = Arc::default();
@@ -570,6 +588,7 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
             let warden_flag = Arc::clone(&warden_flag);
             let cut_flag = Arc::clone(&cut_flag);
             let refuse_flag = Arc::clone(&refuse_flag);
+            let refuse_wait = Arc::clone(&refuse_wait);
             let trailing = Arc::clone(&trailing);
             let index = {
                 let mut all = session_log.lock().unwrap();
@@ -643,12 +662,18 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
                             }
                             send(&mut s, Some(&mut crypto), opcode::SMSG_CHAR_RENAME, &body);
                         }
-                        opcode::CMSG_PLAYER_LOGIN if refuse_flag.load(Ordering::SeqCst) => send(
-                            &mut s,
-                            Some(&mut crypto),
-                            opcode::SMSG_CHARACTER_LOGIN_FAILED,
-                            &[1],
-                        ),
+                        opcode::CMSG_PLAYER_LOGIN if refuse_flag.load(Ordering::SeqCst) => {
+                            let (held, released) = &*refuse_wait;
+                            let _ = released
+                                .wait_timeout_while(held.lock().unwrap(), WAIT, |h| *h)
+                                .unwrap();
+                            send(
+                                &mut s,
+                                Some(&mut crypto),
+                                opcode::SMSG_CHARACTER_LOGIN_FAILED,
+                                &[1],
+                            );
+                        }
                         opcode::CMSG_LOGOUT_REQUEST => {
                             send(&mut s, Some(&mut crypto), opcode::SMSG_LOGOUT_COMPLETE, &[]);
                             for (op, body) in trailing.lock().unwrap().clone() {
@@ -672,6 +697,7 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
         warden,
         cut,
         refuse,
+        refusal_gate,
         trail,
         addon_info,
         open,
