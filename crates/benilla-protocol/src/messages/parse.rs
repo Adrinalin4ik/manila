@@ -662,12 +662,13 @@ fn parse_server_body(
             }
         }
         opcode::SMSG_INVENTORY_CHANGE_FAILURE => {
-            let (reason, required_level, item_guid, bag_slot) =
+            let (reason, required_level, item_guid, item2_guid, bag_slot) =
                 items::read_inventory_change_failure(&mut r)?;
             ServerPacket::InventoryChangeFailure {
                 reason,
                 required_level,
                 item_guid,
+                item2_guid,
                 bag_slot,
             }
         }
@@ -1191,6 +1192,17 @@ fn parse_server_body(
             }
             ServerPacket::SetFactionStanding { standings }
         }
+        opcode::SMSG_SET_FORCED_REACTIONS => {
+            let count = read_u32_le(&mut r)?;
+            let mut reactions =
+                Vec::with_capacity(capacity_hint(count, super::reputation::FACTION_LIST_LEN));
+            for _ in 0..count {
+                let faction = read_u32_le(&mut r)?;
+                let rank = read_u32_le(&mut r)?;
+                reactions.push((faction, rank));
+            }
+            ServerPacket::SetForcedReactions { reactions }
+        }
         opcode::SMSG_SET_FACTION_VISIBLE => ServerPacket::SetFactionVisible {
             list_id: read_u32_le(&mut r)?,
         },
@@ -1643,6 +1655,22 @@ fn parse_server_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `SMSG_SET_FORCED_REACTIONS`: a count, then `(faction, rank)` pairs of `u32`s.
+    #[test]
+    fn the_forced_reaction_table_decodes_whole() {
+        let mut body = 2u32.to_le_bytes().to_vec();
+        for v in [1u32, 6, 72, 4] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        let (packet, tail) = parse_server_with_tail(opcode::SMSG_SET_FORCED_REACTIONS, &body)
+            .expect("a well-formed body decodes");
+        assert!(matches!(
+            packet,
+            ServerPacket::SetForcedReactions { ref reactions } if reactions == &[(1, 6), (72, 4)]
+        ));
+        assert_eq!(tail, 0);
+    }
 
     #[test]
     fn a_trailing_byte_is_reported_as_tail_one_and_never_as_a_failure() {

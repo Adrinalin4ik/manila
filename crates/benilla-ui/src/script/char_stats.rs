@@ -169,6 +169,8 @@ pub struct InvSlotView {
     pub item_id: u32,
     /// Whether the item may go on an action bar, by the same filter as a bag slot's.
     pub bar_placeable: bool,
+    /// The action bar's count gate, as a bag slot's ([`super::container::ContainerSlot`]).
+    pub consumable: bool,
     /// Icon texture path (`Interface\Icons\…`); `None` while the template answer is in flight.
     pub icon: Option<String>,
     /// `ITEM_FIELD_STACK_COUNT`, or for the ammo slot the bag-summed carried total.
@@ -189,10 +191,18 @@ pub struct InvSlotView {
     /// Bound at runtime (`0x5da2c0`): `ITEM_FIELD_FLAGS & 1`, or an enchant whose
     /// `SpellItemEnchantment` row binds. The tooltip's bind line then says Soulbound.
     pub already_bound: bool,
+    /// The template's bonding (`[rec+0x194]`), 0 while unresolved: the equip arms ask on 2.
+    pub bonding: u32,
+    /// The on-use spell the dispatcher reads (`0x5d8c80`), 0 for none or while unresolved.
+    pub use_spell: u32,
+    /// The arm `UseInventoryItem` takes in the dispatcher, with no equip fork; `link` is set once
+    /// the template is cached, which the dispatcher needs (`0x5d8d5c`).
+    pub use_fork: super::container::UseFork,
     /// An `|Hitem:…|h[Name]|h` link once the name is known.
     pub link: Option<String>,
-    /// Whether a pending item operation covers this slot (`IsInventoryItemLocked`).
-    pub locked: bool,
+    /// The item object's guid, 0 while unresolved: `IsInventoryItemLocked` reads the client's lock
+    /// on it.
+    pub guid: u64,
     /// The 1-based live-API slots this item could be equipped into; empty if none.
     pub equip_slots: Vec<u8>,
     /// The resolved `ITEM_FIELD_CREATOR` name, the tooltip's "<Made by %s>" line.
@@ -498,8 +508,10 @@ impl InvSlotView {
             name: slot.link.as_deref().and_then(link_item_name),
             durability: slot.durability,
             already_bound: slot.already_bound,
+            bonding: slot.bonding,
+            use_spell: slot.use_spell,
             link: slot.link.clone(),
-            locked: slot.locked,
+            guid: slot.guid,
             creator: slot.creator.clone(),
             enchants: slot.enchants.clone(),
             // The item's own flags (UNLOCKED, WRAPPED) and expiry, which the tooltip builder reads.

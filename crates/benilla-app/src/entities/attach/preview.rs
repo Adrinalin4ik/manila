@@ -165,6 +165,8 @@ pub(in crate::entities) fn build_glue_preview(
     };
     let (race, sex) = look.body();
     let Some(display_id) = char_create.0.body_display(race, sex) else {
+        // No ChrRaces row, a sex past 1 or a zero display id: no body (`0x5ec480`), so nothing
+        // to show; stop retrying.
         state.built = true; // a non-playable race can't resolve — nothing to show, don't spin
         if !state.complained {
             state.complained = true;

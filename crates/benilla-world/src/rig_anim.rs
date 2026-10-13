@@ -46,6 +46,16 @@ pub fn take_anchor_writes() -> (u64, u64) {
     (ANCHOR_WROTE.swap(0, Relaxed), ANCHOR_SKIPPED.swap(0, Relaxed))
 }
 
+/// A scene's own clock in seconds, on each model root that stands in a scene that keeps one: a
+/// `<Model>` widget's private `CM2Scene` (`CSimpleModel+0x314`, `0x76cfc0`), zeroed by its
+/// constructor (`0x706ff0`) and advanced only by the widget's `OnUpdate` (`0x76d7f0`), which the
+/// visible-frame pump calls, so a hidden pane's scene stands still. A model with none runs on the
+/// world's clock. Read by the global-sequence channels ([`GlobalSeqDrive`]) and the material lanes
+/// (`doodad_anim`), each against its own anchor: `clock − attach` for a global sequence
+/// (`CM2Model+0x68`), `clock − lo` for a sequence band (`0x714530`).
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+pub struct SceneClock(pub f64);
+
 /// This rig's per-bone pose evaluation is parked (decision 0448): the pose evaluator and the pose
 /// post-passes skip it. The sequence clocks, the driver state machine, and the event scanner all
 /// keep running — parking turns *sampling* off, nothing else.
