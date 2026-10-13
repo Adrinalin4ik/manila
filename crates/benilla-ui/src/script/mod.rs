@@ -105,6 +105,8 @@ mod item_stats;
 mod item_text;
 pub mod keybind;
 mod keyboard;
+mod layer_batch;
+pub(crate) mod texel;
 pub(crate) mod use_gates;
 pub(crate) use keyboard::enable_for_script;
 pub use keyboard::{KeyUp, KeyWalk};

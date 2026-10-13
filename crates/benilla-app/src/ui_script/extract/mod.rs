@@ -1287,6 +1287,7 @@ fn convert_entry(
         QuadContent::Texture {
             path,
             color,
+            gradient,
             additive,
             tex_coords,
             circular,
@@ -1409,6 +1410,10 @@ fn convert_entry(
             // A pathless Texture region is a solid color; a textured one tints by it.
             let mut color = color.unwrap_or([1.0, 1.0, 1.0, 1.0]);
             color[3] *= eq.alpha;
+            // A gradient's vertex colours each multiply the fill and the alpha, as `0x77fac0`
+            // folds the frame alpha into every vertex's byte.
+            let corner_colors =
+                gradient.map(|corners| corners.map(|v| std::array::from_fn(|i| v[i] * color[i])));
             out.push(UiQuad {
                 rect,
                 z_key: eq.z,
@@ -1416,6 +1421,7 @@ fn convert_entry(
                 uv,
                 uv_clamp,
                 color,
+                corner_colors,
                 additive,
                 clip,
                 // `SetRotation` is counter-clockwise-positive, `UiQuad::rotation` clockwise.
@@ -1978,6 +1984,37 @@ mod extract_gate_tests {
         app_over(script)
     }
 
+    /// A black fill under a vertical alpha ramp, the credits fade's shape, in a frame at half
+    /// alpha: each corner is fill × gradient × frame alpha (`0x77fac0` folds it into every
+    /// vertex), the opaque end at the bottom.
+    #[test]
+    fn a_gradient_paints_per_corner_over_its_fill() {
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+            local f = CreateFrame("Frame", "Fade")
+            f:SetPoint("TOPLEFT", 0, 0)
+            f:SetWidth(100); f:SetHeight(100)
+            local t = f:CreateTexture(nil, "ARTWORK")
+            t:SetAllPoints(f)
+            t:SetTexture(0, 0, 0)
+            t:SetGradientAlpha("VERTICAL", 0, 1, 0, 1, 0, 1, 0, 0)
+            f:SetAlpha(0.5)
+        "#,
+            )
+            .unwrap();
+        let mut app = app_over(script);
+        app.update();
+        let quads = &app.world().resource::<UiQuads>().quads;
+        let fade = quads
+            .iter()
+            .find(|q| q.texture.is_none() && q.corner_colors.is_some())
+            .expect("the fade draws, with its corners");
+        let (top, bottom) = ([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.5]);
+        assert_eq!(fade.corner_colors, Some([top, top, bottom, bottom]));
+    }
+
     /// [`app_from_script`] over a VM of the caller's.
     fn app_over(script: UiScript) -> App {
         let mut app = App::new();
@@ -2348,19 +2385,21 @@ mod extract_gate_tests {
     #[test]
     fn a_shown_sibling_splices_through_the_shift_and_matches_the_full_conversion() {
         // A, B, C in declaration order, so B's entries sort between A's and C's; B starts hidden.
+        // Each texture has a layer of its own: in one, the batch sort (`0x7731a0`) would rank the
+        // three by texture and move C's key when B rejoins.
         const BUILD: &str = r#"
-            local function box(name, x, r, g, b)
+            local function box(name, x, r, g, b, layer)
               local f = CreateFrame("Frame", name)
               f:SetPoint("TOPLEFT", x, 0)
               f:SetWidth(50); f:SetHeight(50)
-              local t = f:CreateTexture(nil, "ARTWORK")
+              local t = f:CreateTexture(nil, layer)
               t:SetTexture(r, g, b)
               t:SetAllPoints()
               return f
             end
-            box("A", 0, 1, 0, 0)
-            hidden = box("B", 60, 0, 1, 0)
-            box("C", 120, 0, 0, 1)
+            box("A", 0, 1, 0, 0, "BACKGROUND")
+            hidden = box("B", 60, 0, 1, 0, "BORDER")
+            box("C", 120, 0, 0, 1, "ARTWORK")
         "#;
         let mut app = app_from_script(&format!("{BUILD}\nhidden:Hide()"));
         app.world_mut()
@@ -2393,7 +2432,7 @@ mod extract_gate_tests {
             quads.quads.len()
         );
         // The comparison app replays the history: `Show()` re-stacks a hidden frame to the tail of
-        // its draw bucket (the client's show, `0x76ae10`), so B draws above C.
+        // its draw bucket (the client's show, `0x76ae10`).
         let mut reference = app_from_script(&format!("{BUILD}\nhidden:Hide()\nhidden:Show()"));
         reference.update();
         assert!(

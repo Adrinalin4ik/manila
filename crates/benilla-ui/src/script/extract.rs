@@ -6,7 +6,9 @@ use crate::order::{self, ZTarget};
 use crate::widget::FrameHandle;
 
 use super::clip::DrawClips;
-use super::{colorselect, slider, ExtractedQuad, FontObject, QuadContent, TexCoords, UiScript};
+use super::{
+    colorselect, layer_batch, slider, ExtractedQuad, FontObject, QuadContent, TexCoords, UiScript,
+};
 
 impl UiScript {
     /// Every live draw target, visible or not: each frame's slot then its regions, in arena order.
@@ -58,11 +60,15 @@ impl UiScript {
 
     /// The render list in painter order, ascending by `ZKey`; call [`UiScript::resolve`] first.
     pub fn extract(&self) -> Vec<ExtractedQuad> {
+        // The files set since the last draw take their stamps: this draw forces them.
+        self.model_mut().texels.flush();
         let model = self.model_ref();
         let list = order::traversal(&model.arena);
         let mut out = Vec::with_capacity(list.len());
         // A scroll child's subtree clips to its ScrollFrames' rects, nested ones intersecting.
         let mut clips = DrawClips::new(&model, &list);
+        // Every texture quad's batch and texture, for the batches' End sort below.
+        let mut batch_quads: Vec<layer_batch::BatchQuad> = Vec::new();
         for &order::DrawEntry {
             target,
             key: zkey,
@@ -73,6 +79,8 @@ impl UiScript {
             let Some(clip) = clips.clip(scope) else {
                 continue;
             };
+            // A region's texture, which ranks it in the batch sort.
+            let mut region_tex = None;
             let (rect, alpha, content, clip, scale) = match target {
                 ZTarget::Frame(fh) => {
                     let frame = model.arena.frame(fh);
@@ -255,6 +263,7 @@ impl UiScript {
                         continue;
                     }
                     let mut data = data_ref.cloned().unwrap_or_default();
+                    region_tex = data.tex.id();
                     // One hop (region combine `0x772180`): the region's alpha times its owner's
                     // `effective_alpha`, which `SetAlpha 0x76a690` already carries down the tree.
                     let alpha = owner_frame.map(|f| f.effective_alpha).unwrap_or(1.0)
@@ -332,7 +341,7 @@ impl UiScript {
                     }
                     // Generated art fills only an empty slot (`ColorPickerFrame.xml` sets none).
                     let content = if let Some(art) =
-                        color_art.filter(|_| data.texture.is_none() && data.fill.is_none())
+                        color_art.filter(|_| data.tex.path().is_none() && data.tex.fill().is_none())
                     {
                         art
                     } else if is_text {
@@ -357,16 +366,21 @@ impl UiScript {
                         }
                     } else {
                         // The draw gate is the texture slot, never the colour (`0x7706e0`: empty
-                        // `+0xcc` emits nothing); a vertex colour alone is a tint. A gradient fills
-                        // the texture slot, so it draws, at its midpoint since a quad has one tint.
-                        let fill = data.fill.or_else(|| data.gradient.map(|g| g.midpoint()));
-                        let has_path = data.texture.is_some();
+                        // `+0xcc` emits nothing): a vertex colour or a gradient alone is a tint.
+                        let fill = data.tex.fill();
+                        let has_path = data.tex.path().is_some();
                         let has_texture = has_path || fill.is_some();
                         QuadContent::Texture {
-                            path: data.texture,
+                            path: std::mem::take(&mut data.tex).into_path(),
                             color: has_texture
                                 .then(|| texture_color(fill, data.vertex_color))
                                 .flatten(),
+                            // The quad record carries the four colours with stride 4
+                            // (`0x77304d`), one per vertex, each times the texel.
+                            gradient: data
+                                .gradient
+                                .filter(|_| has_texture)
+                                .map(|g| g.vertex_colors()),
                             // The renderer acts on ADD only: the other four `alphaMode` values
                             // answer `GetBlendMode` but draw as straight alpha.
                             additive: data.blend == crate::script::BlendMode::Add,
@@ -393,6 +407,20 @@ impl UiScript {
                 QuadContent::ModelPane { .. } => zkey.callback(order::DrawLayer::Artwork).raw(),
                 _ => zkey.raw(),
             };
+            // A slot's texture by its stamp; the colour picker's two images, built when it loads
+            // (`0x78b580`, `0x78b8a0`), before anything a script sets.
+            let rank = match &content {
+                QuadContent::Texture { .. } => region_tex.map(|id| model.texels.stamp(id)),
+                QuadContent::ColorWheel | QuadContent::ColorValue { .. } => Some(0),
+                _ => None,
+            };
+            if let (Some(rank), Some(batch)) = (rank, order::quad_batch(z)) {
+                batch_quads.push(layer_batch::BatchQuad {
+                    index: out.len(),
+                    batch,
+                    rank,
+                });
+            }
             out.push(ExtractedQuad {
                 target,
                 z,
@@ -419,6 +447,8 @@ impl UiScript {
                 );
             }
         }
+        // Each layer batch's End sorts its quads by texture (`0x7731a0`).
+        layer_batch::sort_batches(&mut out, &batch_quads);
         out
     }
 }
