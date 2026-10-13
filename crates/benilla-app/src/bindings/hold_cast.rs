@@ -232,7 +232,8 @@ pub(super) fn tick(
         let made = script.take_script_calls();
         let used = match made.as_slice() {
             [] => None,
-            [ScriptCall::UseAction(u)] => Some(*u),
+            // A press carries the item locks it read, so it is cloned, not copied.
+            [ScriptCall::UseAction(u)] => Some(u.clone()),
             _ => {
                 h.eligible = false;
                 None
@@ -250,13 +251,14 @@ pub(super) fn tick(
             }
         });
         // Queue order: what was waiting, then this repeat's cast.
+        let kept = keep.is_some();
         if let Some(u) = keep {
             script.requeue_script_calls(vec![ScriptCall::UseAction(u)]);
             h.fired = true;
             h.last = Some(now);
         }
         script.requeue_script_calls(earlier);
-        if keep.is_some() {
+        if kept {
             // One cast per pass: the next latch would only meet this one's in-flight guard.
             break;
         }

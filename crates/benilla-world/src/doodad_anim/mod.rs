@@ -24,9 +24,14 @@ use mat_anim::tick_anim_materials;
 /// The material/UV animation lever, `/console matAnimOff 1`.
 pub use mat_anim::set_mat_anim_off;
 pub use mat_anim::{
-    playing_seq, register_entity_uv, register_fx_uv, register_tint, sample_mat_anim, AnimMatPart,
-    MatAnim, TintAnimMaterials, TintLoop, UvAnimMaterials, UvLoops,
+    clocked_twin, playing_seq, register_entity_uv, register_fx_uv, register_tint, sample_mat_anim,
+    scene_clocked, AnimMatPart, MatAnim, TintAnimMaterials, TintLoop, UvAnimMaterials, UvLoops,
 };
+
+/// The material tick's set: a scene that owns its clock ([`crate::rig_anim::SceneClock`]) writes
+/// it before this.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MatAnimTick;
 pub(crate) use mat_anim::{register_uv, UvLoop};
 
 /// What a placed doodad model animates, decided per model at spawn.
@@ -513,7 +518,9 @@ impl Plugin for DoodadAnimPlugin {
             Update,
             (
                 sample_mat_anim.before(crate::model_render::ModelVisSet),
-                tick_anim_materials.after(crate::model_render::ModelVisSet),
+                tick_anim_materials
+                    .in_set(MatAnimTick)
+                    .after(crate::model_render::ModelVisSet),
                 // After the tick, so the probe's `row` column is this frame's write.
                 mat_anim::matanim_probe.after(tick_anim_materials),
             ),
