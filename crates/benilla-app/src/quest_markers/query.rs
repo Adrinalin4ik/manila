@@ -103,6 +103,7 @@ pub(super) fn query_statuses(
     // `ResMut` retain marks `QuestGiver` changed.
     if index.is_changed() {
         state.asked.retain(|guid, _| index.0.contains_key(guid));
+        state.judged.retain(|guid| index.0.contains_key(guid));
         quest.retain_statuses(|npc| index.0.contains_key(&npc));
     }
     // Off a sweep, a unit's verdict depends only on its descriptor and the two reaction
@@ -110,7 +111,9 @@ pub(super) fn query_statuses(
     let catalogs_moved =
         reputations.is_changed() || factions.as_ref().is_some_and(|f| f.is_changed());
     for (entity, guid, net, obj, fm) in &objects {
-        if !swept && !full && !catalogs_moved && !obj.is_changed() {
+        // A unit not judged yet is judged now, whatever its change tick says.
+        let first_sight = state.judged.insert(guid.0);
+        if !swept && !full && !catalogs_moved && !obj.is_changed() && !first_sight {
             continue;
         }
         // `0x6073f0` zeroes the marker (`+0xb2c`, the green `!` too) and the status (`+0xcb8`)
@@ -246,6 +249,11 @@ pub(super) struct QueryState {
     generation: u64,
     /// Each asked guid's [`unit_ask_key`]; pruned by object lifetime only, never by a sweep.
     asked: HashMap<u64, u64>,
+    /// The guids judged at least once, pruned with `asked`. A unit's create is its first ask
+    /// (`0x607380` from the create path), and the store's change tick alone cannot carry that:
+    /// a unit whose store was written on a frame this system saw no player in is never
+    /// "changed" again.
+    judged: std::collections::HashSet<u64>,
     /// Last frame's alive state and faction template, the two full-sweep edges; the first frame in
     /// a world is never a full sweep.
     was_dead: bool,
