@@ -480,6 +480,11 @@ mod caret_tests {
     fn app_with(lua: &str) -> App {
         let script = UiScript::new().unwrap();
         script.run(lua).unwrap();
+        app_on(script)
+    }
+
+    /// The whole UI pass on a 1024×768 window (`s = 1`) over `script`.
+    pub(super) fn app_on(script: UiScript) -> App {
         let mut app = App::new();
         app.insert_non_send_resource(script);
         app.insert_resource(UiFontAtlas::for_test(1.0).expect("the client faces open"));
@@ -623,5 +628,58 @@ mod caret_tests {
                 );
             }
         }
+    }
+}
+
+/// A message line's links through the whole UI pass, on the stock `UIErrorsFrame`.
+#[cfg(test)]
+mod link_span_tests {
+    use benilla_ui::script::UiScript;
+
+    use super::caret_tests::app_on;
+    use crate::ui_script::test_ui::load_ui;
+
+    const LINE: &str = "|cff1eff00|Hitem:7073:0:0:0|h[Broken Fang]|h|r";
+
+    /// Stock `UIErrorsFrame` is a `<MessageFrame>` (`UIErrorsFrame.xml:4`), whose update
+    /// (`0x786200`) never takes a link button (`0x7a3880`), so its link line takes no mouse; a
+    /// ScrollingMessageFrame's same line does (`0x788ce7`).
+    #[test]
+    fn a_link_in_the_stock_errors_frame_takes_no_mouse() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let script = UiScript::new().unwrap();
+        for file in [
+            "Interface\\FrameXML\\GlobalStrings.lua",
+            "Interface\\FrameXML\\Fonts.xml",
+            "Interface\\FrameXML\\UIParent.xml",
+            "Interface\\FrameXML\\UIErrorsFrame.xml",
+        ] {
+            load_ui(&script, file);
+        }
+        script
+            .run(&format!(
+                r#"
+                UIErrorsFrame:AddMessage("{LINE}", 1.0, 0.1, 0.1, 1.0)
+                CF = CreateFrame("ScrollingMessageFrame", "CF", UIParent)
+                CF:SetPoint("BOTTOMLEFT", 32, 100); CF:SetWidth(430); CF:SetHeight(120)
+                CF:SetFontObject(ChatFontNormal)
+                CF:AddMessage("{LINE}")
+                "#
+            ))
+            .unwrap();
+        let app = app_on(script);
+        let s = app.world().non_send_resource::<UiScript>();
+        assert_eq!(
+            s.eval::<i64>("return CF:GetNumChildren()").unwrap(),
+            1,
+            "the chat line's link has its button"
+        );
+        assert_eq!(
+            s.eval::<i64>("return UIErrorsFrame:GetNumChildren()")
+                .unwrap(),
+            0,
+            "the error line's link is text"
+        );
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
     }
 }
