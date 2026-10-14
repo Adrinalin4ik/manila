@@ -910,7 +910,10 @@ pub(crate) mod schedule_tests {
     ///
     /// MONKEY (merge upstream dd3983a4, 2026-10-13): upstream 4,689 → 4,642; 4,642 + 19 of ours by
     /// arithmetic, as above.
-    const UPDATE_ACTIONABLE_CEILING: usize = 4_661;
+    ///
+    /// MONKEY (merge upstream 94eb6a8b, 2026-10-14): upstream 4,642 → 4,603; 4,603 + 19 of ours by
+    /// arithmetic, as above.
+    const UPDATE_ACTIONABLE_CEILING: usize = 4_622;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
