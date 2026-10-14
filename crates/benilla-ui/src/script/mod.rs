@@ -304,6 +304,7 @@ pub use types::{
     MeasureRequest, Outline, QuadContent, ScriptValue, TexCoords,
 };
 pub(crate) use types::{FontExplicit, MeasuredText, RegionData};
+pub use unit::by_name::{self, NameCandidate};
 pub use unit::{
     grey_band, level_reads_unknown, parse_unit_token, power_token, unit_is_grey, PlayerRecord,
     SelectionRequest, UnitBase, UnitGuids, UnitState, UnitTokenParse,
@@ -1197,8 +1198,9 @@ impl UiScript {
         keyboard::char_input(&self.lua, text)
     }
 
-    /// Paste host clipboard text into the focused EditBox as one edit: newlines survive only in a
-    /// `multiLine` box, other control characters drop. `true` if a box consumed it.
+    /// Paste host clipboard text into the focused EditBox, typed a character at a time as the
+    /// reference's paste is (`0x77e250`), with a typed character's escapes and events. `true` if
+    /// a box consumed it.
     pub fn paste(&mut self, text: &str) -> bool {
         editbox::paste(&self.lua, text)
     }
