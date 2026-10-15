@@ -386,6 +386,11 @@ fn drive_vplates(
     let scale = window.map_or(1.0, |w| w.scale_factor());
     // Everything below is in window px, divided by this once for the widget layer's root units.
     let seam = window.map_or(1.0, |w| crate::ui_script::seam_scale(w.height()));
+    let unknown_object: String = script
+        .lua()
+        .globals()
+        .get::<String>("UNKNOWNOBJECT")
+        .unwrap_or_default();
     let mut states: Vec<PlateState> = Vec::new();
 
     // Plates seat in squared-distance order from the gx point (0.4, 0.3), Y mirrored from the
@@ -575,10 +580,13 @@ fn drive_vplates(
                 .unwrap_or(1)
                 .max(1) as f32,
             bar_colour: [tint[0], tint[1], tint[2]],
+            // A unit whose name query has not answered wears `UNKNOWNOBJECT`, as its tooltip and
+            // `UnitName` do: a plate never shows with no name, and a plate addon keys on it.
             name: names
                 .resolve_unit(guid.0, store, &net_commands)
+                .filter(|name| !name.is_empty())
                 .map(str::to_owned)
-                .unwrap_or_default(),
+                .unwrap_or_else(|| unknown_object.clone()),
             // The skull (`0x7cbb40`): rank 3 through `gated_rank` (so a charmed boss shows its
             // level), or a hostile 10 or more levels up that is not grey (`0x5f0700`, vacuous
             // there but transcribed). A unit with no level yet shows neither.

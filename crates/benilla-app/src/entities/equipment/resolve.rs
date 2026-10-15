@@ -225,6 +225,11 @@ pub(in crate::entities) fn resolve_equipment(
                 };
                 match templates.held(entry, &net) {
                     Some(t) => eq.bodyslots[idx] = t.display_info_id,
+                    // A negative is an answer: `held` reads `None` for "still asking" and for
+                    // "the server does not know this entry" alike, and a player attaches only
+                    // once it settles, so an unknown entry held as pending would leave it with
+                    // no body for the life of the session.
+                    None if templates.template_answered_unknown(entry) => {}
                     None => eq.settled = false, // asked; answer pending
                 }
             }
@@ -233,12 +238,15 @@ pub(in crate::entities) fn resolve_equipment(
             if let Some(entry) = s.player_visible_item_entry(14).filter(|e| *e != 0) {
                 match templates.held(entry, &net) {
                     Some(t) => eq.cloak = t.display_info_id,
+                    // The same distinction as the composite slots above.
+                    None if templates.template_answered_unknown(entry) => {}
                     None => eq.settled = false,
                 }
             }
             if let Some(entry) = s.player_visible_item_entry(0).filter(|e| *e != 0) {
                 match templates.held(entry, &net) {
                     Some(t) => eq.helm = t.display_info_id,
+                    None if templates.template_answered_unknown(entry) => {}
                     None => eq.settled = false,
                 }
             }

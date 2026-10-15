@@ -238,6 +238,9 @@ pub(crate) struct Model {
     /// Named `<Font>` objects by lowercased name, as 1.12 matches them with `SStrCmpI` (`0x783870`,
     /// `0x7838c7`); read them only through `font_object`, where the fold lives.
     pub(crate) font_objects_by_lower: HashMap<String, FontObject>,
+    /// A declared font's `inherits=` parent and what it sets itself, by lowercased name: the
+    /// live link a parent's setter walks ([`super::font::cascade`]).
+    pub(crate) font_links: HashMap<String, super::font::FontLink>,
     /// Each region's rect while its valid bit is set: what its getters and a FontString's draw
     /// read (`GetRect 0x768320`, `0x7730b7`). A cleared region keeps its rect until its own next
     /// invalidate, as `ClearAllPoints` queues no resolve (`0x767620`).
@@ -1245,6 +1248,58 @@ impl Model {
         }
     }
 
+    /// The font a FontString's text is drawn in, which is what its measure must use. A button's
+    /// label takes `Button:SetFont`'s face, height and outline on each axis it did not set itself,
+    /// exactly as the draw folds them ([`super::extract`]); every other region its own. Measured
+    /// in its own font instead, a label came out a pixel narrower or wider than its text, and the
+    /// draw cut it short with an ellipsis.
+    pub(crate) fn label_font<'a>(
+        &'a self,
+        rh: crate::widget::RegionHandle,
+        d: &'a RegionData,
+    ) -> (Option<&'a str>, Option<f32>, super::Outline) {
+        let own = (d.font_path.as_deref(), d.font_height, d.outline);
+        let Some(region) = self.arena.region(rh) else {
+            return own;
+        };
+        let Some(crate::widget::KindState::Button(bs)) =
+            self.arena.frame(region.owner).map(|f| &f.kind_state)
+        else {
+            return own;
+        };
+        let (true, Some(bf)) = (bs.text == Some(rh), bs.font.as_ref()) else {
+            return own;
+        };
+        (
+            if d.font_explicit.face {
+                own.0
+            } else {
+                Some(bf.path.as_str())
+            },
+            if d.font_explicit.height {
+                own.1
+            } else {
+                Some(bf.height)
+            },
+            if d.font_explicit.outline {
+                own.2
+            } else {
+                super::Outline::flags(&bf.flags)
+            },
+        )
+    }
+
+    /// [`RegionData::measure_key`] under [`Self::label_font`].
+    pub(crate) fn measure_key(
+        &self,
+        rh: crate::widget::RegionHandle,
+        d: &RegionData,
+        scale: f32,
+    ) -> u64 {
+        let (font, height, outline) = self.label_font(rh, d);
+        d.measure_key_as(d.text.as_deref().unwrap_or(""), scale, font, height, outline)
+    }
+
     pub(crate) fn new() -> Model {
         Model {
             vm: super::glue::VmKind::InGame,
@@ -1291,6 +1346,7 @@ impl Model {
             backdrops: HashMap::new(),
             simple_html: simplehtml::SimpleHtmlStates::new(),
             font_objects_by_lower: HashMap::new(),
+            font_links: HashMap::new(),
             region_resolved: HashMap::new(),
             region_kept: HashMap::new(),
             next_id: 1,
