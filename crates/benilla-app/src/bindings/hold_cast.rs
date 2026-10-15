@@ -162,12 +162,13 @@ pub(super) fn tick(
     state: Res<BindingsState>,
     capture: Res<UiKeyboardCapture>,
     gate: ReadyGate,
-    mut holds: Local<Vec<Hold>>,
+    mut holds: Local<crate::ui_script::VmMemo<Vec<Hold>>>,
 ) {
     let Some(script) = script.as_mut() else {
-        holds.clear();
+        holds.get_for(None).clear();
         return;
     };
+    let holds = holds.get(script);
     let held = |h: &Hold| {
         state
             .latched
@@ -278,6 +279,41 @@ fn drop_one_use(script: &mut UiScript, action: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reload_relearns_a_held_commands_body_in_the_new_vm() {
+        use bevy::ecs::system::{IntoSystem, System};
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        app.world_mut().resource_mut::<PressAndHoldCasting>().0 = true;
+        app.world_mut().resource_mut::<BindingsState>().latched =
+            vec![(Held::Key(KeyCode::Digit1), "ACTIONBUTTON1".into())];
+        let vm = |body: &str| {
+            let script = UiScript::new().unwrap();
+            script.run("calls=0").unwrap();
+            script.register_bindings(&benilla_ui::bindings_xml::parse(&format!(
+                "<Bindings><Binding name=\"ACTIONBUTTON1\" runOnUp=\"true\">{body}</Binding></Bindings>"
+            )).unwrap());
+            script
+        };
+        // A macro-like body is ineligible for repetition in this VM.
+        app.world_mut()
+            .insert_non_send_resource(vm("calls=calls+1;ClearTarget();ClearTarget()"));
+        let mut system = IntoSystem::into_system(tick);
+        system.initialize(app.world_mut());
+        system.run((), app.world_mut()).unwrap();
+        app.world()
+            .non_send_resource::<UiScript>()
+            .run("assert(calls==2)")
+            .unwrap();
+        // A UI reload can replace the body while the physical key remains latched.
+        app.world_mut()
+            .insert_non_send_resource(vm("calls=calls+1"));
+        system.run((), app.world_mut()).unwrap();
+        app.world()
+            .non_send_resource::<UiScript>()
+            .run("assert(calls==2)")
+            .unwrap();
+    }
 
     #[test]
     fn the_action_bar_commands_and_nothing_else() {

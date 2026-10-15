@@ -494,9 +494,13 @@ pub fn wmo_group_submeshes(group_bytes: &[u8], root: &WmoRoot) -> Result<Vec<Ren
     let mut out = Vec::new();
     {
         let has_normals = group.vertex_normals.len() == group.vertex_positions.len();
-        let has_colors = colors.len() == group.vertex_positions.len();
         // Neither exterior (`0x8`) nor exterior-lit (`0x40`): the reference's interior test.
         let interior = (group.flags & 0x48) == 0;
+        // Only an interior group draws with its MOCV. The exterior drawer binds its vertex
+        // streams without a colour (`0x6b4f2d` passes format 3 to `0x6b4da0`, whose colour slot
+        // is then empty, `0x6b4e40`), where the interior drawer passes 4 and the MOCV pointer
+        // (`0x6b51b0`, `0x6b4e12`). An exterior group's MOCV, however dark, changes nothing.
+        let has_colors = interior && colors.len() == group.vertex_positions.len();
         let vertex = |g: u32| {
             let p = &group.vertex_positions[g as usize];
             let n = group
@@ -719,6 +723,21 @@ mod tests {
             "0x34 is read raw: a zeroed header says liquid type 0, NOT the 0xf sentinel — the \
              reader must never conflate 'no liquid' with 'this whole group is water'"
         );
+    }
+
+    /// Shadowmoon_Slagpit01_00x: MOGP declares 0x40 (short of the 0x44 header) and its sub-chunks
+    /// follow as top-level siblings to EOF — they still belong to the group.
+    #[test]
+    fn mogp_declaring_less_than_its_header_still_owns_the_sibling_chunks() {
+        let mut hdr = vec![0u8; 68];
+        hdr[8..12].copy_from_slice(&0x8u32.to_le_bytes());
+        let mut group = chunk(b"REVM", &17u32.to_le_bytes());
+        group.extend_from_slice(b"PGOM");
+        group.extend_from_slice(&64u32.to_le_bytes());
+        group.extend_from_slice(&hdr);
+        group.extend(chunk(b"RDOM", &[3, 0, 9, 0])); // MODR: doodad refs 3, 9
+        assert_eq!(wmo_group_doodad_refs(&group), vec![3, 9]);
+        assert_eq!(wmo_group_header(&group).expect("group header").flags, 0x8);
     }
 
     /// All 13 shipped overrides are `0`, water, so the no-liquid sentinel cannot be zero.

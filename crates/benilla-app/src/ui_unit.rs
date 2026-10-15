@@ -1357,7 +1357,10 @@ pub(crate) fn feed_units(
     // `stores_removed`, so both still open it. Not covered: a change on the target's OWNER alone
     // (the `CanAssist` owner chase in `held.state`) waits for the next change that opens the gate.
     #[cfg(not(target_os = "macos"))]
-    let stores_changed = {
+    let stores_changed = if index.is_none() {
+        // An optional manager index cannot suppress descriptor changes in a standalone feed.
+        !stores.changed.is_empty()
+    } else {
         let entity_of = |guid: u64| index.as_ref().and_then(|i| i.0.get(&guid).copied());
         let self_e = self_q.iter().next().and_then(|(_, g)| entity_of(g.0));
         let tot_e = selection

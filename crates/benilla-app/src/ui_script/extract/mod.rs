@@ -426,10 +426,8 @@ pub(crate) fn tick_script(
     mut last_seam: Local<f32>,
     // The `scale_factor` measures were last answered under; 0 until the first frame.
     mut last_dpi: Local<f32>,
-    // The message-sweep counter as this pass last read it — the FPS journal's print-cost column is
-    // its per-frame delta. A `Local` and not a `VmMemo`: the counter is cumulative in the VM, so a
-    // fresh VM restarts it at zero and `saturating_sub` reads that as "no work", which is right.
-    mut msg_hashed_seen: Local<u64>,
+    // The cumulative counter restarts with the VM; its per-frame journal delta must do likewise.
+    mut msg_hashed_seen: Local<super::VmMemo<u64>>,
     // The dial, `UIParent`'s scale in the VM, and the automatic scale's last display.
     (ui_scale, mut auto_cache): (
         Res<super::UiScaleCvar>,
@@ -637,6 +635,7 @@ pub(crate) fn tick_script(
     // measure sweep, so this rises by the frame's line count whenever anything printed.
     {
         let hashed = script.msg_lines_hashed();
+        let msg_hashed_seen = msg_hashed_seen.get(&script);
         let delta = hashed.saturating_sub(*msg_hashed_seen);
         // Nothing printed, nothing swept, nothing to add — and an atomic write of zero is still a
         // write. A settled frame leaves this meter entirely alone.
