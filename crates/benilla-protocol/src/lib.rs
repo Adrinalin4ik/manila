@@ -24,7 +24,7 @@ pub use world::{
     WorldReader, WorldSession, WorldWriter, WORLD_PORT,
 };
 
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 
 use anyhow::{anyhow, Context, Result};
 use benilla_srp::{NormalizedString, PublicKey, SrpClientChallenge, SESSION_KEY_LENGTH};
@@ -70,12 +70,11 @@ impl std::fmt::Display for DialFailure {
 
 impl std::error::Error for DialFailure {}
 
-/// Resolves, then tries every resolved address in turn: `localhost` gives `::1` first, and a
-/// server may bind only IPv4.
+/// Resolves, then dials the first IPv4 address ([`first_ipv4`]).
 fn dial(host: &str, port: u16) -> Result<TcpStream> {
     use std::net::ToSocketAddrs;
     let address = format!("{host}:{port}");
-    let addrs: Vec<std::net::SocketAddr> = match (host, port).to_socket_addrs() {
+    let addrs: Vec<SocketAddr> = match (host, port).to_socket_addrs() {
         Ok(addrs) => addrs.collect(),
         Err(e) => {
             return Err(anyhow::Error::new(DialFailure {
@@ -85,19 +84,26 @@ fn dial(host: &str, port: u16) -> Result<TcpStream> {
             .context(format!("resolving {host}: {e}")))
         }
     };
-    if addrs.is_empty() {
+    let Some(target) = first_ipv4(&addrs) else {
         return Err(anyhow::Error::new(DialFailure {
             address,
             unresolved: true,
         }));
-    }
-    TcpStream::connect(&addrs[..]).map_err(|e| {
+    };
+    TcpStream::connect(target).map_err(|e| {
         anyhow::Error::new(DialFailure {
             address,
             unresolved: false,
         })
         .context(format!("connecting: {e}"))
     })
+}
+
+/// The address 1.12.1 dials: IPv4 alone, the first the resolver gives (`WowConnection::ConnectToHost`
+/// `0x5b6e40`: `inet_addr`, else `gethostbyname`'s first entry). `localhost` resolves to `::1`
+/// first, which a realmd bound to IPv4 refuses only after about 2 s on Windows.
+fn first_ipv4(addrs: &[SocketAddr]) -> Option<SocketAddr> {
+    addrs.iter().copied().find(SocketAddr::is_ipv4)
 }
 
 /// A realm from realmd's realm list, with every field the wire carries.
@@ -282,5 +288,28 @@ mod host_port_tests {
             host_port("play.example.com:realmd", 3724),
             ("play.example.com:realmd", 3724)
         );
+    }
+}
+
+#[cfg(test)]
+mod dial_tests {
+    use super::first_ipv4;
+    use std::net::SocketAddr;
+
+    fn addrs(list: &[&str]) -> Vec<SocketAddr> {
+        list.iter().map(|a| a.parse().unwrap()).collect()
+    }
+
+    #[test]
+    fn localhost_dials_its_ipv4_address() {
+        let got = first_ipv4(&addrs(&["[::1]:3724", "127.0.0.1:3724"]));
+        assert_eq!(got, Some("127.0.0.1:3724".parse().unwrap()));
+    }
+
+    #[test]
+    fn the_first_ipv4_address_is_dialled_and_ipv6_never() {
+        let got = first_ipv4(&addrs(&["[2001:db8::2]:1", "10.0.0.2:1", "10.0.0.1:1"]));
+        assert_eq!(got, Some("10.0.0.2:1".parse().unwrap()));
+        assert_eq!(first_ipv4(&addrs(&["[2001:db8::1]:1"])), None);
     }
 }
