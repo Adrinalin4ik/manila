@@ -30,6 +30,8 @@ use bevy::prelude::*;
 use crate::ui_script::VmMemo;
 use benilla_ui::script::{CvarCheck, SeededCvar, UiScript};
 
+#[cfg(test)]
+mod deviations_doc;
 mod inert;
 #[cfg(test)]
 mod reference_table;
