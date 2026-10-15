@@ -1,5 +1,5 @@
 //! The verb-fired event gate: an event the reference fires on a verb's own call path
-//! (`reference/1.12-verb-events.tsv`) must be fired by a file that registers the verb, since stock
+//! (`reference/verb_events.tsv`) must be fired by a file that registers the verb, since stock
 //! Lua calls such a verb for its event (`0x4d8c90`, the trainer filter's commit, fires
 //! `TRAINER_UPDATE`). Otherwise the pair is declared in [`ELSEWHERE`] or [`GAP`], and the verb's
 //! own file must not fire it. The check is textual, so it cannot see a fire off the verb's path.
@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-/// One row of `reference/1.12-verb-events.tsv`.
+/// One row of `reference/verb_events.tsv`.
 struct Pair {
     verb: String,
     event: String,
@@ -23,28 +23,6 @@ const ELSEWHERE: &[(&str, &str, &str)] = &[];
 
 /// Pairs nothing fires on the verb's path, each with its reason.
 const GAP: &[(&str, &str, &str)] = &[
-    (
-        "CancelSkillUps",
-        "SKILL_LINES_CHANGED",
-        "the reference's verb (0x4d3e30) calls the temp-point reset and fires unconditionally at \
-         0x4d3e35; here the reset runs over a table this model keeps empty (`skills.rs`), so \
-         nothing moves and `ui_char.rs`'s feed has nothing to announce — the stock SkillFrame \
-         would only repaint under its own Close",
-    ),
-    // MONKEY (integration): the two temp-point verbs, the same case as `CancelSkillUps` (pre-existing
-    // upstream gap, surfaced once the Windows path fix let this gate run).
-    (
-        "AddSkillUp",
-        "SKILL_LINES_CHANGED",
-        "the reference's helper 0x4d32d0 moves a temp point and fires; the temp-point table stays \
-         empty in this model (`skills.rs`), and `ui_char.rs`'s feed fires on any real block change",
-    ),
-    (
-        "RemoveSkillUp",
-        "SKILL_LINES_CHANGED",
-        "the reference's helper 0x4d3480, the same as AddSkillUp: no temp points to move here, and \
-         `ui_char.rs`'s feed fires on any real block change",
-    ),
     (
         "ClickTargetTradeButton",
         "TRADE_REPLACE_ENCHANT",
@@ -94,9 +72,9 @@ const GAP: &[(&str, &str, &str)] = &[
 fn table() -> Vec<Pair> {
     let tsv = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../reference/1.12-verb-events.tsv"
+        "/../../reference/verb_events.tsv"
     );
-    let text = std::fs::read_to_string(tsv).expect("reference/1.12-verb-events.tsv");
+    let text = std::fs::read_to_string(tsv).expect("reference/verb_events.tsv");
     text.lines()
         .filter(|l| !l.starts_with('#') && !l.starts_with("verb\t"))
         .filter_map(|l| {

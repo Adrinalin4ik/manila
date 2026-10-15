@@ -3,7 +3,7 @@
 //! row, as 1.12.1 loads FrameXML (`UI_Init 0x48fbf0`: `FrameXML.toc` at `0x48ffed`, the addons at
 //! `0x4900a3`, only the latter through `AddOn_Load`); and a dev build boots without it.
 
-use benilla_ui::script::{EditAction, EditUnit, QuadContent, ScriptValue, UiScript};
+use benilla_ui::script::{EditAction, EditUnit, QuadContent, UiScript};
 
 use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
 
@@ -97,15 +97,15 @@ fn defined_at(log: &[String], name: &str) -> usize {
         .unwrap_or_else(|| panic!("{name} was never defined in the load"))
 }
 
-/// The stock FrameXML's own globals, from the captured 1.12.1 `_G` (`reference/1.12-globals.tsv`):
+/// The stock FrameXML's own globals, from the captured 1.12.1 `_G` (`reference/lua_globals.tsv`):
 /// the `framexml` rows a FrameXML file defines at load, LoadOnDemand ones aside.
 fn stock_framexml_globals() -> std::collections::HashSet<String> {
     let tsv = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../reference/1.12-globals.tsv"
+        "/../../reference/lua_globals.tsv"
     ));
     tsv.lines()
-        .filter(|l| !l.starts_with('#'))
+        .skip(1)
         .filter_map(|l| {
             let mut cols = l.split('\t');
             let (name, kind, origin) = (cols.next()?, cols.next()?, cols.next()?);
@@ -640,10 +640,7 @@ fn the_error_log_lays_out_on_the_trainer_art_as_the_class_trainer_does() {
     // The class trainer's layout, read off its own frames once it has laid itself out.
     s.set_money(50);
     s.set_trainer(Some(super::trainer_tests::menu()));
-    s.fire_event(
-        "TRAINER_SHOW",
-        vec![ScriptValue::Str("Sana Winterhoof".into())],
-    );
+    s.fire_event("TRAINER_SHOW", vec![]);
     s.resolve();
     let trainer = |s: &UiScript, frame: &str| window_rect(s, "ClassTrainerFrame", frame);
     let ref_rows = s

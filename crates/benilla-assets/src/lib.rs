@@ -90,23 +90,33 @@ impl MpqAssetReader {
     }
 }
 
+/// The archive path an asset path names: the sampler-mode marker ([`texture_url`]) names the
+/// asset, not the archive file.
+fn internal_path(path: &Path) -> Result<String, AssetReaderError> {
+    let raw = path
+        .to_str()
+        .ok_or_else(|| AssetReaderError::NotFound(path.to_path_buf()))?;
+    Ok(strip_sampler_marker(raw).unwrap_or_else(|| raw.to_string()))
+}
+
+impl MpqAssetReader {
+    /// The bytes of the archive file `path` names. The browser reads through `wasm_fetch` instead.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, AssetReaderError> {
+        let internal = internal_path(path)?;
+        if !self.chain.contains(&internal) {
+            return Err(AssetReaderError::NotFound(path.to_path_buf()));
+        }
+        self.chain
+            .read(&internal)
+            .map_err(|e| AssetReaderError::Io(Arc::new(std::io::Error::other(format!("{e:#}")))))
+    }
+}
+
 impl AssetReader for MpqAssetReader {
     #[cfg(not(target_arch = "wasm32"))]
     async fn read<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
-        let raw = path
-            .to_str()
-            .ok_or_else(|| AssetReaderError::NotFound(path.to_path_buf()))?;
-        // The sampler-mode marker (`texture_url`) names the asset, not the archive file.
-        let stripped = strip_sampler_marker(raw);
-        let internal = stripped.as_deref().unwrap_or(raw);
-        if !self.chain.contains(internal) {
-            return Err(AssetReaderError::NotFound(path.to_path_buf()));
-        }
-        let bytes = self
-            .chain
-            .read(internal)
-            .map_err(|e| AssetReaderError::Io(Arc::new(std::io::Error::other(format!("{e:#}")))))?;
-        Ok(VecReader::new(bytes))
+        Ok(VecReader::new(self.read_bytes(path)?))
     }
 
     // The web target has no filesystem, so there is no `Chain::contains` pre-check to make cheaply
@@ -216,12 +226,73 @@ async fn wasm_fetch(url: &str) -> std::result::Result<Vec<u8>, WasmFetchError> {
 }
 
 /// The sampler-mode marker separator in an `mpq://` texture URL (see [`texture_url`]).
+/// The asset-source id for a model opened with the loose flag and its textures: load paths look
+/// like `mpq-loose://interface/glues/models/ui_human/ui_human.m2`.
+pub const MPQ_LOOSE_SOURCE: &str = "mpq-loose";
+
+/// A Bevy [`AssetReader`] over the install's loose files, then the patch chain: the open of a
+/// model whose creation passes flags bit 2 (`0x707368` keeps `flags & 4` for the `.m2`'s open at
+/// `0x706afd`, `0x71d4fa` keeps it for its textures, pushed at `0x71da64`), as a model frame's
+/// `SetModel` (5, at `0x76ccf5`) and the minimap's arrows (4, at `0x4ee181`) create theirs.
+#[derive(Clone)]
+pub struct LooseAssetReader {
+    mpq: MpqAssetReader,
+    loose: LooseFiles,
+}
+
+impl AssetReader for LooseAssetReader {
+    // The browser has no install tree to index: a loose-flagged open reads as the archive source
+    // does, through its async fetch (which already asks the host's `/addons` route first).
+    #[cfg(target_arch = "wasm32")]
+    async fn read<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
+        let _ = &self.loose;
+        <MpqAssetReader as AssetReader>::read(&self.mpq, path).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn read<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
+        // The URL holds `/` where the model's name held `\` ([`m2_url`] writes every separator
+        // as `/`), so it is turned back for the index.
+        let name = internal_path(path)?.replace('/', "\\");
+        let bytes = match self.loose.find(&name, LooseOpen::Index) {
+            // A loose file that will not open is a miss, with no turn to the chain (`0x647865`).
+            Some(file) => file
+                .read()
+                .ok_or_else(|| AssetReaderError::NotFound(path.to_path_buf()))?,
+            None => self.mpq.read_bytes(path)?,
+        };
+        Ok(VecReader::new(bytes))
+    }
+
+    async fn read_meta<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
+        Err::<VecReader, _>(AssetReaderError::NotFound(path.to_path_buf()))
+    }
+
+    async fn read_directory<'a>(
+        &'a self,
+        path: &'a Path,
+    ) -> Result<Box<PathStream>, AssetReaderError> {
+        Err(AssetReaderError::NotFound(path.to_path_buf()))
+    }
+
+    async fn is_directory<'a>(&'a self, _path: &'a Path) -> Result<bool, AssetReaderError> {
+        Ok(false)
+    }
+}
+
+/// The sampler-mode marker in an `mpq://` texture URL.
 const SAMPLER_MARKER: char = '@';
 
 /// The `mpq://` URL of a model texture at a sampler address mode. Bevy keys the sampler to the
 /// `Image` and the `Image` to its path, so a mode other than repeat/repeat marks the path before
 /// the extension (`…/leaves01@cc.blp`), which must stay `.blp` to pick the loader.
 pub fn texture_url(internal: &str, wrap: (bool, bool)) -> String {
+    texture_url_on(MPQ_SOURCE, internal, wrap)
+}
+
+/// [`texture_url`] on the asset source `source`: a model's textures are read from the source its
+/// `.m2` was, as they open with the model's flag (`0x71da64`).
+pub fn texture_url_on(source: &str, internal: &str, wrap: (bool, bool)) -> String {
     let path = internal.replace('\\', "/").to_ascii_lowercase();
     // **The extension is normalised, not trusted** - the same rule `m2_url` below already
     // applies to model references, and for the same reason: what a file NAMES is not what the
@@ -243,14 +314,14 @@ pub fn texture_url(internal: &str, wrap: (bool, bool)) -> String {
         .or_else(|| path.strip_suffix(".png"))
         .unwrap_or(&path);
     if wrap == (true, true) {
-        return format!("mpq://{stem}.blp");
+        return format!("{source}://{stem}.blp");
     }
     let tag = match wrap {
         (true, false) => "rc",
         (false, true) => "cr",
         _ => "cc",
     };
-    format!("mpq://{stem}{SAMPLER_MARKER}{tag}.blp")
+    format!("{source}://{stem}{SAMPLER_MARKER}{tag}.blp")
 }
 
 /// The `Map.dbc` [`MapCatalog`] (`mapId` to directory and `LoadingScreenID`) as a Bevy resource; a
@@ -261,13 +332,19 @@ pub struct MapCatalogRes(pub benilla_formats::MapCatalog);
 /// A model reference path (`.mdx`/`.mdl`, any case, backslashes) as its lowercase `mpq://…m2` URL:
 /// the archive file is `.m2`, and one spelling per model keeps the handle dedup working.
 pub fn m2_url(raw: &str) -> String {
+    m2_url_on(MPQ_SOURCE, raw)
+}
+
+/// [`m2_url`] on the asset source `source`: [`MPQ_LOOSE_SOURCE`] for a model created with the
+/// loose flag.
+pub fn m2_url_on(source: &str, raw: &str) -> String {
     let p = raw.to_ascii_lowercase().replace('\\', "/");
     let stem = p
         .strip_suffix(".mdx")
         .or_else(|| p.strip_suffix(".mdl"))
         .or_else(|| p.strip_suffix(".m2"))
         .unwrap_or(&p);
-    format!("mpq://{stem}.m2")
+    format!("{source}://{stem}.m2")
 }
 
 /// A WMO root path as its `mpq://…wmo` URL, lowercased for handle dedup.
@@ -307,13 +384,22 @@ fn strip_sampler_marker(path: &str) -> Option<String> {
     matches!(tag, "rc" | "cr" | "cc").then(|| format!("{base}.{ext}"))
 }
 
-/// Register the `mpq://` source on `app`, backed by the patch chain at `data_dir`. Call it before
+/// Register the `mpq://` source on `app`, backed by the patch chain at `data_dir`, and the
+/// `mpq-loose://` source over the install's loose files and the same chain. Call it before
 /// `AssetPlugin` builds (before `DefaultPlugins`), which reads the sources.
 pub fn register_mpq_source(app: &mut App, data_dir: &Path) -> Result<()> {
     let reader = MpqAssetReader::open(data_dir)?;
+    let loose = LooseAssetReader {
+        mpq: reader.clone(),
+        loose: LooseFiles::install(),
+    };
     app.register_asset_source(
         MPQ_SOURCE,
         AssetSourceBuilder::new(move || -> Box<dyn ErasedAssetReader> { Box::new(reader.clone()) }),
+    );
+    app.register_asset_source(
+        MPQ_LOOSE_SOURCE,
+        AssetSourceBuilder::new(move || -> Box<dyn ErasedAssetReader> { Box::new(loose.clone()) }),
     );
     Ok(())
 }
@@ -365,6 +451,51 @@ mod tests {
         assert_eq!(strip_sampler_marker("world/foo.blp"), None);
         assert_eq!(strip_sampler_marker("world/foo@bar.blp"), None);
         assert_eq!(sampler_mode_of("world/foo@bar.blp"), (true, true));
+    }
+
+    /// The loose source answers a model or texture loose in the install ahead of the chain, by its
+    /// lowercased `/` URL, and falls through to the chain for the rest; the plain source never
+    /// sees the loose file.
+    #[test]
+    fn the_loose_source_reads_the_install_before_the_chain() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mpq = MpqAssetReader::open(&data).expect("open mpq reader");
+        let install =
+            std::env::temp_dir().join(format!("benilla-loose-source-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&install);
+        let shadow = install.join("Data/DBFilesClient/Spell.dbc");
+        std::fs::create_dir_all(shadow.parent().unwrap()).unwrap();
+        std::fs::write(&shadow, b"loose").unwrap();
+        let root = install.clone();
+        let cell = LooseIndexCell::new(move || LooseIndex::build(Some(&root), &root.join("Data")));
+        let reader = LooseAssetReader {
+            mpq: mpq.clone(),
+            loose: LooseFiles {
+                addons: None,
+                install: Some(Arc::new(cell)),
+            },
+        };
+        let read = |r: &dyn ErasedAssetReader, path: &str| {
+            block_on(async {
+                let mut out = r.read(Path::new(path)).await.ok()?;
+                let mut buf = Vec::new();
+                out.read_to_end(&mut buf).await.ok()?;
+                Some(buf)
+            })
+        };
+        assert_eq!(
+            read(&reader, "dbfilesclient/spell.dbc").as_deref(),
+            Some(&b"loose"[..])
+        );
+        assert_eq!(
+            &read(&mpq, "dbfilesclient/spell.dbc").unwrap()[..4],
+            b"WDBC"
+        );
+        assert_eq!(
+            &read(&reader, "DBFilesClient/Map.dbc").unwrap()[..4],
+            b"WDBC"
+        );
+        let _ = std::fs::remove_dir_all(&install);
     }
 
     #[test]

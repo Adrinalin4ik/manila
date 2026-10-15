@@ -307,8 +307,9 @@ impl Loader<'_> {
     /// name matters: unnamed, mlua's `#[track_caller]` `load` names it after this Rust line.
     fn run(&self, chunk: &[u8], path: &str) -> mlua::Result<()> {
         // The reference's file chunk name, `"@%s"` (`0x8716e0`, `0x704bc0`; a file name to
-        // `luaO_chunkid 0x6f5c40`), with `\` separators as in `crate::script::addon_chunk_name`.
-        self.run_named(chunk, &format!("@{}", path.replace('/', "\\")))
+        // `luaO_chunkid 0x6f5c40`), with `\` separators as in `crate::script::addon_chunk_name`,
+        // over the install path: an addon's files sit under `Interface\AddOns\`.
+        self.run_named(chunk, &format!("@{}", self.status_path(path)))
     }
 
     /// Run a chunk under a complete chunk name, for a producer whose name is not a path.
@@ -399,7 +400,7 @@ impl Loader<'_> {
                     // The reference names an inline body `"%s:<Scripts>"` (`0x871074`, formatted at
                     // `0x6ee0ff`) over the document's path with no `@`, so a raise reads
                     // `[string "Interface\FrameXML\Foo.xml:<Scripts>"]`, not a file path.
-                    let name = format!("{}:<Scripts>", self.path.replace('/', "\\"));
+                    let name = format!("{}:<Scripts>", self.status_path(&self.path));
                     if let Err(e) = self.run_named(&chunk, &name) {
                         self.report.raise(format!("inline <Script>: {e}"), &e);
                     }
@@ -754,6 +755,7 @@ impl Loader<'_> {
         // 7 · the post-load hook (`0x76a2f0`): close the window (`0x76a2ff`), then the nested
         //     <Frames>, whose OnLoads fire before ours (`0x76a060`).
         crate::script::visibility::set_load_window(self.lua(), wrapper, false);
+        crate::script::tooltip_post_load(self.lua(), wrapper);
         for frames_el in children_named(el, "Frames") {
             for child in &frames_el.children {
                 let expanded = self.expand(child);

@@ -49,13 +49,15 @@ mod death;
 pub mod diagnostics;
 mod editbox;
 pub mod instance;
-pub(crate) use editbox::{adopt_text_region, editbox_text_region_wrapper};
+pub(crate) use editbox::{adopt_text_region, apply_xml_bytes, editbox_text_region_wrapper};
+pub(crate) use tooltip::post_load as tooltip_post_load;
 pub(crate) mod addon;
 mod addon_enable;
 pub mod addon_gate;
 mod char_name;
 mod client;
 mod clock;
+mod cvar_checks;
 mod cvars;
 mod dressup;
 mod duel;
@@ -72,7 +74,7 @@ mod glue_core;
 mod glue_create;
 mod glue_realm;
 mod glue_select;
-pub use glue::{VmKind, GLUE_EVENTS};
+pub use glue::{glue_events, VmKind};
 pub use glue_core::{
     glue_status_key, launch_addon_url, launch_addon_url_allowed, launch_url_allowed, GlueCall,
     GlueCredentials, GlueHost, GlueNotice, GlueRequest, GlueSignal, GlueText, NoticeState,
@@ -87,11 +89,15 @@ pub use glue_realm::{
     GlueRealmType, RealmSortKey,
 };
 pub use glue_select::{GlueCharacter, GlueScenePane, GlueSelectCells};
+mod denied;
+mod gm_survey;
 mod gm_ticket;
 mod gossip;
 mod guild;
 mod handler_prof;
 mod hyperlink;
+mod lfg;
+mod lottery;
 mod screenshot;
 mod tabard;
 pub use handler_prof::HandlerRow;
@@ -106,6 +112,7 @@ mod item_text;
 pub mod keybind;
 mod keyboard;
 mod layer_batch;
+pub(crate) mod taint;
 pub(crate) mod texel;
 pub(crate) mod use_gates;
 pub(crate) use keyboard::enable_for_script;
@@ -206,7 +213,7 @@ pub use char_stats::{
     BANK_BAG_SLOT_COUNT, INVENTORY_SLOT_COUNT, SKILL_DEFENSE, SKILL_UNARMED,
 };
 pub use chat_misc::EmoteRequest;
-pub use chat_send::ChatSend;
+pub use chat_send::{ChatGroup, ChatSend, SEND_CHAT_TOKENS};
 pub use chat_types::ChatTypeColor;
 pub use chat_window::{message_group_index, ChatWindowLook, MESSAGE_GROUPS};
 pub use container::{
@@ -221,16 +228,23 @@ pub use cursor::{
     CursorPetAction, CursorSpell, CursorStablePet, EnchantConfirm, HeldCursor, WorldPick,
     EQUIPMENT_BAG,
 };
+pub use cvar_checks::{
+    check_base_mip, check_camera_decay, check_camera_distance_max, check_camera_pitch,
+    check_camera_rate, check_camera_smooth_style, check_camera_time, check_camera_view,
+    check_camera_yaw, check_farclip, check_frill_density, check_refresh, check_shadow_level,
+    check_small_cull, check_tex_lod_bias, check_triple_buffer, CvarCheck, CvarVerdict,
+};
 pub use cvars::{small_cull_text, sstr_to_int};
 pub use cvars::{
     MultisampleFormat, ScreenResolution, SeededCvar, VideoCaps, CVAR_FRILL_DENSITY, CVAR_GAMMA,
-    CVAR_SMALL_CULL, CVAR_WORLD_DETAIL, IN_WORLD_READ_ONLY_CVARS, VIDEO_DEFAULT_CVARS,
-    WORLD_DETAIL_STOPS,
+    CVAR_SMALL_CULL, CVAR_WORLD_DETAIL, IN_WORLD_READ_ONLY_CVARS, LUA_CVAR_LIMIT,
+    VIDEO_DEFAULT_CVARS, WORLD_DETAIL_STOPS,
 };
 pub use death::{DeathAction, DeathUiState};
 pub use dressup::DressUpIntent;
 pub use duel::DuelRequest;
 pub use follow::FollowRequest;
+pub use gm_survey::{GmSurveyTables, SurveyAnswerSend};
 pub use gm_ticket::{GmTicketIntent, GmTicketWrite};
 pub use gossip::{GossipMenu, GossipOptionView, GossipQuestRow};
 pub use guild::{
@@ -238,7 +252,9 @@ pub use guild::{
     MAX_RANKS, MIN_RANKS, RANK_RIGHT_BITS,
 };
 pub use input_verbs::{BindingInput, FiredInput, HeldInput};
-pub use modelframe::ModelPaneFrame;
+pub use lfg::LfgDungeon;
+pub use lottery::UnservedSend;
+pub use modelframe::{CharacterPaneFrame, ModelPaneFrame};
 pub use petition::{
     validate_guild_name, PetitionRecordView, PetitionRequest, PetitionState, PETITION_TYPE_CHARTER,
     PETITION_TYPE_PETITION,
@@ -273,7 +289,9 @@ pub use quest::{
     QuestAction, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect, QuestState,
 };
 pub use quest_log::{QuestLogDetail, QuestLogEntryView, QuestLogObjectiveView, QuestLogState};
-pub(crate) use region::{apply_font_parts, implicit_creation_anchor_lua, install_loaded_texture};
+pub(crate) use region::{
+    apply_font_parts, apply_wrap_attrs, implicit_creation_anchor_lua, install_loaded_texture,
+};
 pub use reputation::{FactionEntry, ReputationSend, ReputationState};
 pub use session::SessionRequest;
 pub use shapeshift::ShapeshiftFormView;
@@ -591,6 +609,7 @@ fn install_framescript(vm: VmKind) -> mlua::Result<Lua> {
     stdlib::sandbox(&lua)?;
     // Before the stdlib layer, so its aliases bind the 5.0-shaped functions.
     lua50::install(&lua)?;
+    taint::install(&lua)?;
     stdlib::install(&lua)?;
 
     // `0x51bb20` (table `0x8503f4`): `GetTime`, `GetGameTime` and `ConsoleExec`. `ReadFile`,
@@ -644,6 +663,10 @@ fn install_in_game(lua: &Lua) -> mlua::Result<()> {
     bind_confirm::install(lua)?;
     instance::install(lua)?;
     gm_ticket::install(lua)?;
+    gm_survey::install(lua)?;
+    denied::install(lua)?;
+    lfg::install(lua)?;
+    lottery::install(lua)?;
     duel::install(lua)?;
     follow::install(lua)?;
     camera_view::install(lua)?;

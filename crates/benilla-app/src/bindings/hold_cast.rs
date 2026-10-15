@@ -140,7 +140,7 @@ impl ReadyGate<'_, '_> {
                 return Verdict::Wait;
             }
         }
-        if self.cooldowns.not_ready(b.action, 0, def, now) {
+        if self.cooldowns.not_ready(b.action, 0, 0, def, now) {
             return Verdict::Wait;
         }
         // The bar's own reads (`IsActionInRange`'s 0 is out; nil is rangeless or no target).

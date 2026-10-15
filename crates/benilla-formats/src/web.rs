@@ -29,7 +29,7 @@ pub fn encode_name(name: &str) -> String {
 
 /// `name` with its `Interface\AddOns\` prefix stripped, or `None` when it carries none.
 ///
-/// An addon's own art, fonts and audio are NOT in the patch chain — `read_chain_or_loose`'s doc
+/// An addon's own art, fonts and audio are NOT in the patch chain — `read_loose_or_chain`'s doc
 /// says so, and the desktop reference reads them off the install tree. That tree is a filesystem,
 /// which wasm does not have, so in the browser these belong to the host's `/addons` route and
 /// asking `/data` for them can only ever 404.

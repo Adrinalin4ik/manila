@@ -167,6 +167,15 @@ impl super::UiScript {
         }
     }
 
+    /// Seat the player's own guid in the unit-token resolver ahead of a full
+    /// [`Self::set_unit_guids`] push, so `"player"` names us from the world-enter cascade on.
+    pub fn seat_player_guid(&mut self, guid: u64) {
+        let mut model = self.model_mut();
+        if model.unit_guids.player != guid {
+            model.unit_guids.player = guid;
+        }
+    }
+
     /// Push or clear the player's active [`TrackingState`].
     pub fn set_tracking(&mut self, tracking: Option<TrackingState>) {
         self.model_mut().tracking = tracking;
@@ -437,6 +446,7 @@ mod tests {
     /// its own: `base + 1` and `base + 2`.
     fn group_script() -> UiScript {
         let mut s = UiScript::new().unwrap();
+        crate::script::tests::common::load_tooltip_template(&s);
         s.set_unit_guids(&UnitGuids {
             player: ME,
             target: TARGET,
@@ -576,7 +586,7 @@ mod tests {
         s.run(
             r#"local a = CreateFrame("Button", "TF1")
                a:SetPoint("CENTER", 0, 0) a:SetWidth(10) a:SetHeight(10)
-               TT = CreateFrame("GameTooltip", "TT")
+               TT = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
                TT:SetOwner(a, "ANCHOR_BOTTOMRIGHT")
                TT:SetUnitDebuff("MouseOver", 1)"#,
         )

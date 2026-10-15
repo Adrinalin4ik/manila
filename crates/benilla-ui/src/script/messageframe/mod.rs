@@ -479,6 +479,12 @@ impl UiScript {
             None => fr,
         });
         let mut used = 0.0f32; // px used from the anchored edge
+
+        // The scrolling class's lines go out from the farthest displayed line to the anchored
+        // one, the order its link rebuild walks them (`0x788c8d`-`0x788d7d`), so the spans reach
+        // [`super::hyperlink`] in the reference's placement order.
+        let first = out.len();
+        let reverse = matches!(frame.kind_state, KindState::ScrollingMessage(_));
         for idx in (0..=top_index).rev() {
             if used >= fr.top - fr.bottom {
                 break; // the next band starts outside the frame
@@ -527,9 +533,15 @@ impl UiScript {
                     alpha_gradient: None,
                     world_seat: false, // interface, not world
                     edit_line: false,
+                    // A line is a FontString with the flag off and no `maxLines` (`0x7865f0`).
+                    non_space_wrap: false,
+                    max_lines: 0,
                 },
                 scale: paint.scale,
             });
+        }
+        if reverse {
+            out[first..].reverse();
         }
     }
 }

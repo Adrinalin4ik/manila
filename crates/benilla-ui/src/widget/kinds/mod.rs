@@ -4,8 +4,10 @@ use std::collections::{HashSet, VecDeque};
 
 use super::{FrameHandle, RegionHandle};
 
+mod character;
 mod editbox;
 mod messageframe;
+pub use character::*;
 pub use editbox::*;
 pub use messageframe::*;
 
@@ -253,7 +255,9 @@ impl TooltipAnchor {
 pub struct TooltipState {
     /// Lines currently filled (`NumLines`). Regions past this index exist but are hidden.
     pub num_lines: usize,
-    /// The left-column FontString pool, index i = line i+1, grown on demand with no line cap.
+    /// The left-column FontString array (`+0x32c`), index i = line i+1: the `<name>TextLeft<n>`
+    /// pairs the post-load pass found (`0x529650`), then one per `AddFontStrings` (`0x529940`). Its
+    /// length is the line limit (`+0x320`), `0x530270` adding no line past it (`0x530291`).
     pub left_lines: Vec<RegionHandle>,
     /// The right-column pool (the `AddDoubleLine`/`TextRightN` half), parallel to `left_lines`.
     pub right_lines: Vec<RegionHandle>,
@@ -279,8 +283,8 @@ pub struct TooltipState {
     pub equipped_header_armed: bool,
     /// `SetPadding`: extra width past the content (`ItemRef.xml:40` sets 16 for the close button).
     pub padding: f32,
-    /// Line 1 came from XML (`ShoppingTooltipTemplate`), so later lines clone the previous fonts.
-    pub xml_declared_lines: bool,
+    /// How many leading pairs the line writers have seated (anchored, justified, hidden).
+    pub seated: usize,
     /// A relayout (`0x530640`) is owed: Show and the line writers run it with an owner, and it
     /// ends by invalidating the plate (`0x530a52`). The layout pre-pass pays it.
     pub relayout_owed: bool,
@@ -312,8 +316,9 @@ pub fn pane_clock_step_ms(elapsed: f32) -> u64 {
 pub struct ModelState {
     /// `SetModel`'s path as written (`.mdx`); the app's loader maps it to the shipped `.m2`.
     pub path: Option<String>,
-    /// `PlayerModel:SetUnit`'s unit (`0x505d70`); it and [`Self::path`] each clear the other.
-    pub unit: Option<String>,
+    /// The `CGCharacterModelBase` half (`0x505680`) of a `PlayerModel`, `DressUpModel` or
+    /// `TabardModel`; `None` on a plain `Model`, which has no `SetUnit`.
+    pub character: Option<CharacterPane>,
     /// The last `SetSequence` id (`[bone0 block + 0xf8]`); what plays is [`Self::armed`].
     pub sequence: i32,
     /// The pane's own scene clock in ms (`0x76cfc0`): its `OnUpdate` (`0x76d7f0`) adds
@@ -419,12 +424,31 @@ impl Default for ModelLight {
     }
 }
 
+impl ModelLight {
+    /// The `CGCharacterModelBase` ctor's light (`0x505680`), over the `<Model>` one it chains to:
+    /// directional (`0x71b620(0)` at `0x5056c9`), ambient 0.7 (`+0x30`, `0x50572e`), diffuse
+    /// (0.8, 0.8, 0.64) (`+0x3c`, `0x505702`) and enabled (`0x71b780(1)` at `0x50576a`). The
+    /// direction is the second `0x71b6a0` write, `(0, 1, 0)` at `0x505761`, which overwrites the
+    /// `(0, −√½, −√½)` of the first at `0x5056e9`. `PlayerModel`'s factory `0x495bd0` runs this
+    /// ctor, and `DressUpModel` and `TabardModel` subclass it; no 1.12 FrameXML calls `SetLight`,
+    /// so every stock window draws in this light.
+    pub fn character() -> Self {
+        Self {
+            enabled: true,
+            omni: false,
+            vector: [0.0, 1.0, 0.0],
+            ambient: [0.7; 3],
+            diffuse: [0.8, 0.8, 0.64],
+        }
+    }
+}
+
 /// A fresh pane as the `CSimpleModel` ctor leaves it.
 impl Default for ModelState {
     fn default() -> Self {
         Self {
             path: None,
-            unit: None,
+            character: None,
             sequence: 0,
             clock_ms: 0,
             armed: None,
@@ -538,11 +562,25 @@ pub fn model_key(path: &str) -> String {
 }
 
 impl ModelState {
-    /// `SetModel` (`0x76cce0`): a fresh instance, dropping unit, icon override and arm, seeded now
-    /// if the file is resident, else when it lands (`0x70ebd0`); the scene clock runs on.
+    /// A fresh `PlayerModel`, `DressUpModel` or `TabardModel`: the `Model` ctor's state, then the
+    /// `CGCharacterModelBase` ctor's (`0x505680`): its members zeroed and its light switched on.
+    pub fn character() -> Self {
+        Self {
+            character: Some(CharacterPane::default()),
+            light: ModelLight::character(),
+            ..Self::default()
+        }
+    }
+
+    /// `SetModel` (`0x76cce0`): a fresh instance, dropping icon override and arm, seeded now if the
+    /// file is resident, else when it lands (`0x70ebd0`); the scene clock runs on. On a character
+    /// pane the file replaces the copy at `+0x318` (slot 37), while the stored subject stays for
+    /// the next build.
     pub fn set_file(&mut self, path: String, facts: Option<&ModelFileFacts>) {
         self.path = Some(path);
-        self.unit = None;
+        if let Some(c) = &mut self.character {
+            c.overtake();
+        }
         self.icon = None;
         self.armed = None;
         self.pending_seed = true;
@@ -552,10 +590,13 @@ impl ModelState {
         }
     }
 
-    /// `ClearModel`: releases the instance.
+    /// `ClearModel`: releases the instance, a character pane's copy included (slot 36 with null),
+    /// which leaves its stored subject (`+0x3e0`, `+0x3f0`) as it was.
     pub fn clear_file(&mut self) {
         self.path = None;
-        self.unit = None;
+        if let Some(c) = &mut self.character {
+            c.overtake();
+        }
         self.icon = None;
         self.armed = None;
         self.pending_seed = false;

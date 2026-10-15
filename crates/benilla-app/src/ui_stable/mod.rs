@@ -16,7 +16,7 @@ use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_pet_stats::{PetFamilyTables, PetStatTables};
 use crate::ui_script::{SweepApp, SweepLeg, UiFeed, UiInput};
-use crate::ui_session::{close_npc_session_out_of_range, npc_switched, sweep_close, NpcSession};
+use crate::ui_session::{CoreCloses, LatchApp, LatchedWindow, NpcWindow};
 
 mod net;
 
@@ -27,29 +27,12 @@ impl Plugin for UiStablePlugin {
         net::register(app);
         app.init_resource::<StableOpen>()
             .init_resource::<StableErrors>()
-            .add_sweep_leg(SweepLeg::Stable, close_stable_on_leave_world)
+            .add_latched_window::<StableOpen>()
+            // `0x490b2a` → `0x4caae0` → `0x4cae10`, the core.
+            .add_sweep_leg(SweepLeg::Stable, close_core)
             .add_systems(
                 Update,
-                (
-                    // Range-close first so the clear fires `PET_STABLE_CLOSED` the same frame.
-                    close_npc_session_out_of_range::<StableOpen>.before(feed_stable),
-                    feed_stable.in_set(UiFeed),
-                    drain_stable.after(UiInput),
-                    // After the VM ticks: the selection is written by a click during `UiInput`
-                    // and by `PetStable_Update`'s re-pick (`PetStable.lua:48-63`) inside the
-                    // feed's events, so an earlier read shows the previous pet for a frame.
-                    feed_stable_booth
-                        .after(UiInput)
-                        // Gated: the feed starts with a name lookup over every UI frame.
-                        .run_if(
-                            |open: Res<StableOpen>, booth: Res<crate::portrait::StableBooth>| {
-                                // One more run after the close, which empties the booth.
-                                open.npc.is_some()
-                                    || booth.unit.is_some()
-                                    || booth.display_id.is_some()
-                            },
-                        ),
-                ),
+                (feed_stable.in_set(UiFeed), drain_stable.after(UiInput)),
             );
     }
 }
@@ -85,16 +68,54 @@ impl StableOpen {
     }
 }
 
-/// The range guard closes the stable when its master is out of range or gone; the server checks
-/// range on every verb (`CheckStableMaster`), failing with code 6, which shows nothing.
-impl NpcSession for StableOpen {
-    fn npc(&self) -> Option<u64> {
+/// The stable master's cell `[0xb72240]`; `ClosePetStables` (`0x4cae40`) is the core itself. The
+/// server also checks range on every verb (`CheckStableMaster`), failing with code 6, which shows
+/// nothing.
+impl LatchedWindow for StableOpen {
+    const WINDOW: NpcWindow = NpcWindow::Stable;
+
+    fn cell(&self) -> Option<u64> {
         self.npc
     }
 
-    fn close(&mut self) {
-        self.clear();
+    fn dispatched(world: &mut World) {
+        close_core(world);
     }
+
+    fn take_close_verb(script: &mut UiScript) -> bool {
+        script.take_stable_close()
+    }
+}
+
+/// The close core `0x4cae10`: with a stable open, the latch release (`0x4cae24`), the cell
+/// cleared, then `PET_STABLE_CLOSED` (`0x4cae3a`).
+pub(crate) fn close_core(world: &mut World) {
+    let Some(npc) = world.resource::<StableOpen>().npc else {
+        return;
+    };
+    crate::ui_session::release(world, npc);
+    world.resource_mut::<StableOpen>().clear();
+    crate::ui_session::note_closed(world, NpcWindow::Stable);
+    crate::ui_session::fire(world, |script| {
+        script.set_stable(None);
+        script.fire_event("PET_STABLE_CLOSED", vec![]);
+    });
+}
+
+/// `MSG_LIST_STABLED_PETS`'s open, `0x4cadc0`: the open stable master's own list re-lists in place
+/// (`0x4cadd6`); any other registers on the latch (`0x4cade2`), then the cell (`0x4caded`).
+pub(crate) fn open_stable(
+    world: &mut World,
+    npc: u64,
+    num_stable_slots: u8,
+    pets: Vec<StabledPet>,
+) {
+    if world.resource::<StableOpen>().npc != Some(npc) {
+        crate::ui_session::register(world, npc);
+    }
+    world
+        .resource_mut::<StableOpen>()
+        .open(npc, num_stable_slots, pets);
 }
 
 /// One wire row as a Lua slot; icon, family and diet stay `None` until the creature query answers.
@@ -114,6 +135,10 @@ fn resolve_pet(
     let family_row = families.and_then(|t| t.families.get(family_id));
     StablePetSlot {
         pet_number: wire.pet_number,
+        // The template's display, which `SetPetStablePaperdoll` shows (`0x4cba0e`).
+        display_id: names
+            .creature_record(wire.creature_entry)
+            .map(|r| r.display_id),
         // The family's `CreatureFamily.dbc` icon; `SetItemButtonTexture` draws `None` as empty.
         icon: families
             .and_then(|t| t.families.icon(family_id))
@@ -172,24 +197,14 @@ fn snapshot(
     })
 }
 
-/// Push the stable into the VM and fire its events on a change.
-/// The leave-world sweep's stable leg (`0x490b2a` → `0x4caae0` → `0x4cae10`): an open stable
-/// closes with `PET_STABLE_CLOSED` (`0x4cae3a`) in the VM the sweep runs in.
-fn close_stable_on_leave_world(script: Option<NonSendMut<UiScript>>, mut open: ResMut<StableOpen>) {
-    if sweep_close(&mut *open).is_none() {
-        return;
-    }
-    if let Some(mut script) = script {
-        script.set_stable(None);
-        script.fire_event("PET_STABLE_CLOSED", vec![]);
-    }
-}
-
+/// Push the stable into the VM and fire its events on a change; the close is the core's
+/// ([`close_core`]).
 fn feed_stable(
     script: Option<NonSendMut<UiScript>>,
     // Mutable only to take the fresh-list latch.
     mut open: ResMut<StableOpen>,
     bar: Res<crate::ui_pet::PetBar>,
+    pet: crate::ui_pet::PetUnit,
     families: Option<Res<PetFamilyTables>>,
     stats: Option<Res<PetStatTables>>,
     prices: Option<Res<StableSlotPrices>>,
@@ -197,14 +212,16 @@ fn feed_stable(
     names: Res<NameCache>,
     mut errors: ResMut<StableErrors>,
     mut last: crate::ui_script::WindowMemo<Option<StableState>>,
-    mut last_npc: crate::ui_script::WindowMemo<Option<u64>>,
+    mut closes: CoreCloses,
     mut sink: crate::ui_action::MessageSink,
 ) {
     let Some(mut script) = script else {
         return;
     };
     let last = last.get(&script);
-    let last_npc = last_npc.get(&script);
+    if closes.since_last(&script, NpcWindow::Stable) {
+        *last = None;
+    }
     // Refusals show, and speak, as their message rows say.
     let lines: Vec<_> = errors
         .0
@@ -224,6 +241,16 @@ fn feed_stable(
 
     // The reference's live-pet test, `[0xb714a0]|[0xb714a4]`; a dismissed pet fails it.
     let has_live_pet = bar.spells.pet_guid != 0;
+    // The summoned pet's cache record while its object is held, `[unit+0xb30]` (`0x60b131`): the
+    // template's display, which `0x505a70` reads at `[rec+0x2c]`. Apart from the snapshot, so it
+    // fires nothing.
+    let live_pet_display = has_live_pet
+        .then(|| pet.store(bar.spells.pet_guid))
+        .flatten()
+        .and_then(|s| s.0.object_entry())
+        .and_then(|entry| names.creature_record(entry))
+        .map(|r| r.display_id);
+    script.set_stable_live_pet_display(live_pet_display);
     let fresh = snapshot(
         &open,
         &names,
@@ -233,44 +260,32 @@ fn feed_stable(
         has_live_pet,
         &commands,
     );
-    let switched = npc_switched(*last_npc, open.npc);
     let fresh_list = std::mem::take(&mut open.fresh_list);
-    if fresh == *last && !switched && !fresh_list {
+    if fresh == *last && !fresh_list {
         return;
     }
     // Push before firing: `fire_event` runs the Lua handlers synchronously.
     script.set_stable(fresh.clone());
-    if switched {
-        // A new stable master while open is a close then an open; consume the close intent
-        // OnHide queues so the drain keeps the new stable.
-        script.fire_event("PET_STABLE_CLOSED", vec![]);
-        script.fire_event("PET_STABLE_SHOW", vec![]);
-        let _ = script.take_stable_close();
-    } else if fresh_list && fresh.is_some() {
+    if fresh_list && fresh.is_some() {
         // Every list fires `PET_STABLE_SHOW` (`0x4cac9b`); on the visible window it only repaints.
         script.fire_event("PET_STABLE_SHOW", vec![]);
-    } else {
-        match (&*last, &fresh) {
-            // A change with no new list is a creature-query answer, the reference's callback edge.
-            (Some(_), Some(_)) => {
-                script.fire_event("PET_STABLE_UPDATE", vec![]);
-                script.fire_event("PET_STABLE_UPDATE_PAPERDOLL", vec![]);
-            }
-            (Some(_), None) => script.fire_event("PET_STABLE_CLOSED", vec![]),
-            // A first snapshot always comes with the list latch.
-            (None, _) => {}
-        }
+    } else if last.is_some() && fresh.is_some() {
+        // A change with no new list is a creature-query answer, the reference's callback edge. A
+        // close is the core's, which told the VM, and a disconnect's clear tells it nothing; a
+        // first snapshot always comes with the list latch.
+        script.fire_event("PET_STABLE_UPDATE", vec![]);
+        script.fire_event("PET_STABLE_UPDATE_PAPERDOLL", vec![]);
     }
     *last = fresh;
-    *last_npc = open.npc;
 }
 
 /// Drain the Lua intents into the four stable verbs, each aimed at the open session's NPC; a close
-/// clears locally, as there is no close opcode.
+/// runs the core, as there is no close opcode.
 fn drain_stable(
     script: Option<NonSendMut<UiScript>>,
-    mut open: ResMut<StableOpen>,
+    open: Res<StableOpen>,
     commands: Res<NetCommands>,
+    mut world_commands: Commands,
 ) {
     let Some(mut script) = script else {
         return;
@@ -291,59 +306,8 @@ fn drain_stable(
     }
     if script.take_stable_close() {
         debug!("ui_stable: client-side close (no packet)");
-        open.clear();
+        crate::ui_session::queue(&mut world_commands, close_core);
     }
-}
-
-/// Point the model pane at the pet `GetSelectedStablePet()` names, as the reference's
-/// `SetPetStablePaperdoll` (`0x4cb870`) does: the summoned pet (`[0xb72250] == -1`) shows its
-/// live body (`[unit+0xb30]`), and anything else, or a failed live resolve (`0x4cb9bc`), shows the
-/// row's creature display, whose late cache answer re-points the pane.
-fn feed_stable_booth(
-    script: Option<NonSendMut<UiScript>>,
-    open: Res<StableOpen>,
-    bar: Res<crate::ui_pet::PetBar>,
-    pet: crate::ui_pet::PetUnit,
-    names: Res<NameCache>,
-    mut booth: ResMut<crate::portrait::StableBooth>,
-) {
-    let Some(mut script) = script else {
-        return;
-    };
-    // Every frame, so a stale yaw cannot snap the model when a pet is picked.
-    booth.yaw = script.model_pane_facing("PetStableModel");
-
-    // `GetSelectedStablePet()`: 0 the summoned pet, 1..=2 a stable slot, -1 nothing, including a
-    // pet the latest list no longer holds.
-    let slot = script.stable_selection();
-
-    let live_pet = bar.spells.pet_guid;
-    let (unit, display_id) = stable_subject(
-        slot,
-        (live_pet != 0).then(|| pet.entity(live_pet)).flatten(),
-        &open.pets,
-        |entry| names.creature_record(entry).map(|r| r.display_id),
-    );
-    booth.unit = unit;
-    booth.display_id = display_id;
-}
-
-/// The selection's `(live unit, display id)`. The live arm reads the pet guid at `[0xb714a0]` and
-/// no row; the display is resolved too, as the reference falls through to it when the live
-/// resolve fails. Display 0 reads as no answer.
-fn stable_subject(
-    slot: i32,
-    live_pet: Option<Entity>,
-    pets: &[StabledPet],
-    display_of: impl Fn(u32) -> Option<u32>,
-) -> (Option<Entity>, Option<u32>) {
-    let unit = if slot == 0 { live_pet } else { None };
-    let display = u8::try_from(slot)
-        .ok()
-        .and_then(|slot| pets.iter().find(|p| p.slot == slot))
-        .and_then(|row| display_of(row.creature_entry))
-        .filter(|&d| d != 0);
-    (unit, display)
 }
 
 /// Stable refusals as message keys: only `ERR_NOT_ENOUGH_MONEY`, `DisplayError(0x25)` in the
@@ -358,77 +322,6 @@ pub(crate) struct StableSlotPrices(pub(crate) benilla_formats::StableSlotPrices)
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn row(slot: u8, entry: u32) -> StabledPet {
-        StabledPet {
-            pet_number: u32::from(slot) + 100,
-            creature_entry: entry,
-            level: 30,
-            name: format!("pet{slot}"),
-            loyalty: 6,
-            slot,
-        }
-    }
-
-    /// One display per entry; entry `9` is the template that ships none.
-    fn display_of(entry: u32) -> Option<u32> {
-        match entry {
-            1 => Some(4449),
-            2 => Some(822),
-            9 => Some(0),
-            _ => None,
-        }
-    }
-
-    #[test]
-    fn the_selection_forks_between_a_live_body_and_a_bare_display() {
-        let pets = [row(0, 1), row(1, 2)];
-        let live = Entity::from_raw_u32(7).expect("a test entity id");
-
-        // Nothing selected: neither source, so the pane empties.
-        assert_eq!(
-            stable_subject(-1, Some(live), &pets, display_of),
-            (None, None)
-        );
-
-        // Slot 0 with the pet out: the body, and the display beside it so a dismiss keeps the pane.
-        assert_eq!(
-            stable_subject(0, Some(live), &pets, display_of),
-            (Some(live), Some(4449))
-        );
-
-        // Slot 0 with the pet dismissed: the display alone.
-        assert_eq!(
-            stable_subject(0, None, &pets, display_of),
-            (None, Some(4449))
-        );
-
-        // A stabled slot never takes the live body: the live arm is gated on the selection.
-        assert_eq!(
-            stable_subject(1, Some(live), &pets, display_of),
-            (None, Some(822))
-        );
-
-        // A slot with no row (never bought, or empty) and a slot past the window: nothing.
-        assert_eq!(
-            stable_subject(2, Some(live), &pets, display_of),
-            (None, None)
-        );
-    }
-
-    #[test]
-    fn an_unanswered_or_display_less_template_empties_the_pane() {
-        assert_eq!(
-            stable_subject(1, None, &[row(1, 404)], display_of),
-            (None, None),
-            "the query has not landed yet"
-        );
-        assert_eq!(
-            stable_subject(1, None, &[row(1, 9)], display_of),
-            (None, None),
-            "the template ships no display"
-        );
-    }
 
     /// The range guard cannot close it: after the drop there is no self player to measure from.
     #[test]

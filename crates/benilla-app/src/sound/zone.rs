@@ -611,10 +611,10 @@ fn start_music_stream(
     // forced the split, and for why a deferred start is safe on both slots.
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let bytes = {
-            let chain = assets.chain.lock_recover();
-            chain.read(&path)
-        };
+        // Every file FMOD opens is a loose-flagged open (`0x7a8860`).
+        let bytes = assets
+            .read_file_or_loose(&path)
+            .ok_or_else(|| anyhow::anyhow!("not in the loose files or the patch chain"));
         let data = match bytes.and_then(mixer::stream_from_bytes) {
             Ok(d) => d,
             Err(e) => {
@@ -788,7 +788,7 @@ fn open_lua_music(
     let Some(mixer_ref) = out.mixer.as_mut() else {
         return false;
     };
-    // The chain, then the addon folder: an addon's own track has an `Interface\AddOns\…` path.
+    // The addon folder, then the chain: an addon's own track has an `Interface\AddOns\…` path.
     let Some(bytes) = assets.read_file_or_loose(path) else {
         // Silent, as the reference's; the name is used verbatim (`0x458720` appends nothing).
         debug!("Lua music: {path} — not in the patch chain or the AddOns folder");

@@ -36,7 +36,7 @@ fn spacing(s: &UiScript, obj: &str) -> f32 {
         .unwrap_or_else(|e| panic!("{obj}:GetSpacing raised {e}"))
 }
 
-/// Every table carries the pair (`reference/1.12-shapes.tsv`, the `SetSpacing` rows), starting at
+/// Every table carries the pair (`reference/bindings.tsv`, the `SetSpacing` rows), starting at
 /// the constructors' 0 (`0x783a81`, `0x770d89`), and a number round-trips.
 #[test]
 fn every_text_table_round_trips_its_spacing() {
@@ -237,10 +237,11 @@ fn a_scrolling_frame_steps_its_messages_and_rows_by_the_spacing() {
         .collect();
     s.set_message_line_rows(&answers);
     let got = bands(&s);
+    // Farthest displayed line first, the scrolling class's emit order.
     let want = [
-        ("new", 90.0, 104.0),
-        ("wrapped", 108.0, 140.0),
         ("old", 144.0, 158.0),
+        ("wrapped", 108.0, 140.0),
+        ("new", 90.0, 104.0),
     ];
     assert_eq!(got.len(), want.len(), "{got:?}");
     for ((t, b, top), (wt, wb, wtop)) in got.iter().zip(want) {
@@ -422,10 +423,11 @@ fn a_scrolling_frame_rounds_a_fractional_spacing_up() {
         .collect();
     s.set_message_line_rows(&answers);
     let got = bands(&s);
+    // Farthest displayed line first, the scrolling class's emit order.
     let want = [
-        ("new", 90.0, 104.0),
-        ("wrapped", 107.0, 138.0),
         ("old", 141.0, 155.0),
+        ("wrapped", 107.0, 138.0),
+        ("new", 90.0, 104.0),
     ];
     assert_eq!(got.len(), want.len(), "{got:?}");
     for ((t, b, top), (wt, wb, wtop)) in got.iter().zip(want) {

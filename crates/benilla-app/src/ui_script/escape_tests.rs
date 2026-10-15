@@ -115,8 +115,9 @@ fn escape_closes_bag_and_panel_releases_loot_and_keeps_the_held_item() {
         !s.eval::<bool>("return LootFrame:IsVisible()").unwrap(),
         "ESC hid the loot window"
     );
-    assert!(
+    assert_eq!(
         s.take_loot_close(),
+        Some(false),
         "closing the loot fired the release (OnHide → CloseLoot)"
     );
     // Stock `ToggleGameMenu` has no `ClearCursor` arm, so the held item survives ESC.
@@ -419,7 +420,8 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
 }
 
 /// The `SpellStopTargeting` rung (`UIParent.lua:1490`) sits after the cast rung and before the
-/// windows; idle, both answer nil.
+/// windows; idle, both answer nil. The app pushes casting while the cursor is up, so the cast rung
+/// answers first there; press 1 is the script's state with only targeting set.
 #[test]
 fn escape_ladder_targeting_rung_after_cast_before_windows() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -461,7 +463,8 @@ fn escape_ladder_targeting_rung_after_cast_before_windows() {
         "ESC while targeting must NOT also close windows"
     );
 
-    // Press 2, casting and targeting both (a state the app never pushes): the cast rung is first.
+    // Press 2, casting and targeting both (the state the app pushes while the cursor is up, the
+    // targeting spell being in flight): the cast rung is first.
     s.set_casting(true);
     s.run("ToggleGameMenu()").unwrap();
     assert!(s.take_spell_stop(), "the cast rung eats first");

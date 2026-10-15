@@ -243,6 +243,9 @@ impl Plugin for NetPlugin {
                     apply_net_updates,
                     tag_self_player,
                     enter_world_on_self_create,
+                    // The create gives control back (`0x5deb56`), in the Net stage ahead of
+                    // `control`'s read of the flags.
+                    crate::player::regain_control_on_arrival.in_set(crate::player::ControlRestore),
                     sample_splines,
                     // Swim state from the water at the feet (the wire never carries it for
                     // creatures), before the clamp so a swimmer is exempt the same frame.
@@ -1501,6 +1504,25 @@ pub(crate) enum ClientCommand {
     },
     /// `CMSG_GMTICKET_GETTICKET`: `GetGMTicket()`.
     GmTicketGet,
+    /// `CMSG_SKILL_BUY_STEP`: `BuySkillTier`, the skill line id.
+    SkillBuyStep {
+        skill_id: u32,
+    },
+    /// `CMSG_LOTTERY_QUERY_OBSOLETE`: `GetLastLotteryNumbers()`.
+    LotteryQuery,
+    /// `CMSG_BUY_LOTTERY_TICKET_OBSOLETE`: `BuyRandomPicks` is `(count, 0)`, `SubmitNumbers`
+    /// `(0, mask)`.
+    BuyLotteryTicket {
+        first: u32,
+        second: u32,
+    },
+    /// `CMSG_GMSURVEY_SUBMIT`: `GMSurveySubmit()`, the survey id, each answered question as
+    /// `(question id, rating, comment)` and the overall comment.
+    GmSurveySubmit {
+        survey: u32,
+        answers: Vec<(u32, u8, String)>,
+        comment: String,
+    },
     /// `CMSG_GMTICKET_DELETETICKET`.
     GmTicketDelete,
     /// `CMSG_GMTICKET_SYSTEMSTATUS`: `GetGMStatus()`.
@@ -2167,6 +2189,11 @@ pub(crate) enum ClientCommand {
     SetLookingForGroup {
         slots: [u32; 3],
         comment: String,
+    },
+    /// `MSG_LOOKING_FOR_GROUP`: `LFGQuery`'s inquiry.
+    LfgQuery {
+        criterion: u32,
+        class: u32,
     },
     /// `CMSG_DEL_FRIEND`.
     DelFriend {

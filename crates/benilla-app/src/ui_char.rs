@@ -16,7 +16,6 @@ use benilla_ui::strings::Arg;
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{ClientCommand, NetCommands, ObjectStore, Objects, SelfPlayer};
-use crate::portrait::PaperDollBooth;
 use crate::ui_items::{find_equip_slot, item_link};
 use crate::ui_script::{gate, UiFeed, UiInput};
 
@@ -63,20 +62,44 @@ pub(crate) struct UiCharPlugin;
 
 impl Plugin for UiCharPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<CharFeedState>().add_systems(
-            Update,
-            (
-                // Before `feed_containers`: a `BAG_UPDATE` handler may read the bag item's own
-                // row (`GetInventoryItemLink("player", ContainerIDToInventoryID(bag))`), so the
-                // inventory push lands first.
-                feed_char
-                    .before(crate::ui_items::feed::feed_containers)
-                    .in_set(UiFeed),
-                watch_skill_ups.in_set(UiFeed),
-                feed_skills.in_set(UiFeed),
-                drain_skill_abandons.after(UiInput),
-            ),
-        );
+        app.init_resource::<CharFeedState>()
+            .add_systems(
+                Startup,
+                load_skill_tiers.after(benilla_assets::AssetSet::Open),
+            )
+            .add_systems(
+                Update,
+                (
+                    // Before `feed_containers`: a `BAG_UPDATE` handler may read the bag item's own
+                    // row (`GetInventoryItemLink("player", ContainerIDToInventoryID(bag))`), so the
+                    // inventory push lands first.
+                    feed_char
+                        .before(crate::ui_items::feed::feed_containers)
+                        .in_set(UiFeed),
+                    watch_skill_ups.in_set(UiFeed),
+                    feed_skills.in_set(UiFeed),
+                    drain_skill_abandons.after(UiInput),
+                ),
+            );
+    }
+}
+
+/// `SkillTiers.dbc`, which `BuySkillTier` prices a step by.
+#[derive(Resource)]
+struct SkillTiersRes(benilla_formats::SkillTiers);
+
+fn load_skill_tiers(mut commands: Commands, assets: Option<Res<benilla_assets::WorldAssets>>) {
+    use benilla_assets::LockRecover;
+    let Some(assets) = assets else { return };
+    let loaded = {
+        let mut chain = assets.chain.lock_recover();
+        benilla_formats::load_skill_tiers(&mut chain)
+    };
+    match loaded {
+        Ok(tiers) => commands.insert_resource(SkillTiersRes(tiers)),
+        Err(e) => {
+            warn!("ui_char: SkillTiers.dbc failed to load — BuySkillTier prices nothing: {e:#}")
+        }
     }
 }
 
@@ -221,11 +244,21 @@ fn feed_skills(
     script: Option<NonSendMut<UiScript>>,
     self_store: Query<Ref<ObjectStore>, With<SelfPlayer>>,
     skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
+    tiers: Option<Res<SkillTiersRes>>,
     mut last: Local<crate::ui_script::VmMemo<Option<SkillsState>>>,
+    mut tiers_pushed: Local<crate::ui_script::VmMemo<bool>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    // The cost table, once per VM.
+    let pushed = tiers_pushed.get(&script);
+    if !*pushed {
+        if let Some(tiers) = tiers.as_deref() {
+            script.set_skill_tiers(tiers.0.tiers());
+            *pushed = true;
+        }
+    }
     let last = last.get(&script);
     let lines_moved = skill_lines.as_ref().is_some_and(|l| l.is_changed());
     let (Ok(store), Some(skill_lines)) = (self_store.single(), skill_lines.as_deref()) else {
@@ -298,6 +331,9 @@ pub(crate) fn skills_row(
         // The unlearnable bit and a nonzero skill step (`0x4d3953`).
         abandonable: slot.step != 0 && rc.unlearnable(),
         mono: rc.mono(),
+        step: u32::from(slot.step),
+        flags: rc.flags,
+        tier_id: rc.tier_id,
     })
 }
 
@@ -843,7 +879,6 @@ pub(crate) fn feed_char(
     props: Option<Res<crate::items::RandomProperties>>,
     commands: Res<NetCommands>,
     mut feed: ResMut<CharFeedState>,
-    mut booth: ResMut<PaperDollBooth>,
     names: Res<crate::names::NameCache>,
     // `ItemSubClass.dbc`, for `GetInventoryItemCount`'s container count bit.
     sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
@@ -851,13 +886,6 @@ pub(crate) fn feed_char(
     let Some(mut script) = script else {
         return;
     };
-    // The stock `CharacterModelFrame` owns the yaw (`Model_Rotate*` call `SetRotation`); the booth
-    // mirrors it, written only on change so it is not marked changed every frame.
-    let yaw = script.model_pane_facing("CharacterModelFrame");
-    if booth.yaw != yaw {
-        booth.yaw = yaw;
-    }
-
     // Per VM: after a `/reload` both snapshots re-push and their events re-fire.
     let (memo, vm_reset) = feed.vm.get_reset(&script);
 
@@ -992,12 +1020,14 @@ pub(crate) fn feed_char(
         gate.audit("feed_char", "a bank bag slot transition");
     }
     for same_bag in repainted {
-        let args = if same_bag {
-            vec![ScriptValue::Str("player".to_string())]
+        if same_bag {
+            script.fire_event(
+                "PLAYERBANKSLOTS_CHANGED",
+                vec![ScriptValue::Str("player".to_string())],
+            );
         } else {
-            Vec::new()
-        };
-        script.fire_event("PLAYERBANKSLOTS_CHANGED", args);
+            script.fire_event("PLAYERBANKSLOTS_CHANGED", vec![]);
+        }
     }
 }
 
@@ -1104,7 +1134,6 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.init_resource::<CharFeedState>()
-            .init_resource::<PaperDollBooth>()
             .init_resource::<Items>()
             .init_resource::<crate::net::GuidIndex>()
             .init_resource::<crate::names::NameCache>()

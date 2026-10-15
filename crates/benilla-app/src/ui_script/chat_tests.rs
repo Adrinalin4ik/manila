@@ -33,6 +33,15 @@ pub(crate) fn chat_frame() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\FloatingChatFrame.xml");
     super::fire_chat_login(&mut s);
     s.set_screen_size(1600.0, 900.0);
+    // The local player `SendChatMessage` needs (`0x49f223`).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probe".into()),
+            ..Default::default()
+        }),
+    );
     s.resolve();
     s
 }
@@ -141,6 +150,27 @@ fn wheel_scroll_re_arms_the_fade_then_freezes_it() {
     let a4 = text_color(&s.extract(), "L1").expect("L1 visible")[3];
     assert!(a4 < 1.0 && a4 > 0.0, "the fade resumed at the bottom: {a4}");
     assert!(close(a4, a1), "and from a full re-arm: {a4} vs {a1}");
+}
+
+/// The stock `ChatFrame.xml` writes `<FontString bytes="256"/>` on the chat box, which caps it at
+/// 255 bytes (`0x77a225`-`0x77a260`, `0x77c040`): a line is stopped before vmangos would drop it.
+#[test]
+fn the_stock_chat_box_stops_at_255_bytes() {
+    benilla_formats::wow_data_or_skip!();
+    let s = chat_frame();
+    assert_eq!(
+        s.eval::<i64>("return ChatFrameEditBox:GetMaxBytes()")
+            .unwrap(),
+        256
+    );
+    s.run("ChatFrameEditBox:SetText(string.rep('\\195\\169', 200))")
+        .unwrap();
+    assert_eq!(
+        s.eval::<i64>("return string.len(ChatFrameEditBox:GetText())")
+            .unwrap(),
+        254,
+        "127 two-byte letters"
+    );
 }
 
 #[test]
@@ -1207,6 +1237,28 @@ fn a_quick_exit_and_reentry_keeps_the_plates_hover_fade() {
         (later - 0.25).abs() < 1e-6,
         "shipped: and on every hover after — got {later}"
     );
+}
+
+/// The Lua binding's chat-type table (`0x49f7a0`) and the drain's token map are one list: every
+/// token the binding accepts is a send, and `RAID_LEADER` and `BATTLEGROUND_LEADER`, which the
+/// reference derives itself (`0x49f3bf`, `0x49f48b`), are neither, so a token the binding lets
+/// through is never dropped by the drain.
+#[test]
+fn the_binding_and_the_drain_share_one_chat_type_list() {
+    use crate::ui_chat::edit::SendType;
+    use std::collections::HashSet;
+
+    let mut wires = HashSet::new();
+    for token in benilla_ui::script::SEND_CHAT_TOKENS {
+        let kind = SendType::from_token(token).unwrap_or_else(|| panic!("{token} has no send"));
+        assert!(
+            wires.insert(format!("{:?}", kind.wire())),
+            "{token} repeats a wire kind"
+        );
+    }
+    for token in ["RAID_LEADER", "BATTLEGROUND_LEADER"] {
+        assert!(SendType::from_token(token).is_none(), "{token}");
+    }
 }
 
 /// The stock `/afk` and `/dnd` call `SendChatMessage(msg, "AFK")` or `"DND"`

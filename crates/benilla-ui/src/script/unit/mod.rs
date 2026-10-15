@@ -194,16 +194,14 @@ pub struct UnitState {
     /// (`0x516c50`, delegating to `CanAttack` `0x606980`) answers for both argument orders. Fed for
     /// `target`, `targettarget`, `npc` and the units a chain ends on; other tokens read false.
     pub can_attack: bool,
-    /// The player may help this unit (`UnitCanAssist("player", unit)`) — app-fed from
-    /// `CanAssist 0x6066f0`, the same predicate that gates whose buffs are visible
-    /// (`ui_aura::buffs_visible_on`) and which side a friendly scan accepts. Fed for the same
-    /// tokens [`Self::can_attack`] is, and for the same reason: the predicate needs resources
-    /// `snapshot`'s other call sites do not hold.
+    /// Whether the player can assist the unit, `UnitCanAssist("player", unit)`: `CanAssist`
+    /// (`0x6066f0`, `this` the player, the argument the unit). Fed where [`Self::can_attack`] is.
     pub can_assist: bool,
-    /// This token resolves to a **TYPEID_CORPSE world object** — `UnitIsCorpse`'s whole
-    /// predicate (`0x5161c0`, §5-VERIFIED: a pure object-type check, no health test; a dead
-    /// mob/player is NOT a corpse). No feed sets it yet — corpse objects (a released player's
-    /// remains) aren't selectable in benilla — a stated gap, not an oversight.
+    /// The same with the unit as `this` and the player the argument (`0x6066f0` reads the reaction
+    /// of `this` toward the argument): `UnitCanAssist(unit, "player")`.
+    pub can_assist_player: bool,
+    /// `UnitIsCorpse` (`0x5161c0`): the token names a `TYPEID_CORPSE` object, which a dead unit
+    /// is not. No feed sets it.
     pub corpse_object: bool,
     /// `UnitAffectingCombat` (`0x517e10`): `UNIT_FIELD_FLAGS` bit `0x00080000`, for every token
     /// including `"player"`; the reference has no separate player combat flag.

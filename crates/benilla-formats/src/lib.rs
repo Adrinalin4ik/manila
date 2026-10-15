@@ -26,6 +26,12 @@ pub use install::{
 /// URL scheme it implements against. Always compiled (`encode_name` is plain Rust and tested
 /// natively); the browser-only pieces are gated to `wasm32` inside the module itself.
 pub mod web;
+/// The install's loose files, asked before the archives by the opens that set the loose flag.
+mod loose;
+pub use loose::{
+    install_index, install_loose_interface_folders, LooseFile, LooseIndex, LooseIndexCell,
+    LooseOpen,
+};
 mod characters;
 #[cfg(target_arch = "wasm32")]
 pub use characters::plan_to_json;
@@ -58,6 +64,12 @@ mod macro_icons;
 pub use unit_blood::{load_blood_catalog, BloodCatalog};
 mod itemsets;
 pub use itemsets::{load_item_sets, ItemSetCatalog, ItemSetInfo};
+mod gm_survey;
+mod lfg_dungeons;
+pub use lfg_dungeons::{load_lfg_dungeons, LfgDungeon};
+mod skill_tiers;
+pub use gm_survey::{load_gm_survey, GmSurvey};
+pub use skill_tiers::{load_skill_tiers, SkillTiers};
 mod gm_ticket_category;
 pub use gm_ticket_category::{
     load_gm_ticket_categories, GmTicketCategory, GmTicketCategoryCatalog,

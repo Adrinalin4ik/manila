@@ -35,7 +35,7 @@ use benilla_ui::widget::MINIMAP_DEFAULT_ZOOM;
 use crate::player::Player;
 use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuadMask, UiQuads, UvRect};
 use benilla_assets::MapCatalogRes;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::{AssetSet, LockRecover, LooseOpen, WorldAssets};
 use benilla_world::wmo_portal::{
     down_ray_seeds, terrain_z_local, WmoPortalInstance, INTERIOR_PROBE_HEIGHT,
 };
@@ -251,15 +251,25 @@ fn setup_minimap(
     match translate {
         Ok(translate) => {
             info!("minimap: md5translate.trs — {} tiles", translate.len());
-            let mask = assets.mask_texture("Textures\\MinimapMask", &mut images);
+            // The default mask and icons open from the archives alone, as `0x4ed810`'s
+            // `TextureCreate` calls pass file flag 0 (`0x4ed862`, `0x4ed88b`, `0x4ed8b4`). The
+            // arrows are model textures (`MinimapArrow.m2`, `Rotating-MinimapArrow.m2`), and
+            // `CGMinimapFrame::LoadArrowModel` creates the models with flags 4 (`0x4ee181`), which
+            // their textures' opens keep (`0x71da64`), so they open loose-flagged.
+            let archives = LooseOpen::Archives;
+            let mask = assets.mask_texture("Textures\\MinimapMask", archives, &mut images);
             let arrow = assets.sprite_texture(blips::PLAYER_ARROW_TEXTURE, &mut images);
-            let poi = assets.sprite_texture("Interface\\Minimap\\POIIcons", &mut images);
+            let poi =
+                assets.sprite_texture_opened("Interface\\Minimap\\POIIcons", archives, &mut images);
             let mut rim_arrows = blips::RimArrowArt::default();
             for kind in blips::RimArrow::ALL {
                 rim_arrows.set(kind, assets.sprite_texture(kind.texture(), &mut images));
             }
-            let object_icons =
-                assets.sprite_texture("Interface\\Minimap\\ObjectIcons", &mut images);
+            let object_icons = assets.sprite_texture_opened(
+                "Interface\\Minimap\\ObjectIcons",
+                archives,
+                &mut images,
+            );
             if mask.is_none() {
                 warn!("minimap: MinimapMask.blp missing — the map will draw square");
             }
@@ -813,10 +823,15 @@ fn feed_minimap_mask(
         return;
     }
     *last = want.clone();
-    let path = want
-        .as_deref()
-        .unwrap_or(benilla_ui::widget::MINIMAP_DEFAULT_MASK);
-    match world_assets.mask_texture(path, &mut images) {
+    // `SetMaskTexture` opens with the loose flag (`0x4ee5e4`); the default, with flag 0 (`0x4ed862`).
+    let (path, open) = match want.as_deref() {
+        Some(path) => (path, LooseOpen::Index),
+        None => (
+            benilla_ui::widget::MINIMAP_DEFAULT_MASK,
+            LooseOpen::Archives,
+        ),
+    };
+    match world_assets.mask_texture(path, open, &mut images) {
         Some(handle) => assets.mask = Some(handle),
         None => {
             warn!("minimap: SetMaskTexture(\"{path}\") — no such texture; keeping the current mask")
@@ -881,7 +896,9 @@ impl Plugin for MinimapPlugin {
                         .before(emit_minimap),
                     // Not in `LightingConsumeSet` though it reads `WowLighting`: at most one frame
                     // of late tint on a 140 px map, not worth a world API item.
-                    emit_minimap.in_set(UiQuadAppend),
+                    emit_minimap
+                        .in_set(UiQuadAppend)
+                        .before(crate::portrait::PaneComposite),
                     // After the emit that fills it, so the blit never samples a frame-old target.
                     composite::drive_composite.after(UiQuadAppend),
                     // Before the script tick, so a zoom button routes to the live index.

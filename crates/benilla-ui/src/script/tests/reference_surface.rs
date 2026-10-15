@@ -1,5 +1,5 @@
 //! The 1.12 surface as a gate: every global the engine puts in a bare VM is one the 1.12.1 client
-//! has (`reference/1.12-globals.tsv`) or a commented entry on [`BEYOND_1_12`], since addons branch
+//! has (`reference/lua_globals.tsv`) or a commented entry on [`BEYOND_1_12`], since addons branch
 //! on a global's presence; no prefix excuses an engine name, as a host seam belongs in Rust. The
 //! production load, core and layer, is `benilla-app`'s `ui_script::surface_gate`; what 1.12 has
 //! and benilla lacks is `scripts/api-coverage.sh`'s count.
@@ -16,18 +16,16 @@ const BEYOND_1_12: &[&str] = &[
     "_G",
 ];
 
-/// `reference/1.12-globals.tsv`'s names.
+/// `reference/lua_globals.tsv`'s names.
 fn reference() -> HashSet<String> {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../reference/1.12-globals.tsv"
+        "/../../reference/lua_globals.tsv"
     );
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        panic!("reading {path}: {e} — regenerate with scripts/gen-reference-globals.py")
-    });
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
     let names: HashSet<String> = text
         .lines()
-        .filter(|l| !l.starts_with('#'))
+        .skip(1)
         .filter_map(|l| l.split('\t').next().map(str::to_string))
         .collect();
     assert!(
@@ -537,10 +535,11 @@ fn button_set_font_returns_nothing_and_is_a_no_op_without_a_label() {
     );
 }
 
-/// FontString's `SetNonSpaceWrap`/`CanNonSpaceWrap` (`0x79e9f0`/`0x79ead0`): on by default, the
-/// getter answers `1` or nil, and a bare `SetNonSpaceWrap()` turns it on.
+/// FontString's `SetNonSpaceWrap`/`CanNonSpaceWrap` (`0x79e9f0`/`0x79ead0`): off from the
+/// constructor (`0x770dd3` stores `0x212`), the getter answers `1` or nil, and a bare
+/// `SetNonSpaceWrap()` turns it on.
 #[test]
-fn non_space_wrap_defaults_on_and_answers_one_or_nil() {
+fn non_space_wrap_defaults_off_and_answers_one_or_nil() {
     let s = crate::script::UiScript::new().unwrap();
     s.run(r#"f = CreateFrame("Frame", "NSF") fs = f:CreateFontString("NSFText", "ARTWORK")"#)
         .unwrap();
@@ -548,8 +547,16 @@ fn non_space_wrap_defaults_on_and_answers_one_or_nil() {
     assert_eq!(
         s.eval::<Option<i64>>("return NSFText:CanNonSpaceWrap()")
             .unwrap(),
+        None,
+        "off from the constructor, answered nil"
+    );
+
+    s.run("NSFText:SetNonSpaceWrap()").unwrap();
+    assert_eq!(
+        s.eval::<Option<i64>>("return NSFText:CanNonSpaceWrap()")
+            .unwrap(),
         Some(1),
-        "default on, answered as 1"
+        "a bare SetNonSpaceWrap() turns it ON, answered as 1"
     );
     assert!(
         !s.eval::<bool>("return NSFText:CanNonSpaceWrap() == true")
@@ -563,14 +570,6 @@ fn non_space_wrap_defaults_on_and_answers_one_or_nil() {
             .unwrap(),
         None,
         "off answers nil, not 0 and not false"
-    );
-
-    s.run("NSFText:SetNonSpaceWrap()").unwrap();
-    assert_eq!(
-        s.eval::<Option<i64>>("return NSFText:CanNonSpaceWrap()")
-            .unwrap(),
-        Some(1),
-        "a bare SetNonSpaceWrap() turns it ON"
     );
 }
 

@@ -6,7 +6,7 @@
 
 use bevy::prelude::*;
 
-use benilla_assets::LockRecover;
+use benilla_assets::{LockRecover, LooseOpen};
 use benilla_ui::script::{GlueNotice, UiScript};
 
 use super::manifest::silenced_ui_load;
@@ -84,8 +84,7 @@ fn install_glue_vm(world: &mut World, screen: super::glue::GlueScreen) -> bool {
     // this VM is born before `cvars::sync_cvars`'s per-VM seed, and the character screen's
     // `OnShow` names the realm `GetServerName` reads off `realmName` (`0x46d289`).
     if let Some(cvars) = world.get_resource::<crate::cvars::Cvars>() {
-        script.set_cvar_saved_base(cvars.orphans());
-        script.seed_cvars(cvars.vm_seed());
+        cvars.seed_vm(&mut script);
     }
     seed_agreements(world, &mut script);
     let start = bevy::platform::time::Instant::now();
@@ -144,6 +143,11 @@ fn new_vm<E: std::fmt::Display>(
     world: &mut World,
     make: fn() -> Result<UiScript, E>,
 ) -> Option<UiScript> {
+    // The client globals the VM holds that no rebuild resets: `[0xcf4d24]`, written only by
+    // `SetEuropeanNumbers` (`0x771c40`), outlives a `ReloadUI` and a logout.
+    let european_numbers = world
+        .get_non_send_resource::<UiScript>()
+        .is_some_and(UiScript::european_numbers);
     let mut script = match make() {
         Ok(s) => s,
         Err(e) => {
@@ -152,6 +156,7 @@ fn new_vm<E: std::fmt::Display>(
             return None;
         }
     };
+    script.set_european_numbers(european_numbers);
     seed_vm_clock(world, &mut script);
     install_addon_asset_resolvers(world, &mut script);
     info!("ui_script: new VM, session {}", script.session());
@@ -178,31 +183,26 @@ fn seed_vm_clock(world: &mut World, script: &mut UiScript) {
     }
 }
 
-/// Wire `Interface\AddOns\` art and fonts: the decoder's loose-file root and the VM's texture,
-/// size and font probes, so the path forms of `SetTexture` and `SetFont` answer the reference's
-/// 1|nil load verdict, and a region with no authored size on an axis takes it from its art as the
-/// client's virtual size getters do. Each probe resolves [`addons::root`] through the store its
-/// renderer reads, so the answer is what draws; they test existence, not decode.
+/// Wire the loose files into art and fonts: the decoder's AddOns folder, beside the install's
+/// index it already reads, and the VM's texture, size and font probes, so the path forms of
+/// `SetTexture` and `SetFont` answer the reference's 1|nil load verdict, and a region with no
+/// authored size on an axis takes it from its art as the client's virtual size getters do. Each
+/// probe resolves through the store and the open its renderer reads (an interface texture's,
+/// [`LooseOpen::Index`], and a font face's, [`LooseOpen::BareNameFirst`]), so the answer is what
+/// draws; they test existence, not decode.
 fn install_addon_asset_resolvers(world: &mut World, script: &mut UiScript) {
-    let root = addons::root();
     let Some(mut assets) = world.get_resource_mut::<benilla_assets::WorldAssets>() else {
         return;
     };
-    assets.set_loose_addon_root(root.clone());
+    assets.set_loose_addon_root(addons::root());
+    let loose = assets.loose().clone();
     let chain = assets.chain.clone();
     let size_chain = chain.clone();
-    let size_root = root.clone();
+    let size_loose = loose.clone();
     let font_chain = chain.clone();
-    let font_root = root.clone();
+    let font_loose = loose.clone();
     script.set_texture_probe(Box::new(move |path| {
-        benilla_assets::sprite_candidates(path).iter().any(|c| {
-            chain.lock_recover().contains(c)
-                || root
-                    .as_deref()
-                    .is_some_and(|r| benilla_assets::loose_addon_file(r, c).is_some())
-                // The browser's addon store, which has no filesystem for the leg above.
-                || benilla_assets::web_addon_exists(c)
-        })
+        benilla_assets::sprite_found(&chain, &loose, path)
     }));
     // Keyed by the path exactly as the region carries it, so a hit allocates nothing (this is
     // asked per zero-size textured region per layout pass); misses are cached too.
@@ -212,11 +212,11 @@ fn install_addon_asset_resolvers(world: &mut World, script: &mut UiScript) {
         if let Some(cached) = sizes.borrow().get(path) {
             return *cached;
         }
-        let measured = benilla_assets::sprite_dimensions(&size_chain, size_root.as_deref(), path);
+        let measured = benilla_assets::sprite_dimensions(&size_chain, &size_loose, path);
         sizes.borrow_mut().insert(path.to_string(), measured);
         measured
     }));
-    // Existence over the same two stores, in the same order, as `ui_text::engine`'s face loader,
+    // Existence over the same stores, in the same order, as `ui_text::engine`'s face loader,
     // memoised because a path's answer cannot change and an addon may call `SetFont` every frame.
     let seen: std::cell::RefCell<std::collections::HashMap<String, bool>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
@@ -224,10 +224,9 @@ fn install_addon_asset_resolvers(world: &mut World, script: &mut UiScript) {
         if let Some(&cached) = seen.borrow().get(path) {
             return cached;
         }
-        let found = font_chain.lock_recover().contains(path)
-            || font_root.as_deref().is_some_and(|r| {
-                benilla_assets::loose_addon_file(r, &benilla_assets::normalize_path(path)).is_some()
-            })
+        let found = font_loose.find(path, LooseOpen::BareNameFirst).is_some()
+            || font_chain.lock_recover().contains(path)
+            // The browser's AddOns folder, which `find` has no filesystem for.
             || benilla_assets::web_addon_exists(&benilla_assets::normalize_path(path));
         seen.borrow_mut().insert(path.to_string(), found);
         found
@@ -710,13 +709,9 @@ fn entry_prepare(
     // The CVar table goes in before the UI loads: stock `UIOptionsFrame.xml`'s camera dropdowns
     // read `cameraSmoothStyle` and `cameraSmoothTrackingStyle` in their `OnLoad`, where a nil is a
     // concat error (`UIOptionsFrame.lua:379-384`, `:501-506`), and this VM was born inside this
-    // call, before `cvars::sync_cvars`'s per-VM seed. Its order: the file's unclaimed entries
-    // first, so an addon's `RegisterCVar` starts at the player's value, then the live table.
+    // call, before `cvars::sync_cvars`'s per-VM seed.
     match world.get_resource::<crate::cvars::Cvars>() {
-        Some(cvars) => {
-            script.set_cvar_saved_base(cvars.orphans());
-            script.seed_cvars(cvars.vm_seed());
-        }
+        Some(cvars) => cvars.seed_vm(script),
         None => script.register_cvars(crate::cvars::registered_pairs()),
     }
     // The item locks before any file or event runs: a `/reload`'s survive, as on the reference's
@@ -1608,6 +1603,39 @@ pub(crate) fn is_emote_token_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `[0xcf4d24]` has one writer, `SetEuropeanNumbers` (`0x771c40`), and nothing resets it, so
+    /// the VM that replaces a dying one (a `ReloadUI`, a logout, a login) opens with its value.
+    #[test]
+    fn the_european_numbers_switch_outlives_the_vm_that_set_it() {
+        let mut world = World::new();
+        let first = UiScript::new().unwrap();
+        assert!(!first.european_numbers(), "off at boot");
+        world.insert_non_send_resource(first);
+        let text = |world: &World| {
+            let script = world.non_send_resource::<UiScript>();
+            script
+                .run("F = CreateFrame('Frame'):CreateFontString() F:SetText('1.5')")
+                .unwrap();
+            script.eval::<String>("return F:GetText()").unwrap()
+        };
+        world
+            .non_send_resource::<UiScript>()
+            .run("SetEuropeanNumbers(1)")
+            .unwrap();
+        for _ in 0..2 {
+            let next = new_vm(&mut world, UiScript::new).expect("a VM");
+            world.insert_non_send_resource(next);
+            assert_eq!(text(&world), "1,5");
+        }
+        world
+            .non_send_resource::<UiScript>()
+            .run("SetEuropeanNumbers(false)")
+            .unwrap();
+        let next = new_vm(&mut world, UiScript::new).expect("a VM");
+        world.insert_non_send_resource(next);
+        assert_eq!(text(&world), "1.5");
+    }
 
     #[test]
     fn the_entry_edge_parks_the_boot_vm_and_the_session_end_returns_it() {

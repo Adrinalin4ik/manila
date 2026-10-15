@@ -830,7 +830,12 @@ pub(crate) mod schedule_tests {
     ///
     /// MONKEY (merge upstream e175209f, 2026-10-12): upstream 371 → 377, ours was 466 = 371 + 95,
     /// so 377 + 95 by arithmetic. NOT yet read off a test run of the merged tree.
-    const POST_UPDATE_CEILING: usize = 472;
+    ///
+    /// MONKEY (merge upstream b220d6a4, 2026-10-15): upstream 377 → 378 (one pair it explains:
+    /// `fit_tiled_backgrounds` against bevy's accessibility `image_changed`). Read off the merged
+    /// tree's test run: 551. The tree before this merge already read 550 against its 472 (the
+    /// Update ceiling failed first, so this one was never reached); the merge adds upstream's one.
+    const POST_UPDATE_CEILING: usize = 551;
     const POST_UPDATE_SLACK: usize = 20;
     /// The actionable pairs in `Update`: conflicting access, no declared order, and nothing
     /// [`Classes`] explains, so the executor orders them however the graph falls. The count may
@@ -851,9 +856,13 @@ pub(crate) mod schedule_tests {
     ///   `native_glue`), never both;
     /// - the cursor classifier against `world_focus`'s focus publish and settle release over
     ///   `Player`: it reads `own_control_lost`, and they write only `settling` and `world_stale`;
-    /// - `ui_quest::lines::feed_quest_lines` against `ui_items::feed_item_stats` and
-    ///   `ui_tooltip::feed_spell_tooltips` over `Items` and the VM: it only reads templates, which
-    ///   those two do not write, and a chat line commutes with their pushes;
+    /// - `ui_quest::lines::feed_quest_lines` and the reader's begin and feed
+    ///   (`ui_item_text::begin_item_text`, `feed_item_text`) against `ui_items::feed_item_stats`
+    ///   and `ui_tooltip::feed_spell_tooltips` over `Items` and the VM: they only read templates,
+    ///   which those two do not write, and a chat line or the reader's text commutes with their
+    ///   pushes;
+    /// - `ui_session::feed_interact_npc` against `query_cache::release_on_enter::<MailOpen>`: the
+    ///   feed reads the mailbox's guid, and the release clears only the pending queries;
     /// - `script_calls::apply_script_calls`, in the target chain, against the `.after(UiInput)`
     ///   drains of gestures that are not such script calls (the ATTACKTARGET binding, the
     ///   item-pick commit, the GameObject openers, the chat, party, duel, trade and death drains)
@@ -912,8 +921,12 @@ pub(crate) mod schedule_tests {
     /// arithmetic, as above.
     ///
     /// MONKEY (merge upstream 94eb6a8b, 2026-10-14): upstream 4,642 → 4,603; 4,603 + 19 of ours by
-    /// arithmetic, as above.
-    const UPDATE_ACTIONABLE_CEILING: usize = 4_622;
+    /// arithmetic, as above. That arithmetic was wrong: the merged tree read 4,661, so ours is 58,
+    /// not 19 — the 39 the arithmetic missed are pairs our systems make with upstream's new ones.
+    ///
+    /// MONKEY (merge upstream b220d6a4, 2026-10-15): upstream 4,603 → 3,964; the merged tree reads
+    /// 4,021 = 3,964 + 57 of ours. Read off the merged tree's test run.
+    const UPDATE_ACTIONABLE_CEILING: usize = 4_021;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -1209,6 +1222,67 @@ pub(crate) mod schedule_tests {
     /// reason.
     const OUTSIDE_THE_FEED_PHASE: &[(&str, &str)] = &[];
 
+    /// The create's control restore (`player::regain_control_on_arrival`) is registered in the
+    /// built client and ordered: after the self create it answers, before the controller and the
+    /// readers of the flags it clears. A lost `add_systems` line, or a lost `.after`, fails here.
+    #[test]
+    fn the_control_restore_runs_after_the_create_and_before_its_readers() {
+        let mut app = headless_client();
+        let c = census(&mut app, Update, SyncPoints::Declared);
+        if !type_names_available(&c) {
+            eprintln!(
+                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
+            );
+            return;
+        }
+        let one = |suffix: &str| -> SystemKey {
+            let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
+            match (hits.next(), hits.next()) {
+                (Some((k, _)), None) => *k,
+                _ => panic!("exactly one system named `…{suffix}` in Update"),
+            }
+        };
+        let mut succ: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
+        for (a, b) in &c.dependencies {
+            succ.entry(*a).or_default().push(*b);
+        }
+        let reach = |start: SystemKey| {
+            let mut seen = HashSet::new();
+            let mut stack = vec![start];
+            while let Some(n) = stack.pop() {
+                for m in succ.get(&n).into_iter().flatten() {
+                    if seen.insert(*m) {
+                        stack.push(*m);
+                    }
+                }
+            }
+            seen
+        };
+        let restore = one("::wire_in::regain_control_on_arrival");
+        let create = one("::net::apply::enter_world_on_self_create");
+        assert!(
+            reach(create).contains(&restore),
+            "the restore runs after the self create"
+        );
+        let after_restore = reach(restore);
+        for reader in [
+            "::player::controller::control",
+            "::ui_unit::feed_player_control",
+            "::ui_action::state::feed_action_state",
+            "::ui_shapeshift::feed_shapeshift_bar",
+            "::player::camera_saved::load_camera_pose",
+            "::tutorial::watch_self",
+            "::ui_trade::answer_trade_request",
+            "::poi_marker::expire_marker",
+            "::char_select::debug_logout_smoke",
+        ] {
+            assert!(
+                after_restore.contains(&one(reader)),
+                "`{reader}` runs after the control restore"
+            );
+        }
+    }
+
     /// The VM ticks once a frame (`extract::tick_script`, in `UiInput`): a push the tick must
     /// see rides `UiFeed`, chained after the net drain and before the tick; a drain of what it
     /// produced is `.after(UiInput)`. Read off the built graph. Fails a holder with no path to or
@@ -1392,8 +1466,6 @@ pub(crate) mod schedule_tests {
          "`state.vm: VmMemo<HonorFeedMemo>`; `events_for(None, ..)` re-fires both events on a fresh VM"),
         ("ui_inspect.rs", "feed_inspect", Because::MemoLatched,
          "the token is latched only by Lua's `NotifyInspect`, and the diffs ride a `VmMemo`"),
-        ("ui_item_text.rs", "drain_item_text", Because::FilledByVm,
-         "page turns and close are Lua intents"),
         ("ui_item_text.rs", "feed_item_text", Because::MemoLatched,
          "`told` is a `VmMemo` inside the session (a fresh VM re-begins), and the open is a player click"),
         ("ui_items/locks.rs", "apply_item_releases", Because::Deliberate,
@@ -1414,6 +1486,8 @@ pub(crate) mod schedule_tests {
          "the window queues are mailbox-click replies; the one server push (`SMSG_RECEIVED_MAIL`) is re-asked by `send_query_next_mail_time_on_enter`, whose reply sets `notify` unconditionally"),
         ("ui_merchant/mod.rs", "feed_merchant", Because::PlayerRoundTrip,
          "a buy/sell refusal answers a click on an open merchant; show/update ride `VmMemo`s"),
+        ("ui_panes.rs", "feed_character_panes", Because::FilledByVm,
+         "the answers answer the VM's own build requests and arms on panes it listed; a frameless VM lists none, and an answer for another VM's rows is dropped"),
         ("ui_petition/feed.rs", "feed_petition", Because::PlayerRoundTrip,
          "every line answers a charter action of ours; the window edges ride the `fed` memo"),
         ("ui_quest_share.rs", "feed_quest_share", Because::PlayerRoundTrip,
@@ -1422,8 +1496,6 @@ pub(crate) mod schedule_tests {
          "it acts only on a glue-kind VM (`script.filter(vm_kind() == Glue)`, documented at the fire sites), never the entry VM the window leaves frameless; news that arrives with no glue VM is held in `AddonInfoReply` for the next one"),
         ("ui_script/extract/mod.rs", "paint_script", Because::Deliberate,
          "per-frame paint and cost state, not a queue"),
-        ("ui_social/feed.rs", "feed_social", Because::MemoLatched,
-         "the login-burst lists are re-announced to a new VM by `fed.seeded` (`VmMemo<FedSocial>`); the show flag is Lua's; a status line waits on the name resolve"),
         ("ui_stable/mod.rs", "feed_stable", Because::PlayerRoundTrip,
          "both packets follow a stable master's gossip and a click in its window"),
         ("ui_summon.rs", "feed_summon", Because::PlayerRoundTrip,

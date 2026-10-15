@@ -8,10 +8,11 @@ use mlua::{Lua, Value};
 use super::super::binding_abi::flag;
 use super::super::calls::ScriptCall;
 use super::super::Model;
+use super::UnitState;
 use super::{
     check_unit_token, classification_word, grey_band, level_reads_unknown, parse_unit_token,
-    pick_unit_token, unit_predicate, unknownobject, with_unit, PlayerRecord, SelectionRequest,
-    UnitBase, UnitTokenParse,
+    pick_unit_token, unit_is_grey, unit_predicate, unknownobject, with_unit, PlayerRecord,
+    SelectionRequest, UnitBase, UnitTokenParse,
 };
 
 /// The `"player"` fast path of `UnitName`, `UnitRace`, `UnitClass` and `UnitSex`, never
@@ -222,17 +223,13 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // UnitCanAssist (`0x516bb0`) → 1/nil — the assist twin of the binding above, delegating to
-    // `CanAssist 0x6066f0` through [`UnitState::can_assist`]. The engine predicate is byte-derived
-    // (`crate`-side `target::relations::can_assist`) and already gates buff visibility; this only
-    // opens the door Lua asks through. ShaguTweaks' `CastSpellByName` hook is a live caller, and
-    // the shipped FrameXML is not — which is why it went missing until an addon asked.
-    //
-    // **The argument gate is taken from [`UnitCanAttack`]'s shape, not read off `0x516bb0`.** Both
-    // positions raise on a non-string here because that is what the sibling does and what every
-    // observed caller passes (`UnitCanAssist("player", "target")`); if the reference turns out to
-    // gate one position only, this is stricter than it, and that is the direction a wrong guess
-    // should err in — a raise names itself, a silent nil does not.
+    // UnitCanAssist (`0x516bb0`) delegates to `CanAssist` (`0x6066f0`), the first unit `this`
+    // (`0x516c03`). Both tokens are `lua_isstring`-gated and both resolved (`0x515940`, which raises
+    // on an unknown one) before either is judged; nil when either names no unit. The snapshots hold
+    // `CanAssist` with the player on one side only: `can_assist` with the player as `this`, and
+    // `can_assist_player` with the unit as `this`. So the first unit being the player reads the
+    // second's `can_assist`, the second being the player reads the first's `can_assist_player`,
+    // and two units that are neither are not modelled and answer nil.
     g.set(
         "UnitCanAssist",
         lua.create_function(|lua, (a, b): (Value, Value)| {
@@ -246,15 +243,50 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 b,
                 r#"Usage: UnitCanAssist("unit", "otherUnit")"#,
             )?);
-            let token = pick_unit_token(&a, &b);
-            unit_predicate(lua, &token, |u| u.can_assist)
+            check_unit_token(&a)?;
+            check_unit_token(&b)?;
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let named = |t: &Option<String>| t.as_ref().and_then(|t| model.unit(t));
+            let player_guid = model.unit("player").map_or(0, |p| p.guid);
+            let is_player = |t: &Option<String>, u: &UnitState| {
+                t.as_deref()
+                    .is_some_and(|t| t.eq_ignore_ascii_case("player"))
+                    || (u.guid != 0 && u.guid == player_guid)
+            };
+            let ok = match (named(&a), named(&b)) {
+                (Some(ua), Some(ub)) if is_player(&a, ua) => ub.can_assist,
+                (Some(ua), Some(ub)) if is_player(&b, ub) => ua.can_assist_player,
+                _ => false,
+            };
+            Ok(flag(ok))
         })?,
     )?;
 
-    // GetQuestGreenRange (`0x4e17d0`, §5-VERIFIED 2026-07-17) — the green→grey boundary the
-    // FrameXML `GetDifficultyColor` buckets by (ref QuestLogFrame.lua l.593):
-    // `GRAYBAND[min(playerLevel/5, 19)]` off the binary's `0x8076c0` table, byte-identical to
-    // the `0x81dda8`/`0x80ae98` twins [`grey_band`] transcribes. No args; 0 with no player.
+    // UnitIsTrivial (`0x519d70`): `0x5f0700`, false for a player (object type bit `0x10`), else
+    // true when the player's level is above the unit's by more than the grey band
+    // ([`unit_is_grey`]). The unit's raw level is read, as `UnitLevel`'s raw 0 is.
+    g.set(
+        "UnitIsTrivial",
+        lua.create_function(|lua, token: Value| {
+            let token = Some(crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: UnitIsTrivial("unit")"#,
+            )?);
+            let player_level = lua
+                .app_data_ref::<Model>()
+                .expect("model app_data")
+                .player_req
+                .level;
+            unit_predicate(lua, &token, |u| {
+                !u.is_player && unit_is_grey(player_level, u.level)
+            })
+        })?,
+    )?;
+
+    // GetQuestGreenRange (`0x4e17d0`): the green-to-grey boundary `QuestLogFrame.lua:593` buckets
+    // by, from the table at `0x8076c0`. The reference answers 0 with no player object (`0x4e17f8`);
+    // here a level of 0 reads the table's first entry, 4.
     g.set(
         "GetQuestGreenRange",
         lua.create_function(|lua, ()| {

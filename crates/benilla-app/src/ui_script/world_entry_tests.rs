@@ -449,9 +449,9 @@ fn sweep_lock_legs(world: &mut World) {
     super::sweep::install_world_leave_sweep(world, |s| {
         s.add_systems((
             crate::ui_loot::close_loot_on_leave_world.in_set(SweepLeg::Loot),
-            crate::ui_merchant::close_merchant_on_leave_world.in_set(SweepLeg::Merchant),
+            crate::ui_merchant::close_core.in_set(SweepLeg::Merchant),
             crate::ui_mail::close_mail_on_leave_world.in_set(SweepLeg::Mail),
-            crate::ui_auction::close_auction_on_leave_world.in_set(SweepLeg::Auction),
+            crate::ui_auction::close_core.in_set(SweepLeg::Auction),
         ));
     });
     let (tx, _rx) = crossbeam_channel::unbounded();
@@ -2088,6 +2088,47 @@ fn player_login_fires_from_the_world_entry_with_the_player_seated() {
         "a worldport re-fires PLAYER_ENTERING_WORLD and not PLAYER_LOGIN"
     );
 
+    drop(app);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A model pane bound to `"player"` at `PLAYER_ENTERING_WORLD`, as `PaperDollFrame.lua:39` binds
+/// `CharacterModelFrame`.
+const PANE_PROBE_LUA: &str = "\
+local doll = CreateFrame(\"PlayerModel\", \"PaneProbeDoll\", UIParent)
+doll:RegisterEvent(\"PLAYER_ENTERING_WORLD\")
+doll:SetScript(\"OnEvent\", function() this:SetUnit(\"player\") end)
+";
+
+/// The cascade runs from our own create, so `"player"` names us in its handlers whichever feed
+/// seats the rest of the unit-token resolver: the stock windows bind their model panes there.
+#[test]
+fn the_world_enter_cascade_resolves_the_player_for_its_handlers() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_addon(
+        "panebind",
+        "PaneProbe",
+        "## Interface: 11200\nPaneProbe.lua\n",
+        PANE_PROBE_LUA,
+    );
+    let (mut app, _rx) = unit_feed_app();
+    app.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+    app.insert_resource(roster_named("Probepane", 1));
+    super::load_ingame_ui_on_world_entry(app.world_mut());
+    spawn_self_player(app.world_mut());
+    app.update();
+
+    let s = app
+        .world()
+        .non_send_resource::<benilla_ui::script::UiScript>();
+    let doll = s.frame_handle("PaneProbeDoll").expect("the probe loaded");
+    assert_eq!(
+        s.character_pane(doll).map(|c| c.guid),
+        Some(1),
+        "SetUnit(\"player\") at the cascade stores our own guid"
+    );
     drop(app);
     let _ = std::fs::remove_dir_all(&tmp);
 }
