@@ -75,6 +75,11 @@ impl UiScript {
             scope,
         } in list.iter()
         {
+            if zkey.parts().strata == order::Strata::World.index()
+                && super::nameplate::awaits_batch(&model, target)
+            {
+                continue;
+            }
             // Under a ScrollFrame with no rect the callback draws nothing (`0x787253`).
             let Some(clip) = clips.clip(scope) else {
                 continue;

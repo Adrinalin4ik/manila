@@ -126,6 +126,11 @@ pub(crate) struct NamePlates {
     assigned: std::collections::HashMap<u64, usize>,
     /// Frame to pool slot, never removed: plates are never destroyed.
     by_frame: std::collections::HashMap<FrameHandle, usize>,
+    /// World-render shows after the WORLD batch build; these plates join the next UI tick.
+    pending_paint: std::collections::HashSet<FrameHandle>,
+    /// Plates this sync hid while they were in the built batch: re-shown in the same pass, they
+    /// still draw from the records the batch copied (`0x772fd0`).
+    retired_in_batch: std::collections::HashSet<FrameHandle>,
     /// Completed clicks, drained by [`UiScript::take_nameplate_clicks`].
     clicks: Vec<NamePlateClick>,
     /// The hit-test veto (`0x7cba30`). Not the mouse-enabled bit: it leaves `IsMouseEnabled()`
@@ -138,6 +143,11 @@ pub(crate) struct NamePlates {
 }
 
 impl NamePlates {
+    /// The next UI update precedes the next batch build (`0x764340`, `0x764347`).
+    pub(super) fn begin_update(&mut self) {
+        self.pending_paint.clear();
+    }
+
     /// Whether `frame` is a plate, whose leave publishes the empty mouseover (`0x7cb8b0`).
     pub(crate) fn is_plate(&self, frame: FrameHandle) -> bool {
         self.by_frame.contains_key(&frame)
@@ -361,6 +371,7 @@ fn sync(
     let relayout = model.nameplates.geometry != Some(geometry);
     model.nameplates.geometry = Some(geometry);
 
+    model.nameplates.retired_in_batch.clear();
     // Retire first, so a departing unit's slot is free for an arriving one, as the reference
     // destroys then creates through one free list in the same tick.
     let gone: Vec<u64> = model
@@ -642,6 +653,10 @@ impl Plate {
         }
 
         if last.is_none() {
+            // WORLD batches precede the world callback's allocations (`0x765896`, `0x7658e2`).
+            if !model.nameplates.retired_in_batch.contains(&frame) {
+                model.nameplates.pending_paint.insert(frame);
+            }
             effects.visibility.push((frame, true));
         }
         if last.as_ref().is_none_or(|l| l.alpha != state.alpha) {
@@ -747,9 +762,30 @@ impl Plate {
             return;
         }
         let frame = model.nameplates.plates[i].frame;
+        if !model.nameplates.pending_paint.remove(&frame) {
+            model.nameplates.retired_in_batch.insert(frame);
+        }
         effects.visibility.push((frame, false));
         model.nameplates.plates[i].last = None;
     }
+}
+
+/// A newly shown plate and its children miss the WORLD batches already built (`0x765896`).
+pub(super) fn awaits_batch(model: &Model, target: crate::order::ZTarget) -> bool {
+    if model.nameplates.pending_paint.is_empty() {
+        return false;
+    }
+    let mut frame = match target {
+        crate::order::ZTarget::Frame(frame) => Some(frame),
+        crate::order::ZTarget::Region(region) => model.arena.region(region).map(|r| r.owner),
+    };
+    while let Some(owner) = frame {
+        if model.nameplates.pending_paint.contains(&owner) {
+            return true;
+        }
+        frame = model.arena.frame(owner).and_then(|f| f.parent);
+    }
+    false
 }
 
 /// One of the plate's textures, with its path and the blend mode the ctor sets (`0x7703f0`).

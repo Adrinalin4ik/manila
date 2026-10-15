@@ -231,6 +231,8 @@ fn a_nameplate_name_and_level_swap_their_separators() {
         hovered: false,
     };
     s.sync_nameplates(geometry, &[state]);
+    // A new plate draws from the first UI update after its sync, as the other plate tests drive.
+    s.tick(0.0);
     s.resolve();
     let texts: Vec<String> = s
         .extract()
