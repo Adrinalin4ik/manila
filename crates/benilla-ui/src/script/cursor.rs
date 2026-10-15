@@ -584,9 +584,7 @@ pub(crate) fn split_container_item(lua: &Lua, bag: i64, slot: u32, count: i64) -
         clear_cursor(model);
         // `StopTargeting` ends an armed spell's targeting, as `SpellStopTargeting` does.
         if model.spell_targeting {
-            model
-                .script_calls
-                .push(super::ScriptCall::SpellStopTargeting);
+            model.queue_call(super::ScriptCall::SpellStopTargeting);
         }
     });
     pick_up_item(lua, item);
@@ -825,16 +823,34 @@ impl super::UiScript {
         self.model_mut().spell_targetable_units = guids.into_iter().collect();
     }
 
-    /// Drain the `(bag, slot)` picks since the last call; a paper-doll pick reports as
-    /// [`EQUIPMENT_BAG`] and its 1-based inventory slot.
-    pub fn take_item_picks(&mut self) -> Vec<(i64, u32)> {
+    /// Drain the picks since the last call; a paper-doll pick reports as [`EQUIPMENT_BAG`] and
+    /// its 1-based inventory slot.
+    pub fn take_item_picks(&mut self) -> Vec<ItemPick> {
         std::mem::take(&mut self.model_mut().item_picks)
     }
 
     /// Drain the enchant-confirm answers since the last call; both answer the pick the app parked.
-    pub fn take_enchant_confirms(&mut self) -> Vec<EnchantConfirm> {
+    pub fn take_enchant_confirms(&mut self) -> Vec<EnchantAnswer> {
         std::mem::take(&mut self.model_mut().enchant_confirms)
     }
+}
+
+/// A bag or paper-doll click made while targeting wants an item (`0x4f9c54`, `0x4c76df`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ItemPick {
+    pub bag: i64,
+    pub slot: u32,
+    /// What the protected-action gate's tag 2 allowed the click: the bind that ends
+    /// `ValidateSpellItemTarget 0x495d60` is `BindSpellTargetObject`, which asks it (`0x6e5b9e`).
+    pub may_cast: bool,
+}
+
+/// One `BindEnchant()` or `ReplaceEnchant()` call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EnchantAnswer {
+    pub confirm: EnchantConfirm,
+    /// What the protected-action gate's tag 2 allowed the call, as [`ItemPick::may_cast`].
+    pub may_cast: bool,
 }
 
 /// A Yes on an enchant-apply confirm (`StaticPopup.lua:1245`, `:1257`); the app holds the item
@@ -864,8 +880,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         g.set(
             name,
             lua.create_function(move |lua, ()| {
+                let may_cast = super::protected::gate(lua, super::protected::Tag::CAST);
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                model.enchant_confirms.push(answer);
+                model.enchant_confirms.push(EnchantAnswer {
+                    confirm: answer,
+                    may_cast,
+                });
                 Ok(())
             })?,
         )?;

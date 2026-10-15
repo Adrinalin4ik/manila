@@ -29,7 +29,7 @@ pub(crate) mod server_alert;
 #[cfg(test)]
 pub(crate) use input::feed_keys;
 #[cfg(test)]
-mod layer_tests;
+pub(crate) mod layer_tests;
 mod load_log;
 mod manifest;
 
@@ -1019,6 +1019,8 @@ mod dressup_tests;
 #[cfg(test)]
 mod minimap_tests;
 
+#[cfg(test)]
+mod protected_gate_tests;
 #[cfg(test)]
 mod spellbook_tests;
 

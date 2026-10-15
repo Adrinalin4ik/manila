@@ -368,9 +368,14 @@ pub(crate) struct Model {
     /// The player's active tracking aura, behind `GetTrackingTexture`.
     pub(crate) tracking: Option<super::aura::TrackingState>,
     /// The calls that touch the selection, the cast or the targeting cursor, in call order.
-    pub(crate) script_calls: Vec<super::calls::ScriptCall>,
-    /// The binding functions' queue, gate depth and mouselook state.
+    pub(crate) script_calls: Vec<super::calls::QueuedCall>,
+    /// The binding functions' queue and mouselook state.
     pub(crate) input: super::input_verbs::InputState,
+    /// The selection change a script call made and the input events it ran under, for the event
+    /// the unit feed signals for it ([`super::UiScript::note_selection_cause`]).
+    pub(crate) selection_cause: Option<(Option<u64>, super::InputEvents)>,
+    /// The protected-action gate's input events ([`super::protected`]).
+    pub(crate) protected: super::protected::Flags,
     /// `DropItemOnUnit` tokens (`0x48d960`), gated by the app; a refusal silently keeps the item.
     pub(crate) drop_item_on_unit: Vec<String>,
 
@@ -564,7 +569,7 @@ pub(crate) struct Model {
     pub(crate) action_sets: Vec<(u32, u32)>,
     /// GlobalStrings keys of refusals this crate raises, fired by the app as `UI_ERROR_MESSAGE`
     /// (the reference's `DisplayError` `0x496720`), each a literal from `0xb4b498` (stride `0x14`).
-    pub(crate) ui_errors: Vec<&'static str>,
+    pub(crate) ui_errors: Vec<(&'static str, super::InputEvents)>,
 
     pub(crate) spellbook: spellbook::SpellBookState,
     /// The pet's spellbook, a second array as in the reference (`0xb700f0`, `0xb6f098`).
@@ -698,9 +703,9 @@ pub(crate) struct Model {
     /// Targeting wants an item (`0x6e6330`): a bag or paper-doll click becomes a pick.
     pub(crate) item_pick_armed: bool,
     /// Picked `(bag, slot)`s; a paper-doll click is `EQUIPMENT_BAG` and its 1-based inventory slot.
-    pub(crate) item_picks: Vec<(i64, u32)>,
+    pub(crate) item_picks: Vec<cursor::ItemPick>,
     /// `BindEnchant()` and `ReplaceEnchant()`, the enchant popups' answers.
-    pub(crate) enchant_confirms: Vec<cursor::EnchantConfirm>,
+    pub(crate) enchant_confirms: Vec<cursor::EnchantAnswer>,
     /// `DeleteCursorItem`'s `(bag, slot, count)`, 0 for the whole stack, as `CMSG_DESTROYITEM`.
     pub(crate) container_destroys: Vec<(i64, u32, u32)>,
     /// The wrapping paper a right-click armed (`0x5edea0`: lock it, cursor mode 2, no packet). Not
@@ -841,7 +846,7 @@ pub(crate) struct Model {
 
     /// `EquipPendingItem`/`CancelPendingEquip` answers in order, and `ConfirmBindOnUse()` calls.
     pub(crate) pending_equip_answers: Vec<bind_confirm::PendingEquipAnswer>,
-    pub(crate) bind_on_use_confirms: u32,
+    pub(crate) bind_on_use_confirms: Vec<bool>,
 
     /// The open loot, the row clicks and whether `CloseLoot` ran. A click is the reference's take
     /// `0x4c2790` with flag 0, raising `LOOT_BIND` for a bind-on-pickup row (a `LootButton`'s own
@@ -1357,6 +1362,8 @@ impl Model {
             tracking: None,
             script_calls: Vec::new(),
             input: Default::default(),
+            protected: Default::default(),
+            selection_cause: None,
             drop_item_on_unit: Vec::new(),
             joined_channels: Vec::new(),
             party: party::PartyState::default(),
@@ -1572,7 +1579,7 @@ impl Model {
             craft_close: false,
             loot: None,
             pending_equip_answers: Vec::new(),
-            bind_on_use_confirms: 0,
+            bind_on_use_confirms: Vec::new(),
             loot_picks: Vec::new(),
             loot_confirms: Vec::new(),
             loot_close: None,
