@@ -227,8 +227,9 @@ impl ScrollingMessageState {
         self.reset_all_fade_times(viewport_rows);
     }
 
-    /// How many messages fit `viewport_rows` from the anchor, each costing its wrapped rows; a
-    /// partly fitting one counts, as in the draw's band walk (`emit_message_lines`).
+    /// How many messages fit `viewport_rows` from the anchor, each costing its wrapped rows: only
+    /// whole ones, the anchored one excepted, as the relayout counts them (`0x7889b3`-`0x788a20`)
+    /// and the draw's band walk shows them (`emit_message_lines`).
     pub fn displayed_count(&self, viewport_rows: usize) -> usize {
         if self.lines.is_empty() || viewport_rows == 0 {
             return 0;
@@ -237,10 +238,11 @@ impl ScrollingMessageState {
         let mut used = 0usize;
         let mut count = 0usize;
         for idx in (0..=top_index).rev() {
-            if used >= viewport_rows {
+            let rows = usize::from(self.lines[idx].rows.max(1));
+            if count > 0 && used + rows > viewport_rows {
                 break;
             }
-            used += usize::from(self.lines[idx].rows.max(1));
+            used += rows;
             count += 1;
         }
         count.max(1)

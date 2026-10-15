@@ -443,8 +443,11 @@ impl UiScript {
     /// own pitch, the raw spacing included ([`MessageFont::plain_pitch`]). A scrolling frame stacks
     /// up from the bottom, `scroll_offset` choosing the bottom message. A MessageFrame does too for `insertMode` BOTTOM, and for TOP hangs the newest off
     /// the top edge (`UIErrorsFrame.xml:4`); the reference's anchor per mode is untraced, and this
-    /// reading reproduces both stock uses. A message that partly fits draws clipped; a faded
-    /// scrolling line keeps its rows, as the reference never re-packs chat.
+    /// reading reproduces both stock uses. The scrolling class displays a message only while it
+    /// fits whole, the anchored one excepted (`0x7889b3`-`0x7889c5`: the height left is compared
+    /// with the message's spacing plus height, and the walk stops short of one that does not fit);
+    /// the plain class's message that partly fits draws clipped. A faded scrolling line keeps its
+    /// rows, as the reference never re-packs chat.
     pub(super) fn emit_message_lines(
         model: &Model,
         fh: FrameHandle,
@@ -510,6 +513,10 @@ impl UiScript {
             }
             let line = &lines[idx];
             let rows = f32::from(line.rows.max(1));
+            // Past the anchored message, the scrolling class stops at one that does not fit whole.
+            if reverse && idx != top_index && used + rows * row_step > fr.top - fr.bottom + 0.01 {
+                break;
+            }
             let band_h = rows * line_h + (rows - 1.0) * gap;
             let (bottom, top) = if from_top {
                 (fr.top - used - band_h, fr.top - used)
