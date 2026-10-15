@@ -56,6 +56,14 @@ impl Conn {
             },
         ))
     }
+
+    /// The halves [`Conn::split`] made, one connection again. The read half is a clone of the
+    /// write half's socket, so dropping it closes nothing.
+    pub fn rejoin(_reader: ConnReader, writer: ConnWriter) -> Conn {
+        Conn {
+            stream: writer.stream,
+        }
+    }
 }
 
 impl ReadExactAsync for Conn {

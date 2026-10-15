@@ -20,7 +20,7 @@ use crate::char_select::{ClientState, Roster};
 use crate::entities::CharCreate;
 use crate::glue_strings::GlueStrings;
 use crate::net::{CharActionResultMessage, CharPick, CharRequest};
-use crate::portrait::{CreateLook, GlueLook, GluePreview};
+use crate::portrait::{CreateLook, GluePreview};
 use crate::sound::GlueSound;
 
 /// Alliance and Horde race columns, top to bottom: `CharacterCreateEnumerateRaces` fills buttons
@@ -54,11 +54,11 @@ impl Plugin for CharCreatePlugin {
                 Update,
                 (
                     screen::rescale_screen,
-                    create_input,
+                    create_input.run_if(crate::ui_script::glue::native_glue),
                     debug_auto_create,
                     debug_pick,
                     debug_shot,
-                    rotate_model,
+                    rotate_model.run_if(crate::ui_script::glue::native_glue),
                     refresh::refresh_dynamic,
                     refresh_name_box,
                     refresh::refresh_hover,
@@ -69,6 +69,8 @@ impl Plugin for CharCreatePlugin {
                 )
                     .chain()
                     .before(crate::glue::GlueVisuals)
+                    // The create screen writes the glue booth's preview.
+                    .in_set(crate::portrait::GluePreviewFeed)
                     .run_if(in_state(ClientState::CharCreate))
                     .after(benilla_world::schedule::WorldStage::Net),
             );
@@ -98,7 +100,7 @@ fn debug_auto_create(
     }
     sel.name.set_text(&name);
     sel.creating = true;
-    let _ = pick.0.try_send(CharRequest::Create(sel.request()));
+    let _ = pick.0.send(CharRequest::Create(sel.request()));
     *fired = true;
     info!("char create: auto-create fired for {:?}", sel.name.text);
 }
@@ -171,8 +173,7 @@ fn debug_pick(
             sel.dials[i] = want.min(n - 1);
         }
     }
-    preview.scene = Some(crate::portrait::GlueScene::Race(sel.race));
-    preview.look = Some(GlueLook::Create(sel.look()));
+    preview.show_create(sel.race, sel.look());
     info!(
         "char create: pick instrument set race {} sex {} class {} dials {:?}",
         sel.race, sel.sex, sel.class, sel.dials
@@ -448,11 +449,10 @@ fn create_input(
     if do_create && !sel.creating {
         sel.creating = true;
         sounds.write(GlueSound("gsCharacterCreationCreateChar"));
-        let _ = pick.0.try_send(CharRequest::Create(sel.request()));
+        let _ = pick.0.send(CharRequest::Create(sel.request()));
     }
     if changed_look {
-        preview.scene = Some(crate::portrait::GlueScene::Race(sel.race));
-        preview.look = Some(GlueLook::Create(sel.look()));
+        preview.show_create(sel.race, sel.look());
     }
 }
 
@@ -744,6 +744,7 @@ mod tests {
                         None::<parts::DynText>,
                         "",
                         &art,
+                        48.0,
                         1.0,
                     );
                 }
@@ -757,6 +758,7 @@ mod tests {
                         None::<parts::DynText>,
                         "",
                         &art,
+                        48.0,
                         1.0,
                     );
                 }
@@ -770,6 +772,7 @@ mod tests {
                         None::<parts::DynText>,
                         "",
                         &art,
+                        48.0,
                         1.0,
                     );
                 }

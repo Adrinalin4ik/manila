@@ -20,7 +20,8 @@ pub mod warden;
 mod writer;
 
 pub use reader::WorldReader;
-pub use session::{WardenRequired, WorldAuthReject, WorldSession};
+pub use session::{WardenRequired, WorldAuthReject, WorldConnectEvent, WorldSession};
+
 pub use writer::WorldWriter;
 
 /// The stock `mangosd` port, for probes that dial the world server without a realm list.
@@ -52,11 +53,34 @@ pub(super) async fn recv_packet(
         .read_exact_async(&mut body)
         .await
         .map_err(|e| anyhow!("reading world body (opcode {opcode:#x}, {body_len} bytes): {e}"))?;
-    messages::parse_server(opcode, &body).map_err(|e| anyhow!("parsing opcode {opcode:#x}: {e}"))
+    messages::parse_server(opcode, &body).map_err(|e| {
+        Unparsed {
+            opcode,
+            reason: e.to_string(),
+        }
+        .into()
+    })
 }
 
-/// What [`observe_sends`] takes: called with a sent packet's opcode and body length.
-pub type SendObserver = fn(opcode: u16, body_len: usize);
+/// A packet whose body did not parse. The whole body was read, so the stream is still aligned and
+/// a reader may skip it and go on, as [`WorldReader::poll`] does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unparsed {
+    pub opcode: u16,
+    pub reason: String,
+}
+
+impl std::fmt::Display for Unparsed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "parsing opcode {:#x}: {}", self.opcode, self.reason)
+    }
+}
+
+impl std::error::Error for Unparsed {}
+
+/// What [`observe_sends`] takes: called with a sent packet's opcode and its body, the bytes after
+/// the 6-byte header and as plain as the caller built them (encryption covers the header alone).
+pub type SendObserver = fn(opcode: u16, body: &[u8]);
 
 static SEND_OBSERVER: OnceLock<SendObserver> = OnceLock::new();
 
@@ -94,7 +118,7 @@ pub(super) fn send_packet(
         .write_all(&packet)
         .map_err(|e| anyhow!("sending opcode {opcode:#x}: {e}"))?;
     if let Some(observer) = SEND_OBSERVER.get() {
-        observer(opcode, body.len());
+        observer(opcode, body);
     }
     Ok(())
 }

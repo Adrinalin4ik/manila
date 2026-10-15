@@ -19,6 +19,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (this, event): (Table, String)| {
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
+            // A name the VM's event table lacks registers nothing and raises nothing (`0x702140`).
+            let Some(event) = model.vm.event_key(&event).map(str::to_string) else {
+                return Ok(());
+            };
             // Dispatch follows registration order, as the reference's listener list does; a
             // re-register keeps its place and never fires twice.
             let list = model.event_to_frames.entry(event.clone()).or_default();
@@ -34,6 +38,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (this, event): (Table, String)| {
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
+            // Matched as `RegisterEvent` matches (`0x702280`).
+            let Some(event) = model.vm.event_key(&event).map(str::to_string) else {
+                return Ok(());
+            };
             if let Some(list) = model.event_to_frames.get_mut(&event) {
                 list.retain(|x| x != &h);
             }
@@ -152,7 +160,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     let changed = !d.anchors.is_empty();
                     d.anchors.clear();
                     if changed {
-                        model.touch_layout();
+                        model.touch_layout_region(rh);
                     }
                     model.region_id(rh)
                 };
@@ -242,10 +250,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 /// * **`OnAttributeChanged`** (1 site, `Roid-Macros`) — **raising, permanently.** It is 2.0's secure
 ///   frame/attribute system; there is no such slot in any 1.12 resolver. That addon is asking for a
 ///   later client and should hear so.
-/// * **`OnHyperlinkEnter` · `OnHyperlinkLeave` · `OnMessageScrollChanged` ·
-///   `OnMovieFinished`/`ShowSubtitle`/`HideSubtitle`** — **raising.** Real 1.12 slots that we
-///   do not fire, and measured at **zero** call sites across the 218-addon corpus, so there is
-///   nothing to weigh against the trap: they land when their mechanism does.
+/// * **`OnMessageScrollChanged`** — **raising.** A real 1.12 slot that we do not fire, measured at
+///   **zero** call sites across the 218-addon corpus, so there is nothing to weigh against the
+///   trap: it lands when its mechanism does.
+/// * **`OnHyperlinkEnter` · `OnHyperlinkLeave`** — **accepted**, since a text frame's hyperlink
+///   button fires them (upstream, [`crate::script::hyperlink`]).
+/// * **`OnMovieFinished` · `OnMovieShowSubtitle` · `OnMovieHideSubtitle`** — **accepted** (upstream):
+///   the stock XML sets them, and the movie frame's player ([`super::super::movieframe`]) is the
+///   one thing that fires them.
 /// * **`OnInputLanguageChanged`** — **accepted, stored, fired by nothing: the reference's own
 ///   no-IME-client behaviour, taken deliberately** (the one exception `SCRIPT_KINDS`' law
 ///   records, decision 2192). The EditBox's IME slot (RF-0082 §2): the real client takes the handler
@@ -293,7 +305,10 @@ fn set_script(lua: &Lua, this: &Table, name: &str, func: Option<Function>) -> ml
             // The first handler of a kind joins that kind's list; nothing else writes `scripts`.
             if model.scripts.entry(h).or_default().insert(kind) {
                 match kind {
-                    "OnUpdate" => model.on_update_frames.push(h),
+                    "OnUpdate" => {
+                        model.on_update_frames.push(h);
+                        model.on_update_joins += 1;
+                    }
                     "OnSizeChanged" => model.on_size_changed_frames.push(h),
                     "OnUpdateModel" => model.on_update_model_frames.push(h),
                     _ => {}
@@ -346,11 +361,12 @@ fn apply_region_inherits(lua: &Lua, wrapper: &Table, from: &str) -> mlua::Result
     if wrapper.call_method::<()>("SetFontObject", from).is_ok() {
         return Ok(());
     }
-    let is_template = {
-        let model = lua.app_data_ref::<Model>().expect("model");
-        let templates = model.framexml_templates.borrow();
-        templates.contains_key(from) || templates.keys().any(|k| k.eq_ignore_ascii_case(from))
-    };
+    let is_template = lua
+        .app_data_ref::<Model>()
+        .expect("model")
+        .framexml_templates
+        .borrow()
+        .contains(from);
     if is_template {
         let mut model = lua.app_data_mut::<Model>().expect("model");
         model.record_warning(format!(
@@ -408,9 +424,12 @@ fn create_region(
             crate::framexml::resolve_name(&name, &super::parent_token_base(&model, Some(owner)))
         };
         publish_global(lua, &name, &wrapper)?;
-        // First name wins, as for frames; a sibling's `SetPoint` can then name this region.
+        // The region keeps its own name; the lookup a sibling's `SetPoint` names it by stays
+        // first-come, as `_G` is.
         let mut model = lua.app_data_mut::<Model>().expect("model");
-        model.region_names.entry(name).or_insert(id);
+        if let Some(rh) = model.id_to_region.get(&id).copied() {
+            crate::script::region::set_region_name(&mut model, rh, id, &name);
+        }
     }
     Ok(wrapper)
 }

@@ -326,6 +326,11 @@ fn mat_key_collapse() -> bool {
     !KEY_ORDER.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Drop every material `cache` keyed to `instance`, which is gone.
+pub(crate) fn forget_instance(cache: &mut MaterialCache, instance: Entity) {
+    cache.retain(|key| key.instance != Some(instance));
+}
+
 /// Build or fetch the deduped [`WowModelMaterial`] for one model batch. `fade_variant` marks the
 /// blend twin every fade rides, built with the source blend, never `Blend`: the twin always blends
 /// (`0x70c1fd`) but its alpha test keys on the stored mode (`0x70c237`), so AlphaKey keeps its

@@ -178,7 +178,7 @@ pub(super) fn drive_delete_dialog(
     if do_delete {
         if let Some((guid, name, _, _)) = &dialog.target {
             info!("char select: deleting {name}");
-            let _ = pick.0.try_send(CharRequest::Delete(*guid));
+            let _ = pick.0.send(CharRequest::Delete(*guid));
         }
         sounds.write(GlueSound("gsTitleOptionOK"));
         dialog.close();
@@ -223,6 +223,7 @@ fn spawn_dialog(
     commands
         .spawn((
             DialogUi,
+            crate::glue::NativeGlue,
             GlobalZIndex(1200), // over the select screen's 1100
             Node {
                 width: Val::Percent(100.0),

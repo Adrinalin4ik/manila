@@ -19,8 +19,9 @@ use crate::net::{
     FieldChanged, FieldEdges, Guid, NetCommands, ObjectStore, Reputations, SelfPlayer,
 };
 use crate::target::{ring_reaction, Factions, Selection};
-use crate::ui_script::{gate, UiInput};
+use crate::ui_script::{gate, SweepApp, UiInput};
 
+mod control_gate;
 mod held;
 
 /// The unit-feed pass, gated so none of its login one-shots or per-VM memos runs before the in-game
@@ -55,35 +56,6 @@ pub(crate) struct CombatTextEvent {
     pub(crate) message_type: &'static str,
     pub(crate) data: Option<String>,
     pub(crate) extra: Option<String>,
-}
-
-/// `PLAYER_LEAVING_WORLD` on a cross-map worldport. The reference fires event `0x111` at one site
-/// (`0x490b48`), gated only by the latch `[0xb4b424]`, from the local player's destructor
-/// (`0x5dd543`, this system), the shutdown tail `0x490bd0` (ours is `shutdown_ui_state`) and the
-/// local player's DESTROY or OUT_OF_RANGE (`0x5e9b5a`); a same-map teleport destroys nothing.
-///
-/// Deviation: fires with our descriptor present, so `UnitExists("player")` answers true where the
-/// reference's (`0x515970`) misses, because matching it breaks `UnitExists` for no stock reader.
-pub(crate) fn fire_leaving_world_on_worldport(
-    script: Option<NonSendMut<UiScript>>,
-    mut sweep: crate::ui_script::LeaveWorldSweep,
-    mut ports: MessageReader<crate::net::WorldportMessage>,
-) {
-    // `needs_ack` false is the initial-login map, an arrival; the whole iterator is read so no
-    // message carries over.
-    let leaving = ports.read().filter(|w| w.needs_ack).count() > 0;
-    if !leaving {
-        return;
-    }
-    // The world latch keeps this producer and the shutdown tail from both claiming one departure;
-    // spent even with no VM, as the reference clears it at `0x490a8d`, ahead of the fire.
-    if !sweep.run() {
-        return;
-    }
-    let Some(mut script) = script else {
-        return;
-    };
-    script.fire_event("PLAYER_LEAVING_WORLD", Vec::new());
 }
 
 /// The feed's change-tracking memory: what we last told the VM, plus one server-side log-once.
@@ -144,20 +116,30 @@ impl Plugin for UiUnitPlugin {
         .add_message::<CombatTextEvent>()
         .add_message::<crate::net::WorldportMessage>()
         .add_message::<crate::net::FieldChanged>()
-        .init_resource::<crate::ui_script::LeavingWorldArmed>()
-        .add_message::<crate::ui_script::WorldLeaveSweepMessage>()
+        .init_world_leave_sweep()
+        // Ahead of the unit feed, so a worldport's leaving edge precedes the entering edge
+        // `feed_units` raises for the same port, and outside its gate: the destructor sweeps
+        // (`0x5dd543`) whether or not an interface is up, the host legs with it.
+        .add_systems(
+            Update,
+            crate::ui_script::sweep_on_worldport
+                .after(benilla_world::schedule::WorldStage::Net)
+                .before(UnitFeed),
+        )
         .add_systems(
             Update,
             (
-                // First, so a worldport's leaving edge precedes the entering edge `feed_units`
-                // raises for the same port.
-                fire_leaving_world_on_worldport,
                 feed_units,
                 // After the aura feed, whose resolver inputs it measures.
                 feed_unit_reach.after(crate::ui_aura::AuraEvents),
                 // After the same feed, whose guids it covers.
                 held::feed_chain_units.after(crate::ui_aura::AuraEvents),
+                // After every snapshot above is pushed, so a handler reads the new reaction.
+                fire_faction_on_forced_table.after(crate::ui_aura::AuraEvents),
+                held::feed_name_candidates,
                 feed_player_control,
+                // After the control edge, whose flag the exemption is asked for.
+                control_gate::feed_control_bypass,
                 feed_farsight_focus,
                 melee_unit_combat,
                 fire_unit_combat,
@@ -700,8 +682,36 @@ fn dist_sq(q: Vec3, p: Vec3) -> f64 {
     (dz * dz + dx * dx) + dy * dy
 }
 
+/// `UNIT_FACTION` for every unit token, on each arrival of the forced-reaction table. The
+/// reference's handler `0x4d59a0` calls `0x606e20` on the active player (`0x4d5a5e`): event 29
+/// through `0x515e50` for the player and its summons and charms, then a sweep of every other
+/// unit (`0x468380` with `0x606f20`), so each token naming a unit hears it, and the target frame
+/// repaints its plate (`TargetFrame.lua:75-79`). The table is no descriptor field, so no field
+/// edge reaches this. Tokens come from the resolver's inputs the aura feed pushes
+/// ([`UiScript::bound_unit_tokens`]), the fan-out `0x515c50` builds; the first sight of a VM only
+/// seats the count, as a login's own first snapshots fire the event.
+fn fire_faction_on_forced_table(
+    script: Option<NonSendMut<UiScript>>,
+    reputations: Res<Reputations>,
+    mut seen: Local<crate::ui_script::VmMemo<Option<u64>>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let arrivals = reputations.forced_arrivals();
+    let seen = seen.get(&script);
+    let arrived = seen.is_some_and(|last| last != arrivals);
+    *seen = Some(arrivals);
+    if !arrived {
+        return;
+    }
+    for token in script.bound_unit_tokens() {
+        script.fire_event("UNIT_FACTION", vec![ScriptValue::Str(token)]);
+    }
+}
+
 /// `PLAYER_CONTROL_LOST`/`GAINED` on a change of the flag `SMSG_CLIENT_CONTROL_UPDATE` writes
-/// (`0x4958e0`); the boot value, and a fresh VM's memo, is in control (`0x48f626`).
+/// (`0x4958e0`), for our own character only (`0x5fa6d0`); the boot value, and a fresh VM's memo, is in control (`0x48f626`).
 fn feed_player_control(
     script: Option<NonSendMut<UiScript>>,
     player: Option<Res<crate::player::Player>>,
@@ -711,11 +721,11 @@ fn feed_player_control(
         return;
     };
     let lost = lost.get(&script);
-    if *lost != player.control_lost {
-        *lost = player.control_lost;
+    if *lost != player.own_control_lost {
+        *lost = player.own_control_lost;
         // `HasFullControl`'s flag rides the same edge.
-        script.set_player_control(!player.control_lost);
-        let event = if player.control_lost {
+        script.set_player_control(!player.own_control_lost);
+        let event = if player.own_control_lost {
             "PLAYER_CONTROL_LOST"
         } else {
             "PLAYER_CONTROL_GAINED"
@@ -1204,11 +1214,19 @@ pub(crate) fn fire_transitions(
     }
     // `UNIT_FACTION`, the PvP-icon repaint, on the fields the icon reads and on the tapped bit: the
     // reference's dynamic-flags watcher (`0x600440`) fires event 29 on bit `0x4` (`0x6005a1` →
-    // `0x6005b0`) and has no arm for `0x8`.
-    if prev.is_none_or(|p| {
-        (p.pvp, p.is_pvp_ffa, &p.faction_group, p.tapped)
-            != (cur.pvp, cur.is_pvp_ffa, &cur.faction_group, cur.tapped)
-    }) {
+    // `0x6005b0`) and has no arm for `0x8`. Also on any change of `UNIT_FIELD_FACTIONTEMPLATE`, the
+    // watch bridge's id 29 (`0x51bbb0`, as for `UNIT_FLAGS` above): a template swap between two
+    // that name no faction group moves nothing in the tuple, yet changes the reaction.
+    let template_moved = edges.moved(
+        cur.guid,
+        benilla_protocol::field::FIELD_UNIT_FACTIONTEMPLATE,
+    );
+    if template_moved
+        || prev.is_none_or(|p| {
+            (p.pvp, p.is_pvp_ffa, &p.faction_group, p.tapped)
+                != (cur.pvp, cur.is_pvp_ffa, &cur.faction_group, cur.tapped)
+        })
+    {
         script.fire_event("UNIT_FACTION", vec![tok()]);
     }
 }
@@ -1360,6 +1378,8 @@ pub(crate) fn feed_units(
     let factions_changed = factions.as_ref().is_some_and(|r| r.is_changed());
     // The interaction NPC moves when nothing else does, and `MERCHANT_SHOW` reads `"npc"`.
     let interact_changed = interact.as_ref().is_some_and(|r| r.is_changed());
+    // A selection call showed its pick as `"target"` inside its chunk, past this memo.
+    let target_view_moved = script.take_target_view_moved();
     gate::trace(
         "feed_units",
         &[
@@ -1373,6 +1393,7 @@ pub(crate) fn feed_units(
             ("reputations", reps_changed),
             ("factions", factions_changed),
             ("interact", interact_changed),
+            ("target_view", target_view_moved),
         ],
     );
     let gate = gate::Gate::new(
@@ -1385,7 +1406,8 @@ pub(crate) fn feed_units(
             || group_changed
             || reps_changed
             || factions_changed
-            || interact_changed,
+            || interact_changed
+            || target_view_moved,
     );
     stores.removed.clear();
     if gate.skip() {
@@ -1461,11 +1483,12 @@ pub(crate) fn feed_units(
             script.set_unit("player", player.clone());
         }
     }
-    let target_dirty = match (&target, memo.last.get("target")) {
-        (Some(cur), Some(prev)) => cur != prev,
-        (None, None) => false,
-        _ => true,
-    };
+    let target_dirty = target_view_moved
+        || match (&target, memo.last.get("target")) {
+            (Some(cur), Some(prev)) => cur != prev,
+            (None, None) => false,
+            _ => true,
+        };
     if target_dirty {
         gate.audit("feed_units", "the target snapshot");
         script.set_unit("target", target.clone());
@@ -1660,8 +1683,8 @@ pub(crate) fn feed_units(
         }
     }
 
-    // `PLAYER_TARGET_CHANGED`, argless, when the selection changes. A `/reload`'s fresh memo fires
-    // it for a kept selection, where the reference's shutdown clears the target (`0x490bdf`).
+    // `PLAYER_TARGET_CHANGED`, argless, when the selection changes. A `/reload`'s fresh memo finds
+    // none: the shutdown dropped the target and told the dying VM (`0x490bdf`).
     if selection.guid != memo.target_guid {
         gate.audit("feed_units", "the PLAYER_TARGET_CHANGED edge");
         memo.target_guid = selection.guid;
@@ -1755,12 +1778,15 @@ fn combo_edge(last: Option<(u8, u64)>, now: (u8, u64)) -> Option<bool> {
     (last != Some(now)).then(|| last.map(|(count, _)| count) != Some(now.0))
 }
 
+#[cfg(test)]
+pub(crate) use held::feed_name_candidates;
+
 /// The bare unit feed, for a test driving the stock unit frames off engine state.
 #[cfg(test)]
 pub(crate) fn add_unit_feed(app: &mut App) {
     app.init_resource::<UnitFeedState>()
         .add_message::<crate::net::FieldChanged>()
-        .add_systems(Update, feed_units);
+        .add_systems(Update, (feed_units, fire_faction_on_forced_table).chain());
 }
 
 #[cfg(test)]
@@ -2800,13 +2826,28 @@ mod tests {
         );
         app.world_mut()
             .resource_mut::<crate::player::Player>()
-            .control_lost = true;
+            .own_control_lost = true;
         assert_eq!(seen(&mut app), vec!["PLAYER_CONTROL_LOST".to_string()]);
         assert_eq!(seen(&mut app), Vec::<String>::new(), "held, not repeated");
         app.world_mut()
             .resource_mut::<crate::player::Player>()
-            .control_lost = false;
+            .own_control_lost = false;
         assert_eq!(seen(&mut app), vec!["PLAYER_CONTROL_GAINED".to_string()]);
+
+        // A possessed creature stuck under fear or confusion is not our character losing control:
+        // `0x5fa600` writes `[0xb4b3e4]` for our own guid alone, so no event and no flag.
+        app.world_mut()
+            .resource_mut::<crate::player::Player>()
+            .control_lost = true;
+        assert_eq!(seen(&mut app), Vec::<String>::new());
+        assert!(app
+            .world()
+            .non_send_resource::<UiScript>()
+            .eval::<bool>("return HasFullControl() == 1")
+            .unwrap());
+        app.world_mut()
+            .resource_mut::<crate::player::Player>()
+            .control_lost = false;
 
         let set_farsight = |app: &mut App, guid: u64| {
             app.world_mut().entity_mut(me).insert(ObjectStore(
@@ -3650,6 +3691,111 @@ mod tests {
         );
     }
 
+    /// A selection call shows its pick as `"target"` to the rest of its chunk (`TargetByName`,
+    /// `0x489d60`); when the commit does not follow (here the call is dropped), the next frame
+    /// re-pushes `"target"` from the committed selection, though nothing the feed diffs moved.
+    #[test]
+    fn a_target_view_the_commit_did_not_follow_is_re_pushed_the_next_frame() {
+        use crate::names::CreatureRecord;
+        use benilla_protocol::messages::ObjectType;
+        use benilla_protocol::ObjectFields;
+        use benilla_ui::script::NameCandidate;
+
+        const OBJECT_FIELD_ENTRY: u16 = 3;
+        /// `HIGHGUID_UNIT` guids of entries 69, the selected wolf, and 70, a druid.
+        const WOLF: u64 = 0xF130_0000_4500_0001;
+        const DRUID: u64 = 0xF130_0000_4600_0001;
+
+        let mut app = App::new();
+        app.init_resource::<UnitFeedState>()
+            .init_resource::<Selection>()
+            .init_resource::<Reputations>()
+            .init_resource::<crate::ui_party::GroupState>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .init_resource::<crate::ui_guild::GuildState>();
+        app.add_message::<FieldChanged>();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        let mut names = NameCache::default();
+        names.insert_creature(
+            69,
+            Some(CreatureRecord {
+                name: "Wolf".into(),
+                subname: None,
+                creature_type: 1,
+                pet_family: 0,
+                rank: 0,
+                type_flags: 0,
+                civilian: false,
+                racial_leader: false,
+                display_id: 0,
+            }),
+        );
+        app.insert_resource(names);
+        app.add_systems(Update, feed_units);
+        app.world_mut().spawn((
+            SelfPlayer,
+            Guid(0x77),
+            ObjectStore(ObjectFields::from_pairs(&[]).into_created(ObjectType::Player)),
+        ));
+        let wolf = app
+            .world_mut()
+            .spawn(ObjectStore(ObjectFields::from_pairs(&[(
+                OBJECT_FIELD_ENTRY,
+                69,
+            )])))
+            .id();
+        *app.world_mut().resource_mut::<Selection>() = Selection {
+            target: Some(wolf),
+            guid: Some(WOLF),
+            ..Default::default()
+        };
+        let target_name = |app: &mut App, lua: &str| -> Option<String> {
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .eval::<Option<String>>(&format!("{lua} return UnitName('target')"))
+                .unwrap()
+        };
+        app.update();
+        app.update();
+        assert_eq!(target_name(&mut app, "").as_deref(), Some("Wolf"));
+
+        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        script.set_name_candidate(
+            DRUID,
+            Some(NameCandidate {
+                name: "Druid".into(),
+                dist2: 1.0,
+                state: benilla_ui::script::UnitState {
+                    exists: true,
+                    has_object: true,
+                    guid: DRUID,
+                    name: Some("Druid".into()),
+                    ..Default::default()
+                },
+                selectable: true,
+            }),
+        );
+        assert_eq!(
+            target_name(&mut app, "TargetByName('Druid')").as_deref(),
+            Some("Druid"),
+            "the chunk reads its pick"
+        );
+        let dropped = app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .take_script_calls();
+        assert_eq!(dropped.len(), 1, "the call queued for the commit");
+        app.update();
+        assert_eq!(
+            target_name(&mut app, "").as_deref(),
+            Some("Wolf"),
+            "the committed selection is shown again"
+        );
+    }
+
     /// `UnitCreatureType` through the real feed (`0x51a280`, resolver `0x605570`): a shapeshifted
     /// player answers the form's type before the race's, an unshifted one the race's, a form of
     /// type -1 falls through to the race, and a creature keeps its template's unless a form
@@ -3805,9 +3951,8 @@ mod tests {
     fn a_cross_map_worldport_fires_leaving_world_and_the_login_map_does_not() {
         let mut app = App::new();
         app.add_message::<crate::net::WorldportMessage>()
-            .init_resource::<crate::ui_script::LeavingWorldArmed>()
-            .add_message::<crate::ui_script::WorldLeaveSweepMessage>()
-            .add_systems(Update, fire_leaving_world_on_worldport);
+            .init_world_leave_sweep()
+            .add_systems(Update, crate::ui_script::sweep_on_worldport);
         app.insert_non_send_resource(UiScript::new().expect("VM"));
         app.world_mut()
             .non_send_resource::<UiScript>()
