@@ -652,9 +652,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ours(
         "lampFog",
         "0",
-        "benilla's own: lamps scattering through night fog - 0 off, else HOW MANY of the
-         nearest lamps glow, up to 32 (`volumetric_fog::MAX_FOG_LAMPS`, the size of the
-         uniform's array). It was a 0/1/2 tier whose rungs meant 16 and 32; the count it
+        "benilla's own: lamps scattering through night fog - 0 off, else HOW MANY of the \
+         nearest lamps glow, up to 32 (`volumetric_fog::MAX_FOG_LAMPS`, the size of the \
+         uniform's array). It was a 0/1/2 tier whose rungs meant 16 and 32; the count it \
          always was is now the setting.",
     ),
     // The halo's brightness, which until now no setting reached: `lamp_haze_strength`
