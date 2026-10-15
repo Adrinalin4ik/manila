@@ -316,6 +316,13 @@ fn spawn_slot(
         && dm.animations.as_ref().is_some_and(|a| {
             a.owns(crate::ranged_flex::BOW_PULL) || a.owns(crate::ranged_flex::BOW_RELEASE)
         });
+    // A prop whose loader idle is not its rest pose (`ModelAnimations::first_seq`): the reference
+    // arms every M2 with that idle at load (`0x71019b`), so its bones stand where the idle puts
+    // them, even unkeyed by time. A ported helm such as `Helm_Cloth_GilneasHat_A_01` carries one
+    // constant translation that seats it on the head; at bind pose it hovers above it.
+    let idle_poses = !dm.skeleton.joints.is_empty()
+        && dm.animations.as_ref().is_some_and(|a| a.first_seq.is_some());
+    let posed = flexes || idle_poses;
     // The item rig, for geometry welded to a billboard bone (an R14 pauldron's spikes): the
     // reference billboards an attached model like a standalone one (`0x718657`..`0x71876f`),
     // blending the bone's camera-replaced row per vertex (`0x71a460`). All seven such models are
@@ -357,9 +364,9 @@ fn spawn_slot(
             benilla_world::rig_palette::RigSkin::allocate_bones(
                 palettes,
                 dm.skeleton.joints.len() as u32,
-                // A resting rider's rows are the placement alone; a flexing prop's are
+                // A resting rider's rows are the placement alone; a posed prop's are
                 // `F × model[b] × ibp[b]`.
-                if flexes {
+                if posed {
                     dm.inverse_bindposes.clone().unwrap_or_default()
                 } else {
                     Handle::default()
@@ -387,7 +394,7 @@ fn spawn_slot(
     // The prop's pose and clock, armed as the reference arms every M2 at load (animation 0 through
     // its `playableAnimationLookup`). A flexing prop's palette rows stay the rider's, composed in
     // the wearer's frame, not from its own `GlobalTransform`.
-    let mut prop_pose = ((flexes && rider.is_some()) || poses_emitters).then(|| {
+    let mut prop_pose = ((posed && rider.is_some()) || poses_emitters).then(|| {
         let anims = dm.animations.as_ref().expect("a posed prop has animations");
         let mut player = AnimationPlayer::default();
         if let Some(idle) = anims.idle_clip() {
