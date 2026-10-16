@@ -203,7 +203,13 @@ fn server(steps: Vec<(u16, Reply)>) -> (String, thread::JoinHandle<Vec<u16>>) {
 
 fn run(steps: Vec<(u16, Reply)>, pinned: Option<&str>) -> Result<crate::Logon> {
     let (addr, handle) = server(steps);
-    let result = block_on(logon_with_override(&addr, "probe", "password", pinned));
+    let result = block_on(logon_with_override(
+        &addr,
+        "probe",
+        "password",
+        crate::auth::LOCALE_TAG_EN_US,
+        pinned,
+    ));
     handle.join().unwrap();
     result
 }
@@ -331,6 +337,7 @@ fn invalid_override_fails_before_connecting() {
             "127.0.0.1:0",
             "probe",
             "password",
+            crate::auth::LOCALE_TAG_EN_US,
             Some(value),
         ))
         .err()

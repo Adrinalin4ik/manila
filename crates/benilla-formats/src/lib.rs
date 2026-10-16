@@ -80,7 +80,12 @@ mod cfg_configs;
 pub use cfg_configs::{load_realm_configs, RealmConfig, RealmConfigs};
 mod wow_ini;
 pub use wow_ini::client_region;
+/// The client locale, the column a localized DBC string is read from.
+mod locale;
+pub use locale::Locale;
 mod itembagfamily;
+#[cfg(test)]
+mod locale_routing;
 pub use itembagfamily::{load_item_bag_families, ItemBagFamilyCatalog};
 mod itemclass;
 pub use itemclass::{load_item_classes, ItemClassCatalog};
@@ -94,7 +99,7 @@ pub use factions::{
     FactionInfo, FactionTemplate, Reaction,
 };
 mod creature_types;
-pub use creature_types::{load_creature_type_flags, CreatureTypeFlags};
+pub use creature_types::{load_creature_type_table, CreatureTypeTable};
 /// The chat language scramble, the reference's `0x49b560`.
 mod garble;
 pub use garble::{garble, garble_chat, Garble, FLUENT_SKILL};
@@ -135,6 +140,8 @@ pub use lock::{
 };
 mod lock_type;
 pub use lock_type::{load_lock_type_catalog, LockTypeCatalog};
+mod chr_races;
+pub use chr_races::{load_chr_races, ChrRaces};
 mod chr_classes;
 pub use chr_classes::{load_chr_classes, ChrClasses, PET_NAME_TOKEN_FALLBACK};
 mod pet_stats;
@@ -296,30 +303,28 @@ pub use value_track::{TrackValue, ValueTrack};
 mod models;
 pub use models::{
     accumulate_wmo_group_camera_collision, accumulate_wmo_group_camera_only_collision,
-    accumulate_wmo_group_collision, authored_half_height, batch_footprint, glue_art_extent,
-    hand_grip_finger_poses, load_m2_animation_summary, load_m2_bone_spins, load_m2_bounds,
-    load_m2_collision_hull, load_m2_mesh, load_m2_mesh_skinned, load_object_model, load_wmo,
-    load_wmo_collision_tris, m2_bone_spins, m2_owner_reach, m2_ribbon_emitter_count,
-    m2_sequence_visible_textures, m2_texture_transform_count, non_separable_billboard_bones,
-    owner_last_rung, owner_last_rung_bucket, parse_m2_animation_lookup, parse_m2_animation_summary,
-    parse_m2_animations, parse_m2_attachments, parse_m2_bounds, parse_m2_camera,
-    parse_m2_cch_marker, parse_m2_collision_hull, parse_m2_event_markers,
-    parse_m2_global_sequence_bones, parse_m2_lights, parse_m2_pane_cameras,
-    parse_m2_playable_animation_lookup, parse_m2_portrait_camera, parse_m2_render_submeshes,
-    parse_m2_skeleton, parse_m2_string_anchors, parse_wmo_fogs, parse_wmo_lights,
-    parse_wmo_portals, parse_wmo_root, rotation_2x2, shipped_glue_art_extent, uv_transform,
-    wmo_group_doodad_refs, wmo_group_fixed_colors, wmo_group_footprint_tris, wmo_group_header,
-    wmo_group_light_refs, wmo_group_liquid_mesh, wmo_group_raw_colors, wmo_group_submeshes,
-    wmo_root_id, AlphaAnim, AlphaMap, AlphaSeq, AnimEvent, ArtExtent, BatchFootprint, Billboard,
-    BillboardKind, BoneKeys, BoneScaleAnim, BoneSpin, CharSkinSlot, CollisionMesh, Coverage,
-    CoverageReader, EmitterBoneLink, EventMarker, FogPolicy, FootprintTris, GlobalSeqBone,
-    GlobalSeqChannel, GroundQuad, KeyAnim, M2AnimSummary, M2Attachment, M2Bounds, M2CameraTracks,
-    M2Light, M2PaneCamera, M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm, ParentBasis,
-    PlayableAnim, RenderSubmesh, RgbAnim, StageTwo, ScalarAnim, SeqLoops, ShippedGlueScene, Skeleton,
-    SkeletonBone, StringAnchors, UvAnim, UvRotAnim, WmoBatchClass, WmoDoodad, WmoDoodadSet, WmoFog,
+    accumulate_wmo_group_collision, hand_grip_finger_poses, load_m2_animation_summary,
+    load_m2_bone_spins, load_m2_bounds, load_m2_collision_hull, load_m2_mesh, load_m2_mesh_skinned,
+    load_object_model, load_wmo, load_wmo_collision_tris, m2_bone_spins, m2_owner_reach,
+    m2_ribbon_emitter_count, m2_sequence_visible_textures, m2_texture_transform_count,
+    non_separable_billboard_bones, owner_last_rung, owner_last_rung_bucket,
+    parse_m2_animation_lookup, parse_m2_animation_summary, parse_m2_animations,
+    parse_m2_attachments, parse_m2_bounds, parse_m2_camera, parse_m2_cch_marker,
+    parse_m2_collision_hull, parse_m2_event_markers, parse_m2_global_sequence_bones,
+    parse_m2_lights, parse_m2_pane_cameras, parse_m2_playable_animation_lookup,
+    parse_m2_portrait_camera, parse_m2_render_submeshes, parse_m2_skeleton,
+    parse_m2_string_anchors, parse_wmo_fogs, parse_wmo_lights, parse_wmo_portals, parse_wmo_root,
+    rotation_2x2, uv_transform, wmo_group_doodad_refs, wmo_group_fixed_colors,
+    wmo_group_footprint_tris, wmo_group_header, wmo_group_light_refs, wmo_group_liquid_mesh,
+    wmo_group_raw_colors, wmo_group_submeshes, wmo_root_id, AlphaAnim, AlphaSeq, AnimEvent,
+    Billboard, BillboardKind, BoneKeys, BoneScaleAnim, BoneSpin, CharSkinSlot, CollisionMesh,
+    EmitterBoneLink, EventMarker, FogPolicy, FootprintTris, GlobalSeqBone, GlobalSeqChannel,
+    GroundQuad, KeyAnim, M2AnimSummary, M2Attachment, M2Bounds, M2CameraTracks, M2Light,
+    M2PaneCamera, M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm, ParentBasis,
+    PlayableAnim, RenderSubmesh, RgbAnim, StageTwo, ScalarAnim, SeqLoops, Skeleton, SkeletonBone,
+    StringAnchors, UvAnim, UvRotAnim, WmoBatchClass, WmoDoodad, WmoDoodadSet, WmoFog,
     WmoGroupHeader, WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef, WmoPortals, WmoRoot,
-    ALPHA_KEY_REF, DEGENERATE_RING_FOOTPRINT, GLUE_AUTHORED_ASPECT, NO_GROUP_LIQUID,
-    OWNER_RUNG_BUCKETS, SHIPPED_GLUE_SCENES,
+    DEGENERATE_RING_FOOTPRINT, NO_GROUP_LIQUID, OWNER_RUNG_BUCKETS,
 };
 mod terrain;
 pub use terrain::{

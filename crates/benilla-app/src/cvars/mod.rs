@@ -134,6 +134,9 @@ pub(crate) enum SetOutcome {
 /// The engine-side CVar table.
 #[derive(Resource)]
 pub(crate) struct Cvars {
+    /// The client's locale index (`[0xc0e080]`), which the register sites that pick their default
+    /// by it read ([`table::Reference::SameByLocale`]).
+    locale: usize,
     rows: Vec<Row>,
     /// Lowercased name → row.
     index: HashMap<String, usize>,
@@ -160,8 +163,18 @@ pub(crate) struct Cvars {
 }
 
 impl Default for Cvars {
+    /// The table as the install's locale registers it.
     fn default() -> Self {
+        Self::for_locale(crate::ui_script::client_locale().index())
+    }
+}
+
+impl Cvars {
+    /// The table as a client of this locale index registers it: each row at its
+    /// [`table::Registered::default_for`].
+    pub(crate) fn for_locale(locale: usize) -> Self {
         let mut cvars = Self {
+            locale,
             rows: Vec::with_capacity(REGISTERED.len() + inert::INERT.len()),
             index: HashMap::with_capacity(REGISTERED.len() + inert::INERT.len()),
             file: BTreeMap::new(),
@@ -174,10 +187,11 @@ impl Default for Cvars {
             lua_created: 0,
         };
         for r in all_rows() {
+            let default = r.default_for(locale);
             cvars.insert_row(Row {
                 name: r.name.to_string(),
-                default: r.default.to_string(),
-                value: r.default.to_string(),
+                default: default.to_string(),
+                value: default.to_string(),
                 pending: None,
                 latched: r.latched,
                 addon: false,
@@ -188,7 +202,32 @@ impl Default for Cvars {
     }
 }
 
+/// A row's registered default on a client of this locale index; `None` for a name no row has.
+pub(crate) fn registered_default(name: &str, locale: usize) -> Option<&'static str> {
+    all_rows()
+        .find(|r| r.name.eq_ignore_ascii_case(name))
+        .map(|r| r.default_for(locale))
+}
+
 impl Cvars {
+    /// Queue the move onto each row this locale registers off its base default
+    /// ([`table::Reference::SameByLocale`]), which a session does not own: a knob starts at the
+    /// base, and the reference's callback runs on the registered string (`0x63dc58`). Before the
+    /// file's own moves, so a saved value lands on top.
+    fn announce_locale_defaults(&mut self) {
+        for r in all_rows() {
+            let at = r.default_for(self.locale);
+            if at == r.default || self.session_owned.contains(&r.name.to_ascii_lowercase()) {
+                continue;
+            }
+            self.events.push(CvarChanged {
+                name: r.name.to_string(),
+                old: r.default.to_string(),
+                new: at.to_string(),
+            });
+        }
+    }
+
     fn insert_row(&mut self, row: Row) {
         let key = row.name.to_ascii_lowercase();
         debug_assert!(
@@ -1177,6 +1216,7 @@ fn load_config(world: &mut World) {
                 browser::apply_override(&mut cvars, row.name, &value);
             }
         }
+        cvars.announce_locale_defaults();
         match stored {
             StoredConfig::Absent => {} // no file, capture without a fixture, or no install
             StoredConfig::Bad(msg) => {
@@ -1518,6 +1558,28 @@ mod tests {
                      a `deviates` row and owes a reason.",
                     row.default,
                 ),
+                Reference::SameByLocale { except } => {
+                    // Each exception is a locale the table has, once, and a different string
+                    // from the base: an entry that repeats the base is a plain `same` row.
+                    let mut seen = Vec::new();
+                    for (locale, value) in *except {
+                        assert!(*locale < 8, "{name}: no locale index {locale}");
+                        assert!(
+                            !seen.contains(locale),
+                            "{name}: locale {locale} listed twice"
+                        );
+                        seen.push(*locale);
+                        assert!(
+                            !agrees(row.default, value),
+                            "{name}: locale {locale} lists the base default {value:?}"
+                        );
+                        assert_eq!(row.default_for(*locale), *value, "{name}");
+                    }
+                    assert!(
+                        !except.is_empty(),
+                        "{name}: a `same_by_locale` row owes a locale"
+                    );
+                }
                 Reference::Deviates { value, why } => {
                     assert!(
                         !agrees(row.default, value),
@@ -1546,6 +1608,83 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// The three register sites that pick their default by locale (`0x603368`, `0x63a738`), at
+    /// all eight indices: AutoInteract is "1" on koKR (1) alone, gxWindow and gxMaximize "1" on
+    /// zhCN (4) alone, and every other row boots the same on every locale. The table and `Cvars`
+    /// agree at each index, and the default the registry restores is the locale's.
+    #[test]
+    fn the_locale_dependent_defaults_hold_at_every_index() {
+        assert_eq!(
+            benilla_formats::Locale::from_index(1).unwrap().name(),
+            "koKR"
+        );
+        assert_eq!(
+            benilla_formats::Locale::from_index(4).unwrap().name(),
+            "zhCN"
+        );
+        let on_at = [("AutoInteract", 1), ("gxWindow", 4), ("gxMaximize", 4)];
+        for locale in 0..8 {
+            let cvars = Cvars::for_locale(locale);
+            for (name, on) in on_at {
+                let want = if locale == on { "1" } else { "0" };
+                assert_eq!(cvars.get(name), Some(want), "{name} at locale {locale}");
+                assert_eq!(
+                    cvars.default_of(name),
+                    Some(want),
+                    "{name} at locale {locale}"
+                );
+                assert_eq!(registered_default(name, locale), Some(want));
+            }
+            for row in all_rows().filter(|r| !on_at.iter().any(|(n, _)| *n == r.name)) {
+                assert_eq!(
+                    row.default_for(locale),
+                    row.default,
+                    "{} must not depend on the locale",
+                    row.name
+                );
+            }
+        }
+    }
+
+    /// A locale that registers a row off its base moves the knob at load, so the state a player
+    /// sees (Click-to-Move, windowed, maximized) is the registered default and not the knob's own
+    /// initial value; a locale that does not leaves every knob where it was.
+    #[test]
+    fn a_locale_default_reaches_its_knob_at_load() {
+        let boot = |locale: usize| {
+            let mut app = cvar_app();
+            app.insert_resource(Cvars::for_locale(locale));
+            app.update();
+            let video = *res::<VideoConfig>(&app);
+            (
+                video.display,
+                video.maximize,
+                res::<crate::player::Approach>(&app).enabled,
+            )
+        };
+        use crate::video::DisplayMode::{Fullscreen, Windowed};
+        assert_eq!(boot(0), (Fullscreen, false, false), "enUS");
+        assert_eq!(boot(1), (Fullscreen, false, true), "koKR: Click-to-Move");
+        assert_eq!(
+            boot(4),
+            (Windowed, true, false),
+            "zhCN: windowed and maximized"
+        );
+        assert_eq!(boot(5), (Fullscreen, false, false), "zhTW is not zhCN");
+    }
+
+    /// A session-owned row stays the session's: the announce does not overwrite the value an
+    /// instrumented run pinned.
+    #[test]
+    fn a_session_owned_row_is_not_announced() {
+        let mut cvars = Cvars::for_locale(4);
+        cvars.own_for_session("gxWindow", Some("0"));
+        cvars.announce_locale_defaults();
+        let names: Vec<_> = cvars.take_events().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, ["gxMaximize"]);
+        assert_eq!(cvars.get("gxWindow"), Some("0"));
     }
 
     #[test]
@@ -3305,6 +3444,7 @@ mod tests {
             .init_resource::<crate::player_distance::PlayerDistance>()
             .init_resource::<crate::text_filter::TextFilterSwitches>()
             .init_resource::<crate::game_tip::GameTipSetting>()
+            .init_resource::<crate::player::Approach>()
             .add_plugins(CvarPlugin);
         for observer in ALL_OBSERVERS {
             observer(&mut app);
@@ -3316,6 +3456,9 @@ mod tests {
     /// Every CVar observer in the crate; a new one is a line here and an `add_observer` in its
     /// plugin.
     const ALL_OBSERVERS: &[fn(&mut App)] = &[
+        |app| {
+            app.add_observer(crate::player::approach_on_cvar);
+        },
         |app| {
             app.add_observer(crate::sound::on_cvar);
         },
@@ -3421,88 +3564,6 @@ mod tests {
 
     fn res<T: Resource>(app: &App) -> &T {
         app.world().resource::<T>()
-    }
-
-    /// The last character entered survives a quit: two launches over one `benilla-config/` with the
-    /// real [`CvarPlugin`] and [`crate::char_select`] systems, so the screen's host write must
-    /// reach the file through the registry's dirty/compose path.
-    #[test]
-    fn entering_the_world_survives_the_quit_and_comes_back_selected() {
-        use crate::char_select::{ClientState, Roster};
-        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
-        let _l = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let tmp = std::env::temp_dir().join(format!("benilla-lastchar-{}", std::process::id()));
-        std::fs::remove_dir_all(&tmp).ok();
-        let _c = EnvGuard::unset("WOW_CAPTURE");
-        let _u = EnvGuard::unset("WOW_UI_SCALE");
-        let _f = EnvGuard::unset("WOW_FARCLIP");
-        let _d = EnvGuard::unset("WOW_CLUTTER_DENSITY");
-        let _w = EnvGuard::unset("WOW_CHAR");
-        let _s = EnvGuard::unset("WOW_CHARSELECT_PICK");
-        let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
-        let roster = || {
-            (1..=4)
-                .map(|g| crate::char_select::test_character(g, &format!("Char{g}")))
-                .collect::<Vec<_>>()
-        };
-
-        // ── Launch 1: the roster lands, and the player enters the world as the third row. ────
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let mut app = cvar_app();
-        app.add_plugins(bevy::state::app::StatesPlugin);
-        crate::char_select::add_test_systems(&mut app, tx);
-        app.update(); // Startup loads the (absent) file; the first Update seeds the VM table
-        app.world_mut().write_message(crate::net::CharListMessage {
-            characters: roster(),
-            realm: None,
-            cause: benilla_protocol::RosterCause::Park,
-            epoch: 0,
-            generation: 0,
-        });
-        app.update();
-        assert_eq!(
-            app.world().resource::<Roster>().selected(),
-            Some(0),
-            "nothing remembered yet, so the first row — the behaviour that was already right",
-        );
-        app.world_mut().resource_mut::<Roster>().pending_pick = Some(3); // guid 3 = row 2
-        app.update();
-        app.world_mut().write_message(AppExit::Success);
-        app.update();
-
-        let text = std::fs::read_to_string(tmp.join("config.toml")).unwrap();
-        assert!(
-            text.contains("lastCharacterIndex = \"2\""),
-            "entering the world must reach the file, 0-based like Config.wtf:\n{text}"
-        );
-
-        // ── Launch 2: a fresh client over the same folder, and the roster arrives. ───────────
-        let (tx, _rx2) = crossbeam_channel::unbounded();
-        let mut app = cvar_app();
-        app.add_plugins(bevy::state::app::StatesPlugin);
-        crate::char_select::add_test_systems(&mut app, tx);
-        app.update();
-        app.world_mut().write_message(crate::net::CharListMessage {
-            characters: roster(),
-            realm: None,
-            cause: benilla_protocol::RosterCause::Park,
-            epoch: 0,
-            generation: 0,
-        });
-        app.update();
-
-        assert_eq!(
-            app.world().resource::<Roster>().selected(),
-            Some(2),
-            "the second launch must stand the SAME character on the stage — the whole report",
-        );
-        assert_eq!(
-            *app.world().resource::<State<ClientState>>().get(),
-            ClientState::CharSelect,
-        );
-        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
@@ -4036,6 +4097,8 @@ mod tests {
     fn reference_boot_value(row: &super::table::Registered) -> Option<&'static str> {
         match &row.reference {
             Reference::Same(v) => Some(v),
+            // The enUS boot value, which the registered default is.
+            Reference::SameByLocale { .. } => Some(row.default),
             // The reference's own boot code lands where our default does.
             Reference::Overridden { .. } => Some(row.default),
             Reference::Deviates { value, .. } => Some(value),
@@ -4106,7 +4169,7 @@ mod tests {
                 Reference::Ours(why)
                 | Reference::Deviates { why, .. }
                 | Reference::Overridden { why, .. } => *why,
-                Reference::Same(_) => continue,
+                Reference::Same(_) | Reference::SameByLocale { .. } => continue,
             };
             assert!(
                 !why.contains('\n') && !why.contains("\\n") && !why.contains("   "),

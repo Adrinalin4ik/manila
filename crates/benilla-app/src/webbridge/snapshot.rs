@@ -16,7 +16,7 @@ use benilla_ui::script::UnitState;
 use benilla_world::world_map::CurrentMap;
 
 use crate::area::ZoneInfo;
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 use crate::creature_anim::select::{move_flags, MovementState};
 use crate::entities::mount::MountChild;
 use crate::names::NameCache;
@@ -85,7 +85,6 @@ impl BridgeReadout<'_, '_> {
         match self.state.get() {
             ClientState::Login => "login",
             ClientState::CharSelect => "charselect",
-            ClientState::CharCreate => "charcreate",
             ClientState::InWorld => "inworld",
         }
     }
@@ -138,7 +137,7 @@ impl BridgeReadout<'_, '_> {
         ];
 
         let now = Instant::now();
-        let chr = self.tables.classes();
+        let chr = self.tables.unit_names();
         // Without a name cache the resolver has no template stage; `Default` leaves every
         // stage absent, which is what a unit with no sources resolves to anyway.
         let types = self
@@ -265,7 +264,7 @@ impl BridgeReadout<'_, '_> {
         motion: Option<&MovementState>,
         self_store: Option<&ObjectStore>,
         dist: f32,
-        chr: Option<&benilla_formats::ChrClasses>,
+        chr: crate::ui_unit::UnitNames<'_>,
         types: crate::creature_type::CreatureTypeSources<'_>,
     ) -> PlainValue {
         let name = self.peek_name(guid);

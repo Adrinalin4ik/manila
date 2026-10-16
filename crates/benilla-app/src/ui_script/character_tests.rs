@@ -54,6 +54,7 @@ fn inventory_with_head_item() -> InventorySlots {
     slots[1] = Some(InvSlotView {
         duration_ms: None,
         already_bound: false,
+        occupied_seats: None,
         bonding: 0,
         use_spell: 0,
         use_fork: Default::default(),
@@ -71,7 +72,11 @@ fn inventory_with_head_item() -> InventorySlots {
         guid: 0x70e,
         equip_slots: vec![1],
         creator: None,
+        gift_creator: None,
+        creator_guid: 0,
+        gift_creator_guid: 0,
         enchants: Vec::new(),
+        spell_0: false,
     });
     slots
 }
@@ -87,6 +92,7 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
             duration_ms: None,
             petition: None,
             already_bound: false,
+            occupied_seats: None,
             bonding: 0,
             use_spell: 0,
             bar_placeable: true,
@@ -103,8 +109,12 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
             cooldown: None,
             readable: false,
             creator: None,
+            gift_creator: None,
+            creator_guid: 0,
+            gift_creator_guid: 0,
             flags: 0,
             enchants: Vec::new(),
+            spell_0: false,
         },
     );
     benilla_ui::script::ContainerState {

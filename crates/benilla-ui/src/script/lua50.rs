@@ -142,7 +142,8 @@ fn install_bit(lua: &Lua) -> mlua::Result<()> {
             if b == 0 {
                 return Err(mlua::Error::runtime("bit.mod: division by zero"));
             }
-            Ok(((u32_of(a) as i32) % b) as i64)
+            // `wrapping_rem`: `INT32_MIN % -1` is 0, not a Rust panic.
+            Ok((u32_of(a) as i32).wrapping_rem(b) as i64)
         })?,
     )?;
     lua.globals().set("bit", bit)
@@ -992,5 +993,22 @@ mod error_quoting_tests {
                assert(format("%2$s %1$s", "a", "b") == "b a")"#,
         )
         .unwrap();
+    }
+
+    /// `bit.mod(INT32_MIN, -1)` is 0: Rust's `%` panics on it, in a release build too.
+    #[test]
+    fn bit_mod_of_int_min_by_minus_one_is_zero() {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(|| {
+                let s = UiScript::new().unwrap();
+                let got: Vec<i64> = s
+                    .eval("return { bit.mod(-2^31, -1), bit.mod(2^31, -1), bit.mod(-7, 2) }")
+                    .unwrap();
+                assert_eq!(got, vec![0, 0, -1]);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

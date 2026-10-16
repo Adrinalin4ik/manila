@@ -23,7 +23,7 @@ use benilla_world::schedule::WorldStage;
 mod apply;
 pub(crate) mod handlers;
 pub(crate) mod io;
-mod motion;
+pub(crate) mod motion;
 mod objects;
 pub(crate) use objects::tear_down;
 mod session;
@@ -42,13 +42,9 @@ use motion::{
 // `pub(crate)`: `creature_anim` reads the shuffle latch it produces, and a test runs both.
 pub(crate) use motion::drive_display_facing;
 pub(crate) use motion::{
-    ground_derived, grounded_y, jump_seed, CreatureSwimming, FacingStep, RemoteMotion, Spline,
-    SplineStopped, UnitMoveModes,
+    grounded_y, jump_seed, CreatureSwimming, FacingStep, RemoteMotion, Spline, SplineStopped,
+    UnitMoveModes,
 };
-// Only the ground-census probe reads this, so a build without the instruments leaves it unused.
-// Not a `cfg`: seam knowledge lives in three fixed places, and this file is not one of them.
-#[allow(unused_imports)]
-pub(crate) use motion::GroundClamped;
 
 /// The net subsystem: spawns the background IO threads and drives the per-frame event drain.
 pub(crate) struct NetPlugin {
@@ -187,7 +183,6 @@ impl Plugin for NetPlugin {
             .insert_resource(NetCommands(handles.commands))
             .insert_resource(CharPick(handles.pick))
             .insert_resource(RealmChoice(handles.realm))
-            .insert_resource(RosterPolicy(handles.screen_asks_roster))
             .insert_resource(LoginSubmit(handles.login))
             .insert_resource(LoginAbandon(handles.login_abandon))
             .insert_resource(PingShared(handles.ping))
@@ -209,6 +204,8 @@ impl Plugin for NetPlugin {
             .init_resource::<crate::world_state::WorldStates>()
             .add_message::<TeleportMessage>()
             .add_message::<FieldChanged>()
+            .add_message::<crate::item_watch::ItemNotice>()
+            .add_message::<crate::field_watch::FieldNotice>()
             .add_message::<SelfMoveMessage>()
             .add_message::<SpeedChangeMessage>()
             .add_message::<ClientControlMessage>()
@@ -484,24 +481,6 @@ impl FieldChanged {
     }
 }
 
-/// The field edges one feed saw this run, by guid and index: the reference fans a moved field out
-/// to every unit token naming the unit (`0x515e50`).
-#[derive(Default)]
-pub(crate) struct FieldEdges(HashSet<(u64, u16)>);
-
-impl FieldEdges {
-    pub fn collect(reader: &mut MessageReader<FieldChanged>) -> Self {
-        Self(reader.read().map(|e| (e.guid, e.index)).collect())
-    }
-    pub fn moved(&self, guid: u64, index: u16) -> bool {
-        self.0.contains(&(guid, index))
-    }
-    #[cfg(test)]
-    pub fn of(edges: &[(u64, u16)]) -> Self {
-        Self(edges.iter().copied().collect())
-    }
-}
-
 /// Merge a descriptor update into a store and emit its [`FieldChanged`] edges; the drain and the
 /// test harness share it.
 pub(crate) fn merge_store_fields(
@@ -584,8 +563,7 @@ pub(crate) struct NetEvents(Receiver<SessionEvent>);
 pub(crate) struct NetCommands(pub(crate) Sender<ClientCommand>);
 
 /// The character-select channel to the IO thread parked at select: create and delete are served
-/// in place, re-emitting the roster (under the native policy), until an [`CharRequest::Enter`]
-/// moves into the world.
+/// in place until an [`CharRequest::Enter`] moves into the world.
 #[derive(Resource)]
 pub(crate) struct CharPick(pub(crate) ParkSender<CharRequest>);
 
@@ -693,14 +671,6 @@ pub(crate) enum CharRequest {
     Enumerate,
 }
 
-/// Whether the screen asks for its roster (the stock glue screens' `GetCharacterListUpdate`)
-/// instead of the IO thread fetching it on reaching the character park (the native screens'). Set
-/// by the UI session as it installs the VM that runs: true with the stock glue VM up, false
-/// otherwise, so a run whose stock VM did not build still gets its roster. The IO thread reads it
-/// as each park is entered.
-#[derive(Resource, Clone)]
-pub(crate) struct RosterPolicy(pub(crate) std::sync::Arc<std::sync::atomic::AtomicBool>);
-
 /// The realm channel: the answer to each [`RealmListMessage`]. Two parks listen, the login-side
 /// one and the character one, since the reference's realm list is a dialog over either screen
 /// (`RealmList.xml` is `frameStrata="DIALOG"`).
@@ -732,7 +702,7 @@ pub(crate) enum RealmRequest {
     Leave,
 }
 
-/// The credentials channel to the IO thread's pre-logon park, sent by [`crate::login`].
+/// The credentials channel to the IO thread's pre-logon park, sent by [`crate::glue_session::login`].
 #[derive(Resource)]
 pub(crate) struct LoginSubmit(pub(crate) async_channel::Sender<io::LoginRequest>);
 
@@ -771,11 +741,15 @@ impl Objects<'_, '_> {
 
     /// A streamed object's merged descriptor fields, found as `0x468460` does, by guid.
     pub fn object(&self, guid: u64) -> Option<&ObjectFields> {
+        self.store(guid).map(|s| &s.0)
+    }
+
+    /// [`Self::object`] with its component.
+    pub(crate) fn store(&self, guid: u64) -> Option<&ObjectStore> {
         self.index
             .0
             .get(&guid)
             .and_then(|&e| self.stores.get(e).ok())
-            .map(|s| &s.0)
     }
 
     /// Every streamed object, items included.
@@ -2377,8 +2351,7 @@ pub(crate) struct RealmListMessage {
     pub(crate) failed: bool,
 }
 
-/// The character roster (`SMSG_CHAR_ENUM`); the IO thread waits for [`crate::char_select`] to
-/// pick. `realm` is the realm this session connected to.
+/// The character roster (`SMSG_CHAR_ENUM`); the IO thread waits for the select screen to pick. `realm` is the realm this session connected to.
 #[derive(Message)]
 pub(crate) struct CharListMessage {
     pub(crate) characters: Vec<benilla_protocol::Character>,
@@ -2387,8 +2360,6 @@ pub(crate) struct CharListMessage {
     pub(crate) cause: benilla_protocol::RosterCause,
     /// The world session that sent it ([`WorldAuthMessage::epoch`]).
     pub(crate) epoch: u64,
-    /// The abandon generation of the attempt that dialed that session.
-    pub(crate) generation: u64,
 }
 
 /// The world server accepted the authentication: the world connect to `realm` is done and the IO
@@ -2434,7 +2405,7 @@ pub(crate) struct CharRenameMessage {
 }
 
 /// `SMSG_CHARACTER_LOGIN_FAILED`: the picked character was refused. `result` is the raw reason,
-/// read by [`crate::char_select::char_login_refusal_text`].
+/// read by the glue manager ([`crate::ui_script::glue_mgr`]).
 #[derive(Message, Clone, Copy)]
 pub(crate) struct CharacterLoginFailedMessage {
     pub(crate) result: u8,
@@ -2528,9 +2499,6 @@ pub(crate) struct LoginFailedMessage {
     pub(crate) refusal: Option<benilla_protocol::LoginRefusal>,
     pub(crate) reason: String,
     pub(crate) terminal: bool,
-    /// The dial that never opened a socket, so the screen can tell an unknown name from a host
-    /// that does not answer.
-    pub(crate) dial: Option<benilla_protocol::DialFailure>,
 }
 
 /// A same-map teleport of our player: snap, then ack. Read by the controller in `Input`.

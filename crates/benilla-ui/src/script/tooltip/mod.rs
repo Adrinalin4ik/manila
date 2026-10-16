@@ -197,16 +197,19 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
     }
 }
 
-/// Writes a line cell's text and colour and shows it.
+/// Writes a line cell's text and colour and shows it. The text goes through `SetText` with its
+/// expand flag (`0x5302e7`, `0x53033d` for the two sides of a line, `0x53060e` for `AppendText`'s
+/// helper `0x5305b0`), so the number separators swap while `SetEuropeanNumbers` holds.
 pub(super) fn write_cell(
     model: &mut Model,
     rh: crate::widget::RegionHandle,
     text: &str,
     color: [f32; 4],
 ) {
+    let text = model.localized_text(text.to_string());
     let d = model.region_data.entry(rh).or_default();
     let was_shown = d.text.as_deref().is_some_and(|t| !t.is_empty());
-    d.text = Some(text.to_string());
+    d.text = Some(text);
     d.set_vertex_color(Some(color));
     // The line's own colour, as if set by `SetTextColor`: a later
     // `GameTooltipText:SetTextColor` must not repaint it.
@@ -265,6 +268,8 @@ fn clear_content(model: &mut Model, h: FrameHandle) {
     }
     // New content replaces a spell render still waiting on its view.
     model.spell_tooltip_waits.remove(&h);
+    // The clear zeroes the kept item entry (`0x5300dd`), so a cache answer rebuilds nothing.
+    model.item_builds.remove(&h);
 }
 
 /// The tooltip's `<name>StatusBar` health bar (`[+0x348]`), if it has one.

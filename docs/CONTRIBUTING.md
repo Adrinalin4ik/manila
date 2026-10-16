@@ -106,7 +106,8 @@ out of scope is closed with the reason.
 - **A 1.12.1 install of your own.** `WOW_DATA=<its Data folder>`, or a `WoW` link at the repo
   root, which only a dev build sees: the player build looks for `Data/` or `WoW/Data/` beside
   the binary. benilla reads the install and never writes into it. `WOW_DATA=` (set, empty)
-  means "no install", which is how the no-install boot is tested on a machine that has one.
+  means "no install": the client refuses to start (an error dialog, or stderr alone in an
+  unattended run) and the no-install tests run on a machine that has one.
 - **Without the install, green is hollow.** Well over a thousand tests read the install and skip
   when it is absent, and a few dozen more read a corpus of vanilla addons
   (`BENILLA_ADDON_CORPUS=<a folder of addons>`, or a `wow-addons-vanilla` link at the root),
@@ -117,8 +118,10 @@ out of scope is closed with the reason.
   `localhost:3724`). A scripted run has no default account: `WOW_USER`, `WOW_PASS` and
   `WOW_CHAR` name a test account on your server whose login kicks nobody, all three, either in
   the environment or in a `.probe-identity` file at the repo root (one per line, never
-  committed), and `scripts/smoke.sh` (the live login gate) refuses without them. `WOW_CHAR`
-  must already be on the account, since the client creates a character only when asked:
+  committed), and `scripts/smoke.sh` (the live login gate) refuses without them. A linked
+  worktree shares the main checkout's `benilla-config/`, unless it has a `.probe-identity`: then
+  it keeps its own, so no run from it touches your settings. `WOW_CHAR` must already be on the
+  account, since the client creates a character only when asked:
   `WOW_PROBE_CHARCREATE=<name> WOW_PROBE_CHARCREATE_KEEP=1`, run without `WOW_CHAR`, makes it.
   The probes drive the body with GM commands, so give that account the top GM level.
 - **Running it unattended.** The rules are `docs/METHOD.md`, "The local server"; these are the
@@ -135,6 +138,8 @@ out of scope is closed with the reason.
     command and logs the reply as `net: server says`. An account named `probe` and digits is
     shielded: every world entry sends `.cheat god on`, `.die` clears it for a death test, and
     `WOW_GOD=off` leaves it off.
+  - A rig, `WOW_PROBE_CHARCREATE` and a glue capture drive the stock glue screens through their
+    own Lua, the calls a player's clicks make.
   - A trace is `WOW_MOVE_TRACE=<file>`, filtered with `WOW_MOVE_TRACE_TAGS` (`"move,snd,in"`) and
     ended by `WOW_PROBE_EXIT_AT=<seconds>`; grep it for the `rly` and `snd` lines.
   - To sniff the wire, trace the tags `in` and `out` (`WOW_MOVE_TRACE_TAGS="in,out"`): one line

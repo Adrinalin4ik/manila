@@ -23,6 +23,7 @@ mod drag_threshold;
 mod dying_target;
 mod end_to_end;
 mod engine_updates;
+mod european_text;
 mod events;
 mod flag_args;
 mod font_object;
@@ -51,6 +52,7 @@ mod modelframe;
 mod movable;
 mod name_targets;
 mod nameplate;
+mod no_font;
 mod numeric_shape_gate;
 mod object_model;
 mod one_or_nil_methods;
@@ -82,6 +84,7 @@ mod tooltip_unit;
 mod toplevel;
 mod update_walk;
 mod visibility;
+mod wheel;
 mod widget_args;
 mod widget_surface;
 mod worldframe;
@@ -117,6 +120,26 @@ fn an_instruction_budget_turns_a_runaway_loop_into_an_error() {
     t.run("BudgetOk = 0 for i = 1, 1000 do BudgetOk = BudgetOk + i end")
         .unwrap();
     assert_eq!(t.eval::<i64>("return BudgetOk").unwrap(), 500_500);
+}
+
+/// The budget counts Lua that a library function calls, as 5.1's count hook does: a `gsub`
+/// replacement over three million characters runs four instructions a call on either VM
+/// (`GETGLOBAL`, `ADD`, `SETGLOBAL`, `RETURN`), and a runaway one is stopped.
+#[test]
+fn the_instruction_budget_counts_lua_a_library_function_runs() {
+    let s = crate::script::UiScript::new().unwrap();
+    s.set_instruction_budget(u64::MAX);
+    s.run("n = 0 string.gsub(string.rep('a', 3000000), 'a', function(c) n = n + 1 return c end)")
+        .unwrap();
+    assert_eq!(s.instructions_used(), 12_000_000);
+
+    let s = crate::script::UiScript::new().unwrap();
+    s.set_instruction_budget(5_000_000);
+    let err = s
+        .run("string.gsub(string.rep('a', 50000000), 'a', function(c) n = 1 return c end)")
+        .expect_err("a library function's callbacks run inside the budget")
+        .to_string();
+    assert!(err.contains("instruction budget exhausted"), "{err}");
 }
 
 /// The hearth location's name, `""` before the packet; `StaticPopup.lua:1742` formats it.

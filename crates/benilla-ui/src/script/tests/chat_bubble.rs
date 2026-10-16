@@ -31,6 +31,8 @@ fn vm() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     s.set_text_measurer(Box::new(BlockFont));
+    // Stock `Fonts.xml` sets it; a plate or bubble built without it has no font and draws no text.
+    s.run(r#"NAMEPLATE_FONT = "Fonts\\FRIZQT__.TTF""#).unwrap();
     s.run(r#"WorldFrame = CreateFrame("WorldFrame", "WorldFrame") WorldFrame:SetAllPoints()"#)
         .unwrap();
     s.resolve();
@@ -463,10 +465,65 @@ fn the_text_takes_the_nameplate_font_global() {
     );
 
     let mut bare = vm();
+    bare.run("NAMEPLATE_FONT = nil").unwrap();
     drive(&mut bare, &[say(1, 1, "a")]);
     assert!(bare
         .eval::<bool>(
             "local r = { (WorldFrame:GetChildren()):GetRegions() } return r[11]:GetFont() == nil"
         )
         .unwrap());
+}
+
+/// The lookup honours an `_G` `__index` (`lua_gettable`, `0x704373`), which may call any verb, the
+/// Model's included; it is made for a new bubble only, and outside the Model's borrow.
+#[test]
+fn a_global_index_metamethod_may_touch_the_model_during_a_bubbles_font_lookup() {
+    let mut s = vm();
+    s.run(
+        r#"NAMEPLATE_FONT = nil
+           hits = 0
+           setmetatable(_G, { __index = function(t, k)
+               if k == "NAMEPLATE_FONT" then
+                   hits = hits + 1
+                   CreateFrame("Frame", nil, UIParent):SetWidth(UIParent:GetWidth())
+               end
+               return nil
+           end })"#,
+    )
+    .unwrap();
+    drive(&mut s, &[say(1, 1, "a")]);
+    assert_eq!(s.eval::<i64>("return hits").unwrap(), 1);
+    // The same speaker's next line takes the freed frame; a second speaker needs a new one.
+    drive(&mut s, &[say(1, 2, "b")]);
+    assert_eq!(s.eval::<i64>("return hits").unwrap(), 1);
+    drive(&mut s, &[say(1, 2, "b"), say(2, 1, "c")]);
+    assert_eq!(s.eval::<i64>("return hits").unwrap(), 2);
+}
+
+/// The bubble text's justification as a Lua reader sees it.
+fn text_justify(s: &mut UiScript) -> String {
+    s.eval::<String>(
+        r#"local regions = { (WorldFrame:GetChildren()):GetRegions() }
+           return regions[11]:GetJustifyH()"#,
+    )
+    .unwrap()
+}
+
+/// `0x4b16e7`: only koKR left-justifies the text; every other locale keeps the FontString's
+/// CENTER. A reused bubble takes the new line's justify alike, and the VM's seated locale is the
+/// one read.
+#[test]
+fn only_a_korean_client_left_justifies_the_bubble_text() {
+    for index in 0..8 {
+        let mut s = vm();
+        s.set_locale(index);
+        drive(
+            &mut s,
+            &[say(7, 1, "Well met, traveller, and well met again!")],
+        );
+        let want = if index == 1 { "LEFT" } else { "CENTER" };
+        assert_eq!(text_justify(&mut s), want, "locale {index}");
+        drive(&mut s, &[say(7, 2, "Farewell.")]);
+        assert_eq!(text_justify(&mut s), want, "locale {index}, second line");
+    }
 }

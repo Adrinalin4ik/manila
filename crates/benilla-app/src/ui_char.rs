@@ -1,6 +1,7 @@
 //! The character-window feed: the [`UnitCombatStats`] and `InventorySlots` snapshots the paper
-//! doll's Lua bindings read, built from our avatar's descriptor and item stores; the events that
-//! repaint it; and the booth's yaw from the stock `CharacterModelFrame`. [`unit_combat_stats`] is
+//! doll's Lua bindings read, built from our avatar's descriptor and item stores, pushed ahead of
+//! the stat events that repaint it ([`crate::ui_unit::field_events`]); the inventory events; and
+//! the booth's yaw from the stock `CharacterModelFrame`. [`unit_combat_stats`] is
 //! the half any unit shares: a creature has no player fields, so those read absent and keep their
 //! defaults.
 
@@ -28,13 +29,9 @@ const ITEM_CLASS_WEAPON: u32 = 2;
 /// Weapon subclass 19, wand (`ItemPrototype.h:211`), for `HasWandEquipped`.
 const SUBCLASS_WAND: u32 = 19;
 
-/// An f32 snapshot field as a diff key, quantized to 1/32 so equal wire values compare equal.
-fn fixed(v: f32) -> i64 {
-    (v * 32.0).round() as i64
-}
-
-/// The last snapshots pushed, so events fire on transitions only; held per VM
-/// ([`crate::ui_script::VmMemo`]), so a `/reload` re-pushes and re-fires as a login does.
+/// The last snapshots pushed, so a push happens on change only; held per VM
+/// ([`crate::ui_script::VmMemo`]), so a `/reload` re-pushes. The stat events are field watches
+/// ([`crate::field_watch`]), never fired off these diffs.
 #[derive(Resource, Default)]
 pub(crate) struct CharFeedState {
     vm: crate::ui_script::VmMemo<CharFeedMemo>,
@@ -75,7 +72,8 @@ impl Plugin for UiCharPlugin {
                     // inventory push lands first.
                     feed_char
                         .before(crate::ui_items::feed::feed_containers)
-                        .in_set(UiFeed),
+                        .in_set(UiFeed)
+                        .in_set(crate::ui_unit::field_events::FieldEventPushes),
                     watch_skill_ups.in_set(UiFeed),
                     feed_skills.in_set(UiFeed),
                     drain_skill_abandons.after(UiInput),
@@ -548,7 +546,9 @@ fn slot_view(
     let creator = obj
         .item_creator()
         .filter(|&g| g != 0)
-        .and_then(|g| names.resolve(g, commands).map(str::to_string));
+        .and_then(|g| names.resolve_player(g, commands).map(str::to_string));
+    let gift_creator = crate::items::gift_creator_name(obj, names, commands);
+    let (creator_guid, gift_creator_guid) = crate::items::creator_guids(obj);
     // All seven enchant slots: our own gear streams as item objects, where an inspected player's
     // descriptor carries only two.
     let enchants = crate::items::enchant_lines(
@@ -604,7 +604,11 @@ fn slot_view(
         .and_then(|d| d.icon.clone());
     Some(InvSlotView {
         bonding: t.map_or(0, |t| t.bonding),
+        // A container's filled seats, which `ClickTradeButton` counts (`0x4bff50`).
+        occupied_seats: is_container
+            .then(|| content_guids.iter().filter(|&&g| g != 0).count() as u32),
         use_spell: t.and_then(|t| t.use_spell).map_or(0, |u| u.spell_id),
+        spell_0: t.is_some_and(benilla_protocol::ItemInfo::has_spell_0),
         use_fork: t.map_or(Default::default(), |t| {
             crate::ui_items::dispatch_fork(t, flags, obj.item_text_id().unwrap_or(0))
         }),
@@ -623,6 +627,9 @@ fn slot_view(
         bar_placeable,
         consumable,
         creator,
+        gift_creator,
+        creator_guid,
+        gift_creator_guid,
         enchants,
         duration_ms,
     })
@@ -696,6 +703,7 @@ fn inventory_slots(
             // Ammo has no item object, only its template, so there is no bind to read.
             already_bound: false,
             bonding: 0,
+            occupied_seats: None,
             use_spell: 0,
             use_fork: Default::default(),
             item_id: ammo_id,
@@ -712,9 +720,13 @@ fn inventory_slots(
             bar_placeable: false,
             consumable: false,
             creator: None,
+            gift_creator: None,
+            creator_guid: 0,
+            gift_creator_guid: 0,
             // No ammo instance streams, only its template id: no enchants, no countdown.
             enchants: Vec::new(),
             duration_ms: None,
+            spell_0: false,
         });
     }
     // Equipment 1..=19, then `Bag0Slot`..`Bag3Slot` (20..=23 in `PaperDollItemFrame.dbc`), the
@@ -772,102 +784,6 @@ fn bank_bag_slots(
     bags
 }
 
-/// Fire the paper doll's repaint events for one unit's snapshot transition, `arg1 = token`: the
-/// eight unit-stat events both pages register (`PaperDollFrame.lua:14-28`,
-/// `PetPaperDollFrame.lua:12-20`), each when a value its handlers read moved. A first snapshot
-/// fires them all.
-pub(crate) fn fire_stat_transitions(
-    script: &mut UiScript,
-    token: &str,
-    prev: Option<&UnitCombatStats>,
-    stats: &UnitCombatStats,
-) {
-    let tok = || ScriptValue::Str(token.to_string());
-    let changed = |sel: fn(&UnitCombatStats) -> Vec<i64>| prev.is_none_or(|p| sel(p) != sel(stats));
-    if changed(|s| {
-        let mut v: Vec<i64> = s.stats.iter().map(|&x| i64::from(x)).collect();
-        v.extend(
-            s.stat_pos
-                .iter()
-                .chain(s.stat_neg.iter())
-                .map(|&x| i64::from(x)),
-        );
-        v
-    }) {
-        script.fire_event("UNIT_STATS", vec![tok()]);
-    }
-    if changed(|s| {
-        s.resistances
-            .iter()
-            .chain(s.resistance_pos.iter())
-            .chain(s.resistance_neg.iter())
-            .map(|&x| i64::from(x))
-            .collect()
-    }) {
-        script.fire_event("UNIT_RESISTANCES", vec![tok()]);
-    }
-    if changed(|s| {
-        vec![
-            fixed(s.min_damage),
-            fixed(s.max_damage),
-            fixed(s.min_offhand_damage),
-            fixed(s.max_offhand_damage),
-            i64::from(s.physical_bonus_pos),
-            i64::from(s.physical_bonus_neg),
-            fixed(s.damage_percent),
-        ]
-    }) {
-        script.fire_event("UNIT_DAMAGE", vec![tok()]);
-    }
-    if changed(|s| {
-        vec![
-            i64::from(s.main_attack_time_ms),
-            i64::from(s.offhand_attack_time_ms),
-            i64::from(s.has_offhand),
-        ]
-    }) {
-        script.fire_event("UNIT_ATTACK_SPEED", vec![tok()]);
-    }
-    if changed(|s| {
-        vec![
-            i64::from(s.attack_power),
-            i64::from(s.attack_power_pos),
-            i64::from(s.attack_power_neg),
-        ]
-    }) {
-        script.fire_event("UNIT_ATTACK_POWER", vec![tok()]);
-    }
-    if changed(|s| {
-        vec![
-            i64::from(s.ranged_attack_power),
-            i64::from(s.ranged_attack_power_pos),
-            i64::from(s.ranged_attack_power_neg),
-            i64::from(s.has_wand),
-        ]
-    }) {
-        script.fire_event("UNIT_RANGED_ATTACK_POWER", vec![tok()]);
-    }
-    if changed(|s| {
-        vec![
-            fixed(s.ranged_min_damage),
-            fixed(s.ranged_max_damage),
-            i64::from(s.ranged_attack_time_ms),
-        ]
-    }) {
-        script.fire_event("UNIT_RANGEDDAMAGE", vec![tok()]);
-    }
-    if changed(|s| {
-        vec![
-            i64::from(s.main_weapon_skill.0),
-            i64::from(s.main_weapon_skill.1),
-            i64::from(s.ranged_weapon_skill.0),
-            i64::from(s.ranged_weapon_skill.1),
-        ]
-    }) {
-        script.fire_event("UNIT_ATTACK", vec![tok()]);
-    }
-}
-
 pub(crate) fn feed_char(
     // `ChrClasses.dbc` field 16, the relic flag `find_equip_slot` reads; absent, no class has one.
     classes: Option<Res<crate::chr_classes::ChrClassTable>>,
@@ -886,7 +802,7 @@ pub(crate) fn feed_char(
     let Some(mut script) = script else {
         return;
     };
-    // Per VM: after a `/reload` both snapshots re-push and their events re-fire.
+    // Per VM: after a `/reload` both snapshots re-push, and `UNIT_INVENTORY_CHANGED` re-fires.
     let (memo, vm_reset) = feed.vm.get_reset(&script);
 
     let Some(store) = inv.self_store.iter().next() else {
@@ -946,13 +862,12 @@ pub(crate) fn feed_char(
         return;
     }
 
+    // The paper doll's getters read this; the stat events that repaint it are field watches,
+    // fired after this push (`crate::ui_unit::field_events`).
     let stats = combat_stats(store, objects, &items, &commands);
     if memo.last_stats.as_ref() != Some(&stats) {
         gate.audit("feed_char", "the combat-stats snapshot");
-        // Push before firing: handlers run synchronously and would paint the old values.
-        let prev = memo.last_stats.take();
         script.set_player_combat_stats(Some(stats.clone()));
-        fire_stat_transitions(&mut script, "player", prev.as_ref(), &stats);
         memo.last_stats = Some(stats);
     }
 
@@ -1064,6 +979,54 @@ fn weapon_enchant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A worn bag's view says how many of its seats are filled, which `ClickTradeButton` reads
+    /// to refuse it (`0x4bff50`, then `0x4bffae` for an empty one in a bag slot).
+    #[test]
+    fn a_worn_bag_view_counts_its_filled_seats() {
+        use benilla_protocol::field::{FIELD_CONTAINER_SLOT_1, FIELD_OBJECT_ENTRY};
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let commands = NetCommands(tx);
+        let mut objs = crate::ui_items::TestObjects::new();
+        // `OBJECT_FIELD_TYPE` container, `CONTAINER_FIELD_NUM_SLOTS` 4, seat 2 filled.
+        objs.spawn_container(
+            0xB1,
+            ObjectFields::from_pairs(&[
+                (2, 0x7),
+                (FIELD_OBJECT_ENTRY, 4496),
+                (48, 4),
+                (FIELD_CONTAINER_SLOT_1 + 4, 0xC1),
+            ]),
+        );
+        objs.spawn_container(
+            0xB2,
+            ObjectFields::from_pairs(&[(2, 0x7), (FIELD_OBJECT_ENTRY, 4496), (48, 4)]),
+        );
+        objs.spawn(
+            0xB3,
+            ObjectFields::from_pairs(&[(2, 0x3), (FIELD_OBJECT_ENTRY, 2589)]),
+        );
+        let items = Items::default();
+        let names = crate::names::NameCache::default();
+        let mut seats = |guid: u64| {
+            slot_view(
+                &objs.get(),
+                &items,
+                None,
+                crate::items::RollCatalogs::NONE,
+                &commands,
+                &names,
+                None,
+                false,
+                guid,
+            )
+            .expect("a view")
+            .occupied_seats
+        };
+        assert_eq!(seats(0xB1), Some(1));
+        assert_eq!(seats(0xB2), Some(0));
+        assert_eq!(seats(0xB3), None);
+    }
     use benilla_protocol::messages::ObjectFields;
     use bevy::ecs::system::RunSystemOnce;
 

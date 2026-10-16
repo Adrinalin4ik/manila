@@ -32,19 +32,21 @@ pub(super) async fn logon_async(
     host: &str,
     username: &str,
     password: &str,
+    locale: u32,
 ) -> Result<super::Logon> {
     let value = match std::env::var("WOW_REALMD_BUILD") {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
         Err(error) => return Err(error).context("reading WOW_REALMD_BUILD"),
     };
-    logon_with_override(host, username, password, value.as_deref()).await
+    logon_with_override(host, username, password, locale, value.as_deref()).await
 }
 
 async fn logon_with_override(
     host: &str,
     username: &str,
     password: &str,
+    locale: u32,
     value: Option<&str>,
 ) -> Result<super::Logon> {
     let pinned = build_from_override(value)?;
@@ -55,7 +57,7 @@ async fn logon_with_override(
         builds
     };
     for (index, &build) in builds.iter().enumerate() {
-        let result = super::logon_with_build(host, username, password, build).await;
+        let result = super::logon_with_build(host, username, password, build, locale).await;
         // Version rejection (with or without a patch offer) permits another build. Account errors,
         // transport failures, invalid server proofs and offline realm flags stay authoritative.
         let version_rejected = result.as_ref().err().is_some_and(|error| {

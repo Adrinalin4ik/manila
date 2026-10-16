@@ -14,7 +14,7 @@ use benilla_ui::script::UiScript;
 /// and a frame's members are the widget API.
 const STDLIB: &[&str] = &["string", "table", "math", "coroutine", "os", "io", "debug"];
 
-fn main() -> mlua::Result<()> {
+fn main() -> benilla_ui::mlua::Result<()> {
     let script = UiScript::new()?;
     // Joined Lua-side into one `name<TAB>type` string per entry: a `Vec<String>` crosses the mlua
     // boundary directly, where a `Vec<(String, String)>` does not.

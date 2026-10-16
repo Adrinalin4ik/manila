@@ -31,7 +31,8 @@ impl Loader<'_> {
             for region in &layer.children {
                 // `inherits=` may name a region template, in the frames' one registry
                 // (`0x6ee500`); a font object's name passes on to `apply_fontstring_font`.
-                let region = &self.expand_region(region);
+                let raw = region;
+                let region = &self.expand_region(raw);
                 let is_texture = region.tag.eq_ignore_ascii_case("Texture");
                 let is_fontstring = region.tag.eq_ignore_ascii_case("FontString");
                 if !is_texture && !is_fontstring {
@@ -41,7 +42,7 @@ impl Loader<'_> {
                     ));
                     continue;
                 }
-                self.build_region(region, wrapper, parent_name, &level, is_texture, dbg);
+                self.build_region(raw, region, wrapper, parent_name, &level, is_texture, dbg);
             }
         }
     }
@@ -59,7 +60,7 @@ impl Loader<'_> {
         dbg: &str,
     ) -> Option<Table> {
         let expanded = self.expand_region(raw);
-        self.build_region(&expanded, wrapper, parent_name, level, true, dbg)
+        self.build_region(raw, &expanded, wrapper, parent_name, level, true, dbg)
     }
 
     /// One `<Layer>` region on `wrapper`, created on `level` and loaded: its name (`$parent`
@@ -68,6 +69,7 @@ impl Loader<'_> {
     /// `0x771480`); an anchored region is left alone. `None` when the creation raised.
     fn build_region(
         &mut self,
+        raw: &Element,
         region: &Element,
         wrapper: &Table,
         parent_name: &str,
@@ -107,7 +109,12 @@ impl Loader<'_> {
             // Before the visual pass, so an explicit `<Color>` beats the font object's.
             self.apply_fontstring_font(region, &region_wrapper, dbg);
         }
-        self.apply_region_visual(region, &region_wrapper, is_texture, dbg);
+        let loads = if is_texture {
+            self.texture_file_loads(raw)
+        } else {
+            Vec::new()
+        };
+        self.apply_region_visual(region, &region_wrapper, is_texture, &loads, dbg);
         if let Err(e) = crate::script::implicit_creation_anchor_lua(self.lua, &region_wrapper) {
             self.report.fault(format!("{dbg}: implicit anchor: {e}"));
         }
@@ -168,7 +175,7 @@ impl Loader<'_> {
             };
             self.apply_region_layout(region, &region_wrapper, parent_name, dbg, FontAttrs::Own);
             self.apply_fontstring_font(region, &region_wrapper, dbg);
-            self.apply_region_visual(region, &region_wrapper, false, dbg);
+            self.apply_region_visual(region, &region_wrapper, false, &[], dbg);
             // The implicit creation anchor, as in `apply_layers`; an EditBox's adopt replaces it.
             if let Err(e) = crate::script::implicit_creation_anchor_lua(self.lua, &region_wrapper) {
                 self.report.fault(format!("{dbg}: implicit anchor: {e}"));
@@ -189,6 +196,15 @@ impl Loader<'_> {
                 }
             }
         }
+    }
+
+    /// `"<kind> <name>: Missing font height in <tag> element"` at severity 1 into the document's
+    /// record: `0x878e10` for a FontString (`0x77117d`), `0x87a4f0` for a Font or a SimpleHTML
+    /// element font (`0x783d9a`), with the object's name or `<unnamed>` (`0x84c7f0`) and the node's tag.
+    pub(super) fn report_missing_font_height(&mut self, kind: &str, name: &str, tag: &str) {
+        let line = format!("{kind} {name}: Missing font height in {tag} element");
+        self.report.status.report(status::WARNING, line.clone());
+        self.report.warnings.push(line);
     }
 
     /// A FontString's `nonspacewrap` and `maxLines` (`0x77103f`-`0x7710cd`), which the loader reads
@@ -288,14 +304,24 @@ impl Loader<'_> {
         region: &Element,
         region_wrapper: &Table,
         is_texture: bool,
+        file_loads: &[(String, bool)],
         dbg: &str,
     ) {
         let color = children_named(region, "Color").next().map(color_of);
         if is_texture {
-            if let Some(file) = region.attr("file") {
+            if !file_loads.is_empty() {
                 // A `<Color>` beside `file=` is discarded, not a tint: `0x76fe20` applies it in its
                 // child loop, then the file, read after (`0x770102`), overwrites the same slot.
-                self.call_region(region_wrapper, "SetTexture", file.to_string(), dbg);
+                // Each `inherits` level loads its own file with the wrap flag of its own
+                // `<TexCoords>`, fixed here: a later `SetTexCoord` leaves it, and `SetTexture`
+                // loads with it off (`0x77012d`).
+                for (file, wrap) in file_loads {
+                    if let Err(e) =
+                        crate::script::load_texture_file(self.lua, region_wrapper, file, *wrap)
+                    {
+                        self.report.fault(format!("{dbg}: region SetTexture: {e}"));
+                    }
+                }
             } else if let Some(c) = color {
                 // No file: a solid fill, an 8×8 texture in the reference, so its alpha multiplies
                 // with `SetVertexColor` rather than being replaced by it.
@@ -346,7 +372,13 @@ impl Loader<'_> {
             if let Some(text) = region.attr("text") {
                 // A global-string key, not a literal (`0x703bf0`).
                 let text = self.resolve_text(text, dbg);
-                self.call_region(region_wrapper, "SetText", Some(text), dbg);
+                // The string's own `SetText` (`0x77103a` → `0x771d80`), not Lua's, which raises on
+                // a string with no font (`0x79d7e5`); `LoadXML` sets the text before the font.
+                if let Err(e) =
+                    crate::script::region::store_text_of(self.lua, region_wrapper, Some(text))
+                {
+                    self.report.fault(format!("{dbg}: region SetText: {e}"));
+                }
             }
             self.apply_wrap_attrs(region, region_wrapper, dbg);
             if let Some(c) = color {
@@ -427,17 +459,31 @@ impl Loader<'_> {
                 }
             }
             Some(path) => {
-                // Applied directly, not through the Lua `SetFont`, which requires a height
-                // (`0x87c69c`) where XML may omit it.
+                // A file needs a first `<FontHeight>` above 0 (`0x77112f`-`0x771154`); else the
+                // load reports `0x878e10` (`0x77117d`) and returns (`0x771191`), before `outline=`
+                // and with the string's font unset.
                 let height = children_named(region, "FontHeight")
                     .next()
-                    .and_then(abs_value);
+                    .and_then(abs_value)
+                    .filter(|h| *h > 0.0);
+                let Some(height) = height else {
+                    let name = wrapper
+                        .call_method::<Option<String>>("GetName", ())
+                        .ok()
+                        .flatten();
+                    self.report_missing_font_height(
+                        "FontString",
+                        name.as_deref().unwrap_or("<unnamed>"),
+                        &region.tag,
+                    );
+                    return;
+                };
                 let outline = region.attr("outline").map(str::to_string);
                 if let Err(e) = crate::script::apply_font_parts(
                     self.lua,
                     wrapper,
                     Some(path.to_string()),
-                    height,
+                    Some(height),
                     outline,
                 ) {
                     self.report.fault(format!("{dbg}: region font attrs: {e}"));

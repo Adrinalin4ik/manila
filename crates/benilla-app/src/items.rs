@@ -9,6 +9,7 @@
 use bevy::platform::time::Instant;
 use std::time::Duration;
 
+use benilla_assets::LockRecover;
 use bevy::prelude::*;
 
 use benilla_protocol::{ItemInfo, ObjectFields};
@@ -225,6 +226,39 @@ pub(crate) fn enchant_lines(
     lines
 }
 
+/// The name behind a wrapped item's `ITEM_WRAPPED_BY` line: only an item carrying WRAPPED `0x8`
+/// takes the gift arm (`0x52b789`, `0x52e1b9`), which reads `ITEM_FIELD_GIFTCREATOR` (`0x52e32a`)
+/// and asks the name cache (`0x52e29d`). A zero guid, an unwrapped item or a name not yet
+/// answered gives `None`, and only the first two ask nothing.
+pub(crate) fn gift_creator_name(
+    fields: &ObjectFields,
+    names: &crate::names::NameCache,
+    commands: &NetCommands,
+) -> Option<String> {
+    if fields.item_flags()? & benilla_protocol::messages::ITEM_DYNFLAG_WRAPPED == 0 {
+        return None;
+    }
+    let giver = fields.item_gift_creator()?;
+    names.resolve_player(giver, commands).map(str::to_string)
+}
+
+/// The creator's guid (`ITEM_FIELD_CREATOR`, asked at `0x52e1f4`) and, for a wrapped item only,
+/// the giver's (`0x52e28d`), 0 where nothing is asked: the tooltip waits on a nonzero one whose
+/// name is not in yet.
+pub(crate) fn creator_guids(fields: &ObjectFields) -> (u64, u64) {
+    let wrapped = fields
+        .item_flags()
+        .is_some_and(|f| f & benilla_protocol::messages::ITEM_DYNFLAG_WRAPPED != 0);
+    (
+        fields.item_creator().unwrap_or(0),
+        if wrapped {
+            fields.item_gift_creator().unwrap_or(0)
+        } else {
+            0
+        },
+    )
+}
+
 /// `0x5da2c0`: already bound when `ITEM_FIELD_FLAGS & 1` is set or a live enchant slot names a
 /// binding `SpellItemEnchantment` row (`0x5da300` to `0x5da320`). The enchant cursor's bind
 /// question (gate `0x495d60`) and the tooltip's Soulbound line both read it. It reads the raw
@@ -375,6 +409,13 @@ pub(crate) struct Items {
     /// when the item is set up (`0x5d8440`), counting seconds from then; they live as long as the
     /// player, here the session. `SMSG_ITEM_TIME_UPDATE` has no such list.
     pending_enchant_times: Vec<(u64, u32, u32)>,
+    /// `(guid, entry)` of our items whose entry changed to one the cache missed, each waiting on
+    /// the answer with the entry watcher's callback `0x5d96b0`, in request order.
+    entry_waiters: Vec<(u64, u32)>,
+    /// The entry each trade getter call that missed the cache asked for, in call order: one
+    /// callback `0x4c0340` per call, with no dedupe (`0x4c017f`, `0x4c0582`). A lookup registers
+    /// it, so it is locked like the in-flight asks and registering takes `&self`.
+    trade_waiters: std::sync::Mutex<Vec<u32>>,
 }
 
 impl Items {
@@ -383,6 +424,41 @@ impl Items {
     pub(crate) fn queue_enchant_time(&mut self, guid: u64, slot: u32, seconds: u32) {
         debug!("enchant timer: item {guid:#x} not held — queued for its arrival");
         self.pending_enchant_times.push((guid, slot, seconds));
+    }
+
+    /// An entry change asked for the record of `entry` with the callback `0x5d96b0`.
+    pub(crate) fn wait_for_entry(&mut self, guid: u64, entry: u32) {
+        self.entry_waiters.push((guid, entry));
+    }
+
+    /// The answer for `entry` landed: the items whose entry change waited on it, in request order.
+    pub(crate) fn take_entry_waiters(&mut self, entry: u32) -> Vec<u64> {
+        let mut taken = Vec::new();
+        self.entry_waiters.retain(|&(g, e)| {
+            let hit = e == entry;
+            if hit {
+                taken.push(g);
+            }
+            !hit
+        });
+        taken
+    }
+
+    /// A trade getter missed the cache on `entry` and asked with the callback `0x4c0340`.
+    pub(crate) fn wait_for_trade_record(&self, entry: u32) {
+        self.trade_waiters.lock_recover().push(entry);
+    }
+
+    /// The answer for `entry` landed, or refused it: how many trade getter calls were waiting on
+    /// it, whose callbacks are spent either way.
+    pub(crate) fn take_trade_waiters(&mut self, entry: u32) -> usize {
+        let waiters = self
+            .trade_waiters
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner());
+        let before = waiters.len();
+        waiters.retain(|&e| e != entry);
+        before - waiters.len()
     }
 
     /// The item `guid` arrived: its queued enchant updates in arrival order, unlinked (`0x5ebde0`).
@@ -430,6 +506,19 @@ impl Items {
         })
     }
 
+    /// The display id a worn `entry` draws with, asked template-only: `None` while the answer is
+    /// pending, `Some(0)` once the server refused the entry. The reference holds the model update
+    /// while `[player+0x1d20]` counts a pending ask (`0x5ec8f0`, `0x5ed771`); the refusal runs the
+    /// callback with status 0 (the item cache's response `0x555140` -> `0x55bdb0`, refusal at
+    /// `0x55bdf5`, `push 0` at `0x55be9f`, callback at `0x55bea8`), `0x5ed880` decrements without
+    /// applying a display (`0x5ed8c0`), and the player is drawn without that slot.
+    pub(crate) fn worn_display(&self, entry: u32, commands: &NetCommands) -> Option<u32> {
+        match self.held(entry, commands) {
+            Some(t) => Some(t.display_info_id),
+            None => self.template_answered_unknown(entry).then_some(0),
+        }
+    }
+
     /// [`Self::template`] without the ask: the cached record only.
     pub(crate) fn template_cached(&self, entry: u32) -> Option<&ItemInfo> {
         self.templates.get(entry)
@@ -474,6 +563,11 @@ impl Items {
     /// item objects and their countdowns go with the index's sweep.
     pub(crate) fn clear_session(&mut self) {
         self.pending_enchant_times.clear();
+        self.entry_waiters.clear();
+        self.trade_waiters
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         self.templates.clear_pending();
     }
 }
@@ -547,6 +641,14 @@ pub(crate) fn test_spawn_item(
     let e = world
         .spawn((Guid(guid), ObjectStore(fields), ItemObject { container }))
         .id();
+    world.resource_mut::<GuidIndex>().0.insert(guid, e);
+    e
+}
+
+/// Any streamed object, straight into a test world: its guid indexed and its descriptor stored.
+#[cfg(test)]
+pub(crate) fn test_spawn_object(world: &mut World, guid: u64, fields: ObjectFields) -> Entity {
+    let e = world.spawn((Guid(guid), ObjectStore(fields))).id();
     world.resource_mut::<GuidIndex>().0.insert(guid, e);
     e
 }
@@ -1006,6 +1108,35 @@ mod tests {
     /// One item object with the given `ITEM_FIELD_FLAGS` and enchant slot 0.
     fn item(flags: u32, slot0: u32) -> ObjectFields {
         ObjectFields::from_pairs(&[(21, flags), (22, slot0)])
+    }
+
+    /// The gift arm (`0x52e1b9`) asks the name cache for the gift creator of a wrapped item and no
+    /// other: an unwrapped item, a zero guid and a name still in flight add no name.
+    #[test]
+    fn only_a_wrapped_item_names_its_gift_creator() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let cmds = NetCommands(tx);
+        let mut names = crate::names::NameCache::default();
+        let giver =
+            |flags: u32, guid: u32| ObjectFields::from_pairs(&[(21, flags), (12, guid), (13, 0)]);
+        // Unwrapped, even with a guid set: no ask, no name.
+        assert_eq!(gift_creator_name(&giver(0, 5), &names, &cmds), None);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        // Wrapped, no giver: nothing to ask.
+        assert_eq!(gift_creator_name(&giver(0x8, 0), &names, &cmds), None);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        // Wrapped, the name in flight: asked once, no name yet.
+        assert_eq!(gift_creator_name(&giver(0x8, 5), &names, &cmds), None);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::NameQuery { guid: 5 })
+        ));
+        // Answered.
+        names.insert_player(5, "Santa".to_string(), None);
+        assert_eq!(
+            gift_creator_name(&giver(0x8, 5), &names, &cmds).as_deref(),
+            Some("Santa")
+        );
     }
 
     /// `0x5da2c0`: the Firestone shape binds and prints no line, so a predicate read off

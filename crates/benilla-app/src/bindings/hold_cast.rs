@@ -223,23 +223,28 @@ pub(super) fn tick(
                 }
             }
         }
-        let earlier = script.take_script_calls();
+        let earlier = script.take_queued_calls();
         for down in [false, true] {
             if let Err(e) = script.execute_binding(&h.command, down) {
                 warn!("bindings({}): hold repeat: {e}", h.command);
             }
         }
-        let made = script.take_script_calls();
+        // Taken with the input events each call was made under, which the protected-call gate
+        // reads, so a repeat keeps its key press's.
+        let made = script.take_queued_calls();
         let used = match made.as_slice() {
             [] => None,
             // A press carries the item locks it read, so it is cloned, not copied.
-            [ScriptCall::UseAction(u)] => Some(u.clone()),
+            [benilla_ui::script::QueuedCall {
+                call: ScriptCall::UseAction(u),
+                input,
+            }] => Some((u.clone(), *input)),
             _ => {
                 h.eligible = false;
                 None
             }
         };
-        let keep = used.filter(|u| {
+        let keep = used.filter(|(u, _)| {
             h.action = Some(u.action);
             match gate.verdict(script, u.action, now) {
                 Verdict::Go => true,
@@ -252,12 +257,15 @@ pub(super) fn tick(
         });
         // Queue order: what was waiting, then this repeat's cast.
         let kept = keep.is_some();
-        if let Some(u) = keep {
-            script.requeue_script_calls(vec![ScriptCall::UseAction(u)]);
+        if let Some((u, input)) = keep {
+            script.requeue_calls(vec![benilla_ui::script::QueuedCall {
+                call: ScriptCall::UseAction(u),
+                input,
+            }]);
             h.fired = true;
             h.last = Some(now);
         }
-        script.requeue_script_calls(earlier);
+        script.requeue_calls(earlier);
         if kept {
             // One cast per pass: the next latch would only meet this one's in-flight guard.
             break;
@@ -267,13 +275,13 @@ pub(super) fn tick(
 
 /// Remove the first queued `UseAction` of `action`: a released latch's stock cast.
 fn drop_one_use(script: &mut UiScript, action: u32) {
-    let mut calls = script.take_script_calls();
+    let mut calls = script.take_queued_calls();
     if let Some(i) = calls.iter().position(
-        |c| matches!(c, ScriptCall::UseAction(ActionUse { action: a, .. }) if *a == action),
+        |c| matches!(&c.call, ScriptCall::UseAction(ActionUse { action: a, .. }) if *a == action),
     ) {
         calls.remove(i);
     }
-    script.requeue_script_calls(calls);
+    script.requeue_calls(calls);
 }
 
 #[cfg(test)]

@@ -44,6 +44,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+      - name: vm-parity
+        run: cargo test -p benilla-ui --features benilla-vm --test vm_parity
       - name: doc-links
         run: scripts/doc-links.py
       - name: message-catalog
@@ -58,5 +60,7 @@ jobs:
         run: scripts/sync-reference.py benilla-re --check
       - name: pass-span-lint
         run: scripts/pass-span-lint.py
+      - name: player-clippy
+        run: cargo clippy -p benilla -p benilla-app --no-default-features -- -D warnings
       - name: player-tests
         run: cargo test -p benilla-formats -p benilla-app --no-default-features --lib

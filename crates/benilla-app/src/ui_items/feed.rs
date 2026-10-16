@@ -20,12 +20,17 @@ use super::{
     KEYRING_SLOTS, PACK_SLOTS,
 };
 
+/// The doll's equipment slots, 0-based descriptor slots 0..=18 (live-API ids 1..=19).
+const WORN_SLOTS: u8 = 19;
+
 /// What the container feed last pushed, for per-bag change events.
 #[derive(Default)]
 pub(crate) struct FeedMemory {
     pushed: HashMap<i64, ContainerState>,
     /// The last `HasKey()` pushed, so its flip is logged once.
     had_key: bool,
+    /// The worn items' cooldowns last pushed, by live-API slot id.
+    worn_cooldowns: HashMap<usize, (i64, u32, bool)>,
     /// Counters for the stores whose lazy resolves make `is_changed` always true.
     items_templates: gate::Watch,
     cooldown_epoch: gate::Watch,
@@ -407,7 +412,7 @@ pub(super) fn feed_item_stats(
     commands: Res<NetCommands>,
     spells: Option<Res<crate::ui_action::Spells>>,
     // The caster the `$`-tokens read: its spell modifiers and its skills.
-    (spell_mods, self_q, locks): CasterReads,
+    (spell_mods, self_q): CasterReads,
     skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
     // The `$z` token: the bind point's area (`SMSG_BINDPOINTUPDATE`), named through `AreaTable`.
     home_bind: Option<Res<crate::net::HomeBind>>,
@@ -484,7 +489,7 @@ pub(super) fn feed_item_stats(
                 } else {
                     mod_sensitive.remove(&id);
                 }
-                let mut view = template_view(
+                let view = template_view(
                     &t,
                     spell_res,
                     Some(&spell_mods),
@@ -498,9 +503,6 @@ pub(super) fn feed_item_stats(
                     icons.as_deref(),
                     &get,
                 );
-                // A lock id with no `Lock.dbc` row is no lock to the builder (`0x52bd6b`..
-                // `0x52bda9`); with the catalog unloaded the id stands.
-                view.lock_id = known_lock_id(view.lock_id, locks.as_deref().map(|l| &l.0));
                 Some((id, view))
             })
             .collect()
@@ -510,23 +512,11 @@ pub(super) fn feed_item_stats(
     }
 }
 
-/// What the `$`-tokens read of the caster, and the `Lock.dbc` the LOCKED line needs a row from
-/// (`0x52bd6b`).
+/// What the `$`-tokens read of the caster.
 type CasterReads<'w, 's> = (
     Res<'w, crate::spell::SpellModifiers>,
     Query<'w, 's, &'static ObjectStore, With<SelfPlayer>>,
-    Option<Res<'w, crate::go_templates::Locks>>,
 );
-
-/// The template's lock id when `Lock.dbc` holds its row, else 0: the builder's LOCKED line starts
-/// from that row (`0x52bd57`..`0x52bd76`), and a missing one is no lock. With the catalog not
-/// loaded the id stands.
-fn known_lock_id(lock_id: u32, locks: Option<&benilla_formats::LockCatalog>) -> u32 {
-    match locks {
-        Some(l) if l.slots(lock_id).is_none() => 0,
-        _ => lock_id,
-    }
-}
 
 /// The player state the tooltip's red requirement lines check: level, class, race, skills,
 /// proficiencies (`SMSG_SET_PROFICIENCY`) and reputation ranks (the DBC base plus the
@@ -685,7 +675,7 @@ fn resolve_slot(
         fields
             .item_creator()
             .filter(|&g| g != 0)
-            .and_then(|g| names.resolve(g, commands).map(str::to_string)),
+            .and_then(|g| names.resolve_player(g, commands).map(str::to_string)),
         // The tooltip's unlocked (0x4) and wrapped (0x8) bits.
         fields.item_flags().unwrap_or(0),
         // `0x5da2c0`: soulbound, or carrying a binding enchant, off the raw descriptor.
@@ -706,6 +696,15 @@ fn resolve_slot(
             rolls.enchants,
         ),
     );
+    let gift_creator = crate::items::gift_creator_name(fields, names, commands);
+    let (creator_guid, gift_creator_guid) = crate::items::creator_guids(fields);
+    // A container's filled seats, which `ClickTradeButton` counts (`0x4bff50`).
+    let occupied_seats = fields.is_container().then(|| {
+        let n = fields.container_num_slots().unwrap_or(0).min(36) as u8;
+        (0..n)
+            .filter(|&j| fields.container_slot(j).is_some_and(|g| g != 0))
+            .count() as u32
+    });
     // The guid rides every shape, so the slot's lock reads from its first push.
     if entry == 0 {
         return Some(ContainerSlot {
@@ -723,8 +722,12 @@ fn resolve_slot(
             count,
             readable,
             creator,
+            gift_creator,
+            creator_guid,
+            gift_creator_guid,
             flags,
             already_bound,
+            occupied_seats,
             enchants: enchant_lines,
             duration_ms,
             ..Default::default()
@@ -768,20 +771,86 @@ fn resolve_slot(
         guid,
         readable,
         creator,
+        gift_creator,
+        creator_guid,
+        gift_creator_guid,
         flags,
         already_bound,
+        occupied_seats,
         enchants: enchant_lines,
         duration_ms,
         equip_slots: find_equip_slot(t.inventory_type, has_relic_slot),
         bar_placeable: t.placeable_on_action_bar(),
         consumable: t.is_consumable(),
-        cooldown: t.use_spell.and_then(|u| {
-            let sd = spells.and_then(|s| s.get(u.spell_id));
-            cooldowns
-                .info_item(u.spell_id, entry, u.category, sd, now)
-                .ui_triple(now, ui_now)
-        }),
+        spell_0: t.has_spell_0(),
+        cooldown: use_cooldown(
+            &t,
+            entry,
+            fields.item_spell_charges(0).unwrap_or(0),
+            cooldowns,
+            spells,
+            now,
+            ui_now,
+        ),
     })
+}
+
+/// What the reference's item query `0x6e2ed0` hands the getters and tooltip setters, `(start_ms on
+/// the GetTime clock, duration_ms, enabled)`, for the item copy holding `charges_left`
+/// (`ITEM_FIELD_SPELL_CHARGES[0]`): by the entry and its first on-use spell, wherever the copy
+/// sits.
+///
+/// `None` is the all-zero answer, enable included: a copy with no charge left on a charged
+/// template, which skips the query (`0x5347e3`, `0x53318a`, `0x4f9a48`, `0x4c8b55`), and a
+/// template with no on-use spell, which the query leaves untouched (`0x6e2f34`). A cold on-use
+/// spell answers enabled (`0x6e1406`).
+fn use_cooldown(
+    t: &ItemInfo,
+    entry: u32,
+    charges_left: i32,
+    cooldowns: &crate::spell::Cooldowns,
+    spells: Option<&benilla_formats::SpellCatalog>,
+    now: bevy::platform::time::Instant,
+    ui_now: f64,
+) -> Option<(i64, u32, bool)> {
+    if t.charges_depleted(charges_left) {
+        return None;
+    }
+    let u = t.use_spell?;
+    let sd = spells.and_then(|s| s.get(u.spell_id));
+    Some(
+        cooldowns
+            .info_item(u.spell_id, entry, u.category, sd, now)
+            .ui_triple(now, ui_now)
+            .unwrap_or((0, 0, true)),
+    )
+}
+
+/// The item query's answer for each worn item by live-API slot id (the descriptor slot plus one),
+/// for the tooltip's ITEM_COOLDOWN_TIME line and `GetInventoryItemCooldown`; a slot the query
+/// answers zeros for has no entry ([`use_cooldown`]). The doll snapshot does not carry it: a cooldown moves no
+/// inventory slot, and that snapshot's change fires `UNIT_INVENTORY_CHANGED`.
+fn worn_cooldowns(
+    store: &ObjectStore,
+    objects: &Objects,
+    items: &Items,
+    commands: &NetCommands,
+    cooldowns: &crate::spell::Cooldowns,
+    spells: Option<&benilla_formats::SpellCatalog>,
+    now: bevy::platform::time::Instant,
+    ui_now: f64,
+) -> HashMap<usize, (i64, u32, bool)> {
+    (0..WORN_SLOTS)
+        .filter_map(|slot0| {
+            let guid = store.0.player_inv_slot(slot0).filter(|&g| g != 0)?;
+            let fields = objects.object(guid)?;
+            let entry = fields.object_entry()?;
+            let t = items.template(entry, guid, commands)?;
+            let charges_left = fields.item_spell_charges(0).unwrap_or(0);
+            let triple = use_cooldown(t, entry, charges_left, cooldowns, spells, now, ui_now)?;
+            Some((usize::from(slot0) + 1, triple))
+        })
+        .collect()
 }
 
 /// Reason 16's `%s`, the target bag's `BagFamily` name ("Only Arrows can be placed in that."), or
@@ -1208,6 +1277,23 @@ pub(crate) fn feed_containers(
             memory.had_key = key;
         }
         script.set_has_key(key);
+
+        // The worn items' use cooldowns, for the tooltip line; no event rides them.
+        let worn = worn_cooldowns(
+            store,
+            &inv.objects,
+            &items,
+            &commands,
+            &cooldowns,
+            spell_catalog,
+            now,
+            ui_now,
+        );
+        if worn != memory.worn_cooldowns {
+            gate.audit("feed_containers", "the worn items' cooldowns");
+            script.set_worn_cooldowns(worn.clone());
+            memory.worn_cooldowns = worn;
+        }
     }
 
     if let Some(t0) = cost_t0 {
@@ -1396,23 +1482,6 @@ mod tests {
         BANK_CONTAINER, BANK_SLOTS,
     };
 
-    /// A lock id with no `Lock.dbc` row is no lock to the item builder (`0x52bd6b`..`0x52bda9`).
-    #[test]
-    fn a_lock_id_without_a_row_is_no_lock() {
-        use benilla_formats::{LockCatalog, LockSlot, LOCK_KEY_ITEM};
-        let mut slots = [LockSlot::default(); benilla_formats::MAX_LOCK_SLOTS];
-        slots[0].key_type = LOCK_KEY_ITEM;
-        let catalog = LockCatalog::from_rows([(7, slots)]);
-        assert_eq!(super::known_lock_id(7, Some(&catalog)), 7);
-        assert_eq!(super::known_lock_id(8, Some(&catalog)), 0);
-        assert_eq!(
-            super::known_lock_id(8, None),
-            8,
-            "no catalog, the id stands"
-        );
-        assert_eq!(super::known_lock_id(0, Some(&catalog)), 0);
-    }
-
     /// The view carries what `GetTradeSkillItemStats` reads beyond the tooltip: the item level, and
     /// the five spell slots whose id names a `Spell.dbc` row with their charges, in slot order.
     #[test]
@@ -1532,6 +1601,245 @@ mod tests {
         // auto-equip's unlock reads the other (`0x5e1704`).
         assert_eq!((sword.guid, sword.item_class), (0xA1, Some(sword_class)));
         assert_eq!((pending.guid, pending.item_class), (0xA3, None));
+    }
+
+    /// A bag slot holding a container says how many of its seats are filled, which
+    /// `ClickTradeButton` refuses a bag on (`0x4bff50`); any other item says nothing.
+    #[test]
+    fn a_resolved_bag_counts_its_filled_seats() {
+        use crate::items::{test_template, Items, RollCatalogs};
+        use crate::names::NameCache;
+        use crate::net::NetCommands;
+        use crate::ui_items::TestObjects;
+        use benilla_protocol::field::{FIELD_CONTAINER_SLOT_1, FIELD_OBJECT_ENTRY};
+        use benilla_protocol::ObjectFields;
+
+        // `OBJECT_FIELD_TYPE` item or container, `CONTAINER_FIELD_NUM_SLOTS`.
+        const TYPE: u16 = 2;
+        const NUM_SLOTS: u16 = 48;
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let commands = NetCommands(tx);
+        let mut objs = TestObjects::new();
+        let seat = |j: u16, g: u64| {
+            [
+                (FIELD_CONTAINER_SLOT_1 + 2 * j, g as u32),
+                (FIELD_CONTAINER_SLOT_1 + 2 * j + 1, 0),
+            ]
+        };
+        let bag = |contents: &[(u16, u64)]| {
+            let mut pairs = vec![(TYPE, 0x7), (FIELD_OBJECT_ENTRY, 4496), (NUM_SLOTS, 6)];
+            pairs.extend(contents.iter().flat_map(|&(j, g)| seat(j, g)));
+            ObjectFields::from_pairs(&pairs)
+        };
+        objs.spawn(0xB1, bag(&[(0, 0xC1), (4, 0xC2)]));
+        objs.spawn(0xB2, bag(&[]));
+        objs.spawn(
+            0xB3,
+            ObjectFields::from_pairs(&[(TYPE, 0x3), (FIELD_OBJECT_ENTRY, 4496)]),
+        );
+        let mut items = Items::default();
+        items.insert_template(4496, Some(test_template("Small Brown Pouch")));
+        let names = NameCache::default();
+        let cooldowns = crate::spell::Cooldowns::default();
+        let mut petitions = crate::ui_petition::PetitionState::default();
+        let mut seats = |guid: u64| {
+            resolve_slot(
+                guid,
+                &objs.get(),
+                &items,
+                None,
+                RollCatalogs::NONE,
+                &commands,
+                &cooldowns,
+                None,
+                &names,
+                &mut petitions,
+                std::time::Instant::now(),
+                0.0,
+                false,
+            )
+            .expect("an occupied slot")
+            .occupied_seats
+        };
+        assert_eq!(seats(0xB1), Some(2));
+        assert_eq!(seats(0xB2), Some(0));
+        assert_eq!(seats(0xB3), None, "not a container");
+    }
+
+    /// A worn item answers the item cooldown query by its entry (`0x6e2ed0`): its answer is pushed
+    /// under the live-API slot id, one past the descriptor slot. An on-use item with none running
+    /// answers cold and enabled (`0x6e1406`); one with no use spell is absent, the query leaving
+    /// its zeros (`0x6e2f34`).
+    #[test]
+    fn a_worn_item_on_cooldown_is_keyed_by_its_live_slot_id() {
+        use super::worn_cooldowns;
+        use crate::items::{test_template, Items};
+        use crate::net::{NetCommands, ObjectStore};
+        use crate::ui_items::TestObjects;
+        use benilla_protocol::field::{FIELD_OBJECT_ENTRY, FIELD_PLAYER_INV_SLOT_HEAD};
+        use benilla_protocol::messages::ItemUseSpell;
+        use benilla_protocol::ObjectFields;
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let commands = NetCommands(tx);
+        let mut objs = TestObjects::new();
+        for (guid, entry) in [(0xA1_u64, 2000_u32), (0xA2, 2001), (0xA3, 2002)] {
+            objs.spawn(
+                guid,
+                ObjectFields::from_pairs(&[(FIELD_OBJECT_ENTRY, entry)]),
+            );
+        }
+        let use_spell = |spell_id| ItemUseSpell {
+            spell_id,
+            cooldown_ms: 120_000,
+            category: 0,
+            category_cooldown_ms: 0,
+        };
+        let mut items = Items::default();
+        for (entry, spell) in [
+            (2000, Some(use_spell(9000))),
+            (2001, Some(use_spell(9001))),
+            (2002, None),
+        ] {
+            let mut t = test_template("Trinket");
+            t.use_spell = spell;
+            items.insert_template(entry, Some(t));
+        }
+        let now = std::time::Instant::now();
+        let mut cooldowns = crate::spell::Cooldowns::default();
+        // Only 2000 was used; 2001 has a use spell and no cooldown, 2002 has no use spell.
+        cooldowns.start_item(2000, &use_spell(9000), None, now);
+        // Descriptor slots 12 (the trinket), 13 and 3 hold the three items.
+        let slot = |s: u16, guid: u64| {
+            [
+                (FIELD_PLAYER_INV_SLOT_HEAD + 2 * s, guid as u32),
+                (FIELD_PLAYER_INV_SLOT_HEAD + 2 * s + 1, 0),
+            ]
+        };
+        let pairs: Vec<(u16, u32)> = [slot(12, 0xA1), slot(13, 0xA2), slot(3, 0xA3)]
+            .into_iter()
+            .flatten()
+            .collect();
+        let store = ObjectStore(ObjectFields::from_pairs(&pairs));
+
+        let worn = worn_cooldowns(
+            &store,
+            &objs.get(),
+            &items,
+            &commands,
+            &cooldowns,
+            None,
+            now,
+            50.0,
+        );
+        assert_eq!(
+            worn,
+            HashMap::from([(13, (50_000, 120_000, true)), (14, (0, 0, true))]),
+            "descriptor slot 12 is live id 13; 2001 is cold, enabled; 2002 has no use spell"
+        );
+    }
+
+    /// A charged template whose copy has no charge left skips the cooldown query, in a bag and on
+    /// the doll alike (`0x5347e3`-`0x5347f4`, `0x53318a`-`0x53319b`, `0x4f9a48`, `0x4c8b55`):
+    /// the test is `template+0x144 != 0` (-1 included) against `ITEM_FIELD_SPELL_CHARGES[0] == 0`.
+    #[test]
+    fn a_charged_item_with_no_charge_left_has_no_cooldown() {
+        use super::worn_cooldowns;
+        use crate::items::{test_template, Items, RollCatalogs};
+        use crate::names::NameCache;
+        use crate::net::{NetCommands, ObjectStore};
+        use crate::ui_items::TestObjects;
+        use benilla_protocol::field::{
+            FIELD_ITEM_SPELL_CHARGES, FIELD_OBJECT_ENTRY, FIELD_PLAYER_INV_SLOT_HEAD,
+        };
+        use benilla_protocol::messages::ItemUseSpell;
+        use benilla_protocol::ObjectFields;
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let commands = NetCommands(tx);
+        let use_spell = |spell_id| ItemUseSpell {
+            spell_id,
+            cooldown_ms: 120_000,
+            category: 0,
+            category_cooldown_ms: 0,
+        };
+        // (guid, entry, template charges, the copy's charges): five cases of the one test.
+        let cases: [(u64, u32, i32, i32); 5] = [
+            (0xD1, 3000, 5, 0),   // charged, spent: no cooldown
+            (0xD2, 3001, 5, 3),   // charged, 3 left: the cooldown
+            (0xD3, 3002, -1, 0),  // unlimited template, copy at 0: no cooldown (`!= 0`, not finite)
+            (0xD4, 3003, 0, 0),   // uncharged template: the cooldown
+            (0xD5, 3004, -1, -1), // unlimited and unspent: the cooldown
+        ];
+        let mut objs = TestObjects::new();
+        let mut items = Items::default();
+        let now = std::time::Instant::now();
+        let mut cooldowns = crate::spell::Cooldowns::default();
+        for &(guid, entry, template_charges, copy_charges) in &cases {
+            objs.spawn(
+                guid,
+                ObjectFields::from_pairs(&[
+                    (FIELD_OBJECT_ENTRY, entry),
+                    (FIELD_ITEM_SPELL_CHARGES, copy_charges as u32),
+                ]),
+            );
+            let mut t = test_template("Charged");
+            t.use_spell = Some(use_spell(entry + 6000));
+            t.spell_charges_0 = template_charges;
+            items.insert_template(entry, Some(t));
+            cooldowns.start_item(entry, &use_spell(entry + 6000), None, now);
+        }
+        let running = Some((50_000, 120_000, true));
+        let expected = [None, running, None, running, running];
+
+        let names = NameCache::default();
+        let mut petitions = crate::ui_petition::PetitionState::default();
+        for (&(guid, ..), want) in cases.iter().zip(expected) {
+            let slot = resolve_slot(
+                guid,
+                &objs.get(),
+                &items,
+                None,
+                RollCatalogs::NONE,
+                &commands,
+                &cooldowns,
+                None,
+                &names,
+                &mut petitions,
+                now,
+                50.0,
+                false,
+            )
+            .expect("an occupied slot");
+            assert_eq!(slot.cooldown, want, "bag slot of {guid:#x}");
+        }
+
+        // The same five on the doll, descriptor slots 12..=16.
+        let pairs: Vec<(u16, u32)> = cases
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &(guid, ..))| {
+                let base = FIELD_PLAYER_INV_SLOT_HEAD + 2 * (12 + i as u16);
+                [(base, guid as u32), (base + 1, 0)]
+            })
+            .collect();
+        let store = ObjectStore(ObjectFields::from_pairs(&pairs));
+        let worn = worn_cooldowns(
+            &store,
+            &objs.get(),
+            &items,
+            &commands,
+            &cooldowns,
+            None,
+            now,
+            50.0,
+        );
+        let want: HashMap<usize, (i64, u32, bool)> = expected
+            .iter()
+            .enumerate()
+            .filter_map(|(i, w)| w.map(|w| (13 + i, w)))
+            .collect();
+        assert_eq!(worn, want);
     }
 
     /// No bags and an empty vault.

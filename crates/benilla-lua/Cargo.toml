@@ -1,0 +1,18 @@
+[package]
+name = "benilla-lua"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Experimental: a Lua interpreter for exactly the 1.12.1 client's Lua 5.0 dialect, with its state as plain Rust data"
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+# The oracle: the VM benilla runs today, the workspace's patched 5.1 that accepts the 1.12 grammar.
+mlua = { version = "0.11", features = ["lua51", "vendored"] }
+benilla-formats = { path = "../benilla-formats" }
+roxmltree = "0.20"
+benilla-ui = { path = "../benilla-ui" }
