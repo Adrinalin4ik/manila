@@ -104,6 +104,7 @@ pub(crate) struct Scene<'w, 's> {
     go_templates: ResMut<'w, GameObjectTemplates>,
     death_net: ResMut<'w, crate::death::DeathNet>,
     group: ResMut<'w, crate::ui_party::GroupState>,
+    pet_bar: Option<Res<'w, crate::ui_pet::PetBar>>,
 }
 
 /// The item watchers' reads of the scene ([`crate::item_watch::Watch`]).
@@ -141,7 +142,23 @@ fn notify_values(sc: &mut Scene, guid: u64, edges: &[(u16, u32, u32)]) {
     let Some(kind) = fields.created_as() else {
         return;
     };
-    let fired = crate::field_watch::values(sc.self_guid.0, guid, kind, fields, edges);
+    let me = sc.self_guid.0;
+    let (names, index, stores) = (&sc.names, &sc.index, &sc.stores);
+    let others = || {
+        let units = index.0.iter().filter_map(|(&g, &e)| {
+            let s = stores.get(e).ok()?;
+            s.is_unit().then_some((g, &s.0))
+        });
+        me.map(|me| crate::field_watch::reaction_sweep(me, units))
+            .unwrap_or_default()
+    };
+    let around = crate::field_watch::Around {
+        me,
+        creature_cached: &|entry| names.creature_record(entry).is_some(),
+        others: &others,
+        pet_bar: sc.pet_bar.as_ref().map_or(0, |bar| bar.spells.pet_guid),
+    };
+    let fired = crate::field_watch::values(&around, guid, kind, fields, edges);
     let notices = item_watch(&sc.index, &sc.stores, &sc.self_guid, &sc.items)
         .values(guid, kind, fields, edges);
     // An entry change that missed the cache waits on the answer (`0x5d9652` asks with `0x5d96b0`).
@@ -177,6 +194,11 @@ fn on_object_create(In(ev): In<SessionEvent>, mut sc: Scene) {
     } = ev
     {
         crate::death::net::note_corpse(guid, kind, &fields, &sc.self_guid, &mut sc.death_net);
+        let other_player =
+            (kind == EntityKind::Player && sc.self_guid.0 != Some(guid)).then(|| fields.clone());
+        // A player's first create runs `PostInit` (`0x5debe0`); a create of one already held runs
+        // its `PostUpdate` (`0x5dec90`) instead.
+        let first_player = kind == EntityKind::Player && !sc.index.0.contains_key(&guid);
         let edges = object_create(
             guid,
             kind,
@@ -200,7 +222,35 @@ fn on_object_create(In(ev): In<SessionEvent>, mut sc: Scene) {
             &sc.net,
         );
         notify_values(&mut sc, guid, &edges);
+        // `PostInit`'s guild tag (`0x5dec19`), ahead of its party record (`0x5dec5f`).
+        if first_player {
+            sc.field_notices
+                .write_batch(crate::field_watch::guild_tag(guid));
+        }
+        if let Some(fields) = other_player {
+            compare_party_record(&mut sc, guid, &fields);
+        }
     }
+}
+
+/// `CGPlayer_C::ComparePartyRecord` (`0x5f0b80`), which another player's `PostInit` runs on its
+/// create (`0x5dec5f`, the active player skipped at `0x5dec48`-`0x5dec5b`) and its reactivation
+/// on a re-create (`0x5decb7`): the stored party or raid record, an empty one off the roster
+/// (`0x5f0bfe`), against a live one built off the descriptor and the held pet (`0x5f0c0b`), the
+/// difference signalled through `0x5e5720` (`0x5f0c42`). Neither record is written back.
+fn compare_party_record(sc: &mut Scene, guid: u64, fields: &ObjectFields) {
+    let old = sc.group.stats.get(&guid).cloned().unwrap_or_default();
+    let pet_guid = fields.unit_pet_guid();
+    let pet = pet_guid
+        .and_then(|g| sc.index.0.get(&g))
+        .and_then(|&e| sc.stores.get(e).ok());
+    let pet_name = pet_guid
+        .zip(pet)
+        .and_then(|(g, p)| sc.names.peek_unit(g, Some(p)));
+    let mut live = old.clone();
+    live.snapshot_descriptor(fields, pet.map(|p| &p.0), pet_name);
+    let notices = crate::ui_party::record_notices(guid, &old, &live);
+    sc.field_notices.write_batch(notices);
 }
 
 /// Items: a descriptor-only create, `SMSG_ITEM_QUERY_SINGLE_RESPONSE` (a miss is cached as `None`
@@ -1488,9 +1538,10 @@ mod tests {
                 create(MOB, EntityKind::Unit, &[(STAT0, 5)]),
             ],
         );
-        assert!(
-            drain(world).is_empty(),
-            "a first create runs no notify pass"
+        assert_eq!(
+            drain(world),
+            crate::field_watch::guild_tag(ME),
+            "a first create runs no notify pass, only a player's own `PostInit`"
         );
         super::super::handlers::dispatch(
             world,
@@ -1514,6 +1565,80 @@ mod tests {
                 FieldNotice::Unit { guid: ME, id: 144 },
                 FieldNotice::Player { id: 189 },
             ]
+        );
+    }
+
+    /// A player's first create runs its guild tag (`0x5dec19`), a re-create does not; another
+    /// player's create, first or again, then compares its party record with its descriptor and
+    /// signals the difference, writing nothing back; our own create compares nothing.
+    #[test]
+    fn another_players_create_signals_its_record_against_its_descriptor() {
+        use crate::field_watch::FieldNotice;
+        use benilla_protocol::messages::{ObjectType, PartyMemberStatsInfo};
+        const ME: u64 = 0x07;
+        const MATE: u64 = 0x2001;
+        const HEALTH: u16 = 22;
+        const MAXHEALTH: u16 = 28;
+        const LEVEL: u16 = 34;
+        let create = |guid: u64, pairs: &[(u16, u32)]| SessionEvent::ObjectCreate {
+            guid,
+            kind: EntityKind::Player,
+            display_id: None,
+            position: [0.0; 3],
+            orientation: 0.0,
+            scale: 1.0,
+            speeds: None,
+            mover: None,
+            transport_progress: None,
+            transport: None,
+            spline: None,
+            fields: ObjectFields::from_pairs(pairs).into_created(ObjectType::Player),
+        };
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let world = app.world_mut();
+        world.resource_mut::<SelfGuid>().0 = Some(ME);
+        let record = PartyMemberStatsInfo {
+            status: Some(1),
+            cur_hp: Some(100),
+            max_hp: Some(100),
+            power_type: Some(0),
+            cur_power: Some(0),
+            max_power: Some(0),
+            level: Some(60),
+            auras: Some(Vec::new()),
+            auras_negative: Some(Vec::new()),
+            ..Default::default()
+        };
+        world
+            .resource_mut::<crate::ui_party::GroupState>()
+            .stats
+            .insert(MATE, record.clone());
+        let drain = |world: &mut World| -> Vec<FieldNotice> {
+            world
+                .resource_mut::<Messages<FieldNotice>>()
+                .drain()
+                .collect()
+        };
+        let mate = [(HEALTH, 100), (MAXHEALTH, 200), (LEVEL, 60)];
+        super::super::handlers::dispatch(world, vec![create(MATE, &mate)]);
+        let signal = |id| FieldNotice::Signal { guid: MATE, id };
+        assert_eq!(
+            drain(world),
+            [FieldNotice::Global { id: 376 }, signal(345), signal(22)],
+            "the guild tag, then the maximum differs"
+        );
+        // Written back nothing, so a re-create of the same descriptor signals the same again.
+        super::super::handlers::dispatch(world, vec![create(MATE, &mate)]);
+        assert_eq!(drain(world), [signal(22)]);
+        assert_eq!(
+            world.resource::<crate::ui_party::GroupState>().stats[&MATE],
+            record
+        );
+        super::super::handlers::dispatch(world, vec![create(ME, &mate)]);
+        assert_eq!(
+            drain(world),
+            crate::field_watch::guild_tag(ME),
+            "our own create: the guild tag alone"
         );
     }
 
