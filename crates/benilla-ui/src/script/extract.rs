@@ -75,6 +75,11 @@ impl UiScript {
             scope,
         } in list.iter()
         {
+            if zkey.parts().strata == order::Strata::World.index()
+                && super::nameplate::awaits_batch(&model, target)
+            {
+                continue;
+            }
             // Under a ScrollFrame with no rect the callback draws nothing (`0x787253`).
             let Some(clip) = clips.clip(scope) else {
                 continue;
@@ -333,6 +338,14 @@ impl UiScript {
                         region.map(|r| r.kind),
                         Some(crate::widget::RegionKind::FontString)
                     );
+                    // A FontString with no font builds no string (`0x7724f8`) and emits nothing
+                    // (`0x772e5b`), whatever its text.
+                    if is_text
+                        && data.font_path.is_none()
+                        && !super::font_block::has_font(&model, rh)
+                    {
+                        continue;
+                    }
                     if bar_fill.is_none() && !thumb_fill && !color_thumb {
                         rect = model.region_resolved.get(&rh).copied().or_else(|| {
                             (!is_text)
@@ -378,6 +391,7 @@ impl UiScript {
                         let fill = data.tex.fill();
                         let has_path = data.tex.path().is_some();
                         let has_texture = has_path || fill.is_some();
+                        let wrap = data.tex.wrap();
                         QuadContent::Texture {
                             path: std::mem::take(&mut data.tex).into_path(),
                             color: has_texture
@@ -393,6 +407,7 @@ impl UiScript {
                             // answer `GetBlendMode` but draw as straight alpha.
                             additive: data.blend == crate::script::BlendMode::Add,
                             tex_coords: data.tex_coords,
+                            wrap,
                             circular: data.circular,
                             portrait_unit: data.portrait_unit,
                             rotation: data.rotation,

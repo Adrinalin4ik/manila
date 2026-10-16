@@ -55,7 +55,7 @@ pub(crate) use emote::EmoteSounds;
 pub(crate) fn kit_decodes() -> u32 {
     kit::DECODES.load(std::sync::atomic::Ordering::Relaxed)
 }
-pub(crate) use glue::{GlueMusicRequest, GlueSound};
+pub(crate) use glue::GlueMusicRequest;
 pub(crate) use greeting::NpcGreetingRequest;
 /// Named by the schedule tests' class table (`game_plugins::schedule_tests::Classes`).
 #[cfg(test)]
@@ -317,10 +317,10 @@ impl Default for AudioListener {
 /// The world soundscape is live: in the world and seated on the avatar. The seat check matters
 /// after a logout, when the camera still sits at the old spot until the next take-control.
 fn world_audio_live(
-    state: Res<State<crate::char_select::ClientState>>,
+    state: Res<State<crate::client_state::ClientState>>,
     player: Res<Player>,
 ) -> bool {
-    *state.get() == crate::char_select::ClientState::InWorld && player.active
+    *state.get() == crate::client_state::ClientState::InWorld && player.active
 }
 
 pub(crate) struct SoundPlugin;

@@ -48,7 +48,12 @@ fn main() -> anyhow::Result<()> {
         Box::new(move |id| std::fs::read(format!("{dir}/{}.cr", module_id_hex(id))).ok()),
     );
 
-    let l = benilla_protocol::logon(&host, &user, &pass)?;
+    let l = benilla_protocol::logon(
+        &host,
+        &user,
+        &pass,
+        benilla_protocol::auth::LOCALE_TAG_EN_US,
+    )?;
     let realm = l.realms.first().expect("no realms");
     println!("realm {:?} @ {}", realm.name, realm.address);
 

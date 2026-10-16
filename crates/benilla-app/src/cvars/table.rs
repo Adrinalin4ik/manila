@@ -24,6 +24,18 @@ pub(crate) struct Registered {
 }
 
 impl Registered {
+    /// What the row boots at on a client of this locale index (`[0xc0e080]`): `default`, except
+    /// on the locales a [`Reference::SameByLocale`] row lists.
+    pub(crate) fn default_for(&self, locale: usize) -> &'static str {
+        match &self.reference {
+            Reference::SameByLocale { except } => except
+                .iter()
+                .find(|(index, _)| *index == locale)
+                .map_or(self.default, |(_, value)| value),
+            _ => self.default,
+        }
+    }
+
     /// Mark the row latched.
     pub(crate) const fn latched(self) -> Self {
         Self {
@@ -57,6 +69,12 @@ pub(crate) enum Reference {
         registered: &'static str,
         why: &'static str,
     },
+    /// The reference registers `default` on every locale but those in `except`, each of which it
+    /// registers the paired string on, and benilla ships exactly that ([`Registered::default_for`]):
+    /// the register site picks its default string by `[0xc0e080]` (`0x603368`, `0x63a738`).
+    SameByLocale {
+        except: &'static [(usize, &'static str)],
+    },
     /// The reference ships `value` and benilla ships another; `why` is the reason.
     Deviates {
         value: &'static str,
@@ -73,6 +91,22 @@ pub(super) const fn same(name: &'static str, default: &'static str) -> Registere
         name,
         default,
         reference: Reference::Same(default),
+        latched: false,
+        check: None,
+    }
+}
+
+/// A row whose default is the reference's own registered string, but not on every locale: the
+/// register site picks the string by the locale index, `default` on all but `except`'s.
+pub(super) const fn same_by_locale(
+    name: &'static str,
+    default: &'static str,
+    except: &'static [(usize, &'static str)],
+) -> Registered {
+    Registered {
+        name,
+        default,
+        reference: Reference::SameByLocale { except },
         latched: false,
         check: None,
     }
@@ -156,8 +190,14 @@ pub(crate) const SESSION_ONLY: &[&str] = &[
 
 /// The table as the script VM's registrar wants it: `(name, default)` pairs in table order.
 pub(crate) fn registered_pairs() -> impl Iterator<Item = (&'static str, &'static str)> {
-    all_rows().map(|r| (r.name, r.default))
+    let locale = crate::ui_script::client_locale().index();
+    all_rows().map(move |r| (r.name, r.default_for(locale)))
 }
+
+/// The locale indices a default depends on: koKR (`0x603368`) and zhCN (`0x63a738`) in the
+/// table `0x8558a4`.
+const KO_KR: usize = 1;
+const ZH_CN: usize = 4;
 
 /// Every registered row: the knobs something reads ([`REGISTERED`]), then the reference's other
 /// script-visible CVars, which nothing here reads ([`super::inert::INERT`]).
@@ -259,8 +299,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `autoLootDefault` is the later-era name, 1.12 having only the shift gesture.
     same("deselectOnClick", "1"),
     // `AutoInteract` (`0x603390`, record `[0xc4d9a4]`), Click-to-Move (`UIOptionsFrame.lua:7`):
-    // "1" on koKR alone (`0x603368`). The knob is [`crate::player::Approach`].
-    same("AutoInteract", "0"),
+    // "1" when the locale is koKR, else "0" (`0x603368`-`0x603376`). The knob is
+    // [`crate::player::Approach`].
+    same_by_locale("AutoInteract", "0", &[(KO_KR, "1")]),
     // `BlockTrades` (`0x842fbc`), `UIOptionsFrame.lua:11`: the refusal leg `0x4bf7bc` fires only
     // when it is set. The knob is [`crate::ui_trade::BlockTrades`].
     same("BlockTrades", "0"),
@@ -611,9 +652,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ours(
         "lampFog",
         "0",
-        "benilla's own: lamps scattering through night fog - 0 off, else HOW MANY of the
-         nearest lamps glow, up to 32 (`volumetric_fog::MAX_FOG_LAMPS`, the size of the
-         uniform's array). It was a 0/1/2 tier whose rungs meant 16 and 32; the count it
+        "benilla's own: lamps scattering through night fog - 0 off, else HOW MANY of the \
+         nearest lamps glow, up to 32 (`volumetric_fog::MAX_FOG_LAMPS`, the size of the \
+         uniform's array). It was a 0/1/2 tier whose rungs meant 16 and 32; the count it \
          always was is now the setting.",
     ),
     // The halo's brightness, which until now no setting reached: `lamp_haze_strength`
@@ -975,12 +1016,12 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1",
         "benilla's own: how strongly fire lights flicker — 0 steady, 1 default, 2 pronounced",
     ),
-    // `gxWindow` (`0x63a889`): "0" on enUS; zhCN registers "1", as it does `gxMaximize`
-    // (`0x63a8e0`), and koKR `AutoInteract` (`0x603390`). The knob is
-    // [`crate::video::VideoConfig::display`]. Deviation: "0" raises a borderless fullscreen window
-    // instead of mode-setting the display, because Wayland and macOS offer no mode-set and X11's
-    // leaves the desktop changed after a crash ([`crate::video`]).
-    same("gxWindow", "0").latched(),
+    // `gxWindow` (`0x63a889`): "1" when the locale is zhCN (`0x63a738`, `0x63a74c`), else "0"
+    // (`0x63a865`-`0x63a86c`). The knob is [`crate::video::VideoConfig::display`]. Deviation: "0"
+    // raises a borderless fullscreen window instead of mode-setting the display, because Wayland
+    // and macOS offer no mode-set and X11's leaves the desktop changed after a crash
+    // ([`crate::video`]).
+    same_by_locale("gxWindow", "0", &[(ZH_CN, "1")]).latched(),
     // `gxResolution`, a string row parsed by `video::on_cvar`. Here it is only the windowed size:
     // fullscreen is the monitor's own and no mode list is offered.
     deviates(
@@ -1159,11 +1200,11 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // The latched `gx*` rows the stock window's boxes and refresh dropdown write (flags 3, committed
     // by `RestartGx`), each callback storing one field of the device-format record `0xc4eb98`.
     //
-    // `gxMaximize` (`0x63a8e0`: name `0x864edc`, "0", "1" on zhCN like `gxWindow`, callback
-    // `0x63b1f0` → `+0x09` `[0xc4eba1]`): the window rebuild `0x58cf10` makes a windowed, maximized
+    // `gxMaximize` (`0x63a8e0`: name `0x864edc`, "0" but "1" on zhCN like `gxWindow`
+    // (`0x63a8b9`-`0x63a8c3`), callback `0x63b1f0` → `+0x09` `[0xc4eba1]`): the window rebuild `0x58cf10` makes a windowed, maximized
     // window a borderless popup (style `0x90000000`) at the screen's full size (`GetSystemMetrics`
     // 0 and 1). The knob is [`crate::video::VideoConfig::maximize`].
-    same("gxMaximize", "0").latched(),
+    same_by_locale("gxMaximize", "0", &[(ZH_CN, "1")]).latched(),
     // `gxTripleBuffer` (`0x63a80d`: name `0x864f88`, "0", callback `0x63afe0` → `+0x18`), whose
     // callback refuses any value but 0 or 1 ("TripleBuffer must be 0 or 1", `0x8650b8`). No effect
     // here: wgpu's present modes offer no triple-buffer choice.
@@ -1207,8 +1248,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ),
     // `lastCharacterIndex` (`0x402d93`, "0" `0x82e570`, category 4, handle `[0x882674]`), help
     // "Last character selected": a 0-based row (the selection cell `[0x83856c]` under `"%d"`), so
-    // "0" is the first character. It mirrors [`crate::char_select::Roster::pending_index`].
-    same(crate::char_select::CVAR_LAST_CHARACTER, "0"),
+    // "0" is the first character. It mirrors
+    // [`crate::glue_session::roster::Roster::pending_index`].
+    same(crate::glue_session::roster::CVAR_LAST_CHARACTER, "0"),
     // The four user agreements the login screen walks (`0x402db6`, `0x402dd9`, `0x402dfc`,
     // `0x402e1f`; "0" `0x82e570`, category 4): "Status of the TOS" (`0x82e8e4`), "... the EULA"
     // (`0x82e8c8`), "... the Scanning notice" (`0x82e89c`) and "... the Contest notice"

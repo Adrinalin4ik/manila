@@ -78,14 +78,12 @@ pub enum LoginStage {
 /// What a roster was fetched for. The screen takes a reply as its own only when it asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RosterCause {
-    /// The IO thread's own enumeration on reaching the character park, which the native screens
-    /// wait for; the stock screens ask for theirs instead.
-    Park,
+    /// A roster no ask of the screen's fetched: an `SMSG_CHAR_ENUM` the world stream carried on its
+    /// own.
+    Unasked,
     /// The reply to a roster request from the screen (`CMSG_CHAR_ENUM` for
     /// `GetCharacterListUpdate`, `0x5aabb0`).
     Asked,
-    /// A create or delete changed the roster; re-sent before the action's result.
-    Changed,
 }
 
 /// How a world session ended. On a loss the reference fires `DISCONNECTED_FROM_SERVER` and
@@ -687,7 +685,7 @@ pub enum SessionEvent {
     ChannelUpdate { remaining_ms: u32 },
     /// Time left on one of our auras by `UNIT_FIELD_AURA` slot (`SMSG_UPDATE_AURA_DURATION`),
     /// never for a permanent one. It arrives before the delta naming the slot's spell.
-    AuraDuration { slot: u8, remaining_ms: u32 },
+    AuraDuration { slot: u8, remaining_ms: i32 },
     /// A spell-visual kit outside the cast sequence (`SMSG_PLAY_SPELL_VISUAL`), such as eat/drink.
     PlaySpellVisual { unit: u64, kit_id: u32 },
     /// Spell damage dealt (`SMSG_SPELLNONMELEEDAMAGELOG`).

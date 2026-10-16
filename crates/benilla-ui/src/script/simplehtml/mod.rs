@@ -238,6 +238,8 @@ fn build(model: &mut Model, fh: FrameHandle, blocks: &[Block]) {
                     break;
                 };
                 let id = model.region_id(rh);
+                // The block's text goes through `SetText` with its expand flag (`0x78aea1`).
+                let text = model.localized_text(text.clone());
                 let mut d = RegionData {
                     anchors: Anchors::from([anchor_for(
                         prev_block,
@@ -248,7 +250,7 @@ fn build(model: &mut Model, fh: FrameHandle, blocks: &[Block]) {
                     // No height: the rect takes the wrapped text's height from the measure round
                     // trip, as the client's font engine gives it (`0x7729b0`, `0x5c2070`).
                     size: Some((width, 0.0)),
-                    text: Some(text.clone()),
+                    text: Some(text),
                     font_object: paint.font_object.clone(),
                     font_explicit: paint.explicit,
                     font_path: paint.font_path.clone(),
@@ -361,7 +363,8 @@ fn anchor_for(prev_block: Option<u32>, frame_id: u32, point: Point, next_y: f32)
 
 /// Apply the `font=`, `<FontHeight>` and `outline=` an XML `<FontString>` or `<FontStringHeaderN>`
 /// child supplies, any of them absent. The reference applies these in C++ (`CSimpleFont::LoadXML`
-/// `0x783c30`, from `0x78a1fe`), not through `SetFont`, which requires both path and height.
+/// `0x783c30`, from `0x78a1fe`), not through `SetFont`, which requires both path and height. The
+/// loader hands a file only with a height above 0 (`0x783d6d`), so `height` is `Some` there.
 pub(crate) fn apply_element_font_parts(
     lua: &Lua,
     this: &Table,

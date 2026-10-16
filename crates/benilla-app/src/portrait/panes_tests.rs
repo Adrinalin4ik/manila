@@ -608,6 +608,28 @@ fn set_unit_puts_the_units_copy_in_the_panes_own_booth() {
     assert_eq!(marked, 1, "its camera renders while drawn");
 }
 
+/// A pane whose copy builds the frame its booth opens is aimed once its camera lands: the aim that
+/// frame finds no camera, as the spawn waits on the commands, and must not count. Unaimed, the
+/// camera stays at its spawn pose, the origin inside the copy, and the pane draws nothing.
+#[test]
+fn a_pane_built_the_frame_it_opens_is_aimed_once_its_camera_lands() {
+    let mut h = Harness::new(
+        r#"m = CreateFrame("PlayerModel", "CharacterModelFrame", UIParent) m:SetUnit("player")"#,
+    );
+    let pane = h.handle(Some("CharacterModelFrame"));
+    h.frame();
+    h.pass();
+    let world = h.app.world_mut();
+    let key = world.resource::<PaneBooths>().panes[&pane].key.clone();
+    let mut cams = world.query::<(&BoothCam, &Transform)>();
+    let eye = cams
+        .iter(world)
+        .find(|(c, _)| c.0 == key)
+        .map(|(_, t)| t.translation)
+        .expect("the pane's camera");
+    assert_ne!(eye, Vec3::ZERO, "the camera was aimed, not left at its spawn pose");
+}
+
 /// The pane draws what its own `SetUnit` named, whatever its name: two panes, two subjects, two
 /// booths; an addon's anonymous pane draws like a stock one.
 #[test]

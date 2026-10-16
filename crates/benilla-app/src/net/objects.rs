@@ -93,6 +93,8 @@ pub(crate) struct Scene<'w, 's> {
     riders: Query<'w, 's, &'static mut crate::transport::TransportRider>,
     speeds: Query<'w, 's, &'static mut UnitSpeeds>,
     field_changes: MessageWriter<'w, FieldChanged>,
+    item_notices: MessageWriter<'w, crate::item_watch::ItemNotice>,
+    field_notices: MessageWriter<'w, crate::field_watch::FieldNotice>,
     speed_changes: MessageWriter<'w, SpeedChangeMessage>,
     self_moves: MessageWriter<'w, super::SelfMoveMessage>,
     hard_landings: MessageWriter<'w, crate::creature_anim::HardLanding>,
@@ -102,6 +104,77 @@ pub(crate) struct Scene<'w, 's> {
     go_templates: ResMut<'w, GameObjectTemplates>,
     death_net: ResMut<'w, crate::death::DeathNet>,
     group: ResMut<'w, crate::ui_party::GroupState>,
+    pet_bar: Option<Res<'w, crate::ui_pet::PetBar>>,
+}
+
+/// The item watchers' reads of the scene ([`crate::item_watch::Watch`]).
+fn item_watch<'a, 'w, 's>(
+    index: &'a GuidIndex,
+    stores: &'a Query<'w, 's, &'static mut ObjectStore>,
+    self_guid: &SelfGuid,
+    items: &'a Items,
+) -> crate::item_watch::Watch<'a, impl Fn(u64) -> Option<&'a ObjectFields> + use<'a, 'w, 's>> {
+    crate::item_watch::Watch {
+        me: self_guid.0,
+        lookup: move |g| {
+            index
+                .0
+                .get(&g)
+                .and_then(|&e| stores.get(e).ok())
+                .map(|s| &s.0)
+        },
+        items,
+    }
+}
+
+/// Run the watchers over one values block that merged into `guid`'s store: the item watchers and
+/// the field watches whose callbacks signal interface events ([`crate::field_watch`]).
+fn notify_values(sc: &mut Scene, guid: u64, edges: &[(u16, u32, u32)]) {
+    let Some(fields) = sc
+        .index
+        .0
+        .get(&guid)
+        .and_then(|&e| sc.stores.get(e).ok())
+        .map(|s| &s.0)
+    else {
+        return;
+    };
+    let Some(kind) = fields.created_as() else {
+        return;
+    };
+    let me = sc.self_guid.0;
+    let (names, index, stores) = (&sc.names, &sc.index, &sc.stores);
+    let others = || {
+        let units = index.0.iter().filter_map(|(&g, &e)| {
+            let s = stores.get(e).ok()?;
+            s.is_unit().then_some((g, &s.0))
+        });
+        me.map(|me| crate::field_watch::reaction_sweep(me, units))
+            .unwrap_or_default()
+    };
+    let around = crate::field_watch::Around {
+        me,
+        creature_cached: &|entry| names.creature_record(entry).is_some(),
+        others: &others,
+        pet_bar: sc.pet_bar.as_ref().map_or(0, |bar| bar.spells.pet_guid),
+    };
+    let fired = crate::field_watch::values(&around, guid, kind, fields, edges);
+    let notices = item_watch(&sc.index, &sc.stores, &sc.self_guid, &sc.items)
+        .values(guid, kind, fields, edges);
+    // An entry change that missed the cache waits on the answer (`0x5d9652` asks with `0x5d96b0`).
+    for n in &notices {
+        if let crate::item_watch::ItemNotice::Entry {
+            guid,
+            new,
+            new_cached: false,
+            ..
+        } = *n
+        {
+            sc.items.wait_for_entry(guid, new);
+        }
+    }
+    sc.item_notices.write_batch(notices);
+    sc.field_notices.write_batch(fired);
 }
 
 fn on_object_create(In(ev): In<SessionEvent>, mut sc: Scene) {
@@ -121,7 +194,12 @@ fn on_object_create(In(ev): In<SessionEvent>, mut sc: Scene) {
     } = ev
     {
         crate::death::net::note_corpse(guid, kind, &fields, &sc.self_guid, &mut sc.death_net);
-        object_create(
+        let other_player =
+            (kind == EntityKind::Player && sc.self_guid.0 != Some(guid)).then(|| fields.clone());
+        // A player's first create runs `PostInit` (`0x5debe0`); a create of one already held runs
+        // its `PostUpdate` (`0x5dec90`) instead.
+        let first_player = kind == EntityKind::Player && !sc.index.0.contains_key(&guid);
+        let edges = object_create(
             guid,
             kind,
             display_id,
@@ -143,7 +221,36 @@ fn on_object_create(In(ev): In<SessionEvent>, mut sc: Scene) {
             &sc.go_templates,
             &sc.net,
         );
+        notify_values(&mut sc, guid, &edges);
+        // `PostInit`'s guild tag (`0x5dec19`), ahead of its party record (`0x5dec5f`).
+        if first_player {
+            sc.field_notices
+                .write_batch(crate::field_watch::guild_tag(guid));
+        }
+        if let Some(fields) = other_player {
+            compare_party_record(&mut sc, guid, &fields);
+        }
     }
+}
+
+/// `CGPlayer_C::ComparePartyRecord` (`0x5f0b80`), which another player's `PostInit` runs on its
+/// create (`0x5dec5f`, the active player skipped at `0x5dec48`-`0x5dec5b`) and its reactivation
+/// on a re-create (`0x5decb7`): the stored party or raid record, an empty one off the roster
+/// (`0x5f0bfe`), against a live one built off the descriptor and the held pet (`0x5f0c0b`), the
+/// difference signalled through `0x5e5720` (`0x5f0c42`). Neither record is written back.
+fn compare_party_record(sc: &mut Scene, guid: u64, fields: &ObjectFields) {
+    let old = sc.group.stats.get(&guid).cloned().unwrap_or_default();
+    let pet_guid = fields.unit_pet_guid();
+    let pet = pet_guid
+        .and_then(|g| sc.index.0.get(&g))
+        .and_then(|&e| sc.stores.get(e).ok());
+    let pet_name = pet_guid
+        .zip(pet)
+        .and_then(|(g, p)| sc.names.peek_unit(g, Some(p)));
+    let mut live = old.clone();
+    live.snapshot_descriptor(fields, pet.map(|p| &p.0), pet_name);
+    let notices = crate::ui_party::record_notices(guid, &old, &live);
+    sc.field_notices.write_batch(notices);
 }
 
 /// Items: a descriptor-only create, `SMSG_ITEM_QUERY_SINGLE_RESPONSE` (a miss is cached as `None`
@@ -155,20 +262,59 @@ fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
             guid,
             container,
             fields,
-        } => item_create(
-            guid,
-            container,
-            fields,
-            &mut sc.commands,
-            &mut sc.index,
-            &mut sc.stores,
-            &mut sc.field_changes,
-            &mut sc.items,
-        ),
+        } => {
+            // A first create runs the item's create hook, the record set-up (`0x5d8400` →
+            // `0x5d8300`); a create of an object already shown (`+0xe4` bit 4, which the hook's
+            // `0x613af0` sets) runs the field watchers over every field instead (`0x465d79`).
+            let hook = (!sc.index.0.contains_key(&guid))
+                .then(|| {
+                    item_watch(&sc.index, &sc.stores, &sc.self_guid, &sc.items)
+                        .created(guid, &fields)
+                })
+                .flatten();
+            let edges = item_create(
+                guid,
+                container,
+                fields,
+                &mut sc.commands,
+                &mut sc.index,
+                &mut sc.stores,
+                &mut sc.field_changes,
+                &mut sc.items,
+            );
+            sc.item_notices.write_batch(hook);
+            notify_values(&mut sc, guid, &edges);
+        }
         SessionEvent::ItemTemplate { entry, info } => {
             let info = info.map(|b| *b);
             debug!("net: item template {entry} → {info:?}");
+            // The answer finishes the set-up of every item of ours waiting on it (`0x5d8390`); a
+            // negative answer finishes nothing (its found byte is clear, `0x5d83b8`).
+            let answered = info.is_some();
+            let landed = answered && sc.items.template_cached(entry).is_none();
             sc.items.insert_template(entry, info);
+            // A negative answer releases the waiters with nothing run (`0x5d96bb`).
+            let waiters = sc.items.take_entry_waiters(entry);
+            let trade_waiters = sc.items.take_trade_waiters(entry);
+            if landed {
+                let notices = {
+                    let (index, stores) = (&sc.index, &sc.stores);
+                    let held = index
+                        .0
+                        .iter()
+                        .filter_map(|(&g, &e)| stores.get(e).ok().map(|s| (g, &s.0)));
+                    item_watch(index, stores, &sc.self_guid, &sc.items)
+                        .record_landed(entry, held, &waiters)
+                };
+                sc.item_notices.write_batch(notices);
+            }
+            // The trade getters' callbacks run for a ready record only (`0x4c0343`).
+            if answered {
+                sc.item_notices.write_batch(std::iter::repeat_n(
+                    crate::item_watch::ItemNotice::TradeRecord { entry },
+                    trade_waiters,
+                ));
+            }
         }
         // `0x5e4f30`'s two arms share the item lookup (`0x468460`, `TYPEMASK_ITEM`) and differ on
         // a miss.
@@ -290,7 +436,7 @@ fn on_unit_move(In(ev): In<SessionEvent>, mut sc: Scene) {
 fn on_object_values(In(ev): In<SessionEvent>, mut sc: Scene) {
     if let SessionEvent::ObjectValues { guid, fields } = ev {
         crate::death::net::recheck_corpse(guid, &fields, &sc.self_guid, &mut sc.death_net);
-        object_values(
+        let edges = object_values(
             guid,
             fields,
             &mut sc.commands,
@@ -298,13 +444,17 @@ fn on_object_values(In(ev): In<SessionEvent>, mut sc: Scene) {
             &mut sc.stores,
             &mut sc.field_changes,
         );
+        notify_values(&mut sc, guid, &edges);
     }
 }
 
-/// The party hook runs first: the reference's deactivate reads the descriptor about to go.
+/// The party hook runs first: the reference's deactivate reads the descriptor about to go, as
+/// the item's does (`0x5d8660`).
 fn on_object_destroyed(In(ev): In<SessionEvent>, mut sc: Scene) {
     if let SessionEvent::ObjectDestroyed(guid) = ev {
         crate::death::net::forget_corpse(guid, &mut sc.death_net);
+        let gone = item_watch(&sc.index, &sc.stores, &sc.self_guid, &sc.items).destroyed(guid);
+        sc.item_notices.write_batch(gone);
         let held = |g: u64| sc.index.0.get(&g).and_then(|e| sc.stores.get(*e).ok());
         crate::ui_party::net::member_deactivated(
             guid,
@@ -329,6 +479,8 @@ fn on_objects_removed(In(ev): In<SessionEvent>, mut sc: Scene) {
     if let SessionEvent::ObjectsRemoved(mut guids) = ev {
         guids.retain(|g| sc.self_guid.0 != Some(*g));
         for guid in &guids {
+            let gone = item_watch(&sc.index, &sc.stores, &sc.self_guid, &sc.items).destroyed(*guid);
+            sc.item_notices.write_batch(gone);
             let held = |g: u64| sc.index.0.get(&g).and_then(|e| sc.stores.get(*e).ok());
             crate::ui_party::net::member_deactivated(
                 *guid,
@@ -472,7 +624,7 @@ fn object_create(
     names: &NameCache,
     go_templates: &GameObjectTemplates,
     net_commands: &NetCommands,
-) {
+) -> Vec<(u16, u32, u32)> {
     let net = NetEntity {
         kind,
         display_id,
@@ -529,7 +681,7 @@ fn object_create(
     // (`0x5fb880`) queries every creature (`0x60afb0`, at `0x60b157`), whose name is the record's
     // field 0 (`0x60934b`). Its `CreatureCache.wdb` answers without the wire; ours lasts a session.
     if matches!(kind, EntityKind::Unit | EntityKind::Player) {
-        let _ = names.resolve(guid, net_commands);
+        let _ = names.resolve_fields(guid, Some(&fields), net_commands);
         // A pet guid carries a pet number, so `resolve` asks the pet-name query; the template is
         // asked by the descriptor's entry as well, the reference's cache key (`[[unit+8]+0xc]`).
         if let Some(entry) = fields.object_entry().filter(|&e| e != 0) {
@@ -539,10 +691,7 @@ fn object_create(
     // Warm the template cache as a GameObject streams in: only the query carries its lockId,
     // which decides use-vs-cast on a right-click.
     if matches!(kind, EntityKind::GameObject) {
-        if let Some(entry) = fields.object_entry() {
-            go_templates.note_transport_entry(guid, entry);
-        }
-        go_templates.request(guid, net_commands);
+        go_templates.request(guid, &fields, net_commands);
         // Where and how big, under `RUST_LOG=benilla_app::net::objects=debug`.
         debug!(
             "gameobject spawn: entry {:?} display {display_id:?} type {go_type:?} \
@@ -596,7 +745,7 @@ fn object_create(
             write_pose(commands, transforms, e, position, placement);
         }
         // The reference refreshes a live guid in place, notifying field watchers like any delta.
-        merge_fields(commands, stores, edges, e, guid, fields);
+        merge_fields(commands, stores, edges, e, guid, fields)
     } else {
         // A transport spawns hidden: its create pose is the spawn point, not where it is in its
         // cycle; the transport tick unhides it at the first sampled pose.
@@ -632,6 +781,7 @@ fn object_create(
         // The seed is not merged: the reference does not notify on create.
         entity.insert(ObjectStore(fields));
         index.0.insert(guid, entity.id());
+        Vec::new()
     }
 }
 
@@ -646,10 +796,10 @@ fn item_create(
     stores: &mut Query<&mut ObjectStore>,
     edges: &mut MessageWriter<FieldChanged>,
     items: &mut Items,
-) {
+) -> Vec<(u16, u32, u32)> {
     debug!("net: item create {guid:#x} (container: {container})");
     if let Some(&e) = index.0.get(&guid) {
-        merge_fields(commands, stores, edges, e, guid, fields);
+        merge_fields(commands, stores, edges, e, guid, fields)
     } else {
         let e = crate::items::spawn_item(commands, index, guid, fields, container);
         // Replay the enchant times queued while it was not held (`0x5ebde0`), as of now.
@@ -663,6 +813,7 @@ fn item_create(
             }
             commands.entity(e).insert(countdowns);
         }
+        Vec::new()
     }
 }
 
@@ -800,6 +951,7 @@ fn unit_move(
 }
 
 /// An `SMSG_UPDATE_OBJECT` values block, merged into any object's store; an unknown guid drops.
+/// The changed dwords come back as `(index, old, new)`.
 fn object_values(
     guid: u64,
     fields: ObjectFields,
@@ -807,9 +959,10 @@ fn object_values(
     index: &GuidIndex,
     stores: &mut Query<&mut ObjectStore>,
     edges: &mut MessageWriter<FieldChanged>,
-) {
-    if let Some(&e) = index.0.get(&guid) {
-        merge_fields(commands, stores, edges, e, guid, fields);
+) -> Vec<(u16, u32, u32)> {
+    match index.0.get(&guid) {
+        Some(&e) => merge_fields(commands, stores, edges, e, guid, fields),
+        None => Vec::new(),
     }
 }
 
@@ -1081,9 +1234,11 @@ fn merge_fields(
     entity: Entity,
     guid: u64,
     delta: ObjectFields,
-) {
+) -> Vec<(u16, u32, u32)> {
+    let mut moved = Vec::new();
     if let Ok(mut s) = stores.get_mut(entity) {
         merge_store_fields(&mut s.0, delta, entity, guid, |e| {
+            moved.push((e.index, e.old, e.new));
             edges.write(e);
         });
     } else {
@@ -1092,6 +1247,7 @@ fn merge_fields(
         );
         commands.entity(entity).insert(ObjectStore(delta));
     }
+    moved
 }
 
 /// Writes one slot of a mover's [`UnitSpeeds`]; `false` when there is none (an untracked guid,
@@ -1174,6 +1330,525 @@ mod update_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The object packets run the item watchers in wire order: the create hook, a values block,
+    /// a seat of ours, a late record, the destroy; another player's item and a resend run none.
+    #[test]
+    fn the_object_packets_write_the_item_watchers_notices_in_wire_order() {
+        use crate::item_watch::ItemNotice;
+        use benilla_protocol::field::{
+            FIELD_ITEM_STACK_COUNT, FIELD_OBJECT_ENTRY, FIELD_PLAYER_INV_SLOT_HEAD,
+        };
+        use benilla_protocol::messages::ObjectType;
+        const ME: u64 = 0x0000_0000_0000_0007;
+        const POTIONS: u64 = 0x4000_0000_0000_0042;
+        const SCROLL: u64 = 0x4000_0000_0000_0043;
+        const THEIRS: u64 = 0x4000_0000_0000_0044;
+        const POTION: u32 = 118;
+        const SCROLL_ID: u32 = 955;
+        // `OBJECT_FIELD_TYPE` item, the entry, `ITEM_FIELD_OWNER` and a stack of one.
+        let create = |guid: u64, entry: u32, owner: u64| SessionEvent::ItemCreate {
+            guid,
+            container: false,
+            fields: ObjectFields::from_pairs(&[
+                (2, 0x3),
+                (FIELD_OBJECT_ENTRY, entry),
+                (6, owner as u32),
+                (7, 0),
+                (FIELD_ITEM_STACK_COUNT, 1),
+            ])
+            .into_created(ObjectType::Item),
+        };
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let world = app.world_mut();
+        let me = world
+            .spawn((
+                Guid(ME),
+                ObjectStore(ObjectFields::default().into_created(ObjectType::Player)),
+            ))
+            .id();
+        world.resource_mut::<GuidIndex>().0.insert(ME, me);
+        world.resource_mut::<SelfGuid>().0 = Some(ME);
+        world
+            .resource_mut::<Items>()
+            .insert_template(POTION, Some(crate::items::test_template("Potion")));
+        let pack_1 = FIELD_PLAYER_INV_SLOT_HEAD + 2 * 23;
+        super::super::handlers::dispatch(
+            world,
+            vec![
+                create(POTIONS, POTION, ME),
+                create(SCROLL, SCROLL_ID, ME),
+                create(THEIRS, POTION, 0x8),
+                SessionEvent::ObjectValues {
+                    guid: POTIONS,
+                    fields: ObjectFields::from_pairs(&[(FIELD_ITEM_STACK_COUNT, 3)]),
+                },
+                SessionEvent::ObjectValues {
+                    guid: POTIONS,
+                    fields: ObjectFields::from_pairs(&[(FIELD_ITEM_STACK_COUNT, 3)]),
+                },
+                SessionEvent::ObjectValues {
+                    guid: THEIRS,
+                    fields: ObjectFields::from_pairs(&[(FIELD_ITEM_STACK_COUNT, 3)]),
+                },
+                SessionEvent::ObjectValues {
+                    guid: ME,
+                    fields: ObjectFields::from_pairs(&[
+                        (pack_1, POTIONS as u32),
+                        (pack_1 + 1, (POTIONS >> 32) as u32),
+                    ]),
+                },
+                SessionEvent::ItemTemplate {
+                    entry: SCROLL_ID,
+                    info: Some(Box::new(crate::items::test_template("Scroll"))),
+                },
+                SessionEvent::ObjectDestroyed(POTIONS),
+                SessionEvent::ObjectDestroyed(THEIRS),
+            ],
+        );
+        let notices: Vec<ItemNotice> = world
+            .resource_mut::<Messages<ItemNotice>>()
+            .drain()
+            .collect();
+        assert_eq!(
+            notices,
+            [
+                ItemNotice::Record {
+                    guid: POTIONS,
+                    entry: POTION
+                },
+                ItemNotice::StackCount {
+                    guid: POTIONS,
+                    entry: POTION
+                },
+                ItemNotice::Seat {
+                    old: None,
+                    new: Some(POTION)
+                },
+                ItemNotice::Record {
+                    guid: SCROLL,
+                    entry: SCROLL_ID
+                },
+                ItemNotice::Destroyed {
+                    guid: POTIONS,
+                    entry: POTION
+                },
+            ]
+        );
+    }
+
+    /// `0x4c0340`: every trade getter call that missed the cache registered its own callback, and
+    /// the record's answer runs each once, in call order, signalling for a ready record only
+    /// (`0x4c0343`); a refusal frees them silent.
+    #[test]
+    fn an_item_answer_runs_each_waiting_trade_getters_callback_once() {
+        use crate::item_watch::ItemNotice;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let world = app.world_mut();
+        {
+            let items = world.resource::<Items>();
+            for entry in [4306, 4306, 2592, 7777] {
+                items.wait_for_trade_record(entry);
+            }
+        }
+        let answer = |entry: u32, ok: bool| SessionEvent::ItemTemplate {
+            entry,
+            info: ok.then(|| Box::new(crate::items::test_template("Thing"))),
+        };
+        super::super::handlers::dispatch(world, vec![answer(4306, true), answer(7777, false)]);
+        let notices: Vec<ItemNotice> = world
+            .resource_mut::<Messages<ItemNotice>>()
+            .drain()
+            .collect();
+        assert_eq!(
+            notices,
+            [
+                ItemNotice::TradeRecord { entry: 4306 },
+                ItemNotice::TradeRecord { entry: 4306 }
+            ],
+            "one per call that asked, none for the refusal"
+        );
+        // The callbacks are spent: a second answer, or the refused entry's later one, runs none.
+        super::super::handlers::dispatch(world, vec![answer(4306, true), answer(7777, true)]);
+        assert!(world
+            .resource_mut::<Messages<ItemNotice>>()
+            .drain()
+            .next()
+            .is_none());
+        // The one still waiting runs on its own answer.
+        super::super::handlers::dispatch(world, vec![answer(2592, true)]);
+        assert_eq!(
+            world
+                .resource_mut::<Messages<ItemNotice>>()
+                .drain()
+                .collect::<Vec<_>>(),
+            [ItemNotice::TradeRecord { entry: 2592 }]
+        );
+    }
+
+    /// The object packets run the field watches per block in wire order: our first create none
+    /// (`0x465d80`), a values block each watch it moved once, a re-create of a live guid like a
+    /// values block (`0x465d8e`); another unit only its bridge.
+    #[test]
+    fn the_object_packets_write_the_field_watches_notices_per_block() {
+        use crate::field_watch::FieldNotice;
+        use benilla_protocol::messages::ObjectType;
+        const ME: u64 = 0x0000_0000_0000_0007;
+        const MOB: u64 = 0xF130_0000_0000_0001;
+        const XP: u16 = 716;
+        const STAT0: u16 = 150;
+        let create = |guid: u64, kind: EntityKind, pairs: &[(u16, u32)]| {
+            let created = if kind == EntityKind::Player {
+                ObjectType::Player
+            } else {
+                ObjectType::Unit
+            };
+            SessionEvent::ObjectCreate {
+                guid,
+                kind,
+                display_id: None,
+                position: [0.0; 3],
+                orientation: 0.0,
+                scale: 1.0,
+                speeds: None,
+                mover: None,
+                transport_progress: None,
+                transport: None,
+                spline: None,
+                fields: ObjectFields::from_pairs(pairs).into_created(created),
+            }
+        };
+        let values = |guid: u64, pairs: &[(u16, u32)]| SessionEvent::ObjectValues {
+            guid,
+            fields: ObjectFields::from_pairs(pairs),
+        };
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let world = app.world_mut();
+        world.resource_mut::<SelfGuid>().0 = Some(ME);
+        let drain = |world: &mut World| -> Vec<FieldNotice> {
+            world
+                .resource_mut::<Messages<FieldNotice>>()
+                .drain()
+                .collect()
+        };
+        super::super::handlers::dispatch(
+            world,
+            vec![
+                create(ME, EntityKind::Player, &[(STAT0, 20), (XP, 10)]),
+                create(MOB, EntityKind::Unit, &[(STAT0, 5)]),
+            ],
+        );
+        assert_eq!(
+            drain(world),
+            crate::field_watch::guild_tag(ME),
+            "a first create runs no notify pass, only a player's own `PostInit`"
+        );
+        super::super::handlers::dispatch(
+            world,
+            vec![
+                values(ME, &[(XP, 30)]),
+                values(MOB, &[(STAT0, 6), (STAT0 + 1, 2)]),
+                // Two blocks on one watch: two runs.
+                values(ME, &[(XP, 40)]),
+                values(ME, &[(STAT0, 21), (XP, 40)]),
+                // A re-create compares like a values block.
+                create(ME, EntityKind::Player, &[(STAT0, 21), (XP, 50)]),
+            ],
+        );
+        assert_eq!(
+            drain(world),
+            [
+                FieldNotice::Player { id: 189 },
+                FieldNotice::Unit { guid: MOB, id: 144 },
+                FieldNotice::Unit { guid: MOB, id: 145 },
+                FieldNotice::Player { id: 189 },
+                FieldNotice::Unit { guid: ME, id: 144 },
+                FieldNotice::Player { id: 189 },
+            ]
+        );
+    }
+
+    /// A player's first create runs its guild tag (`0x5dec19`), a re-create does not; another
+    /// player's create, first or again, then compares its party record with its descriptor and
+    /// signals the difference, writing nothing back; our own create compares nothing.
+    #[test]
+    fn another_players_create_signals_its_record_against_its_descriptor() {
+        use crate::field_watch::FieldNotice;
+        use benilla_protocol::messages::{ObjectType, PartyMemberStatsInfo};
+        const ME: u64 = 0x07;
+        const MATE: u64 = 0x2001;
+        const HEALTH: u16 = 22;
+        const MAXHEALTH: u16 = 28;
+        const LEVEL: u16 = 34;
+        let create = |guid: u64, pairs: &[(u16, u32)]| SessionEvent::ObjectCreate {
+            guid,
+            kind: EntityKind::Player,
+            display_id: None,
+            position: [0.0; 3],
+            orientation: 0.0,
+            scale: 1.0,
+            speeds: None,
+            mover: None,
+            transport_progress: None,
+            transport: None,
+            spline: None,
+            fields: ObjectFields::from_pairs(pairs).into_created(ObjectType::Player),
+        };
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let world = app.world_mut();
+        world.resource_mut::<SelfGuid>().0 = Some(ME);
+        let record = PartyMemberStatsInfo {
+            status: Some(1),
+            cur_hp: Some(100),
+            max_hp: Some(100),
+            power_type: Some(0),
+            cur_power: Some(0),
+            max_power: Some(0),
+            level: Some(60),
+            auras: Some(Vec::new()),
+            auras_negative: Some(Vec::new()),
+            ..Default::default()
+        };
+        world
+            .resource_mut::<crate::ui_party::GroupState>()
+            .stats
+            .insert(MATE, record.clone());
+        let drain = |world: &mut World| -> Vec<FieldNotice> {
+            world
+                .resource_mut::<Messages<FieldNotice>>()
+                .drain()
+                .collect()
+        };
+        let mate = [(HEALTH, 100), (MAXHEALTH, 200), (LEVEL, 60)];
+        super::super::handlers::dispatch(world, vec![create(MATE, &mate)]);
+        let signal = |id| FieldNotice::Signal { guid: MATE, id };
+        assert_eq!(
+            drain(world),
+            [FieldNotice::Global { id: 376 }, signal(345), signal(22)],
+            "the guild tag, then the maximum differs"
+        );
+        // Written back nothing, so a re-create of the same descriptor signals the same again.
+        super::super::handlers::dispatch(world, vec![create(MATE, &mate)]);
+        assert_eq!(drain(world), [signal(22)]);
+        assert_eq!(
+            world.resource::<crate::ui_party::GroupState>().stats[&MATE],
+            record
+        );
+        super::super::handlers::dispatch(world, vec![create(ME, &mate)]);
+        assert_eq!(
+            drain(world),
+            crate::field_watch::guild_tag(ME),
+            "our own create: the guild tag alone"
+        );
+    }
+
+    /// The object handlers over a headless client with our player live (an empty store created
+    /// as a player), the potion's template cached; the items it lists created, our own.
+    fn watch_world(items: &[(u64, u32, bool)]) -> App {
+        use benilla_protocol::messages::ObjectType;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let world = app.world_mut();
+        let me = world
+            .spawn((
+                Guid(WATCH_ME),
+                ObjectStore(ObjectFields::default().into_created(ObjectType::Player)),
+            ))
+            .id();
+        world.resource_mut::<GuidIndex>().0.insert(WATCH_ME, me);
+        world.resource_mut::<SelfGuid>().0 = Some(WATCH_ME);
+        world
+            .resource_mut::<Items>()
+            .insert_template(118, Some(crate::items::test_template("Potion")));
+        let creates = items
+            .iter()
+            .map(|&(guid, entry, container)| watched_item(guid, entry, container))
+            .collect();
+        super::super::handlers::dispatch(world, creates);
+        drain_notices(world);
+        app
+    }
+
+    const WATCH_ME: u64 = 0x0000_0000_0000_0007;
+
+    /// Our item's create block: type item (or container, 4 seats), the entry, ourselves as owner
+    /// and a stack of one.
+    fn watched_item(guid: u64, entry: u32, container: bool) -> SessionEvent {
+        use benilla_protocol::field::{FIELD_ITEM_STACK_COUNT, FIELD_OBJECT_ENTRY};
+        use benilla_protocol::messages::ObjectType;
+        let mut pairs = vec![
+            (2, if container { 0x7 } else { 0x3 }),
+            (FIELD_OBJECT_ENTRY, entry),
+            (6, WATCH_ME as u32),
+            (7, 0),
+            (FIELD_ITEM_STACK_COUNT, 1),
+        ];
+        if container {
+            pairs.push((48, 4));
+        }
+        SessionEvent::ItemCreate {
+            guid,
+            container,
+            fields: ObjectFields::from_pairs(&pairs).into_created(if container {
+                ObjectType::Container
+            } else {
+                ObjectType::Item
+            }),
+        }
+    }
+
+    fn drain_notices(world: &mut World) -> Vec<crate::item_watch::ItemNotice> {
+        world
+            .resource_mut::<Messages<crate::item_watch::ItemNotice>>()
+            .drain()
+            .collect()
+    }
+
+    /// An entry change to an uncached entry waits on the answer with its own callback
+    /// (`0x5d96b0`), not the create's set-up; a negative answer runs nothing.
+    #[test]
+    fn an_entry_change_that_misses_the_cache_runs_its_callback_on_the_answer() {
+        use crate::item_watch::ItemNotice;
+        use benilla_protocol::field::FIELD_OBJECT_ENTRY;
+        const POTIONS: u64 = 0x4000_0000_0000_0042;
+        let mut app = watch_world(&[(POTIONS, 118, false)]);
+        let world = app.world_mut();
+        let to = |entry: u32| SessionEvent::ObjectValues {
+            guid: POTIONS,
+            fields: ObjectFields::from_pairs(&[(FIELD_OBJECT_ENTRY, entry)]),
+        };
+        let answer = |entry: u32, known: bool| SessionEvent::ItemTemplate {
+            entry,
+            info: known.then(|| Box::new(crate::items::test_template("Scroll"))),
+        };
+        super::super::handlers::dispatch(world, vec![to(955), answer(955, true)]);
+        assert_eq!(
+            drain_notices(world),
+            [
+                ItemNotice::Entry {
+                    guid: POTIONS,
+                    old: 118,
+                    new: 955,
+                    new_cached: false
+                },
+                ItemNotice::EntryRecord {
+                    guid: POTIONS,
+                    entry: 955
+                },
+            ]
+        );
+        super::super::handlers::dispatch(world, vec![to(956), answer(956, false)]);
+        assert_eq!(
+            drain_notices(world),
+            [ItemNotice::Entry {
+                guid: POTIONS,
+                old: 955,
+                new: 956,
+                new_cached: false
+            }],
+            "a negative answer runs nothing"
+        );
+    }
+
+    /// A create block for a live item runs the watchers over what it moved, never the create's
+    /// record set-up (`0x465d79`, the object already shown).
+    #[test]
+    fn a_re_create_of_a_live_item_runs_its_watchers() {
+        use crate::item_watch::ItemNotice;
+        use benilla_protocol::field::FIELD_ITEM_STACK_COUNT;
+        use benilla_protocol::messages::ObjectType;
+        const POTIONS: u64 = 0x4000_0000_0000_0042;
+        let mut app = watch_world(&[(POTIONS, 118, false)]);
+        let world = app.world_mut();
+        let SessionEvent::ItemCreate { fields, .. } = watched_item(POTIONS, 118, false) else {
+            unreachable!()
+        };
+        let mut fields = fields;
+        fields.merge(ObjectFields::from_pairs(&[(FIELD_ITEM_STACK_COUNT, 4)]));
+        let again = SessionEvent::ItemCreate {
+            guid: POTIONS,
+            container: false,
+            fields: fields.into_created(ObjectType::Item),
+        };
+        super::super::handlers::dispatch(world, vec![again]);
+        assert_eq!(
+            drain_notices(world),
+            [ItemNotice::StackCount {
+                guid: POTIONS,
+                entry: 118
+            }]
+        );
+    }
+
+    /// The out-of-range list releases our item through the same deactivate as a destroy
+    /// (`0x464920`); our own player in the list is skipped.
+    #[test]
+    fn an_item_of_ours_out_of_range_is_destroyed_for_the_watchers() {
+        use crate::item_watch::ItemNotice;
+        const POTIONS: u64 = 0x4000_0000_0000_0042;
+        let mut app = watch_world(&[(POTIONS, 118, false)]);
+        let world = app.world_mut();
+        super::super::handlers::dispatch(
+            world,
+            vec![SessionEvent::ObjectsRemoved(vec![WATCH_ME, POTIONS])],
+        );
+        assert_eq!(
+            drain_notices(world),
+            [ItemNotice::Destroyed {
+                guid: POTIONS,
+                entry: 118
+            }]
+        );
+    }
+
+    /// A bag seated in one of our bag seats has its own seats watched (`0x4f90d0`); the same bag
+    /// before it is seated, or another in the backpack, has none.
+    #[test]
+    fn a_seated_bags_seats_run_their_watcher_through_the_handlers() {
+        use crate::item_watch::ItemNotice;
+        use benilla_protocol::field::{FIELD_CONTAINER_SLOT_1, FIELD_PLAYER_INV_SLOT_HEAD};
+        const POTIONS: u64 = 0x4000_0000_0000_0042;
+        const BAG: u64 = 0x4000_0000_0000_0050;
+        let mut app = watch_world(&[(POTIONS, 118, false), (BAG, 4496, true)]);
+        let world = app.world_mut();
+        let seat = |j: u16, g: u64| SessionEvent::ObjectValues {
+            guid: BAG,
+            fields: ObjectFields::from_pairs(&[
+                (FIELD_CONTAINER_SLOT_1 + 2 * j, g as u32),
+                (FIELD_CONTAINER_SLOT_1 + 2 * j + 1, (g >> 32) as u32),
+            ]),
+        };
+        let bag_seat = FIELD_PLAYER_INV_SLOT_HEAD + 2 * 19;
+        super::super::handlers::dispatch(
+            world,
+            vec![
+                seat(1, POTIONS),
+                SessionEvent::ObjectValues {
+                    guid: WATCH_ME,
+                    fields: ObjectFields::from_pairs(&[
+                        (bag_seat, BAG as u32),
+                        (bag_seat + 1, (BAG >> 32) as u32),
+                    ]),
+                },
+                seat(1, 0),
+                seat(2, POTIONS),
+            ],
+        );
+        assert_eq!(
+            drain_notices(world),
+            [
+                ItemNotice::Bag { entries: vec![118] },
+                ItemNotice::Seat {
+                    old: Some(118),
+                    new: None
+                },
+                ItemNotice::Seat {
+                    old: None,
+                    new: Some(118)
+                },
+            ],
+            "the unseated bag's change ran nothing; the seated one's two did"
+        );
+    }
 
     /// `0x1EB` for an unheld item waits on the active player and replays at its create; `0x1EA`
     /// for one is dropped; the destroy takes the cells.

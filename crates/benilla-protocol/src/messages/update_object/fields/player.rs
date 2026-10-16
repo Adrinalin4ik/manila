@@ -6,7 +6,7 @@ impl ObjectFields {
     /// `OBJECT_FIELD_ENTRY` (3): the template entry. The only route to a pet's template: its guid
     /// holds a pet number instead, but vmangos writes the entry here (`Creature.cpp:376`).
     pub fn object_entry(&self) -> Option<u32> {
-        self.get_u32(3)
+        self.get_u32(FIELD_OBJECT_ENTRY)
     }
     /// `ITEM_FIELD_OWNER` (field 6): the item's owner, which the client's lock watchers compare
     /// with the active player.
@@ -25,7 +25,7 @@ impl ObjectFields {
     /// charges left on spell `i`, signed; negative is consumed when empty, 0 is spent.
     pub fn item_spell_charges(&self, i: u8) -> Option<i32> {
         (i < 5)
-            .then(|| self.get_u32(FIELD_ITEM_STACK_COUNT + 2 + u16::from(i)))?
+            .then(|| self.get_u32(FIELD_ITEM_SPELL_CHARGES + u16::from(i)))?
             .map(|v| v as i32)
     }
     /// `ITEM_FIELD_FLAGS` (field 21): `0x08` wrapped, never alerts; `0x10` forces red status 4.
@@ -35,6 +35,11 @@ impl ObjectFields {
     /// `ITEM_FIELD_CREATOR` (field 10): crafter, or letter sender (`HandleMailCreateTextItem`).
     pub fn item_creator(&self) -> Option<u64> {
         self.get_guid(10).filter(|&g| g != 0)
+    }
+    /// `ITEM_FIELD_GIFTCREATOR` (field 12, `[item+0x114]+0x18` at `0x52e32a`): who wrapped the
+    /// item, read only while it carries the WRAPPED flag.
+    pub fn item_gift_creator(&self) -> Option<u64> {
+        self.get_guid(12).filter(|&g| g != 0)
     }
     /// `ITEM_FIELD_ITEM_TEXT_ID` (field 45, owner only): a mailed letter copy's text; nonzero
     /// makes a right-click read it (`CMSG_ITEM_TEXT_QUERY`) instead of using the item.

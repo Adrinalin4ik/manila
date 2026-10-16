@@ -23,6 +23,8 @@ webgpu = ["bevy/webgpu", "benilla-world/webgpu"]
 # Links Bevy as a shared library so an incremental rebuild relinks faster. The binary then starts
 # only through `cargo run`, which puts the toolchain's libstd on the loader path.
 bevy_dynamic_linking = ["bevy/dynamic_linking"]
+# Experimental: run the UI scripts on benilla's own 1.12 interpreter (`benilla-lua`).
+benilla-vm = ["benilla-ui/benilla-vm"]
 
 [dependencies]
 # Wall-clock reads (`SystemTime::now`) go through `web-time`: a re-export of std's on native, and
@@ -45,6 +47,10 @@ regex = "1"
 libc = "0.2"
 # PNG encoding only: the macOS cursor's NSImage data and screenshots.
 image = { version = "0.25", default-features = false, features = ["png"] }
+# The "no WoW install" error dialog (`no_install`): AppKit, Win32 and, on Linux, `zenity`; no GTK.
+# `xdg-portal` is the Linux backend that carries the message dialog; `wayland` is its file-dialog
+# parent handle, which a message dialog without a parent never reads.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 # Thread-to-ECS channels: crossbeam's `Receiver` is `Sync`, so it is a resource without a mutex.
 crossbeam-channel = "0.5"
 # The two channels the sequencer *waits* at (credentials, character pick). crossbeam's `recv` parks

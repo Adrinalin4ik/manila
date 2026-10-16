@@ -68,7 +68,9 @@ impl ScanWitness for NamingWitness {
         offset: u32,
         length: u8,
     ) -> Attestation<ApiIntegrity> {
-        self.note(format!("API_CHECK {module}!{proc} +{offset:#x} len {length}"));
+        self.note(format!(
+            "API_CHECK {module}!{proc} +{offset:#x} len {length}"
+        ));
         Attestation::NotImplemented
     }
     fn timing_values(&self) -> Attestation<TimingValues> {
@@ -124,7 +126,12 @@ fn main() -> anyhow::Result<()> {
         }),
     );
 
-    let l = benilla_protocol::logon(&host, &user, &pass)?;
+    let l = benilla_protocol::logon(
+        &host,
+        &user,
+        &pass,
+        benilla_protocol::auth::LOCALE_TAG_EN_US,
+    )?;
     let realm = l.realms.first().expect("no realms");
     println!("realm {:?} @ {}", realm.name, realm.address);
 

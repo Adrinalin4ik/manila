@@ -1,0 +1,1047 @@
+//! The string library: 5.1's `lstrlib.c`, whose messages the script host carries (the pattern
+//! matcher with `%f` and `%b`). A pattern ends at its first NUL, as the C matcher reads a C
+//! string.
+
+use crate::api::R;
+use crate::cfmt::{self, Spec};
+use crate::value::{Value, V};
+use crate::vm::{LuaError, Vm};
+
+/// The string function benilla has under `name`, for a state that registers its own list.
+pub(crate) fn native(name: &str) -> Option<crate::heap::NativeFn> {
+    Some(match name {
+        "len" => len,
+        "sub" => sub,
+        "lower" => lower,
+        "upper" => upper,
+        "char" => char_,
+        "rep" => rep,
+        "byte" => byte,
+        "format" => format,
+        "dump" => dump,
+        "find" => find,
+        "gfind" => gfind,
+        "gsub" => gsub,
+        _ => return None,
+    })
+}
+
+pub fn open(vm: &mut Vm) {
+    let t = vm.heap.new_table(0, 4);
+    let fns: [(&'static str, crate::heap::NativeFn); 12] = [
+        ("len", len),
+        ("sub", sub),
+        ("lower", lower),
+        ("upper", upper),
+        ("char", char_),
+        ("rep", rep),
+        ("byte", byte),
+        ("format", format),
+        ("dump", dump),
+        ("find", find),
+        ("gfind", gfind),
+        ("gsub", gsub),
+    ];
+    for (name, f) in fns {
+        let v = vm.new_native(name, f);
+        let k = vm.str(name.as_bytes());
+        vm.heap.table_mut(t).set(k, v).unwrap();
+    }
+    vm.set_global("string", Value::Table(t));
+}
+
+/// 5.1's `posrelat`: a negative position counts back from the end, and one before the start is 0.
+fn posrelat(pos: i64, len: usize) -> i64 {
+    let pos = if pos < 0 {
+        pos.saturating_add(len as i64 + 1)
+    } else {
+        pos
+    };
+    pos.max(0)
+}
+
+fn len(vm: &mut Vm, nargs: usize) -> R<usize> {
+    let s = vm.check_str(nargs, 1)?;
+    let n = vm.heap.str(s).len();
+    Ok(vm.ret1(Value::Num(n as f64)))
+}
+
+fn sub(vm: &mut Vm, nargs: usize) -> R<usize> {
+    let s = vm.check_str(nargs, 1)?;
+    let l = vm.heap.str(s).len();
+    let start = vm.check_integer(nargs, 2)?;
+    let end = vm.opt_integer(nargs, 3, -1)?;
+    let mut start = posrelat(start, l);
+    let mut end = posrelat(end, l);
+    if start < 1 {
+        start = 1;
+    }
+    if end > l as i64 {
+        end = l as i64;
+    }
+    if start <= end {
+        let (a, e) = (start as usize - 1, end as usize);
+        let r = vm
+            .heap
+            .intern_with(|h, b| b.extend_from_slice(&h.str(s)[a..e]));
+        Ok(vm.ret1(Value::Str(r)))
+    } else {
+        Ok(vm.ret_str(b""))
+    }
+}
+
+fn lower(vm: &mut Vm, nargs: usize) -> R<usize> {
+    let s = vm.check_str(nargs, 1)?;
+    let r = vm.heap.intern_with(|h, b| {
+        b.extend_from_slice(h.str(s));
+        b.make_ascii_lowercase();
+    });
+    Ok(vm.ret1(Value::Str(r)))
+}
+
+fn upper(vm: &mut Vm, nargs: usize) -> R<usize> {
+    let s = vm.check_str(nargs, 1)?;
+    let r = vm.heap.intern_with(|h, b| {
+        b.extend_from_slice(h.str(s));
+        b.make_ascii_uppercase();
+    });
+    Ok(vm.ret1(Value::Str(r)))
+}
+
+fn char_(vm: &mut Vm, nargs: usize) -> R<usize> {
+    let mut out = Vec::with_capacity(nargs);
+    for i in 1..=nargs {
+        let c = vm.check_int(nargs, i)?;
+        // `uchar(c) == c`.
+        if !(0..=255).contains(&c) {
+            return Err(vm.arg_error(i, "invalid value"));
+        }
+        out.push(c as u8);
+    }
+    Ok(vm.ret_str(&out))
+}
+
+/// 5.1's `rep`: `n` copies; a result past [`crate::api::MAX_STRING`] is `not enough memory`.
+fn rep(vm: &mut Vm, nargs: usize) -> R<usize> {
+    let s = vm.check_str(nargs, 1)?;
+    let n = vm.check_int(nargs, 2)?;
+    let l = vm.heap.str(s).len();
+    if n <= 0 || l == 0 {
+        return Ok(vm.ret_str(b""));
+    }
+    let total = l.saturating_mul(n as usize);
+    let [mut out] = vm.take_bufs::<1>();
+    let r = vm.reserve(&mut out, total);
+    if r.is_ok() {
+        // Doubling copies, as `slice::repeat` makes them.
+        out.extend_from_slice(vm.heap.str(s));
+        while out.len() <= total / 2 {
+            out.extend_from_within(..);
+        }
+        out.extend_from_within(..total - out.len());
+    }
+    let r = r.map(|()| vm.ret_str(&out));
+    vm.give_bufs([out]);
+    r
+}
+
+/// 5.1's `byte`: the bytes from `i` (1) to `j` (`i`), each a number.
+fn byte(vm: &mut Vm, nargs: usize) -> R<usize> {
+    let s = vm.check_str(nargs, 1)?;
+    let l = vm.heap.str(s).len();
+    let posi = posrelat(vm.opt_integer(nargs, 2, 1)?, l);
+    let pose = posrelat(vm.opt_integer(nargs, 3, posi)?, l);
+    let posi = posi.max(1);
+    let pose = pose.min(l as i64);
+    if posi > pose {
+        return Ok(0);
+    }
+    let n = (pose - posi + 1) as usize;
+    if !vm.check_stack(n) {
+        return Err(vm.error_at(1, "stack overflow (string slice too long)"));
+    }
+    for i in 0..n {
+        let b = vm.heap.str(s)[posi as usize - 1 + i];
+        vm.push(Value::Num(b as f64));
+    }
+    Ok(n)
+}
+
+/// 5.1's `dump`: a Lua function becomes a binary chunk, a native one cannot. The chunk carries
+/// 5.1's header and the function's source name, not 5.1 bytecode: the script host's
+/// `loadstring` refuses every binary chunk, so nothing reads past the header.
+fn dump(vm: &mut Vm, nargs: usize) -> R<usize> {
+    let f = vm.check_function(nargs, 1)?;
+    let V::Func(f) = f.unpack() else {
+        unreachable!("checked a function")
+    };
+    let source = match vm.heap.func(f) {
+        crate::heap::FuncObj::Lua(l) => l.proto().source.clone(),
+        crate::heap::FuncObj::Native { .. } => {
+            return Err(vm.error_at(1, "unable to dump given function"))
+        }
+    };
+    let mut out = b"\x1bLuaQ\x00\x01\x04\x08\x04\x08\x00".to_vec();
+    out.extend_from_slice(&source);
+    Ok(vm.ret_str(&out))
+}
+
+// ── string.format ────────────────────────────────────────────────────────────────────────────
+
+fn format(vm: &mut Vm, nargs: usize) -> R<usize> {
+    let mut b = vm.take_bufs::<2>();
+    let r = format_in(vm, nargs, &mut b);
+    vm.give_bufs(b);
+    r
+}
+
+fn format_in(vm: &mut Vm, nargs: usize, [f, out]: &mut [Vec<u8>; 2]) -> R<usize> {
+    let fs = vm.check_str(nargs, 1)?;
+    f.extend_from_slice(vm.heap.str(fs));
+    let f = &f[..];
+    let mut arg = 1;
+    let mut i = 0;
+    while i < f.len() {
+        if f[i] != b'%' {
+            out.push(f[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        if i < f.len() && f[i] == b'%' {
+            out.push(b'%');
+            i += 1;
+            continue;
+        }
+        arg += 1;
+        // `if (++arg > top) luaL_argerror(L, arg, "no value")`, before the item is read.
+        if arg > nargs {
+            return Err(vm.arg_error(arg, "no value"));
+        }
+        // A number's text is short: the bound on the whole is enough for it.
+        vm.check_len(out)?;
+        // `scanformat`: flags, two width digits, a point and two precision digits at most.
+        let mut spec = Spec::default();
+        let at = |j: usize| f.get(j).copied().unwrap_or(0);
+        let flags_at = i;
+        while at(i) != 0 && b"-+ #0".contains(&at(i)) {
+            match at(i) {
+                b'-' => spec.minus = true,
+                b'+' => spec.plus = true,
+                b' ' => spec.space = true,
+                b'#' => spec.alt = true,
+                _ => spec.zero = true,
+            }
+            i += 1;
+        }
+        // 5.1's `scanformat`: six flags or more, which `FLAGS` cannot hold.
+        if i - flags_at >= 6 {
+            return Err(vm.error_at(1, "invalid format (repeated flags)"));
+        }
+        for _ in 0..2 {
+            if at(i).is_ascii_digit() {
+                spec.width = spec.width * 10 + (at(i) - b'0') as usize;
+                i += 1;
+            }
+        }
+        if at(i) == b'.' {
+            i += 1;
+            let mut p = 0;
+            for _ in 0..2 {
+                if at(i).is_ascii_digit() {
+                    p = p * 10 + (at(i) - b'0') as usize;
+                    i += 1;
+                }
+            }
+            spec.precision = Some(p);
+        }
+        if at(i).is_ascii_digit() {
+            return Err(vm.error_at(1, "invalid format (width or precision too long)"));
+        }
+        let conv = at(i);
+        i += 1;
+        match conv {
+            b'c' => {
+                // `(int)luaL_checknumber`: the double cast straight to 32 bits.
+                let c = crate::api::c_int_direct(vm.check_number(nargs, arg)?);
+                let item = cfmt::fmt_str(
+                    &[c as u8],
+                    &Spec {
+                        precision: None,
+                        ..spec
+                    },
+                );
+                // `luaL_addlstring(b, buff, strlen(buff))`: a `%c` of 0 ends the item.
+                let item = &item[..item.iter().position(|&b| b == 0).unwrap_or(item.len())];
+                out.extend_from_slice(item);
+            }
+            b'd' | b'i' => {
+                // `(long)luaL_checknumber`.
+                let n = crate::api::c_integer(vm.check_number(nargs, arg)?);
+                let item = if spec.is_plain() {
+                    // A bare `%d`: the digits alone.
+                    n.to_string()
+                } else {
+                    cfmt::fmt_int(n, &spec)
+                };
+                out.extend_from_slice(item.as_bytes());
+            }
+            b'o' | b'u' | b'x' | b'X' => {
+                let n = vm.check_number(nargs, arg)?;
+                // `(unsigned long)luaL_checknumber`.
+                let n = crate::api::c_ulong(n);
+                let item = cfmt::fmt_uint(n, conv, &spec);
+                out.extend_from_slice(item.as_bytes());
+            }
+            b'e' | b'E' | b'f' | b'g' | b'G' => {
+                let n = vm.check_number(nargs, arg)?;
+                let item = cfmt::fmt_float(n, conv, &spec);
+                out.extend_from_slice(item.as_bytes());
+            }
+            b'q' => {
+                let s = vm.check_str(nargs, arg)?;
+                // `addquoted`: two quotes, and up to four bytes for each byte quoted.
+                let len = vm.heap.str(s).len();
+                vm.reserve(out, len.saturating_mul(4).saturating_add(2))?;
+                out.push(b'"');
+                for &c in vm.heap.str(s) {
+                    match c {
+                        b'"' | b'\\' | b'\n' => {
+                            out.push(b'\\');
+                            out.push(c);
+                        }
+                        b'\r' => out.extend_from_slice(b"\\r"),
+                        0 => out.extend_from_slice(b"\\000"),
+                        _ => out.push(c),
+                    }
+                }
+                out.push(b'"');
+            }
+            b's' => {
+                let s = vm.check_str(nargs, arg)?;
+                // At most the string and a two-digit width.
+                let len = vm.heap.str(s).len();
+                vm.reserve(out, len.saturating_add(99))?;
+                let b = vm.heap.str(s);
+                if spec.precision.is_none() && b.len() >= 100 {
+                    out.extend_from_slice(b);
+                } else {
+                    // `sprintf` reads a C string.
+                    let c = &b[..b.iter().position(|&x| x == 0).unwrap_or(b.len())];
+                    if spec.is_plain() {
+                        out.extend_from_slice(c);
+                    } else {
+                        out.extend_from_slice(&cfmt::fmt_str(c, &spec));
+                    }
+                }
+            }
+            c => {
+                // 5.1 names the option; past the end it is the C string's NUL, which prints as
+                // nothing.
+                let opt = if c == 0 {
+                    String::new()
+                } else {
+                    (c as char).to_string()
+                };
+                return Err(vm.error_at(1, &format!("invalid option `%{opt}' to `format'")));
+            }
+        }
+    }
+    Ok(vm.ret_str(out))
+}
+
+// ── the matcher ──────────────────────────────────────────────────────────────────────────────
+
+const MAX_CAPTURES: usize = 32;
+
+const CAP_UNFINISHED: isize = -1;
+const CAP_POSITION: isize = -2;
+const SPECIALS: &[u8] = b"^$*+?.([%-";
+
+struct MatchState<'a> {
+    src: &'a [u8],
+    /// The pattern, NUL-terminated as 5.0's C string is.
+    pat: &'a [u8],
+    level: usize,
+    capture: [(usize, isize); MAX_CAPTURES],
+    /// The Rust stack address past which a nested match raises `pattern too complex`.
+    stack_limit: usize,
+}
+
+/// A matcher error: the message `luaL_error` raises.
+struct PatErr(&'static str);
+
+type M<T> = Result<T, PatErr>;
+
+fn class_match(c: u8, cl: u8) -> bool {
+    let res = match cl.to_ascii_lowercase() {
+        b'a' => c.is_ascii_alphabetic(),
+        b'c' => c < 32 || c == 127,
+        b'd' => c.is_ascii_digit(),
+        b'l' => c.is_ascii_lowercase(),
+        b'p' => c.is_ascii_punctuation(),
+        b's' => matches!(c, 9..=13 | 32),
+        b'u' => c.is_ascii_uppercase(),
+        b'w' => c.is_ascii_alphanumeric(),
+        b'x' => c.is_ascii_hexdigit(),
+        b'z' => c == 0,
+        _ => return cl == c,
+    };
+    if cl.is_ascii_lowercase() {
+        res
+    } else {
+        !res
+    }
+}
+
+impl MatchState<'_> {
+    fn p(&self, i: usize) -> u8 {
+        self.pat.get(i).copied().unwrap_or(0)
+    }
+
+    fn class_end(&self, p: usize) -> M<usize> {
+        let mut p = p;
+        let c = self.p(p);
+        p += 1;
+        match c {
+            b'%' => {
+                if self.p(p) == 0 {
+                    return Err(PatErr("malformed pattern (ends with `%')"));
+                }
+                Ok(p + 1)
+            }
+            b'[' => {
+                if self.p(p) == b'^' {
+                    p += 1;
+                }
+                loop {
+                    if self.p(p) == 0 {
+                        return Err(PatErr("malformed pattern (missing `]')"));
+                    }
+                    let c = self.p(p);
+                    p += 1;
+                    if c == b'%' && self.p(p) != 0 {
+                        p += 1;
+                    }
+                    if self.p(p) == b']' {
+                        break;
+                    }
+                }
+                Ok(p + 1)
+            }
+            _ => Ok(p),
+        }
+    }
+
+    /// `matchbracketclass`: `p` at the `[`, `ec` at the `]`.
+    fn bracket(&self, c: u8, p: usize, ec: usize) -> bool {
+        let mut sig = true;
+        let mut p = p;
+        if self.p(p + 1) == b'^' {
+            sig = false;
+            p += 1;
+        }
+        loop {
+            p += 1;
+            if p >= ec {
+                break;
+            }
+            if self.p(p) == b'%' {
+                p += 1;
+                if class_match(c, self.p(p)) {
+                    return sig;
+                }
+            } else if self.p(p + 1) == b'-' && p + 2 < ec {
+                p += 2;
+                if self.p(p - 2) <= c && c <= self.p(p) {
+                    return sig;
+                }
+            } else if self.p(p) == c {
+                return sig;
+            }
+        }
+        !sig
+    }
+
+    fn single(&self, c: u8, p: usize, ep: usize) -> bool {
+        match self.p(p) {
+            b'.' => true,
+            b'%' => class_match(c, self.p(p + 1)),
+            b'[' => self.bracket(c, p, ep - 1),
+            pc => pc == c,
+        }
+    }
+
+    /// A nested `do_match`, within the Rust stack the VM allows its calls. The first level,
+    /// which `find`, `gsub` and `gfind` call, is not checked, so a pattern that never nests pays
+    /// nothing. Deviation: 5.1's `match` recurses without a bound and overflows the C stack
+    /// (near 32000 levels on 8 MB); this raises 5.2's `pattern too complex` instead. The bound
+    /// is stack measured, not levels counted, so it holds at any optimisation level: a level
+    /// takes about 110 bytes at opt-level 1 and about 1.5 KB at opt-level 0.
+    #[inline(never)]
+    fn sub_match(&mut self, s: usize, p: usize) -> M<Option<usize>> {
+        let marker = 0u8;
+        if (std::ptr::addr_of!(marker) as usize) < self.stack_limit {
+            return Err(PatErr("pattern too complex"));
+        }
+        self.do_match(s, p)
+    }
+
+    fn do_match(&mut self, s: usize, p: usize) -> M<Option<usize>> {
+        let (mut s, mut p) = (s, p);
+        loop {
+            match self.p(p) {
+                b'(' => {
+                    return if self.p(p + 1) == b')' {
+                        self.start_capture(s, p + 2, CAP_POSITION)
+                    } else {
+                        self.start_capture(s, p + 1, CAP_UNFINISHED)
+                    };
+                }
+                b')' => return self.end_capture(s, p + 1),
+                0 => return Ok(Some(s)),
+                b'$' if self.p(p + 1) == 0 => {
+                    return Ok(if s == self.src.len() { Some(s) } else { None });
+                }
+                b'%' if self.p(p + 1) == b'b' => match self.balance(s, p + 2)? {
+                    Some(e) => {
+                        s = e;
+                        p += 4;
+                        continue;
+                    }
+                    None => return Ok(None),
+                },
+                b'%' if self.p(p + 1) == b'f' => {
+                    p += 2;
+                    if self.p(p) != b'[' {
+                        return Err(PatErr("missing `[' after `%f' in pattern"));
+                    }
+                    let ep = self.class_end(p)?;
+                    let prev = if s == 0 { 0 } else { self.src[s - 1] };
+                    let cur = self.src.get(s).copied().unwrap_or(0);
+                    if !self.bracket(prev, p, ep - 1) && self.bracket(cur, p, ep - 1) {
+                        p = ep;
+                        continue;
+                    }
+                    return Ok(None);
+                }
+                b'%' if self.p(p + 1).is_ascii_digit() => {
+                    match self.match_capture(s, self.p(p + 1))? {
+                        Some(e) => {
+                            s = e;
+                            p += 2;
+                            continue;
+                        }
+                        None => return Ok(None),
+                    }
+                }
+                _ => {
+                    let ep = self.class_end(p)?;
+                    let m = s < self.src.len() && self.single(self.src[s], p, ep);
+                    match self.p(ep) {
+                        b'?' => {
+                            if m {
+                                if let Some(r) = self.sub_match(s + 1, ep + 1)? {
+                                    return Ok(Some(r));
+                                }
+                            }
+                            p = ep + 1;
+                        }
+                        b'*' => return self.max_expand(s, p, ep),
+                        b'+' => {
+                            return if m {
+                                self.max_expand(s + 1, p, ep)
+                            } else {
+                                Ok(None)
+                            }
+                        }
+                        b'-' => return self.min_expand(s, p, ep),
+                        _ => {
+                            if !m {
+                                return Ok(None);
+                            }
+                            s += 1;
+                            p = ep;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn balance(&self, s: usize, p: usize) -> M<Option<usize>> {
+        if self.p(p) == 0 || self.p(p + 1) == 0 {
+            return Err(PatErr("unbalanced pattern"));
+        }
+        if s >= self.src.len() || self.src[s] != self.p(p) {
+            return Ok(None);
+        }
+        let (b, e) = (self.p(p), self.p(p + 1));
+        let mut cont = 1;
+        let mut s = s + 1;
+        while s < self.src.len() {
+            let c = self.src[s];
+            if c == e {
+                cont -= 1;
+                if cont == 0 {
+                    return Ok(Some(s + 1));
+                }
+            } else if c == b {
+                cont += 1;
+            }
+            s += 1;
+        }
+        Ok(None)
+    }
+
+    // Inlined into `do_match`: one frame per pattern level, so a deep match stays within the
+    // CPU's return-address predictor.
+    #[inline(always)]
+    fn max_expand(&mut self, s: usize, p: usize, ep: usize) -> M<Option<usize>> {
+        let mut i = 0;
+        while s + i < self.src.len() && self.single(self.src[s + i], p, ep) {
+            i += 1;
+        }
+        loop {
+            if let Some(r) = self.sub_match(s + i, ep + 1)? {
+                return Ok(Some(r));
+            }
+            if i == 0 {
+                return Ok(None);
+            }
+            i -= 1;
+        }
+    }
+
+    // Inlined into `do_match`: one frame per pattern level, so a deep match stays within the
+    // CPU's return-address predictor.
+    #[inline(always)]
+    fn min_expand(&mut self, s: usize, p: usize, ep: usize) -> M<Option<usize>> {
+        let mut s = s;
+        loop {
+            if let Some(r) = self.sub_match(s, ep + 1)? {
+                return Ok(Some(r));
+            }
+            if s < self.src.len() && self.single(self.src[s], p, ep) {
+                s += 1;
+            } else {
+                return Ok(None);
+            }
+        }
+    }
+
+    // Inlined into `do_match`: one frame per pattern level, so a deep match stays within the
+    // CPU's return-address predictor.
+    #[inline(always)]
+    fn start_capture(&mut self, s: usize, p: usize, what: isize) -> M<Option<usize>> {
+        if self.level >= MAX_CAPTURES {
+            return Err(PatErr("too many captures"));
+        }
+        self.capture[self.level] = (s, what);
+        self.level += 1;
+        let r = self.sub_match(s, p)?;
+        if r.is_none() {
+            self.level -= 1;
+        }
+        Ok(r)
+    }
+
+    // Inlined into `do_match`: one frame per pattern level, so a deep match stays within the
+    // CPU's return-address predictor.
+    #[inline(always)]
+    fn end_capture(&mut self, s: usize, p: usize) -> M<Option<usize>> {
+        let l = self.capture_to_close()?;
+        self.capture[l].1 = (s - self.capture[l].0) as isize;
+        let r = self.sub_match(s, p)?;
+        if r.is_none() {
+            self.capture[l].1 = CAP_UNFINISHED;
+        }
+        Ok(r)
+    }
+
+    fn capture_to_close(&self) -> M<usize> {
+        (0..self.level)
+            .rev()
+            .find(|&l| self.capture[l].1 == CAP_UNFINISHED)
+            .ok_or(PatErr("invalid pattern capture"))
+    }
+
+    fn check_capture(&self, l: u8) -> M<usize> {
+        let l = l as isize - b'1' as isize;
+        if l < 0 || l as usize >= self.level || self.capture[l as usize].1 == CAP_UNFINISHED {
+            return Err(PatErr("invalid capture index"));
+        }
+        Ok(l as usize)
+    }
+
+    fn match_capture(&self, s: usize, l: u8) -> M<Option<usize>> {
+        let l = self.check_capture(l)?;
+        let (init, len) = self.capture[l];
+        let len = len as usize;
+        if self.src.len() - s >= len && self.src[init..init + len] == self.src[s..s + len] {
+            Ok(Some(s + len))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// `push_onecapture`.
+    fn capture_value(&self, vm: &mut Vm, i: usize) -> M<Value> {
+        let (init, len) = self.capture[i];
+        if len == CAP_UNFINISHED {
+            return Err(PatErr("unfinished capture"));
+        }
+        Ok(if len == CAP_POSITION {
+            Value::Num((init + 1) as f64)
+        } else {
+            vm.str(&self.src[init..init + len as usize])
+        })
+    }
+
+    /// `push_captures`: the captures, or the whole match `s..e` when there are none.
+    fn captures(&self, vm: &mut Vm, whole: Option<(usize, usize)>) -> M<Vec<Value>> {
+        if self.level == 0 {
+            if let Some((s, e)) = whole {
+                return Ok(vec![vm.str(&self.src[s..e])]);
+            }
+        }
+        (0..self.level).map(|i| self.capture_value(vm, i)).collect()
+    }
+}
+
+fn pat_err(vm: &mut Vm, e: PatErr) -> LuaError {
+    vm.error_at(1, e.0)
+}
+
+/// The pattern as 5.0 reads it: up to its first NUL, then a NUL.
+/// The pattern as 5.0's matcher reads it, a C string: up to its first NUL, then one.
+/// The byte a match of `pat` from `p` must start with, when its first item is one literal byte
+/// that must occur (no `*`, `?` or `-` after it): `do_match` returns no match at once at any
+/// position without it, before it reads the rest of the pattern, so skipping such positions
+/// changes no result and no error.
+fn first_literal(pat: &[u8], p: usize) -> Option<u8> {
+    let (c, ep) = match *pat.get(p)? {
+        b'%' => {
+            let c = *pat.get(p + 1)?;
+            if c == 0 || c.is_ascii_alphanumeric() {
+                return None;
+            }
+            (c, p + 2)
+        }
+        c if c == 0 || c == b')' || SPECIALS.contains(&c) => return None,
+        c => (c, p + 1),
+    };
+    match pat.get(ep) {
+        Some(b'*' | b'?' | b'-') => None,
+        _ => Some(c),
+    }
+}
+
+fn c_pattern(p: &[u8], out: &mut Vec<u8>) {
+    out.clear();
+    out.extend_from_slice(&p[..p.iter().position(|&b| b == 0).unwrap_or(p.len())]);
+    out.push(0);
+}
+
+fn new_state<'a>(vm: &Vm, src: &'a [u8], pat: &'a [u8]) -> MatchState<'a> {
+    MatchState {
+        src,
+        pat,
+        level: 0,
+        capture: [(0, 0); MAX_CAPTURES],
+        stack_limit: vm.rust_stack_limit(),
+    }
+}
+
+// The pattern functions copy the subject and pattern out of the heap (a match calls back into
+// the VM); the copies go into buffers the VM keeps, not fresh allocations.
+fn find(vm: &mut Vm, nargs: usize) -> R<usize> {
+    let mut b = vm.take_bufs::<3>();
+    let r = find_in(vm, nargs, &mut b);
+    vm.give_bufs(b);
+    r
+}
+
+fn find_in(vm: &mut Vm, nargs: usize, [src, pat, cpat]: &mut [Vec<u8>; 3]) -> R<usize> {
+    let s = vm.check_str(nargs, 1)?;
+    let p = vm.check_str(nargs, 2)?;
+    let l1 = vm.heap.str(s).len();
+    let mut init = posrelat(vm.opt_integer(nargs, 3, 1)?, l1) - 1;
+    if init < 0 {
+        init = 0;
+    } else if init as usize > l1 {
+        init = l1 as i64;
+    }
+    let init = init as usize;
+    let plain = vm.arg(nargs, 3).truthy();
+    src.extend_from_slice(vm.heap.str(s));
+    pat.extend_from_slice(vm.heap.str(p));
+    c_pattern(pat, cpat);
+    let (src, pat, cpat) = (&src[..], &pat[..], &cpat[..]);
+    if plain || !cpat[..cpat.len() - 1].iter().any(|c| SPECIALS.contains(c)) {
+        // `lmemfind` over the whole pattern, NULs included.
+        let hay = &src[init..];
+        let found = if pat.is_empty() {
+            Some(0)
+        } else if pat.len() > hay.len() {
+            None
+        } else {
+            hay.windows(pat.len()).position(|w| w == pat)
+        };
+        if let Some(i) = found {
+            vm.push(Value::Num((init + i + 1) as f64));
+            vm.push(Value::Num((init + i + pat.len()) as f64));
+            return Ok(2);
+        }
+        return Ok(vm.ret1(Value::Nil));
+    }
+    let (anchor, start) = if cpat[0] == b'^' {
+        (true, 1)
+    } else {
+        (false, 0)
+    };
+    let mut ms = new_state(vm, src, cpat);
+    let mut s1 = init;
+    loop {
+        ms.level = 0;
+        match ms.do_match(s1, start) {
+            Err(e) => return Err(pat_err(vm, e)),
+            Ok(Some(e)) => {
+                let caps = match ms.captures(vm, None) {
+                    Ok(c) => c,
+                    Err(e) => return Err(pat_err(vm, e)),
+                };
+                vm.push(Value::Num((s1 + 1) as f64));
+                vm.push(Value::Num(e as f64));
+                for c in &caps {
+                    vm.push(*c);
+                }
+                return Ok(2 + caps.len());
+            }
+            Ok(None) => {}
+        }
+        s1 += 1;
+        if s1 > src.len() || anchor {
+            break;
+        }
+    }
+    Ok(vm.ret1(Value::Nil))
+}
+
+/// `gfind`: an iterator closure over `(s, p, position)`.
+fn gfind(vm: &mut Vm, nargs: usize) -> R<usize> {
+    let s = vm.check_str(nargs, 1)?;
+    let p = vm.check_str(nargs, 2)?;
+    let f = vm.new_closure(
+        "gfind_aux",
+        gfind_aux,
+        vec![Value::Str(s), Value::Str(p), Value::Num(0.0)],
+    );
+    Ok(vm.ret1(f))
+}
+
+fn gfind_aux(vm: &mut Vm, nargs: usize) -> R<usize> {
+    let mut b = vm.take_bufs::<2>();
+    let r = gfind_in(vm, nargs, &mut b);
+    vm.give_bufs(b);
+    r
+}
+
+fn gfind_in(vm: &mut Vm, _nargs: usize, [src, cpat]: &mut [Vec<u8>; 2]) -> R<usize> {
+    let (V::Str(s), V::Str(p)) = ((vm.upvalue(0)).unpack(), (vm.upvalue(1)).unpack()) else {
+        return Ok(0);
+    };
+    let pos = vm.tonumber(vm.upvalue(2)).unwrap_or(0.0) as usize;
+    src.extend_from_slice(vm.heap.str(s));
+    c_pattern(vm.heap.str(p), cpat);
+    let (src, cpat) = (&src[..], &cpat[..]);
+    let mut ms = new_state(vm, src, cpat);
+    let mut at = pos;
+    while at <= src.len() {
+        ms.level = 0;
+        match ms.do_match(at, 0) {
+            Err(e) => return Err(pat_err(vm, e)),
+            Ok(Some(e)) => {
+                let newstart = if e == at { e + 1 } else { e };
+                vm.set_upvalue(2, Value::Num(newstart as f64));
+                let caps = match ms.captures(vm, Some((at, e))) {
+                    Ok(c) => c,
+                    Err(e) => return Err(pat_err(vm, e)),
+                };
+                for c in &caps {
+                    vm.push(*c);
+                }
+                return Ok(caps.len());
+            }
+            Ok(None) => at += 1,
+        }
+    }
+    Ok(0)
+}
+
+/// 5.1's `gsub`: a string, table or function replacement; `nil` or `false` keeps the match.
+fn gsub(vm: &mut Vm, nargs: usize) -> R<usize> {
+    let mut b = vm.take_bufs::<4>();
+    let r = gsub_in(vm, nargs, &mut b);
+    vm.give_bufs(b);
+    r
+}
+
+fn gsub_in(vm: &mut Vm, nargs: usize, [src, cpat, out, repl_buf]: &mut [Vec<u8>; 4]) -> R<usize> {
+    let s = vm.check_str(nargs, 1)?;
+    let p = vm.check_str(nargs, 2)?;
+    let srcl = vm.heap.str(s).len();
+    let repl = vm.arg(nargs, 2);
+    // `luaL_optint(L, 4, srcl+1)`: the default cast to `int` as C casts it.
+    let max_s = vm.opt_int(nargs, 4, (srcl as i64 + 1) as i32)?;
+    // 5.1's `str_gsub`: a string or number, a function, or a table.
+    let kind = match repl.unpack() {
+        _ if nargs < 3 => None,
+        V::Str(_) | V::Num(_) => Some(0),
+        V::Func(_) => Some(1),
+        V::Table(_) => Some(2),
+        _ => None,
+    };
+    let Some(kind) = kind else {
+        return Err(vm.arg_error(3, "string/function/table expected"));
+    };
+    if kind == 0 {
+        // `lua_tolstring(L, 3)`: a number replacement is its text.
+        let r = vm.tostr(repl).unwrap();
+        repl_buf.extend_from_slice(vm.heap.str(r));
+    }
+    src.extend_from_slice(vm.heap.str(s));
+    c_pattern(vm.heap.str(p), cpat);
+    let (src, cpat, repl_bytes) = (&src[..], &cpat[..], &repl_buf[..]);
+    let (anchor, pstart) = if cpat[0] == b'^' {
+        (true, 1)
+    } else {
+        (false, 0)
+    };
+    let mut ms = new_state(vm, src, cpat);
+    let mut at = 0usize;
+    let mut n = 0;
+    let lit = if anchor {
+        None
+    } else {
+        first_literal(cpat, pstart)
+    };
+    while n < max_s {
+        // Straight to the next place the first byte occurs: `do_match` fails at once anywhere
+        // else, and those bytes are copied as the loop below would copy them one by one.
+        if let Some(c) = lit {
+            match src[at..].iter().position(|&b| b == c) {
+                Some(k) => {
+                    out.extend_from_slice(&src[at..at + k]);
+                    at += k;
+                }
+                None => break,
+            }
+        }
+        ms.level = 0;
+        let e = match ms.do_match(at, pstart) {
+            Ok(e) => e,
+            Err(e) => return Err(pat_err(vm, e)),
+        };
+        if let Some(e) = e {
+            n += 1;
+            add_value(vm, &ms, out, kind, repl, repl_bytes, at, e)?;
+        }
+        match e {
+            Some(e) if e > at => at = e,
+            _ if at < src.len() => {
+                out.push(src[at]);
+                at += 1;
+            }
+            _ => break,
+        }
+        if anchor {
+            break;
+        }
+    }
+    out.extend_from_slice(&src[at..]);
+    let r = vm.str(out);
+    vm.push(r);
+    vm.push(Value::Num(n as f64));
+    Ok(2)
+}
+
+/// 5.1's `push_onecapture`: capture `i`, or the whole match `s..e` for 0 when there are none.
+fn one_capture(vm: &mut Vm, ms: &MatchState, i: usize, s: usize, e: usize) -> R<Value> {
+    if i >= ms.level {
+        if i == 0 {
+            return Ok(vm.str(&ms.src[s..e]));
+        }
+        return Err(pat_err(vm, PatErr("invalid capture index")));
+    }
+    ms.capture_value(vm, i).map_err(|e| pat_err(vm, e))
+}
+
+/// 5.1's `add_value`: one match's replacement onto `out`.
+#[allow(clippy::too_many_arguments)]
+fn add_value(
+    vm: &mut Vm,
+    ms: &MatchState,
+    out: &mut Vec<u8>,
+    kind: u8,
+    repl: Value,
+    repl_bytes: &[u8],
+    s: usize,
+    e: usize,
+) -> R<()> {
+    let v = match kind {
+        0 => {
+            // `add_s`: `%0` the whole match, `%1`-`%9` a capture, `%` and anything else itself.
+            vm.check_len(out)?;
+            let mut i = 0;
+            while i < repl_bytes.len() {
+                let c = repl_bytes[i];
+                if c != b'%' {
+                    out.push(c);
+                } else {
+                    i += 1;
+                    let d = repl_bytes.get(i).copied().unwrap_or(0);
+                    if !d.is_ascii_digit() {
+                        out.push(d);
+                    } else if d == b'0' {
+                        vm.reserve(out, e - s)?;
+                        out.extend_from_slice(&ms.src[s..e]);
+                    } else {
+                        let v = one_capture(vm, ms, (d - b'1') as usize, s, e)?;
+                        let sv = vm.tostr(v).unwrap();
+                        vm.reserve(out, vm.heap.str(sv).len())?;
+                        out.extend_from_slice(vm.heap.str(sv));
+                    }
+                }
+                i += 1;
+            }
+            return Ok(());
+        }
+        1 => {
+            let caps = ms
+                .captures(vm, Some((s, e)))
+                .map_err(|err| pat_err(vm, err))?;
+            vm.call_value(repl, &caps, 1)?[0]
+        }
+        _ => {
+            let k = one_capture(vm, ms, 0, s, e)?;
+            vm.index(repl, k, None)?
+        }
+    };
+    if !v.truthy() {
+        // Nil or false keeps the matched text.
+        vm.reserve(out, e - s)?;
+        out.extend_from_slice(&ms.src[s..e]);
+    } else if let Some(sv) = matches!(v.unpack(), V::Str(_) | V::Num(_))
+        .then(|| vm.tostr(v))
+        .flatten()
+    {
+        vm.reserve(out, vm.heap.str(sv).len())?;
+        out.extend_from_slice(vm.heap.str(sv));
+    } else {
+        // `luaL_error`: the position of `gsub`'s caller.
+        let t = v.type_name();
+        return Err(vm.error_at(1, &format!("invalid replacement value (a {t})")));
+    }
+    Ok(())
+}

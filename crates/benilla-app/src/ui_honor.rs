@@ -4,14 +4,12 @@
 //! refuses by not answering (`MiscHandler.cpp:962-972`); the stock pane re-asks from its `OnShow`
 //! while it holds nothing, the only retry.
 //!
-//! The reference fires the pane's events from three field watches (`0x467e70`, callback
-//! `0x5de4b0`): `PLAYER_FIELD_SESSION_KILLS` fires `PLAYER_PVP_KILLS_CHANGED`, and
-//! `PLAYER_BYTES_3` and `PLAYER_FIELD_BYTES2` byte 0 fire `PLAYER_PVP_RANK_CHANGED`. Nothing
-//! watches the weekly, lifetime or highest-rank fields, which `HonorFrame.lua:10-11` repaints only
-//! on `PLAYER_ENTERING_WORLD`.
-//!
-//! Deviation: the reference watches the whole `PLAYER_BYTES_3` dword, so a drunkenness change also
-//! fires `PLAYER_PVP_RANK_CHANGED`; we watch byte 3 alone, because that repaint is identical.
+//! The pane's events are three field watches (`0x467e70`, callback `0x5de4b0`):
+//! `PLAYER_FIELD_SESSION_KILLS` fires `PLAYER_PVP_KILLS_CHANGED`, and the whole `PLAYER_BYTES_3`
+//! dword and `PLAYER_FIELD_BYTES2` byte 0 fire `PLAYER_PVP_RANK_CHANGED`, from
+//! [`crate::field_watch`]; this feed pushes what their handlers read, ahead of them and of the
+//! world-enter events. Nothing watches the weekly, lifetime or highest-rank fields, which
+//! `HonorFrame.lua:10-11` repaints only on `PLAYER_ENTERING_WORLD`.
 
 use std::collections::HashMap;
 
@@ -28,7 +26,7 @@ pub(crate) struct InspectHonor(pub(crate) Option<benilla_protocol::messages::Ins
 
 /// What the last push told this VM, keyed on the VM so a `/reload`'s fresh VM is told again.
 #[derive(Resource, Default)]
-struct HonorFeedState {
+pub(crate) struct HonorFeedState {
     vm: VmMemo<HonorFeedMemo>,
 }
 
@@ -67,7 +65,16 @@ impl Plugin for UiHonorPlugin {
         app.init_resource::<InspectHonor>()
             .init_resource::<HonorFeedState>()
             .init_resource::<crate::nameplates::PvpNameStrings>()
-            .add_systems(Update, feed_honor.in_set(UiFeed))
+            // Ahead of the unit feed: the reference writes the block with the create whose hook
+            // runs the world-enter cascade, so `PLAYER_ENTERING_WORLD`'s repaint reads it, and
+            // the field events' handlers read it too.
+            .add_systems(
+                Update,
+                feed_honor
+                    .in_set(UiFeed)
+                    .in_set(crate::ui_unit::field_events::FieldEventPushes)
+                    .before(crate::ui_unit::UnitFeed),
+            )
             // A VM holder, so after the tick; before the driver, so a new VM's strings reach the
             // lines the frame it arrives.
             .add_systems(
@@ -80,9 +87,9 @@ impl Plugin for UiHonorPlugin {
 }
 
 /// The overhead name's rank strings ([`crate::nameplates::PvpNameStrings`]), read off a VM the
-/// first frame it is in the world. Every VM is installed whole, outside `Update` (the boot VM with
-/// `GlobalStrings.lua` run, a world VM after its FrameXML and addon load), so the read sees what
-/// the load defined; any other frame pays one compare.
+/// first frame it is in the world. Every VM is installed whole, outside `Update` (the glue VM after
+/// its GlueXML, a world VM after its FrameXML and addon load), so the read sees what the load
+/// defined; any other frame pays one compare.
 fn feed_pvp_name_strings(
     script: Option<NonSend<UiScript>>,
     mut strings: ResMut<crate::nameplates::PvpNameStrings>,
@@ -137,21 +144,8 @@ fn honor_snapshot(store: &ObjectStore) -> Option<HonorState> {
     })
 }
 
-/// `(kills changed, rank changed)` between two snapshots, from the three watched fields only; a
-/// first push fires both. The watched fields are listed so that a new field fires nothing.
-fn events_for(before: Option<&HonorState>, after: &HonorState) -> (bool, bool) {
-    let Some(b) = before else {
-        return (true, true);
-    };
-    // `PLAYER_FIELD_SESSION_KILLS`, both halves.
-    let kills = |h: &HonorState| (h.session_hk, h.session_dk);
-    // `PLAYER_BYTES_3` byte 3 and `PLAYER_FIELD_BYTES2` byte 0; not `highest_rank`, unwatched.
-    let ranks = |h: &HonorState| (h.rank, h.rank_bar);
-    (kills(b) != kills(after), ranks(b) != ranks(after))
-}
-
-/// Push the self snapshot and the inspect reply, fire what moved, and drain the pane's request.
-fn feed_honor(
+/// Push the self snapshot and the inspect reply, and drain the pane's request.
+pub(crate) fn feed_honor(
     script: Option<NonSendMut<UiScript>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
     inspect_target: Res<crate::ui_inspect::InspectTarget>,
@@ -170,15 +164,8 @@ fn feed_honor(
     if let Ok(store) = self_store.single() {
         if let Some(fresh) = honor_snapshot(store) {
             if memo.last.as_ref() != Some(&fresh) {
-                let (kills, ranks) = events_for(memo.last.as_ref(), &fresh);
                 script.set_honor(Some(fresh));
                 memo.last = Some(fresh);
-                if kills {
-                    script.fire_event("PLAYER_PVP_KILLS_CHANGED", vec![]);
-                }
-                if ranks {
-                    script.fire_event("PLAYER_PVP_RANK_CHANGED", vec![]);
-                }
             }
         }
     }
@@ -249,55 +236,58 @@ fn feed_honor(
 mod tests {
     use super::*;
 
-    fn state() -> HonorState {
-        HonorState {
-            session_hk: 3,
-            lifetime_hk: 900,
-            rank: 8,
-            highest_rank: 9,
-            rank_bar: 128,
-            ..Default::default()
-        }
-    }
-
+    /// The block is pushed on first sight and on change, and the push fires nothing: the PvP
+    /// events are the field watches' (`0x5ddc35`, `0x5ddc5c`, `0x5ddc83`), which a create and a
+    /// `/reload` never run.
     #[test]
-    fn each_event_fires_only_for_its_own_half() {
-        let base = state();
-
-        let mut killed = base;
-        killed.session_hk += 1;
-        assert_eq!(events_for(Some(&base), &killed), (true, false));
-
-        let mut ranked = base;
-        ranked.rank = 9;
-        assert_eq!(events_for(Some(&base), &ranked), (false, true));
-
-        // The rank bar is `PLAYER_FIELD_BYTES2` byte 0, a rank event.
-        let mut barred = base;
-        barred.rank_bar = 200;
-        assert_eq!(events_for(Some(&base), &barred), (false, true));
-
-        // Unwatched in the reference (`0x467e70`), so these fire nothing.
-        for mutate in [
-            (|h: &mut HonorState| h.last_week_standing = 42) as fn(&mut HonorState),
-            |h: &mut HonorState| h.lifetime_hk = 5_000,
-            |h: &mut HonorState| h.yesterday_honor = 900,
-            |h: &mut HonorState| h.highest_rank = 18,
-        ] {
-            let mut quiet = base;
-            mutate(&mut quiet);
-            assert_eq!(
-                events_for(Some(&base), &quiet),
-                (false, false),
-                "an unwatched field must fire nothing"
-            );
-        }
-    }
-
-    /// Otherwise a pane whose numbers arrived before it existed would never paint.
-    #[test]
-    fn the_first_push_fires_both() {
-        assert_eq!(events_for(None, &state()), (true, true));
+    fn the_feed_pushes_the_block_and_fires_nothing() {
+        use bevy::ecs::system::RunSystemOnce;
+        const FIELD_SESSION_KILLS: u16 = 1250;
+        let mut app = App::new();
+        app.init_resource::<HonorFeedState>()
+            .init_resource::<InspectHonor>()
+            .init_resource::<crate::ui_inspect::InspectTarget>()
+            .init_resource::<crate::target::Selection>()
+            .init_resource::<crate::ui_party::GroupState>();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
+        let script = vm(r#"SEEN = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("PLAYER_PVP_RANK_CHANGED")
+            f:RegisterEvent("PLAYER_PVP_KILLS_CHANGED")
+            f:SetScript("OnEvent", function()
+                table.insert(SEEN, event .. " " .. tostring(arg1))
+            end)"#);
+        app.insert_non_send_resource(script);
+        let me = app
+            .world_mut()
+            .spawn((
+                SelfPlayer,
+                ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(
+                    FIELD_SESSION_KILLS,
+                    3,
+                )])),
+            ))
+            .id();
+        // The session's honorable kills as the pane reads them, and what the VM heard.
+        let step = |app: &mut App| {
+            app.world_mut().run_system_once(feed_honor).unwrap();
+            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            s.resolve();
+            let kills = s.eval::<i64>("return (GetPVPSessionStats())").unwrap();
+            let heard = s.eval::<Vec<String>>("return SEEN").unwrap();
+            s.run("SEEN = {}").unwrap();
+            (kills, heard)
+        };
+        assert_eq!(step(&mut app), (3, vec![]), "the first push is silent");
+        *app.world_mut().get_mut::<ObjectStore>(me).unwrap() = ObjectStore(
+            benilla_protocol::ObjectFields::from_pairs(&[(FIELD_SESSION_KILLS, 4)]),
+        );
+        assert_eq!(
+            step(&mut app),
+            (4, vec![]),
+            "a change is the watch's to fire"
+        );
     }
 
     fn vm(src: &str) -> UiScript {

@@ -7,6 +7,7 @@ use mlua::{Lua, MultiValue, Table, Value};
 
 use super::binding_abi::{flag, number_arg};
 use super::cursor::{self, CursorItem, CursorPayload};
+use super::protected::{self, Tag};
 use super::Model;
 
 /// The petition lines an item tooltip prints under the name (`0x854d7c..0x854dd0`): the title and
@@ -58,18 +59,35 @@ pub struct ContainerSlot {
     pub consumable: bool,
     /// Current and max durability; `None` when the max is 0 or the item object has not arrived.
     pub durability: Option<(u32, u32)>,
-    /// The use cooldown, `(start_ms on the GetTime clock, duration_ms, enabled)`; `None` if cold.
+    /// The item query's answer (`GetItemCooldown`, `0x6e2ed0`), `(start_ms on the GetTime clock,
+    /// duration_ms, enabled)`. `None` is the all-zero answer, enable included: a template with no
+    /// on-use spell, a charged one with none left, or one still in flight. A cold on-use spell is
+    /// `Some((0, 0, true))`.
     pub cooldown: Option<(i64, u32, bool)>,
+    /// The template's block 0 names a spell (`+0x11c`, any trigger): `GetInventoryItemCooldown`
+    /// runs no query without one (`0x4c8b47`).
+    pub spell_0: bool,
     /// The instance carries `ITEM_FIELD_ITEM_TEXT_ID` (a mail copy): `GetContainerItemInfo`'s
     /// `readable`, which shows the Inspect cursor (`ContainerFrame.lua:638`).
     pub readable: bool,
     /// The `ITEM_FIELD_CREATOR` name for the "Written by" or "<Made by>" line, once resolved.
     pub creator: Option<String>,
+    /// The `ITEM_FIELD_GIFTCREATOR` name for a wrapped item's `ITEM_WRAPPED_BY` line, once
+    /// resolved; only a wrapped item asks for it, as the gift arm does (`0x52e29d`).
+    pub gift_creator: Option<String>,
+    /// The `ITEM_FIELD_CREATOR` guid, 0 for none: with no [`Self::creator`] yet, the name the
+    /// tooltip waits for.
+    pub creator_guid: u64,
+    /// The `ITEM_FIELD_GIFTCREATOR` guid, 0 for none, as [`Self::creator_guid`].
+    pub gift_creator_guid: u64,
     /// `ITEM_FIELD_FLAGS`; the tooltip reads UNLOCKED `0x4` and WRAPPED `0x8`.
     pub flags: u32,
     /// Bound at runtime (`0x5da2c0`): `ITEM_FIELD_FLAGS & 1`, or an enchant whose
     /// `SpellItemEnchantment` row binds. The tooltip's bind line then says Soulbound.
     pub already_bound: bool,
+    /// For a container (`TYPEMASK_CONTAINER`), how many of its seats hold an item, which
+    /// `ClickTradeButton` counts (`0x4bff50`); `None` for any other item.
+    pub occupied_seats: Option<u32>,
     /// The enchant slots in slot order, named from `SpellItemEnchantment.dbc`; empty when none.
     pub enchants: Vec<super::EnchantView>,
     /// A timed item's lifetime left in ms (`SMSG_ITEM_TIME_UPDATE`), floored to the second.
@@ -154,6 +172,9 @@ pub struct ContainerUse {
     pub asks: bool,
     /// `onSelf`: the use targets the player in place of the selection (`0x4fa17d`-`0x4fa18e`).
     pub on_self: bool,
+    /// What the protected-action gate's tag 2 allowed the call: an item's on-use spell casts
+    /// through `TryCastSpell`, behind it (`0x4fa430` → `0x5d8d00` → `0x5d9258` → `0x6e5a90`).
+    pub may_cast: bool,
 }
 
 /// One enchant slot as the tooltip renders it (`0x52c9f9`..`0x52ca23`); the app resolves the row.
@@ -219,6 +240,23 @@ pub struct BagAutoStore {
     pub count: Option<u32>,
 }
 
+/// What `GetContainerItemCooldown` and `GetInventoryItemCooldown` push for the item query's answer
+/// (`0x6e2ed0`), `(start, duration, enable)` in `GetTime` seconds. No answer is three zeros, the
+/// enable included (`0x4f9ae9`, `0x4c8bdf`). An answer past its end reads cold with enable 1: the
+/// query ran and found nothing left, so a re-feed cannot replay the finish flash. A held one
+/// (`enable` 0) answers the call's own now (`0x6e1517`).
+pub(super) fn item_cooldown_triple(query: Option<(f64, f64, bool)>, now: f64) -> (f64, f64, i64) {
+    match query {
+        None => (0.0, 0.0, 0),
+        Some((start, duration, enabled)) if start + duration > now || !enabled => (
+            crate::script::clock::held_start(start, enabled, now),
+            duration,
+            i64::from(enabled),
+        ),
+        Some(_) => (0.0, 0.0, 1),
+    }
+}
+
 impl super::UiScript {
     /// Drain the auto-stores `PutItemInBag`/`PutItemInBackpack` queued since the last call.
     pub fn take_bag_autostores(&mut self) -> Vec<BagAutoStore> {
@@ -249,6 +287,28 @@ impl super::UiScript {
                 model.containers.remove(&bag);
             }
         }
+    }
+
+    /// Push the use cooldowns of the worn items, `(start_ms on the GetTime clock, duration_ms,
+    /// enabled)` by live-API slot id, stored in seconds like a bag slot's. No event fires: a
+    /// cooldown moves no inventory slot.
+    pub fn set_worn_cooldowns(
+        &mut self,
+        cooldowns: std::collections::HashMap<usize, (i64, u32, bool)>,
+    ) {
+        self.model_mut().worn_cooldowns = cooldowns
+            .into_iter()
+            .map(|(slot, (start_ms, duration_ms, enabled))| {
+                (
+                    slot,
+                    (
+                        start_ms as f64 / 1000.0,
+                        f64::from(duration_ms) / 1000.0,
+                        enabled,
+                    ),
+                )
+            })
+            .collect();
     }
 
     /// Push `HasKey()`'s answer: whether the player owns a `BagFamily` key item anywhere.
@@ -361,7 +421,13 @@ pub enum UiCursorMode {
 /// deposit (`0x4fa312`, `0x4fa34b`), the sale (`0x4fa37f`), the open (`0x5edcd9`) and the wrap
 /// paper (`0x5edea0`). The equip arm is not done here: it returns its item, which the call puts on
 /// the cursor ([`use_equip_arm`]). The app sends each arm.
-fn use_cleared(model: &mut super::Model, bag: i64, slot: u32, on_self: bool) -> Option<CursorItem> {
+fn use_cleared(
+    model: &mut super::Model,
+    bag: i64,
+    slot: u32,
+    on_self: bool,
+    may_cast: bool,
+) -> Option<CursorItem> {
     let s = model
         .containers
         .get(&bag)
@@ -399,20 +465,19 @@ fn use_cleared(model: &mut super::Model, bag: i64, slot: u32, on_self: bool) -> 
         if let Some(key) =
             super::use_gates::item_use_refusal(model, fork, item_id, use_spell, known)
         {
-            model.ui_errors.push(key);
+            model.push_ui_error(key);
             return None;
         }
     }
-    model
-        .script_calls
-        .push(super::ScriptCall::UseContainerItem(ContainerUse {
-            bag,
-            slot,
-            guid,
-            arm,
-            asks: false,
-            on_self,
-        }));
+    model.queue_call(super::ScriptCall::UseContainerItem(ContainerUse {
+        bag,
+        slot,
+        guid,
+        arm,
+        asks: false,
+        on_self,
+        may_cast,
+    }));
     match arm {
         UseArm::Withdraw | UseArm::Deposit | UseArm::Sell | UseArm::Item(UseFork::Open) => {
             cursor::lock_item(model, guid);
@@ -427,7 +492,7 @@ fn use_cleared(model: &mut super::Model, bag: i64, slot: u32, on_self: bool) -> 
 /// `AutoEquipCursorItem` (`0x4fa3ff`), then the item locks unless it is a projectile
 /// (`0x4fa40b`, `0x4fa418`), whose clear unlocked it instead (`0x5e1711`). A bind-on-equip item
 /// sends nothing: it stays held and locked under the question.
-fn use_equip_arm(lua: &Lua, bag: i64, slot: u32, item: CursorItem, on_self: bool) {
+fn use_equip_arm(lua: &Lua, bag: i64, slot: u32, item: CursorItem, on_self: bool, may_cast: bool) {
     let guid = item.guid;
     let projectile = item.item_class == Some(cursor::ITEM_CLASS_PROJECTILE);
     let step = cursor::equip::auto_equip_from(lua, item, false);
@@ -437,16 +502,15 @@ fn use_equip_arm(lua: &Lua, bag: i64, slot: u32, item: CursorItem, on_self: bool
             step,
             cursor::equip::AutoEquip::Sent { .. } | cursor::equip::AutoEquip::Asked { .. }
         ) {
-            model
-                .script_calls
-                .push(super::ScriptCall::UseContainerItem(ContainerUse {
-                    bag,
-                    slot,
-                    guid,
-                    arm: UseArm::Item(UseFork::Equip),
-                    asks: matches!(step, cursor::equip::AutoEquip::Asked { .. }),
-                    on_self,
-                }));
+            model.queue_call(super::ScriptCall::UseContainerItem(ContainerUse {
+                bag,
+                slot,
+                guid,
+                arm: UseArm::Item(UseFork::Equip),
+                asks: matches!(step, cursor::equip::AutoEquip::Asked { .. }),
+                on_self,
+                may_cast,
+            }));
         }
         if !projectile {
             cursor::lock_item(model, guid);
@@ -479,7 +543,12 @@ fn arm_gift_wrap(model: &mut super::Model, bag: i64, slot: u32) {
 ///
 /// Returns the item a pickup puts on the cursor, which the binding sets past this segment
 /// ([`cursor::pick_up_item`]), so the setter's inner clear signals on its own.
-fn pickup_container_item(model: &mut super::Model, bag: i64, slot: u32) -> Option<CursorItem> {
+fn pickup_container_item(
+    model: &mut super::Model,
+    bag: i64,
+    slot: u32,
+    may_cast: bool,
+) -> Option<CursorItem> {
     // An armed gift wrap completes here, before the cursor is read. `PickupContainerItem` is the
     // only caller of the wrap sender `0x5edfc0`, so an equipped item cannot be wrapped.
     if let Some(wrap) = model.pending_wrap {
@@ -528,7 +597,11 @@ fn pickup_container_item(model: &mut super::Model, bag: i64, slot: u32) -> Optio
             .and_then(|c| c.slots.get(&slot))
             .is_some_and(|s| s.item_id != 0);
         if occupied && model.item_pick_armed {
-            model.item_picks.push((bag, slot));
+            model.item_picks.push(cursor::ItemPick {
+                bag,
+                slot,
+                may_cast,
+            });
         } else if occupied {
             model.container_repairs.push((bag, slot));
         }
@@ -734,8 +807,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetContainerItemCooldown(bag, slot) (`0x4f99b0`) → start, duration, enable on the `GetTime`
-    // clock, as `GetActionCooldown`; enable 0 is a held cooldown. An expired one reads cold, so a
-    // re-feed cannot replay the finish flash.
+    // clock, as `GetActionCooldown`; enable 0 is a held cooldown. No resolved slot or no item in it
+    // pushes three zeros, the enable included (`0x4f9ae9`), and so does the slot's own answer when
+    // it is all zero ([`item_cooldown_triple`]). Unlike the worn getter it asks no use-spell test
+    // of the template (`0x4f9a48`).
     lua.globals().set(
         "GetContainerItemCooldown",
         lua.create_function(|lua, (bag, slot): (Value, Value)| {
@@ -747,22 +822,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 "Usage: GetContainerItemCooldown(index, slot)",
             )?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            // No resolved slot or no item in it pushes three zeros, the enable included
-            // (`0x4f9ae9`); an item with no running cooldown reads (0, 0, 1).
             let held = key.is_some_and(|k| {
                 model
                     .containers
                     .get(&k.0)
                     .is_some_and(|c| c.slots.contains_key(&k.1))
             });
-            Ok(match key.and_then(|k| model.container_cooldowns.get(&k)) {
-                _ if !held => (0.0, 0.0, 0),
-                Some(&(start, duration, enabled)) if start + duration > now || !enabled => (
-                    crate::script::clock::held_start(start, enabled, now),
-                    duration,
-                    i32::from(enabled),
-                ),
-                _ => (0.0, 0.0, 1),
+            Ok(if held {
+                item_cooldown_triple(
+                    key.and_then(|k| model.container_cooldowns.get(&k).copied()),
+                    now,
+                )
+            } else {
+                (0.0, 0.0, 0)
             })
         })?,
     )?;
@@ -853,10 +925,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // payload goes back, never placed, and an armed gift wrap is cancelled. The clear's
             // events run first, as the reference's do before it reads the slot.
             super::tick::verb(lua, cursor::clear_cursor);
-            if let Some(item) =
-                super::tick::verb(lua, |model| use_cleared(model, bag, slot, on_self))
-            {
-                use_equip_arm(lua, bag, slot, item, on_self);
+            // The item's on-use spell casts through `TryCastSpell`, behind the gate's tag 2.
+            let may_cast = protected::gate(lua, Tag::CAST);
+            if let Some(item) = super::tick::verb(lua, |model| {
+                use_cleared(model, bag, slot, on_self, may_cast)
+            }) {
+                use_equip_arm(lua, bag, slot, item, on_self, may_cast);
             }
             Ok(())
         })?,
@@ -867,9 +941,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "PickupContainerItem",
         lua.create_function(|lua, (bag, slot): (i64, u32)| {
-            if let Some(item) =
-                super::tick::verb(lua, |model| pickup_container_item(model, bag, slot))
-            {
+            // An armed item-targeting spell binds the item through `BindSpellTargetObject`, behind
+            // the gate's tag 2.
+            let may_cast = protected::gate(lua, Tag::CAST);
+            if let Some(item) = super::tick::verb(lua, |model| {
+                pickup_container_item(model, bag, slot, may_cast)
+            }) {
                 cursor::pick_up_item(lua, item);
             }
             Ok(())
@@ -972,6 +1049,7 @@ mod tests {
                 duration_ms: None,
                 petition: None,
                 already_bound: false,
+                occupied_seats: None,
                 bonding: 0,
                 use_spell: 0,
                 bar_placeable: true,
@@ -986,8 +1064,12 @@ mod tests {
                 guid: 0x10a,
                 equip_slots: Vec::new(),
                 cooldown: None,
+                spell_0: false,
                 readable: false,
                 creator: None,
+                gift_creator: None,
+                creator_guid: 0,
+                gift_creator_guid: 0,
                 flags: 0,
                 enchants: Vec::new(),
             },
@@ -1260,6 +1342,44 @@ mod tests {
             shape(&mut s, 1),
             "5:number:1:nil:nil",
             "the held item reads locked"
+        );
+    }
+
+    /// The item's on-use spell casts through `TryCastSpell`, behind the gate's tag 2 (`0x4fa430` →
+    /// `0x5d8d00` → `0x5d9258` → `0x6e5a90` → `0x6e4bc1`). The call keeps its other arms, so it is
+    /// queued whatever the gate said, carrying the answer; an armed item-targeting spell's pick
+    /// carries it the same way (`0x4f9c54` → `0x495d60` → `0x6e5b9e`).
+    #[test]
+    fn container_uses_and_picks_carry_what_the_gate_allowed() {
+        let may_cast = |s: &mut UiScript| -> Vec<bool> {
+            s.take_script_calls()
+                .into_iter()
+                .map(|c| c.may_cast())
+                .collect()
+        };
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(backpack()));
+        s.run("UseContainerItem(0, 1)").unwrap();
+        s.run(r#"RunScript("UseContainerItem(0, 1)")"#).unwrap();
+        s.run_binding(r#"RunScript("UseContainerItem(0, 1)")"#)
+            .unwrap();
+        assert_eq!(
+            may_cast(&mut s),
+            [true, false, true],
+            "the client's own, a macro outside an input event, a macro inside a key's body"
+        );
+
+        s.set_item_pick_armed(true);
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        s.run(r#"RunScript("PickupContainerItem(0, 1)")"#).unwrap();
+        s.run_binding(r#"RunScript("PickupContainerItem(0, 1)")"#)
+            .unwrap();
+        assert_eq!(
+            s.take_item_picks()
+                .iter()
+                .map(|p| (p.bag, p.slot, p.may_cast))
+                .collect::<Vec<_>>(),
+            [(0, 1, true), (0, 1, false), (0, 1, true)]
         );
     }
 
@@ -1630,6 +1750,7 @@ mod tests {
                 duration_ms: None,
                 petition: None,
                 already_bound: false,
+                occupied_seats: None,
                 bonding: 0,
                 use_spell: 0,
                 bar_placeable: true,
@@ -1644,8 +1765,12 @@ mod tests {
                 guid: 0x10b,
                 equip_slots: Vec::new(),
                 cooldown: None,
+                spell_0: false,
                 readable: false,
                 creator: None,
+                gift_creator: None,
+                creator_guid: 0,
+                gift_creator_guid: 0,
                 flags: 0,
                 enchants: Vec::new(),
             },
@@ -2072,6 +2197,8 @@ mod tests {
         let mut state = backpack();
         // Slot 1's item is 4 s into a 10 s use-cooldown: started at GetTime 96.
         state.slots.get_mut(&1).unwrap().cooldown = Some((96_000, 10_000, true));
+        // Slot 4's on-use spell is cold: the query answers enabled.
+        state.slots.get_mut(&4).unwrap().cooldown = Some((0, 0, true));
         s.set_container(0, Some(state));
 
         assert!(s
@@ -2082,8 +2209,16 @@ mod tests {
             .unwrap());
         assert!(s
             .eval::<bool>(
-                "local s, d, e = GetContainerItemCooldown(0, 3)\n\
+                "local s, d, e = GetContainerItemCooldown(0, 4)\n\
                  return s == 0 and d == 0 and e == 1"
+            )
+            .unwrap());
+        // An item the query answered cold (`Some`) reads enabled; one it left at its zeros
+        // (`None`: no on-use spell, a spent charged template) reads enable 0 (`0x6e2f34`).
+        assert!(s
+            .eval::<bool>(
+                "local s, d, e = GetContainerItemCooldown(0, 3)\n\
+                 return s == 0 and d == 0 and e == 0"
             )
             .unwrap());
         // Past expiry, the same stored triple reads cold.

@@ -42,7 +42,9 @@ impl Plugin for UiReputationPlugin {
         app.add_systems(
             Update,
             (
-                feed_reputation.in_set(UiFeed),
+                feed_reputation
+                    .in_set(UiFeed)
+                    .in_set(crate::ui_unit::field_events::FieldEventPushes),
                 drain_reputation_sends.after(UiInput),
             ),
         );
@@ -219,7 +221,7 @@ type ReputationInputs = Option<(u8, u8, Option<u32>)>;
 /// descriptions) runs only when the wire slots, the catalog, race/class or the watched index
 /// move, and the equality check behind it keeps a change to no listed row quiet. The first push
 /// fires too: the stock watch bar initializes off `UPDATE_FACTION` at login.
-fn feed_reputation(
+pub(crate) fn feed_reputation(
     script: Option<NonSendMut<UiScript>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
     reputations: Res<Reputations>,
@@ -274,9 +276,25 @@ fn feed_reputation(
     if last.as_ref() == Some(&fresh) {
         return;
     }
+    let bare = faction_fires(last.as_ref(), &fresh);
     script.set_reputation(fresh.clone());
     *last = Some(fresh);
-    script.fire_event("UPDATE_FACTION", vec![]);
+    for _ in 0..bare {
+        script.fire_event("UPDATE_FACTION", vec![]);
+    }
+}
+
+/// How many bare `UPDATE_FACTION` signals a transition makes. The standing, flag and rebuild
+/// producers (`0x4d569e`, `0x4d56f6`, `0x4d5984`, `0x4d5db0`) signal bare through `0x703e50`; a
+/// first push is the initialize message, which signals twice: the rebuild `0x4d5430` calls the
+/// sorter `0x4d5c40` (`0x4d55de`), which ends in a bare signal (`0x4d5db0`), and the message ends
+/// in another (`0x4d569e`). The watched index is pushed here and signals `("player")` from its
+/// own field watch (`0x5ddcce`, [`crate::field_watch`]), never from this diff.
+fn faction_fires(prev: Option<&ReputationState>, fresh: &ReputationState) -> usize {
+    match prev {
+        None => 2,
+        Some(p) => usize::from(p.entries != fresh.entries),
+    }
 }
 
 /// Send the pane's queued verbs; none is acked, and the engine already holds its own copy.
@@ -314,6 +332,105 @@ fn drain_reputation_sends(script: Option<NonSendMut<UiScript>>, commands: Res<Ne
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A live feed over an empty catalog: the first push is the initialize message's two bare
+    /// signals, and a watched-index change is pushed with no signal, its watch's to fire.
+    #[test]
+    fn the_list_signals_bare_and_the_watched_index_is_pushed_silently() {
+        use benilla_formats::FactionCatalog;
+        const FIELD_WATCHED: u16 = 1261;
+        let mut app = App::new();
+        app.init_resource::<Reputations>()
+            .insert_resource(Factions::from_catalog(FactionCatalog::from_rows(
+                Default::default(),
+                Default::default(),
+            )))
+            .add_systems(Update, feed_reputation);
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("UPDATE_FACTION")
+                f:SetScript("OnEvent", function()
+                    table.insert(SEEN, event .. " " .. tostring(arg1))
+                end)
+            "#,
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        let me = app
+            .world_mut()
+            .spawn((
+                SelfPlayer,
+                ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(
+                    FIELD_WATCHED,
+                    u32::MAX,
+                )])),
+            ))
+            .id();
+        let seen = |app: &mut App| {
+            app.update();
+            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            s.resolve();
+            let out = s.eval::<Vec<String>>("return SEEN").unwrap();
+            s.run("SEEN = {}").unwrap();
+            out
+        };
+        assert_eq!(
+            seen(&mut app),
+            vec!["UPDATE_FACTION nil"; 2],
+            "initialize: the sorter's signal and the message's"
+        );
+        assert!(seen(&mut app).is_empty());
+        *app.world_mut().get_mut::<ObjectStore>(me).unwrap() = ObjectStore(
+            benilla_protocol::ObjectFields::from_pairs(&[(FIELD_WATCHED, 3)]),
+        );
+        assert!(seen(&mut app).is_empty());
+    }
+
+    /// The list's bare signals: two for the initialize message, one per list change, none for the
+    /// watched index alone.
+    #[test]
+    fn the_list_and_the_watched_index_are_two_producers() {
+        let entry = |id: u32| FactionEntry {
+            faction_id: id,
+            rep_list_id: id,
+            parent_id: 0,
+            name: String::new(),
+            description: String::new(),
+            standing: 0,
+            standing_id: 4,
+            bar_min: 0,
+            bar_max: 3000,
+            visible: true,
+            is_header: false,
+            at_war: false,
+            can_toggle_at_war: true,
+            inactive: false,
+        };
+        let base = ReputationState {
+            entries: vec![entry(1)],
+            watched: None,
+        };
+        assert_eq!(faction_fires(None, &base), 2);
+        let watched = ReputationState {
+            watched: Some(3),
+            ..base.clone()
+        };
+        assert_eq!(faction_fires(Some(&base), &watched), 0);
+        let listed = ReputationState {
+            entries: vec![entry(1), entry(2)],
+            ..base.clone()
+        };
+        assert_eq!(faction_fires(Some(&base), &listed), 1);
+        let both = ReputationState {
+            entries: vec![entry(2)],
+            watched: Some(1),
+        };
+        assert_eq!(faction_fires(Some(&base), &both), 1);
+    }
 
     /// The pane's bar reads [`RANK_BOUNDS`], the nameplate the rank function: they must agree.
     #[test]

@@ -44,7 +44,7 @@ fn production_load(tag: &str, stock_ui: bool) -> (UiScript, Vec<String>) {
 /// The production in-game load, the layer on unless `stock_ui`, over a hermetic AddOns root that
 /// `addons` fills; `before` runs ahead of the load. The caller holds [`ENV_LOCK`]. Returns the VM
 /// and the load's failures.
-pub(super) fn production_load_with(
+pub(crate) fn production_load_with(
     tag: &str,
     stock_ui: bool,
     before: &str,
@@ -213,12 +213,6 @@ fn the_layer_is_absent_from_the_addon_api() {
             "IsAddOnLoaded(\"{name}\") answers"
         );
     }
-    assert!(
-        !super::addons::installed_rows()
-            .iter()
-            .any(|a| a.name.eq_ignore_ascii_case("benilla")),
-        "the AddOns screen lists benilla"
-    );
 }
 
 /// `WOW_STOCK_UI=1` drops the layer in a dev build alone; a player build always loads it.

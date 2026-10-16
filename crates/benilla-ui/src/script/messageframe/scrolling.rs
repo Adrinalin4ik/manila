@@ -505,9 +505,10 @@ mod tests {
             s.add(format!("l{n}"), 1.0, 1.0, 1.0);
         }
         s.lines[1].rows = 3;
-        // 4 rows: the newest (1) and the middle (3) fill it; a partly fitting message counts.
+        // 4 rows: the newest (1) and the middle (3) fill it; a partly fitting message does not
+        // count, the newest excepted (`0x7889b3`-`0x7889c5`).
         assert_eq!(s.displayed_count(4), 2);
-        assert_eq!(s.displayed_count(3), 2, "partial middle line still counts");
+        assert_eq!(s.displayed_count(3), 1, "a partly fitting middle line is not displayed");
         assert_eq!(s.displayed_count(1), 1);
         // A page is displayed − 1, one message of overlap, never 0.
         s.page_up(4);
@@ -520,63 +521,59 @@ mod tests {
         assert!(s.at_bottom());
     }
 
+    /// The scrolling class displays only messages that fit whole, the newest excepted
+    /// (`0x7889b3`-`0x7889c5`), so a frame one row short of a wrapped message leaves it out.
     #[test]
-    fn emit_stacks_wrapped_rows_and_clips_partial_top() {
-        let mut s = UiScript::new().unwrap();
-        s.set_screen_size(800.0, 600.0);
-        s.run(
-            "local f = CreateFrame('ScrollingMessageFrame', 'CF')\n\
-             f:SetPoint('BOTTOMLEFT', 32, 90)\n\
-             f:SetWidth(430)\n\
-             f:SetHeight(34)",
-        )
-        .unwrap();
-        s.run("CF:AddMessage('old', 1, 1, 1)").unwrap();
-        s.run("CF:AddMessage('wrapped', 1, 1, 1)").unwrap();
-        s.run("CF:AddMessage('new', 1, 1, 1)").unwrap();
-        s.resolve();
-        let reqs = s.message_lines_needing_measure();
-        assert_eq!(reqs.len(), 3);
-        assert!(reqs.iter().all(|r| (r.wrap_width - 430.0).abs() < 0.5));
-        let answers: Vec<(u32, u32, u16, u64)> = reqs
-            .iter()
-            .map(|r| (r.frame, r.index, if r.index == 1 { 2 } else { 1 }, r.key))
-            .collect();
-        s.set_message_line_rows(&answers);
-        assert!(
-            s.message_lines_needing_measure().is_empty(),
-            "answered keys satisfy the cache"
-        );
-        // Default font, pitch 14. Frame [90, 124): 'new' is [90, 104), 'wrapped' [104, 132)
-        // overflows and draws clipped, and 'old' would start at 132, outside, so does not draw.
-        let quads = s.extract();
-        let texts: Vec<(String, f32, f32)> = quads
-            .iter()
-            .filter_map(|q| match (&q.content, q.rect) {
-                (crate::script::QuadContent::Text { text: Some(t), .. }, Some(r)) => {
-                    Some((t.clone(), r.bottom, r.top))
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            texts.len(),
-            2,
-            "partial top line draws, off-top line doesn't"
-        );
-        // Farthest displayed line first, the link rebuild's walk (`0x788c8d`-`0x788d7d`).
+    fn emit_stacks_wrapped_rows_and_leaves_out_a_partial_top() {
+        let texts_at = |height: f32| {
+            let mut s = UiScript::new().unwrap();
+            s.set_screen_size(800.0, 600.0);
+            s.run(&format!(
+                "local f = CreateFrame('ScrollingMessageFrame', 'CF')\n\
+                 f:SetPoint('BOTTOMLEFT', 32, 90)\n\
+                 f:SetWidth(430)\n\
+                 f:SetHeight({height})"
+            ))
+            .unwrap();
+            s.run("CF:AddMessage('old', 1, 1, 1)").unwrap();
+            s.run("CF:AddMessage('wrapped', 1, 1, 1)").unwrap();
+            s.run("CF:AddMessage('new', 1, 1, 1)").unwrap();
+            s.resolve();
+            let reqs = s.message_lines_needing_measure();
+            assert_eq!(reqs.len(), 3);
+            assert!(reqs.iter().all(|r| (r.wrap_width - 430.0).abs() < 0.5));
+            let answers: Vec<(u32, u32, u16, u64)> = reqs
+                .iter()
+                .map(|r| (r.frame, r.index, if r.index == 1 { 2 } else { 1 }, r.key))
+                .collect();
+            s.set_message_line_rows(&answers);
+            assert!(
+                s.message_lines_needing_measure().is_empty(),
+                "answered keys satisfy the cache"
+            );
+            s.extract()
+                .iter()
+                .filter_map(|q| match (&q.content, q.rect) {
+                    (crate::script::QuadContent::Text { text: Some(t), .. }, Some(r)) => {
+                        Some((t.clone(), r.bottom, r.top))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<(String, f32, f32)>>()
+        };
+        // Default font, pitch 14. Frame [90, 124): 'new' is [90, 104); 'wrapped' would need
+        // [104, 132), past the top, so it is not displayed, and nothing above it is.
+        let texts = texts_at(34.0);
+        assert_eq!(texts.len(), 1, "a partly fitting message is left out");
+        assert_eq!(texts[0].0, "new");
+        assert!((texts[0].1 - 90.0).abs() < 0.01 && (texts[0].2 - 104.0).abs() < 0.01);
+        // Frame [90, 132): 'wrapped' fits whole. Farthest displayed line first, the link
+        // rebuild's walk (`0x788c8d`-`0x788d7d`).
+        let texts = texts_at(42.0);
+        assert_eq!(texts.len(), 2);
         assert_eq!(texts[0].0, "wrapped");
         assert!((texts[0].1 - 104.0).abs() < 0.01 && (texts[0].2 - 132.0).abs() < 0.01);
         assert_eq!(texts[1].0, "new");
-        assert!((texts[1].1 - 90.0).abs() < 0.01 && (texts[1].2 - 104.0).abs() < 0.01);
-        let clip = quads
-            .iter()
-            .find_map(|q| match &q.content {
-                crate::script::QuadContent::Text { text: Some(t), .. } if t == "wrapped" => q.clip,
-                _ => None,
-            })
-            .expect("wrapped line carries a clip");
-        assert!((clip.top - 124.0).abs() < 0.01 && (clip.bottom - 90.0).abs() < 0.01);
     }
 
     /// The lines draw at the frame's ARTWORK layer: a BACKGROUND texture, such as the chat
