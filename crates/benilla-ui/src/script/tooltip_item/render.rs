@@ -11,11 +11,12 @@ use crate::script::tooltip::{append_line, duration_text, plural_template};
 use crate::script::{ItemTemplateView, Model};
 use crate::strings::{fill, Arg};
 
+use super::build::{note_miss, CacheWait};
 use super::names::*;
 
 /// What a source knows beyond the template: an item object's fields, or a block source's name and
 /// roll. A template source passes `None`.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(in crate::script) struct ItemInstance {
     /// The name with its random suffix joined, which the reference composes in the builder
     /// (`0x52b7bf`, `0x5d8b00` through `ITEM_SUFFIX_TEMPLATE`); `None` takes the template's.
@@ -28,6 +29,13 @@ pub(in crate::script) struct ItemInstance {
     /// The resolved `ITEM_FIELD_GIFTCREATOR` name (`0x55f080` at `0x52e29d`) of a wrapped item;
     /// `None` while it is unresolved (`0x52e2a4`) or the field is 0 (`0x52e288`): no line either way.
     pub gift_creator: Option<String>,
+    /// The creator's and the giver's guids (`+0x410`, `+0x418`, or the object's fields), 0 for
+    /// none: a name still unresolved behind a nonzero one is a name-cache miss.
+    pub creator_guid: u64,
+    pub gift_creator_guid: u64,
+    /// The item object's guid, the builder's p3 (`+0x380`), 0 for a block or template source:
+    /// what a rebuild finds the live object by.
+    pub guid: u64,
     /// `ITEM_FIELD_ITEM_TEXT_ID` ≠ 0, a letter's copy: the creator line reads WRITTEN_BY
     /// (`0x52e223`) and READABLE shows (`0x52e348`).
     pub has_text: bool,
@@ -70,7 +78,7 @@ pub(in crate::script) struct ItemInstance {
 
 impl ItemInstance {
     /// The wrapped test the builder runs once: the object's WRAPPED flag, or the block's word.
-    fn wrapped(&self) -> bool {
+    pub(super) fn wrapped(&self) -> bool {
         self.flags & 0x8 != 0 || self.block_wrapped
     }
 }
@@ -83,7 +91,7 @@ const SET_SPACER: &str = " \n";
 
 /// The builder's two independent render flags, p4 and p5 of `0x52b650`.
 #[derive(Clone, Copy, Default)]
-pub(super) struct BuilderFlags {
+pub(in crate::script) struct BuilderFlags {
     /// p5 `[arg+0x18]`: prepend the gray `CURRENTLY_EQUIPPED` line. Only the two compare bindings
     /// set it, and both pass [`name_only`](Self::name_only) zero.
     pub currently_equipped: bool,
@@ -119,12 +127,23 @@ pub(super) fn render_view_flagged(
             .spell_triggers
             .iter()
             .any(|&(t, id, _)| t == 6 && id != 0 && knows(id));
-        // The set view (a miss records the ask) and the equipped ids the set block counts.
+        // The set view and the equipped ids the set block counts. A miss records the ask, and a
+        // member still unnamed skips its line (`0x52df5a`); either waits for its answer.
         let set_view = (v.item_set != 0)
             .then(|| {
                 let view = model.item_sets.get(&v.item_set).cloned();
-                if view.is_none() {
-                    model.item_set_asks.insert(v.item_set);
+                match &view {
+                    None => {
+                        model.item_set_asks.insert(v.item_set);
+                        note_miss(&mut model, CacheWait::Set(v.item_set));
+                    }
+                    // One item-name ask per member still unnamed (`0x52df4b`).
+                    Some(view) => {
+                        for &(item, _) in view.members.iter().filter(|(_, n)| n.is_none()) {
+                            let set = v.item_set;
+                            note_miss(&mut model, CacheWait::MemberName { set, item });
+                        }
+                    }
                 }
                 view
             })
@@ -167,7 +186,22 @@ pub(super) fn render_view_flagged(
     add((name, name_color))?;
     // The petition lines, below the name: a charter's `GUILD_CHARTER_*` pair or a petition's
     // `PETITION_*`, by the record's charter bit (`GetPetitionInfo`'s first return). A line whose
-    // source is unresolved waits for the repaint, as the creator line does.
+    // source is unresolved waits for its answer's rebuild, as the creator line does.
+    // A charter's live object asks the petition cache (`0x52b92f`) and its owner the name cache
+    // (`0x52b9c5`), each with the tooltip as the answer's cookie.
+    if let Some(i) = inst.filter(|i| v.flags & 0x2000 != 0 && i.object && i.guid != 0) {
+        let wait = match &i.petition {
+            None => Some(CacheWait::Petition(i.guid)),
+            Some(p) if p.owner.is_none() => Some(CacheWait::PetitionOwner(i.guid)),
+            Some(_) => None,
+        };
+        if let Some(wait) = wait {
+            note_miss(
+                &mut lua.app_data_mut::<Model>().expect("model app_data"),
+                wait,
+            );
+        }
+    }
     if let Some(p) = inst.and_then(|i| i.petition.as_ref()) {
         let (title_key, creator_key) = if p.is_charter {
             ("GUILD_CHARTER_TITLE", "GUILD_CHARTER_CREATOR")
@@ -676,6 +710,18 @@ pub(super) fn render_view_flagged(
     // ITEM_WRAPPED_BY off `ITEM_FIELD_GIFTCREATOR` (`0x52e32a`) or the block's `+0x418`, and never
     // the creator's line. Any other source adds
     // ITEM_WRITTEN_BY for a letter, else ITEM_CREATED_BY, green by its own `|cff00ff00`.
+    // A nonzero guid with no name yet is a name-cache miss (`0x52e28d`, `0x52e1f4`); a zero one
+    // asks nothing.
+    let (asked, guid) = match inst.wrapped() {
+        true => (&inst.gift_creator, inst.gift_creator_guid),
+        false => (&inst.creator, inst.creator_guid),
+    };
+    if asked.is_none() && guid != 0 {
+        note_miss(
+            &mut lua.app_data_mut::<Model>().expect("model app_data"),
+            CacheWait::Name(guid),
+        );
+    }
     if inst.wrapped() {
         if let Some(name) = &inst.gift_creator {
             keyed("ITEM_WRAPPED_BY", &[Arg::S(name)], WHITE, false)?;
@@ -723,9 +769,8 @@ struct LockSubLine {
 /// skill slot (`0x52bdde`..`0x52be3d`). The first slot's type then picks the line under it
 /// (`0x52be5d`):
 /// - a key (1) names the key item from the item cache, in white, and nothing on a miss
-///   (`0x52bf30`..`0x52bfa1`); a miss asks for the template, and the line appears on a redraw,
-///   which benilla runs only where stock re-runs `OnEnter` (a bag hover does, the trade
-///   target's does not);
+///   (`0x52bf30`..`0x52bfa1`); a miss asks for the template with the tooltip as the answer's
+///   cookie (`0x52bf48`), and the answer rebuilds the tooltip;
 /// - a skill (2) walks the lock a second time (`0x52be98`) and names the lock type in the ramp's
 ///   colour for the last open-lock spell it tried, even one whose skill falls short; no known
 ///   opener of the type adds nothing (`0x52bea2`);
@@ -761,6 +806,7 @@ fn lock_lines(lua: &Lua, v: &ItemTemplateView, inst: Option<&ItemInstance>) -> O
                 let name = model.item_templates.get(&entry).map(|t| t.name.clone());
                 if name.is_none() && entry != 0 {
                     model.item_stat_asks.insert(entry);
+                    note_miss(model, CacheWait::Template(entry));
                 }
                 name.map(|arg| LockSubLine {
                     key: "LOCKED_WITH_ITEM",
