@@ -362,10 +362,11 @@ pub(crate) fn object_material(
 ) -> Option<String> {
     let name = |id: u32| materials.and_then(|m| m.0.name(id)).map(str::to_string);
     if benilla_protocol::guid::is_gameobject(guid) {
-        return match go_templates.get(guid) {
+        let fields = objects.object(guid)?;
+        return match go_templates.of(fields) {
             Some(go) => go.quest_material.and_then(name),
             None => {
-                go_templates.request(guid, commands);
+                go_templates.request(guid, fields, commands);
                 None
             }
         };
@@ -385,7 +386,7 @@ fn readable(
     commands: &NetCommands,
 ) -> Option<Readable> {
     let name = |id: u32| materials.and_then(|m| m.0.name(id)).map(str::to_string);
-    if let Some(go) = go_templates.get(guid) {
+    if let Some(go) = go_templates.of_guid(objects, guid) {
         return Some(Readable {
             title: go.name.clone(),
             material: go.text_page.and_then(|p| name(p.material)),
@@ -447,7 +448,7 @@ fn feed_item_text(
                 .and_then(|o| o.item_creator());
             let creator = match creator_guid {
                 None => None, // authorless
-                Some(guid) => match names.resolve(guid, &commands) {
+                Some(guid) => match names.resolve_player(guid, &commands) {
                     Some(name) => Some(name.to_string()),
                     None => return, // name query in flight
                 },
@@ -622,6 +623,13 @@ mod quest_material_tests {
     fn a_quest_sourced_from_an_object_paints_the_objects_material() {
         let items = Items::default();
         let mut objs = crate::ui_items::TestObjects::new();
+        // Each source object is streamed; its descriptor, not its guid, names the template.
+        for entry in [100, 102, 777] {
+            objs.spawn_object(
+                go_guid(entry),
+                crate::go_templates::test_fields(entry as u32),
+            );
+        }
         let objects = objs.get();
         let mut gos = GameObjectTemplates::default();
         let (tx, rx) = crossbeam_channel::unbounded();
