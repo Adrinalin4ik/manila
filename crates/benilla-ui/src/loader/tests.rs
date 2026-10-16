@@ -1660,10 +1660,45 @@ mod loader_tests {
             QuadContent::Text { color: Some(c), font_height: Some(h), .. }
                 if *c == [0.1, 0.2, 0.3, 1.0] && *h == 12.0
         ));
-        assert!(s
+        // B's unknown font object leaves it with no font: it holds its text and draws none
+        // (`0x7724f8`).
+        assert_eq!(s.eval::<String>("return OVB:GetText()").unwrap(), "B");
+        assert!(!s
             .extract()
             .into_iter()
             .any(|q| matches!(&q.content, QuadContent::Text { text: Some(t), .. } if t == "B")));
+    }
+
+    /// `<ButtonText>` is built by the ordinary FontString loader (`0x7789d0` → `0x6f2780`), so its
+    /// `font=` font object (`0x771104`) and its `inherits=` give the label its font; `zBar`'s tab
+    /// label is the first, `AdvancedTradeSkillWindow`'s buttons the second.
+    #[test]
+    fn button_text_reads_its_own_font_and_inherits() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Ui>
+                <Font name="TabFont" font="Fonts\FRIZQT__.TTF" virtual="true">
+                    <FontHeight><AbsValue val="10"/></FontHeight>
+                </Font>
+                <Font name="DialogFont" font="Fonts\MORPHEUS.TTF" virtual="true">
+                    <FontHeight><AbsValue val="14"/></FontHeight>
+                </Font>
+                <Button name="ByFont"><ButtonText font="TabFont"/></Button>
+                <Button name="ByInherits"><ButtonText inherits="DialogFont"/></Button>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        assert_eq!(
+            s.eval::<(String, f32)>("return ByFont:GetFontString():GetFont()")
+                .unwrap(),
+            ("Fonts\\FRIZQT__.TTF".to_string(), 10.0)
+        );
+        assert_eq!(
+            s.eval::<(String, f32)>("return ByInherits:GetFontString():GetFont()")
+                .unwrap(),
+            ("Fonts\\MORPHEUS.TTF".to_string(), 14.0)
+        );
     }
 
     /// The chat edit box's shape. The engine assigns the text slot from the direct-child
@@ -1674,6 +1709,9 @@ mod loader_tests {
         s.set_screen_size(800.0, 600.0);
         let doc = parse(
             r#"<Ui>
+                <Font name="ChatFontNormal" font="Fonts\ARIALN.TTF" virtual="true">
+                    <FontHeight><AbsValue val="14"/></FontHeight>
+                </Font>
                 <EditBox name="EB" letters="255">
                     <Size><AbsDimension x="600" y="32"/></Size>
                     <Anchors>
@@ -1684,7 +1722,7 @@ mod loader_tests {
                     <TextInsets><AbsInset left="47" right="13" top="0" bottom="0"/></TextInsets>
                     <Layers>
                         <Layer level="ARTWORK">
-                            <FontString name="$parentHeader" text="Say:">
+                            <FontString name="$parentHeader" inherits="ChatFontNormal" text="Say:">
                                 <Anchors>
                                     <Anchor point="LEFT"><Offset><AbsDimension x="13" y="0"/></Offset></Anchor>
                                 </Anchors>
