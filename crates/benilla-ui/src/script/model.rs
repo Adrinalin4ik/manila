@@ -685,6 +685,10 @@ pub(crate) struct Model {
     pub(crate) containers: HashMap<i64, container::ContainerState>,
     /// Per `(bag, slot)`, `(start, duration, enabled)` in `GetTime` seconds, stamped at push.
     pub(crate) container_cooldowns: HashMap<(i64, u32), (f64, f64, bool)>,
+    /// The same triple for a worn item, by live-API slot id (1..=19); the cooldown query is keyed
+    /// by the item's entry (`0x6e2ed0`), so a worn trinket answers as a bagged one does. Kept off
+    /// the doll snapshot, whose change fires `UNIT_INVENTORY_CHANGED`.
+    pub(crate) worn_cooldowns: HashMap<usize, (f64, f64, bool)>,
     /// `HasKey()`: a keys-family item in equipment, bags, bank or keyring; gates the keyring UI.
     pub(crate) has_key: bool,
     /// What the cursor carries; nothing moves locally, the server's updates settle the bags.
@@ -987,6 +991,11 @@ pub(crate) struct Model {
     pub(crate) random_properties: HashMap<u32, super::RandomPropertyView>,
     /// The player's level, class, race and skills, for a tooltip's red requirement lines.
     pub(crate) player_req: PlayerReqState,
+    /// `Lock.dbc` by lock id, pushed whole at startup, and what the active player opens locks with
+    /// (`None` before the first push: no active player). The item tooltip's `LOCKED` colour walks
+    /// them ([`super::lock_check::check_lock`]).
+    pub(crate) lock_rows: HashMap<u32, Vec<super::LockSlotView>>,
+    pub(crate) lock_openers: Option<super::LockOpeners>,
     /// Spell id to its tooltip view, and the misses asked for.
     pub(crate) spell_tooltips: HashMap<u32, super::SpellTooltipView>,
     pub(crate) spell_tooltip_asks: HashSet<u32>,
@@ -1522,6 +1531,7 @@ impl Model {
             pet_renames: Vec::new(),
             containers: HashMap::new(),
             container_cooldowns: HashMap::new(),
+            worn_cooldowns: HashMap::new(),
             has_key: false,
             cursor: None,
             cursor_grid: false,
@@ -1672,6 +1682,8 @@ impl Model {
             random_properties: HashMap::new(),
             item_stat_asks: HashSet::new(),
             player_req: PlayerReqState::default(),
+            lock_rows: HashMap::new(),
+            lock_openers: None,
             spell_tooltips: HashMap::new(),
             spell_tooltip_asks: HashSet::new(),
             pet_spell_tooltips: HashMap::new(),
