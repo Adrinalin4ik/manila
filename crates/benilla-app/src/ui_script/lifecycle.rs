@@ -370,6 +370,8 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     // Before the load, as `0x48f590` runs before `0x48fbf0`: an addon's file scope sets the mask
     // after it, and a `/reload` never takes this step.
     crate::minimap::restore_default_mask(world);
+    // `InitializeGame` arms the play-time warning before it jumps to `UI_Init` (`0x48f636`-`0x48f681`).
+    crate::ui_billing::arm_at_world_entry(world);
     load_ingame_ui_seated(world, LoadSeat::Roster);
 }
 
@@ -423,6 +425,10 @@ fn load_ingame_ui_seated(world: &mut World, seat: LoadSeat) {
         .and_then(|r| r.realm.as_ref().map(|r| r.name.clone()))
         .unwrap_or_default();
     script.set_realm_name(&realm);
+    // `GetBillingTimeRested` reads the connection's word (`0x48ec59`), there for every VM.
+    if let Some(billing) = world.get_resource::<crate::net::SessionBilling>() {
+        script.set_billing_time_rested(billing.0.time_rested);
+    }
     // `CGGameUI::InitializeGame` flags these read-only before `UI_Init` loads anything
     // (`0x48f566`-`0x48f584`), so an in-game `SetCVar` of one raises, logout handlers included;
     // `ShutdownGame` clears them (`0x491240`), and here the flags die with this VM. The host's
