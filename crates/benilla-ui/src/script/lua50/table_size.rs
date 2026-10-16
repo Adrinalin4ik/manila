@@ -72,6 +72,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let sizes = store;
 
     let t: Table = g.get("table")?;
+    // 5.1's own `getn`, `lua_objlen`: the `#t` its `sort` reads, kept before 5.0's replaces it.
+    let objlen: Function = t.get("getn")?;
 
     let getn_sizes = sizes.clone();
     t.set(
@@ -191,7 +193,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // `table.sort` (`0x7fb900`) sorts `1..getn`, 5.1's `1..#t`: a shorter remembered size lifts
-    // the tail out around the C sort. Deviation: a longer one sorts only the border, where 5.0
+    // the tail out around 5.1's sort. Deviation: a longer one sorts only the border, where 5.0
     // compares nils and raises: it departs from an error path, not from a mechanism.
     let sort_sizes = sizes.clone();
     let sort: Function = t.get("sort")?;
@@ -199,7 +201,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "sort",
         lua.create_function(move |_, (t, cmp): (Table, Option<Function>)| {
             let n = get_n(&sort_sizes, &t)?;
-            let border = i64::try_from(t.raw_len()).unwrap_or(i64::MAX);
+            let border = objlen.call::<i64>(t.clone())?;
             if n >= border {
                 return sort.call::<()>((t, cmp));
             }

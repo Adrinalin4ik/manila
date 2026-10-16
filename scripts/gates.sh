@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # The land gate chain: every gate in order, stopping at the first failure.
 #
-# fmt, clippy, reference, test, test-no-install, doc-links, message-catalog, pass-span-lint,
-# player-tests, enforcer, enforcer-no-install. A failure prints the gate's log tail and exits
-# nonzero; a green run stamps the tree, which then re-greens without running. GATES_FORCE=1 runs
-# the chain anyway,
+# fmt, clippy, reference, test, test-no-install, vm-parity, doc-links, message-catalog,
+# pass-span-lint, player-tests, enforcer, enforcer-no-install. A failure prints the gate's log tail
+# and exits nonzero; a green run stamps the tree, which then re-greens without running.
+# GATES_FORCE=1 runs the chain anyway,
 # WOW_DATA picks the install (set and empty: none) and TMPDIR holds the scratch files; the script
 # sets BENILLA_REQUIRE_DATA, BENILLA_ADDON_CORPUS, BENILLA_SKIP_LOG and WOW_WORLDVIEW_CHECK for
 # its gates. BENILLA_RE names the benilla-re checkout the reference gate compares `reference/` with.
@@ -153,6 +153,10 @@ report_skips test
 # test-no-install: refuses a test that reads the install without `wow_data_or_skip!`. `WOW_DATA=`
 # (set, empty) is the resolver's "no install"; no build reads it, so the test binaries are reused.
 run test-no-install env -u BENILLA_REQUIRE_DATA WOW_DATA= cargo test --no-fail-fast --workspace
+
+# vm-parity: the script host on benilla's own VM (`benilla-vm`) against the answers the C Lua
+# build recorded in `vm_parity.golden`; `test` runs the same cases on the C build.
+run vm-parity cargo test -p benilla-ui --features benilla-vm --test vm_parity
 
 # doc-links: refuses a doc link to a `crate::`, `super::`, `self::` or `Self::` path whose leaf is
 # declared nowhere in the workspace. Narrow on purpose: every other unresolved link is a convention.

@@ -225,7 +225,7 @@ const REGION_TAG: u32 = 0x8000_0000;
 /// ([`Model::touch_layout_frame`]), and the next resolve re-derives just those nodes against the
 /// model ([`UiScript::rederive_named`]), joining, leaving or re-pointing them in place, the way a
 /// retained layout tree marks a node dirty rather than rebuilding itself.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct LayoutScope {
     /// Per id: the hash the last converged resolve saw, or [`NO_NODE`]; a mismatch seeds dirty.
     last: Vec<u64>,

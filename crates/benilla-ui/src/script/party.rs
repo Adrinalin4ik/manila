@@ -706,7 +706,7 @@ const READY_CHECK_SECONDS: f64 = 30.0;
 /// The ready-check state: the armed deadline (`[0xb713f4]`), the members whose pending flag
 /// (`[entry+0x158]`) is set, and summary lines not yet pushed to chat. Outside [`PartyState`]
 /// because a roster push replaces that and this survives it.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct ReadyCheckState {
     pub(crate) deadline: Option<f64>,
     pub(crate) unanswered: Vec<u64>,

@@ -115,7 +115,7 @@ impl Category {
 }
 
 /// The list the realm verbs read.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct GlueRealmList {
     holder: Vec<GlueRealm>,
     /// The Region's rows; empty until seeded.

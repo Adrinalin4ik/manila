@@ -15,19 +15,20 @@ use super::{
 // ── The Rust-side model ──
 
 /// The host's answer to whether a texture path resolves to a file.
-pub type TextureProbe = Box<dyn Fn(&str) -> bool>;
+pub type TextureProbe = std::rc::Rc<dyn Fn(&str) -> bool>;
 
 /// The host's world-to-map projection (`0x4a7360`): the displayed map's selection as
 /// [`super::UiScript::world_map_selection`] reads it, a map id and a world `(x, y)`, to the map UV,
 /// `None` where the reference's outputs stay at their `(0, 0)`.
-pub type WorldLocProjector =
-    Box<dyn Fn((u32, u32, Option<u32>), u32, f32, f32) -> Option<(f32, f32)>>;
+pub type WorldLocProjector = std::rc::Rc<WorldLocFn>;
+pub type WorldLocFn = dyn Fn((u32, u32, Option<u32>), u32, f32, f32) -> Option<(f32, f32)>;
 
 /// The host's answer to a texture path's size in texels.
-pub type TextureSizeProbe = Box<dyn Fn(&str) -> Option<(u32, u32)>>;
+pub type TextureSizeProbe = std::rc::Rc<TextureSizeFn>;
+pub type TextureSizeFn = dyn Fn(&str) -> Option<(u32, u32)>;
 
 /// The host's answer to whether a font path loads.
-pub type FontProbe = Box<dyn Fn(&str) -> bool>;
+pub type FontProbe = std::rc::Rc<dyn Fn(&str) -> bool>;
 
 /// Minted id to handle, indexed directly: ids are dense and every scripted call looks one up.
 #[derive(Debug, Clone)]
@@ -85,6 +86,7 @@ pub(crate) fn node_deferred(
 
 /// The Rust-side model behind the Lua VM, in `lua.app_data`. It holds no mlua handles, whose
 /// persistent count the vendored `LUAI_MAXCSTACK` caps.
+#[derive(Clone)]
 pub(crate) struct Model {
     /// Which FrameScript state this VM is: it picks the event table and the frame types.
     pub(crate) vm: super::glue::VmKind,
@@ -106,7 +108,7 @@ pub(crate) struct Model {
     /// The host's reader for chain-sourced addon files; without one such an addon is `MISSING`.
     pub(crate) addons_chain_reader: Option<super::addon::SharedChainReader>,
     /// The host's font engine, so a metric answers inside the asking call, not a frame later.
-    pub(crate) measurer: Option<Box<dyn super::TextMeasure>>,
+    pub(crate) measurer: Option<super::measure::SharedMeasurer>,
     /// Whether a texture path resolves (patch chain or loose addon file), so the path form of
     /// `SetTexture` returns the reference's 1 or nil inline (`0x79bb40`). `None` answers nil.
     pub(crate) texture_probe: Option<TextureProbe>,

@@ -1,0 +1,12 @@
+[package]
+name = "benilla-mlua"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Experimental: the slice of mlua's API benilla uses, over benilla-lua's 1.12 VM"
+
+[lints]
+workspace = true
+
+[dependencies]
+benilla-lua = { path = "../benilla-lua" }

@@ -286,7 +286,9 @@ pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState, RepairCosts};
 pub(crate) use minimap::apply_model_attrs as apply_minimap_model_attrs;
 pub(crate) use model::Model;
-pub use model::{FontProbe, TextureProbe, TextureSizeProbe, WorldLocProjector};
+pub use model::{
+    FontProbe, TextureProbe, TextureSizeFn, TextureSizeProbe, WorldLocFn, WorldLocProjector,
+};
 pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo};
 pub use pet::{PetActionView, PetStats};
 pub use pvp::{decorated_name, pvp_name_global_keys, HonorState, InspectHonorData, RankTitle};
@@ -749,6 +751,22 @@ impl UiScript {
     /// share a state, so world entry mints its VM at the top of its load.
     pub fn session(&self) -> u64 {
         self.session
+    }
+
+    /// An independent copy of this UI, Lua and Rust sides both, as a fresh session: a built state
+    /// to start many runs from without building it again. The host's services (the text measurer,
+    /// the probes) are shared with the original; an instruction budget is not carried over.
+    #[cfg(feature = "benilla-vm")]
+    pub fn fork(&self) -> UiScript {
+        let lua = self.lua.fork();
+        lua.remove_hook();
+        lua.set_app_data(self.model_ref().clone());
+        handler_prof::install(&lua);
+        UiScript {
+            lua,
+            instructions: Default::default(),
+            session: NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
     }
 
     /// Bound how long a chunk may run: past `budget` VM instructions the hook raises a Lua error,

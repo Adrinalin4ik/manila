@@ -44,12 +44,14 @@ impl RegionHandle {
 
 // ── The generational arena ───────────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct Slot<T> {
     generation: u32,
     value: Option<T>,
 }
 
 /// `remove` bumps the slot's generation, so an old handle stops resolving.
+#[derive(Clone)]
 struct Arena<T> {
     slots: Vec<Slot<T>>,
     free: Vec<u32>,
@@ -301,6 +303,7 @@ pub struct ChildWalk {
 /// The frame arena: frames, regions, the name registry and the propagation mutators. The screen
 /// root is not a node: a frame with no parent hangs off it. Within a bucket the client's list is a
 /// head insert walked tail to head, the same order as the ascending [`Frame::insertion_seq`].
+#[derive(Clone)]
 pub struct WidgetArena {
     frames: Arena<Frame>,
     regions: Arena<Region>,

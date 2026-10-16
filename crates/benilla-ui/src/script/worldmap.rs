@@ -470,9 +470,9 @@ impl super::UiScript {
 
     /// Install the host's world-to-map projection behind `GetWorldLocMapPosition` and the
     /// landmark list.
-    pub fn set_world_loc_projector(&mut self, projector: super::WorldLocProjector) {
+    pub fn set_world_loc_projector(&mut self, projector: Box<super::WorldLocFn>) {
         let mut model = self.model_mut();
-        model.world_loc_projector = Some(projector);
+        model.world_loc_projector = Some(projector.into());
         refresh_landmarks(&mut model);
     }
 

@@ -93,7 +93,7 @@ pub struct PlateState {
 }
 
 /// One pooled plate's widgets, in the reference's creation order.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Plate {
     frame: FrameHandle,
     border: RegionHandle,
@@ -119,7 +119,7 @@ impl Plate {
 
 /// The plate pool, grown on demand and never shrunk or reordered: addons scan only the children
 /// past the count they last saw, so a compacted list would hide every later plate from them.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct NamePlates {
     plates: Vec<Plate>,
     /// Each live unit's pool slot, by [`PlateState::key`]: the reference's `[unit+0xe60]`.

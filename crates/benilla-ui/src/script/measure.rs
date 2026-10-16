@@ -32,6 +32,24 @@ pub trait TextMeasure {
     }
 }
 
+/// The installed [`TextMeasure`], shared by a state and its forks ([`super::UiScript::fork`]): a
+/// font engine answers the same for every copy of the UI.
+#[derive(Clone)]
+pub(crate) struct SharedMeasurer(std::rc::Rc<std::cell::RefCell<Box<dyn TextMeasure>>>);
+
+impl TextMeasure for SharedMeasurer {
+    fn measure(&mut self, req: &MeasureRequest) -> (f32, f32, f32) {
+        self.0.borrow_mut().measure(req)
+    }
+
+    fn editbox_advances(
+        &mut self,
+        req: &super::EditBoxAdvanceRequest,
+    ) -> Option<(Vec<f32>, Vec<usize>, f32)> {
+        self.0.borrow_mut().editbox_advances(req)
+    }
+}
+
 /// Measure region `rh` now if a measurer is installed and its stored measure is stale; a current
 /// one is left alone, so a per-frame poll does not re-measure.
 pub(super) fn ensure_measured(lua: &Lua, rh: RegionHandle) {
@@ -77,7 +95,9 @@ impl super::UiScript {
     /// it whenever the window size or `uiScale` changes: glyph advances snap to whole physical
     /// pixels.
     pub fn set_text_measurer(&mut self, measurer: Box<dyn TextMeasure>) {
-        self.model_mut().measurer = Some(measurer);
+        self.model_mut().measurer = Some(SharedMeasurer(std::rc::Rc::new(
+            std::cell::RefCell::new(measurer),
+        )));
     }
 
     /// Whether a [`TextMeasure`] is installed; the host then skips its batch measure pass.

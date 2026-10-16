@@ -123,10 +123,35 @@ pub fn survey(root: &Path) -> Vec<AddonReport> {
     // Folder -> the method names its source defines, memoised: one library folder is a dependency
     // of dozens of addons.
     let mut defined_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // On benilla's own VM the stock interface is built once and each addon gets a fork of it.
+    #[cfg(feature = "benilla-vm")]
+    let template = stock_vm(root, &registry);
+    let make = || -> Result<UiScript, String> {
+        #[cfg(feature = "benilla-vm")]
+        return template.as_ref().map(UiScript::fork).map_err(Clone::clone);
+        #[cfg(not(feature = "benilla-vm"))]
+        stock_vm(root, &registry)
+    };
     names
         .iter()
-        .map(|n| survey_one(root, n, &installed, &registry, &mut defined_methods))
+        .map(|n| survey_one(root, n, &installed, &registry, &mut defined_methods, &make))
         .collect()
+}
+
+/// A VM with our whole interface under it (see the module doc), a session seated and the AddOn
+/// API answering for the whole installed set.
+fn stock_vm(root: &Path, registry: &[benilla_ui::script::AddOnInfo]) -> Result<UiScript, String> {
+    let mut script = UiScript::new().map_err(|e| e.to_string())?;
+    // A time bound, so one non-terminating addon cannot stall the survey: about 50x the heaviest
+    // corpus addon (Enchantrix, 4M instructions), so a runaway reports in about a second.
+    script.set_instruction_budget(ADDON_INSTRUCTION_BUDGET);
+    script.set_screen_size(1024.0, 768.0);
+    // The saved-variable roots are `None`, so a survey never reads or writes a player's; the
+    // AddOns root is passed, so `LoadAddOn("<folder addon>")` does not answer `MISSING`.
+    script.register_addons(registry.to_vec(), Some(root.to_path_buf()), None, None);
+    seat_a_session(&mut script);
+    let _ = crate::ui_script::load_default_ui(&script);
+    Ok(script)
 }
 
 /// The corpus every VM sees: the folders with a manifest, the case-folded installed set, and the
@@ -219,6 +244,7 @@ fn survey_one(
     installed: &BTreeSet<String>,
     registry: &[benilla_ui::script::AddOnInfo],
     defined_methods: &mut BTreeMap<String, BTreeSet<String>>,
+    make: &dyn Fn() -> Result<UiScript, String>,
 ) -> AddonReport {
     let Some(toc_path) = manifest_path(root, name) else {
         return AddonReport {
@@ -238,8 +264,7 @@ fn survey_one(
         .map(str::to_owned)
         .collect();
 
-    // A VM with our whole interface under it (see the module doc).
-    let mut script = match UiScript::new() {
+    let script = match make() {
         Ok(s) => s,
         Err(e) => {
             return AddonReport {
@@ -251,16 +276,9 @@ fn survey_one(
             }
         }
     };
-    // A time bound, so one non-terminating addon cannot stall the survey: about 50x the heaviest
-    // corpus addon (Enchantrix, 4M instructions), so a runaway reports in about a second.
+    let mut script = script;
+    // A fork carries no budget; re-armed, the count starts at this addon.
     script.set_instruction_budget(ADDON_INSTRUCTION_BUDGET);
-    script.set_screen_size(1024.0, 768.0);
-    // The AddOn API answers for the whole installed set before anything runs. The saved-variable
-    // roots are `None`, so a survey never reads or writes a player's; the AddOns root is passed, so
-    // `LoadAddOn("<folder addon>")` does not answer `MISSING`.
-    script.register_addons(registry.to_vec(), Some(root.to_path_buf()), None, None);
-    seat_a_session(&mut script);
-    let _ = crate::ui_script::load_default_ui(&script);
     // The addon's dependencies, first and recursively, as `AddOn_Load` (`0x51f240`) does in its
     // first two steps. Loaded before `globals_of` below, so a name a dependency provides is not
     // missing.

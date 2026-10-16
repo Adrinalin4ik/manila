@@ -73,7 +73,7 @@ pub struct BubbleState {
 }
 
 /// One pooled bubble's widgets, in the reference's creation order after the backdrop's nine.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Bubble {
     frame: FrameHandle,
     tail: RegionHandle,
@@ -91,7 +91,7 @@ struct Bubble {
 
 /// The bubble pool: grown on demand, never shrunk or reordered, so every bubble keeps its place in
 /// the `WorldFrame`'s child list for the session.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct ChatBubbles {
     bubbles: Vec<Bubble>,
     /// The free list (`[0xb6f064]`): a finished bubble joins the tail (`0x4b15e5`-`0x4b15f7`) and a

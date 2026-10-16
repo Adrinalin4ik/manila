@@ -55,7 +55,7 @@ pub struct Diagnostic {
 }
 
 /// The log, held on the model.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct DiagnosticLog {
     rows: VecDeque<Diagnostic>,
     /// The last `seq` handed out; kept apart from `rows.len()` so eviction never renumbers.
