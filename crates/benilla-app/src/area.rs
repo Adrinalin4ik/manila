@@ -288,12 +288,12 @@ pub(crate) struct RealmPvp(bool);
 fn latch_realm_pvp(
     mut latch: ResMut<RealmPvp>,
     roster: Option<Res<crate::char_select::Roster>>,
-    realms: Option<Res<crate::realm_select::Realms>>,
+    tables: Option<Res<crate::glue_session::realm::RealmTables>>,
 ) {
     let realm_type = roster.and_then(|r| r.realm.as_ref().map(|realm| realm.realm_type));
     let row = realm_type
-        .zip(realms)
-        .and_then(|(t, realms)| realms.row_pvp(t));
+        .zip(tables)
+        .and_then(|(t, tables)| tables.row_pvp(t));
     latch.0 = latched_realm_pvp(latch.0, row);
 }
 
@@ -311,7 +311,7 @@ impl Plugin for AreaPlugin {
         app.init_resource::<RealmPvp>()
             .add_systems(Startup, load_area_table.after(AssetSet::Open))
             .add_systems(
-                OnEnter(crate::char_select::ClientState::InWorld),
+                OnEnter(crate::client_state::ClientState::InWorld),
                 latch_realm_pvp,
             )
             .add_systems(
