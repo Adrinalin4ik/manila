@@ -118,20 +118,24 @@ fn the_builtin_next_outlives_its_globals() {
     }
 }
 
-/// A vararg call's `arg` table is an allocation like any other: a loop of nothing but vararg
-/// calls collects as it goes (5.1.5's `adjust_varargs` checks the collector).
+/// A vararg call's `arg` table is counted, but the client's `adjust_varargs` never checks the
+/// collector (`0x6f6200`..`0x6f6366`): a loop of nothing but vararg calls collects nothing, and
+/// the next check, a table made, collects what it left.
 #[test]
-fn vararg_calls_collect_as_they_go() {
+fn vararg_calls_wait_for_the_next_check() {
     let mut vm = benilla_lua::new_state();
+    vm.full_gc();
+    let n = vm.heap.collections;
     run(
         &mut vm,
         "local function f(...) return arg.n end for i = 1, 200000 do f(i, i) end",
     );
+    assert_eq!(vm.heap.collections, n, "no collection in the loop");
     let tables = vm.heap.counts()[1];
-    assert!(
-        tables < 50000,
-        "200000 `arg` tables should not wait for a collection, {tables} live"
-    );
+    assert!(tables >= 200000, "every `arg` table waits: {tables} live");
+    run(&mut vm, "local t = {}");
+    assert!(vm.heap.collections > n);
+    assert!(vm.heap.counts()[1] < 50000, "the next check collects them");
 }
 
 /// A table's growth counts toward the heap, as 5.1's `luaM_reallocvector` charges it: an array
@@ -287,10 +291,14 @@ fn a_snapshot_counts_its_own_growth() {
     let mut vm = benilla_lua::new_state();
     run(&mut vm, "collectgarbage(-1) Big = {}");
     let mut snap = vm.clone();
-    let (before, snap_before) = (kb(&mut vm), kb(&mut snap));
+    let (before, snap_before) = (vm.heap.bytes(), snap.heap.bytes());
     run(&mut snap, "for j = 1, 100000 do Big[j] = j end");
-    assert!(kb(&mut snap) - snap_before >= 1500.0);
-    assert_eq!(kb(&mut vm), before, "the snapshot's growth counted here");
+    assert!(snap.heap.bytes() - snap_before >= 1500 * 1024);
+    assert_eq!(
+        vm.heap.bytes(),
+        before,
+        "the snapshot's growth counted here"
+    );
 }
 
 /// 5.1.5's dead keys: a collection marks a deleted string key dead, so setting it again takes a
