@@ -20,7 +20,7 @@ pub mod warden;
 mod writer;
 
 pub use reader::WorldReader;
-pub use session::{WardenRequired, WorldAuthReject, WorldConnectEvent, WorldSession};
+pub use session::{WorldAuthReject, WorldConnectEvent, WorldSession};
 
 pub use writer::WorldWriter;
 

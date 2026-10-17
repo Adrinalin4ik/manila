@@ -676,6 +676,9 @@ fn entry_prepare(
     // an addon's file scope sets the mask after it, and a `/reload` never takes this step.
     if seat == LoadSeat::Roster {
         crate::minimap::restore_default_mask(world);
+        // `InitializeGame` arms the play-time warning before it jumps to `UI_Init`
+        // (`0x48f636`-`0x48f681`): upstream's step, on this fork's entry opening.
+        crate::ui_billing::arm_at_world_entry(world);
     }
     // The character whose AddOn enable state applies. Resolved before the load because the
     // enable file gates which addons run at all.
@@ -715,6 +718,10 @@ fn entry_prepare(
         .and_then(|r| r.realm.as_ref().map(|r| r.name.clone()))
         .unwrap_or_default();
     script.set_realm_name(&realm);
+    // `GetBillingTimeRested` reads the connection's word (`0x48ec59`), there for every VM.
+    if let Some(billing) = world.get_resource::<crate::net::SessionBilling>() {
+        script.set_billing_time_rested(billing.0.time_rested);
+    }
     // `CGGameUI::InitializeGame` flags these read-only before `UI_Init` loads anything
     // (`0x48f566`-`0x48f584`), so an in-game `SetCVar` of one raises, logout handlers included;
     // `ShutdownGame` clears them (`0x491240`), and here the flags die with this VM. The host's

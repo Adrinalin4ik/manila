@@ -1103,7 +1103,7 @@ fn display_session() -> String {
 /// MONKEY (lighting): the value compare on top of `is_changed()` stays. This branch hangs its
 /// lighting knobs off `VideoConfig` too, so a `SetCVar("interiorGain")` marks the resource
 /// changed; without the compare it would re-assert vsync and undo a probe's `AutoNoVsync`.
-fn apply_present_mode(
+pub(crate) fn apply_present_mode(
     cfg: Res<VideoConfig>,
     restarts: Res<GxRestarts>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
@@ -1132,7 +1132,7 @@ fn apply_present_mode(
 /// Push the display mode to the window, gated as [`apply_present_mode`] is. The guard matches the
 /// variant, not the monitor: birth uses `Primary` and a live toggle `Current`, so a `!=` compare
 /// would re-assert fullscreen on every launch.
-fn apply_window_mode(
+pub(crate) fn apply_window_mode(
     cfg: Res<VideoConfig>,
     restarts: Res<GxRestarts>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,

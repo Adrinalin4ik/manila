@@ -919,23 +919,6 @@ pub(crate) struct UnitStores<'w, 's> {
     removed: RemovedComponents<'w, 's, Guid>,
 }
 
-/// A guid's streamed descriptor, whichever entity holds it — `CanAssist`'s owner chase, and the
-/// twin of `target::scan`'s own `store_of`.
-///
-/// It clones, where the scanner borrows, because the predicate's parameter is
-/// `FnOnce(u64) -> Option<ObjectStore>` and this feed's call sites already hold the query
-/// immutably for the unit being judged. The cost is one descriptor copy on the one clause that
-/// asks for it — a unit that is **not** player-controlled — and nothing at all otherwise, since
-/// `FnOnce` means the closure is never run when the earlier clauses decide.
-fn store_of(
-    index: &Option<Res<crate::net::GuidIndex>>,
-    stores: &Query<&'static ObjectStore>,
-    guid: u64,
-) -> Option<ObjectStore> {
-    let entity = *index.as_ref()?.0.get(&guid)?;
-    stores.get(entity).ok().cloned()
-}
-
 /// The client tables [`snapshot`] reads beside a descriptor, as one parameter for the feeders that
 /// sit at Bevy's 16-parameter limit: `ChrClasses.dbc` for the relic slot, the form table the
 /// creature-type resolver's first stage reads and `CreatureType.dbc` for its words. Each is absent
@@ -1349,20 +1332,12 @@ pub(crate) fn feed_units(
     // `ResMut` because the guild-identity cache is lazy: a miss sends `CMSG_GUILD_QUERY`.
     mut guild: ResMut<crate::ui_guild::GuildState>,
     interact: Option<Res<crate::ui_session::InteractNpc>>,
-    // Rested billing minutes, sent only in `SMSG_AUTH_RESPONSE`; the reference keeps a global.
-    entered_world: Option<MessageReader<crate::net::EnteredWorldMessage>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
     // wenilla carry: the `fu_us` meter, the whole body from here.
     let _span = crate::perf::journal::SpanGuard::new(&crate::perf::journal::FU_US);
-    // Ahead of the gate: a login edge, with no snapshot to diff.
-    if let Some(entered) =
-        entered_world.and_then(|mut r| r.read().last().map(|m| m.billing_time_rested))
-    {
-        script.set_billing_time_rested(entered);
-    }
     let chr = tables.unit_names();
     let types = tables.types(&names);
     // One reborrow, so the memo and `warned_sideless` borrow disjointly rather than alias.

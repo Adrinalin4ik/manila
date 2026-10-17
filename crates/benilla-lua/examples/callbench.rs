@@ -1,4 +1,4 @@
-//! Call micro-benchmarks against the fork, best of five.
+//! Call micro-benchmarks, best of five.
 use std::time::Instant;
 const CASES: &[(&str, &str)] = &[
     ("empty call", "local function f() end for i = 1, 3000000 do f() end"),
@@ -20,15 +20,9 @@ fn best<F: FnMut()>(mut f: F) -> f64 {
 fn main() {
     if let Some(only) = std::env::args().nth(1) {
         let src = CASES.iter().find(|c| c.0.contains(&only)).unwrap().1;
-        let fork = std::env::args().nth(2).is_some_and(|a| a == "fork");
         for _ in 0..20 {
-            if fork {
-                let lua = mlua::Lua::new();
-                lua.load(src).exec().unwrap();
-            } else {
-                let mut vm = benilla_lua::new_state();
-                vm.exec(src.as_bytes(), b"=b").unwrap();
-            }
+            let mut vm = benilla_lua::new_state();
+            vm.exec(src.as_bytes(), b"=b").unwrap();
         }
         return;
     }
@@ -37,13 +31,6 @@ fn main() {
             let mut vm = benilla_lua::new_state();
             vm.exec(src.as_bytes(), b"=b").unwrap();
         });
-        let fork = best(|| {
-            let lua = mlua::Lua::new();
-            lua.load(*src).exec().unwrap();
-        });
-        println!(
-            "{name:<16} ours {ours:6.2} ms  fork {fork:6.2} ms  {:.2}x",
-            ours / fork
-        );
+        println!("{name:<16} {ours:6.2} ms");
     }
 }

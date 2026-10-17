@@ -142,6 +142,7 @@ mod ui_bank;
 mod ui_battlefield;
 mod ui_battlefield_positions;
 mod ui_battlefield_score;
+mod ui_billing;
 mod ui_bind_confirm;
 mod ui_binder;
 mod ui_cast;

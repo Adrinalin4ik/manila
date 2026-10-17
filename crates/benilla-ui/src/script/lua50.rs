@@ -3,7 +3,7 @@
 //! The reference embeds Lua 5.0 (`$Lua: Lua 5.0` at `0x811b30`), and `InitLua 0x7039e0` opens
 //! five libraries: base (`0x811e28`, 36 entries), `string` (`0x822d88`, 12), `table`
 //! (`0x822d40`, 8), `math` (`0x822c60`, 24) and `bit` (`0x822c18`, 8), with no `os`, `io`,
-//! `debug` or `coroutine`. The grammar is the Lua fork's, in `third_party/lua-src`.
+//! `debug` or `coroutine`. The grammar is benilla-lua's (`crates/benilla-lua/GRAMMAR.md`).
 //!
 //! `...` is a parameter-list token only: a vararg function reads its arguments through 5.0's
 //! `arg` table (`arg.n`, `unpack(arg)`). So Lua written here forwards an unknown argument list
@@ -77,8 +77,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set("print", Value::Nil)?;
     g.set("_VERSION", Value::Nil)?;
 
-    // `__pow` is a 1.12 global, which 5.0 calls to implement `^`; nothing here calls it, but an
-    // addon can see it.
+    // `__pow` is a 1.12 global (`0x7fb4c4`), which `^` on two numbers calls (`0x6f9b52`).
     g.set(
         "__pow",
         lua.create_function(|_, (a, b): (f64, f64)| Ok(a.powf(b)))?,
@@ -153,7 +152,7 @@ fn install_bit(lua: &Lua) -> mlua::Result<()> {
 /// answers `(count_KB, threshold_KB)` (`lua_getgccount 0x6f43f0`, `lua_getgcthreshold
 /// 0x6f43e0`); `collectgarbage` (`0x703250`) takes an optional number, sets the threshold to that
 /// many KB (`lua_setgcthreshold 0x6f4400`) and answers nothing, so 5.1's string options raise.
-/// 5.1's collector has no threshold, so it is kept here by 5.0's rules against mlua's heap: a
+/// 5.1's collector has no threshold, so it is kept here by 5.0's rules against the VM's heap: a
 /// live count that reaches it collects, and a collection resets it to twice the live count.
 fn install_gc(lua: &Lua) -> mlua::Result<()> {
     /// 5.0's `GCthreshold` (`[G+0x24]`), in bytes.
@@ -758,8 +757,8 @@ mod tests {
         assert_eq!(s.eval::<i64>("return string.len('abcd')").unwrap(), 4);
     }
 
-    /// The 5.0 grammar the stock files use still parses, including the three constructs the fork
-    /// restores: the iterator-less generic-for, nested long strings (`LUA_COMPAT_LSTR`) and the
+    /// The 5.0 grammar the stock files use still parses, including the three constructs 5.1
+    /// dropped: the iterator-less generic-for, nested long strings (`LUA_COMPAT_LSTR`) and the
     /// constructor's extra semicolon.
     #[test]
     fn the_5_0_grammar_the_reference_writes_still_parses() {
@@ -878,8 +877,8 @@ mod tests {
 mod error_quoting_tests {
     use crate::script::UiScript;
 
-    /// Error messages quote a program element as the reference does, `` `x' ``: the fork's
-    /// `luaconf.h` restores 5.0's `LUA_QL`, and `debugstack` renders its own frames the same way
+    /// Error messages quote a program element as the reference does, `` `x' ``, 5.0's
+    /// `LUA_QL`, and `debugstack` renders its own frames the same way
     /// (`0x703760`).
     #[test]
     fn errors_quote_program_elements_the_way_lua_5_0_does() {

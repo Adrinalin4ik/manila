@@ -422,13 +422,13 @@ impl SkyMatLane {
         if let Some(st) = &sub.stage1 {
             if let Some(uv) = st.uv_anim.clone() {
                 if let Some(slot) = table.alloc() {
-                    write(materials, &|m| m.extension.stage1.z = f32::from(slot));
+                    write(materials, &|m| m.extension.stage1_uv.z = f32::from(slot));
                     lane.stage1_uv = Some((slot, uv));
                 }
             }
             if st.uv_rot.is_some() || st.uv_scale.is_some() {
                 if let Some(slot) = table.alloc() {
-                    write(materials, &|m| m.extension.stage1.w = f32::from(slot));
+                    write(materials, &|m| m.extension.stage1_uv.w = f32::from(slot));
                     lane.stage1_affine = Some((
                         slot,
                         AffineLoops {

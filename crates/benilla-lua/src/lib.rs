@@ -1,5 +1,5 @@
 //! benilla-lua: an interpreter for the Lua benilla's script host runs, Lua 5.1.5 patched to the
-//! 1.12 grammar (`third_party/lua-src/BENILLA.md`). The state is plain Rust data, so it can be
+//! 1.12 grammar (`GRAMMAR.md`). The state is plain Rust data, so it can be
 //! cloned, inspected and restored.
 
 pub mod api;
@@ -39,9 +39,9 @@ pub fn new_state() -> Vm {
     vm
 }
 
-/// The state benilla's script host starts from: Lua 5.1's standard libraries as mlua's
-/// `Lua::new()` opened them (`luaopen_base`, then table, io, os, string, math and package), each
-/// table sized and filled in its C registration order. The script host's sandbox then deletes
+/// The state benilla's script host starts from: Lua 5.1's standard libraries as the C build's
+/// mlua `Lua::new()` opened them (`luaopen_base`, then table, io, os, string, math and package),
+/// each table sized and filled in its C registration order. The script host's sandbox then deletes
 /// what 1.12 lacks, and the deleted keys stay in the tables as 5.1 leaves them, so every table
 /// lays out, and iterates, as it did. A function 5.1 has and benilla does not is a placeholder
 /// that raises: the sandbox deletes every one.
@@ -304,7 +304,7 @@ pub fn chunkid(source: &[u8]) -> Vec<u8> {
 
 /// Compile a chunk and drop it, or answer the client's own syntax error.
 pub fn check(src: &[u8], chunkname: &[u8]) -> Result<(), SyntaxError> {
-    compile::compile(src, chunkname, &mut heap::Heap::default(), 0).map(|_| ())
+    compile::compile(src, chunkname, &mut heap::Heap::default()).map(|_| ())
 }
 
 #[cfg(test)]
@@ -341,10 +341,7 @@ mod tests {
         );
         assert_eq!(err("break"), "t:1: no loop to break near `<eof>'");
         assert_eq!(err("(a) = 1"), "t:1: syntax error near `='");
-        assert_eq!(
-            err("if x then\nend end"),
-            "t:2: `<eof>' expected near `end'"
-        );
+        assert_eq!(err("if x then\nend end"), "t:2: <eof> expected near `end'");
         assert_eq!(
             err("do\nx = 1"),
             "t:2: `end' expected (to close `do' at line 1) near `<eof>'"
@@ -365,7 +362,7 @@ mod tests {
         // The string constant a chunk returns.
         let one = |src: &[u8]| -> Vec<u8> {
             let mut heap = heap::Heap::default();
-            let p = compile::compile(src, b"=t", &mut heap, 0).unwrap();
+            let p = compile::compile(src, b"=t", &mut heap).unwrap();
             let value::V::Str(s) = p.consts[0].unpack() else {
                 panic!("{:?}", p.consts)
             };

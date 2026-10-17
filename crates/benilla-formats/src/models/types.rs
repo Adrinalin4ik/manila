@@ -262,24 +262,6 @@ pub enum FogPolicy {
     Off = 4,
 }
 
-/// MONKEY (skybox): a two-texture batch's second stage (`textureCount 2`, which no stock 1.12
-/// model authors): texture `textureLookup[combo + 1]` on the UV set `texUnitLookup[coord + 1]`,
-/// moved by `texAnimLookup[transform + 1]`, multiplied into stage 0 (`Mod`, or `Mod2x` on the
-/// modern `0x4014` combiner).
-#[derive(Debug, Clone, Default)]
-pub struct StageTwo {
-    pub texture: Option<String>,
-    pub wrap_x: bool,
-    pub wrap_y: bool,
-    /// Per vertex, parallel to [`RenderSubmesh::positions`], from the stage's own UV set.
-    pub uvs: Vec<[f32; 2]>,
-    /// The stage's colour doubles (`Mod2x`).
-    pub mod2x: bool,
-    pub uv_anim: Option<UvAnim>,
-    pub uv_rot: Option<super::key_anim::KeyAnim<[f32; 4]>>,
-    pub uv_scale: Option<super::key_anim::KeyAnim<[f32; 2]>>,
-}
-
 /// One render batch: self-contained geometry and its material.
 #[derive(Debug, Clone)]
 pub struct RenderSubmesh {
@@ -364,12 +346,44 @@ pub struct RenderSubmesh {
     /// over its base); the reference draws both from one vertex array under LEQUAL, the later
     /// winning exactly (`0x70c190`), so consolidators refuse a section they cannot take whole.
     pub section: Option<u16>,
-    /// MONKEY (skybox): the second texture stage, `None` on every one-texture batch.
-    pub stage1: Option<StageTwo>,
     /// Texture coordinates generated as a view-space sphere map, not read from [`Self::uvs`]
     /// (`texture_unit_lookup[texCoordSet] > 2`): `uv = normalize(P − 2(P·N)N).xy · 0.5 + 0.5`.
     /// Such a mesh parks its UVs at one point (`GnomeSubwayGlass.m2`).
     pub env_map: bool,
+    /// The batch's second texture stage, for a unit of two or more textures; `None` for one.
+    pub stage1: Option<TextureStage>,
+    /// Stage 0's combine preset, 0 to 5 (`benilla_m2::M2Model::stage_combine`): preset 0, the
+    /// stock opaque batch's, takes its alpha from the diffuse alone, 1 modulates it by the texel.
+    pub combine: u8,
+}
+
+/// A texture stage after the first: the reference binds one per texture of the unit
+/// (`0x70b740`-`0x70b823`), each with its own texture, coordinates and combine.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextureStage {
+    /// The texture through the batch's lookup at `texture_combo_index + k` (`0x70b768`); `None`
+    /// for a slot the spawn site fills (skin, character, icon) or no record.
+    pub texture: Option<String>,
+    /// The texture record's address mode (`flags & 0x1/0x2`), as stage 0's.
+    pub wrap_x: bool,
+    pub wrap_y: bool,
+    /// Generated coordinates: the lookup `texture_unit_lookup[texCoordSet + k]` is above 2
+    /// (`0x70b8bd`), the same view-space sphere map as [`RenderSubmesh::env_map`]. Otherwise the
+    /// stage reads the vertex's UV set `k` (`Model2.bls` binds `texcoord[k]`), which no stock
+    /// two-texture batch does.
+    pub env_map: bool,
+    /// The combine preset (`benilla_m2::M2Model::stage_combine`): 0 and 1 modulate the colour
+    /// with alpha passed or modulated, 3 adds, 4 modulates ×2, 2 and 5 interpolate.
+    pub combine: u8,
+    /// MONKEY (skybox): a stage that is not [`Self::env_map`] reads its own UV set, which the
+    /// sky's two-texture batches do: per vertex, parallel to [`RenderSubmesh::positions`] (empty
+    /// for an env-mapped stage), moved by `texAnimLookup[transform + 1]`, and multiplied into
+    /// stage 0 (`Mod`, or `Mod2x` on the modern `0x4014` combiner).
+    pub uvs: Vec<[f32; 2]>,
+    pub mod2x: bool,
+    pub uv_anim: Option<UvAnim>,
+    pub uv_rot: Option<super::key_anim::KeyAnim<[f32; 4]>>,
+    pub uv_scale: Option<super::key_anim::KeyAnim<[f32; 2]>>,
 }
 
 /// A flat ground-plane quad: four vertices on one horizontal plane at or just above z = 0 (hover
@@ -435,8 +449,9 @@ impl Default for RenderSubmesh {
             rgb_seq: None,
             wmo_batch: None,
             env_map: false,
-            section: None,
             stage1: None,
+            combine: 1,
+            section: None,
         }
     }
 }

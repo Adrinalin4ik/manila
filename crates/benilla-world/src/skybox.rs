@@ -572,7 +572,7 @@ fn build_skybox(
                         h.id(),
                         |m| m.clone(),
                     )?;
-                    m.extension.stage1 = Vec4::new(mode, 0.0, 0.0, 0.0);
+                    m.extension.stage1_uv = Vec4::new(mode, 0.0, 0.0, 0.0);
                     m.extension.stage1_texture = tex1.clone();
                     Some(mats.materials().add(m))
                 };

@@ -1,5 +1,5 @@
 //! The lexer: Lua 5.1's `llex.c` as benilla's script host has always run it, built with
-//! `LUA_COMPAT_LSTR` 2 (`third_party/lua-src/BENILLA.md`): `\n`, `\r` and their pairs end a line,
+//! `LUA_COMPAT_LSTR` 2 (`GRAMMAR.md`): `\n`, `\r` and their pairs end a line,
 //! long brackets have levels (`[=[ ]=]`) and a level-0 one nests `[[` as 5.0's did, and a numeral
 //! is read as the client reads it, decimal only. Source is bytes.
 
@@ -239,11 +239,6 @@ impl<'a> Lexer<'a> {
             t => t.text(),
         };
         self.error_at(msg.as_bytes(), Some(&near))
-    }
-
-    /// `luaX_lexerror(ls, msg, 0)`: the position and the message, no token.
-    pub fn error_plain(&self, msg: &str) -> SyntaxError {
-        self.error_at(msg.as_bytes(), None)
     }
 
     /// `luaX_lexerror`: an end of input names `<eof>`, anything else quotes the buffer.

@@ -1,6 +1,7 @@
 // The model pass for M2, WMO and ground-clutter meshes, lit and fogged in gamma space:
 //   M2:           color = clamp01(A + D·I·(4/17)(0.375 + 2μ + 1.875μ²)) × tex × tint, μ = N·L
 //   clutter, WMO: color = clamp(ambient + diffuse·max(N·L, 0)) × tex × tint
+//   stage 1:      color = combine(color, tex1), tex1 at the generated coordinate (presets below)
 //   fog:          color = mix(fog_color, color, fog_factor); out = color, raw gamma
 // The M2 law is the order-2 SH lobe of `Shaders\Vertex\Model2.bls` (cvar `M2UseShaders`, default
 // 1); M2's one FFP light site (`70bdf6`) runs only with that cvar off. Clutter and WMO are the FFP
@@ -61,14 +62,20 @@ struct ModelParams {
     // Rows of `wow_light.matanim`, 0 = identity: x = UV scroll, y = tint, z = texture-transform
     // affine, w = the UI tile's cell clip.
     anim_slots: vec4<f32>,
-    // MONKEY (skybox): stage 1 of a two-texture batch: x = 0 none / 1 Mod / 2 Mod2x, z/w = the
-    // matanim rows of its translation and affine.
+    // The second texture stage: x = bound (1) or not (0), y = its combine preset 0-5, z = the
+    // stage-0 combine preset plus one; w unused.
     stage1: vec4<f32>,
+    // MONKEY (skybox): a two-texture batch's stage 1 that is NOT env-mapped (the sky's), read on
+    // UV set B under `WOW_STAGE1`: x = 0 none / 1 Mod / 2 Mod2x, z/w = the matanim rows of its
+    // translation and affine. It samples `stage1_texture`, which a batch binds for one stage 1 or
+    // the other, never both.
+    stage1_uv: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> m: ModelParams;
-// MONKEY (skybox): stage 1's texture, the fallback image off `WOW_STAGE1`.
-@group(#{MATERIAL_BIND_GROUP}) @binding(94) var stage1_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(95) var stage1_sampler: sampler;
+// Stage 1's texture, sampled at the generated coordinate `env_uv` when `m.stage1.x` is set, or on
+// UV set B when `m.stage1_uv.x` is (MONKEY skybox).
+@group(#{MATERIAL_BIND_GROUP}) @binding(101) var stage1_texture: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(102) var stage1_sampler: sampler;
 
 // A fully covered character shadow retains 45% of the authored model lighting.
 const SHADOW_SUN_FLOOR: f32 = 0.45;
@@ -387,6 +394,52 @@ struct WowVsOut {
     // 8-bit ranks and then to FOUR u32s of twelve - three extra interstage components in all (25
     // for this struct, against a 60-component limit) - see `EXT_SEL_K`.
     @location(11) @interpolate(flat) ext_sel: vec4<u32>,
+    // Stage 1's generated coordinate, (0, 0) when the material binds no stage 1. Location 12:
+    // 11 is the fork's `ext_sel`.
+    @location(12) env_uv: vec2<f32>,
+}
+
+// The generated environment coordinate of `Model2.bls` (its programs for a stage whose coordinate
+// lookup is above 2, `0x70b8bd`): in view space R = normalize(P − 2(P·N)N), uv = R.xy·0.5 + 0.5,
+// per vertex. The reference view basis (`0x5c3e70`) and Bevy's −Z-forward one differ only in z,
+// so R.xy needs no fixup.
+fn wow_env_uv(p_view: vec3<f32>, n_view: vec3<f32>) -> vec2<f32> {
+    let refl = normalize(p_view - 2.0 * dot(p_view, n_view) * n_view);
+    return refl.xy * 0.5 + vec2<f32>(0.5, 0.5);
+}
+
+// Stage 1's colour combine on `prev`, the stage-0 result, by gx preset as the default device,
+// Direct3D, maps it (`0x80a25c` = 4, 4, 13, 7, 5, 12 as `D3DTOP`, args TEXTURE and CURRENT, which
+// the device never changes): 0 and 1 modulate, 2 BLENDTEXTUREALPHA interpolates by the texel's
+// alpha, 3 adds, 4 modulates ×2, 5 BLENDDIFFUSEALPHA interpolates by `diffuse_a`, the vertex
+// colour's alpha. Each stage's result saturates.
+fn stage1_rgb(preset: u32, prev: vec3<f32>, tex: vec4<f32>, diffuse_a: f32) -> vec3<f32> {
+    var c = prev * tex.rgb;
+    if (preset == 2u) {
+        c = mix(prev, tex.rgb, tex.a);
+    } else if (preset == 3u) {
+        c = prev + tex.rgb;
+    } else if (preset == 4u) {
+        c = 2.0 * prev * tex.rgb;
+    } else if (preset == 5u) {
+        c = mix(prev, tex.rgb, diffuse_a);
+    }
+    return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// A stage's alpha on `prev`, the previous stage's (the diffuse alpha, for stage 0), by gx preset
+// (`0x80a274`, args TEXTURE and CURRENT): 1 modulates, 3 adds, 4 modulates ×2, the rest
+// (SELECTARG2) pass the previous.
+fn stage_alpha(preset: u32, prev: f32, tex: f32) -> f32 {
+    var a = prev;
+    if (preset == 1u) {
+        a = prev * tex;
+    } else if (preset == 3u) {
+        a = prev + tex;
+    } else if (preset == 4u) {
+        a = 2.0 * prev * tex;
+    }
+    return clamp(a, 0.0, 1.0);
 }
 
 // The dynamic point-light term at a world-space point (decisions 0016/0273/0278, selection 0285) —
@@ -1159,18 +1212,23 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
 #ifdef VERTEX_UVS_A
     out.uv = vertex.uv;
     // Env-mapped batches (`clutter_fade.z` bit 12; `texture_unit_lookup[texCoordSet] > 2` at
-    // `0x70b8bd`) generate their texcoord per vertex as `Model2.bls` does: in view space
-    // R = normalize(P − 2(P·N)N), uv = R.xy·0.5 + 0.5 (`0x70b8d0`). The reference view basis
-    // (`0x5c3e70`) and Bevy's −Z-forward one differ only in z, so R.xy needs no fixup.
+    // `0x70b8bd`) generate their texcoord per vertex (`wow_env_uv`).
 #ifdef VERTEX_POSITIONS
 #ifdef VERTEX_NORMALS
     if ((u32(m.clutter_fade.z) & 4096u) != 0u) {
-        let p_view = view_rot * p_cam;
-        let n_view = normalize(view_rot * out.world_normal);
-        let refl = normalize(p_view - 2.0 * dot(p_view, n_view) * n_view);
-        out.uv = refl.xy * 0.5 + vec2<f32>(0.5, 0.5);
+        out.uv = wow_env_uv(view_rot * p_cam, normalize(view_rot * out.world_normal));
     }
 #endif
+#endif
+#endif
+    // Stage 1 takes the same generated coordinate in its own interpolant: a two-texture unit's
+    // second lookup is the environment one in every stock model (`0xffff`).
+    out.env_uv = vec2<f32>(0.0);
+#ifdef VERTEX_POSITIONS
+#ifdef VERTEX_NORMALS
+    if (m.stage1.x > 0.5) {
+        out.env_uv = wow_env_uv(view_rot * p_cam, normalize(view_rot * out.world_normal));
+    }
 #endif
 #endif
 #ifdef VERTEX_UVS_B
@@ -1339,17 +1397,28 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
 #ifdef WOW_STAGE1
 #ifdef VERTEX_UVS_B
     {
-        let t1 = wow_light.matanim[u32(m.stage1.z)];
-        let a1 = wow_light.matanim[u32(m.stage1.w)];
+        let t1 = wow_light.matanim[u32(m.stage1_uv.z)];
+        let a1 = wow_light.matanim[u32(m.stage1_uv.w)];
         let d1 = (in.uv_b + t1.xy - vec2<f32>(0.5, 0.5)) * vec2<f32>(1.0 + a1.z, 1.0 + a1.w);
         let c1 = 1.0 + a1.x;
         let uv1 = vec2<f32>(0.5 + d1.x * c1 - d1.y * a1.y, 0.5 + d1.x * a1.y + d1.y * c1);
         let s1 = textureSampleBias(stage1_texture, stage1_sampler, uv1, view.mip_bias);
-        let k1 = select(1.0, 2.0, m.stage1.x > 1.5);
+        let k1 = select(1.0, 2.0, m.stage1_uv.x > 1.5);
         base_color = vec4<f32>(base_color.rgb * s1.rgb * k1, base_color.a * s1.a);
     }
 #endif
 #endif
+    // Stage 1 (`0x70b740` binds a stage per texture of the unit): its alpha joins the stage-0
+    // alpha the cutout reads (the blend's is `faded_alpha`, below); its colour combines after the light (below).
+    let stage1_on = m.stage1.x > 0.5;
+    let stage1_preset = u32(m.stage1.y);
+    let tex0_alpha = base_color.a;
+    var tex1 = vec4<f32>(1.0);
+    if (stage1_on) {
+        tex1 = textureSampleBias(stage1_texture, stage1_sampler, in.env_uv, view.mip_bias);
+        base_color.a = stage_alpha(stage1_preset, base_color.a, tex1.a);
+    }
+
     // The MeshTag (mesh_tag.rs): bit 31 = highlight, bit 30 = interior fog; payload bits 0-5 = the
     // fade alpha (a zero payload is untagged, opaque), 19-29 = the rig slot, 6-13 = the ground
     // shade (0 lit, 255 MCSH-shadowed) or, on an interior-prop material, 6-18 = the SH-probe slot.
@@ -1386,7 +1455,17 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // The depth-prime twin (`M2UseZFill`) masks colour writes, so only the discards above shape its
     // depth. No early return: naga's MSL backend miscompiles the dead tail ("redefinition of
     // '_tmp'").
-    let faded_alpha = base_color.a * obj_fade;
+    // The blended alpha is the stage chain on the instance alpha, the diffuse (`0x70c73a`, c28.w):
+    // stage 0 combines it with the texel by its preset's alpha op, so an opaque batch's preset 0
+    // (`0x811f8c`) blends by the fade alone and the texel's alpha never reaches the frame. Stage 1
+    // follows on that. `m.stage1.z` is the stage-0 preset + 1, 0 for a batch with none.
+    var faded_alpha = base_color.a * obj_fade;
+    if (m.stage1.z > 0.5) {
+        faded_alpha = stage_alpha(u32(m.stage1.z) - 1u, obj_fade, tex0_alpha);
+        if (stage1_on) {
+            faded_alpha = stage_alpha(stage1_preset, faded_alpha, tex1.a);
+        }
+    }
     let base = alpha_discard(pbr_input.material, base_color);
 
     // --- Lighting --------------------------------------------------------------------------------
@@ -1769,6 +1848,11 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     if ((is_mod || is_mod2x) && !is_wmo) {
         rgb = base.rgb;
     }
+    // Stage 1 combines with the stage-0 result, the lit texel, before the fog.
+    if (stage1_on) {
+        // The diffuse alpha is the batch and instance alpha, the shader's `obj_fade`.
+        rgb = stage1_rgb(stage1_preset, rgb, tex1, obj_fade);
+    }
 
     // MONKEY (wet): rain on sky-exposed WMO/M2 surfaces (wet_hook.wgsl); interior, glue booth, unlit,
     // Mod/Mod2x, additive and dry = untouched.
@@ -1818,7 +1902,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
 
 
     var out: WowFragOut;
-    // Output alpha is tex × fade. Opaque intent (`clutter_fade.z` bit 3) pins it to 1: a no-op
+    // Output alpha is `faded_alpha`. Opaque intent (`clutter_fade.z` bit 3) pins it to 1: a no-op
     // under correct pipeline state, and a guard for macOS/Metal with an extra camera, where an
     // opaque draw can bind a blending pipeline and show the BLP's garbage alpha.
     let opaque_intent = (u32(m.clutter_fade.z) & 8u) != 0u;

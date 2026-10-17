@@ -26,7 +26,6 @@ syncing upstream is [docs/UPSTREAM.md](docs/UPSTREAM.md).
 | `crates/wenilla-realm/templates/play.html` | the realm's player page (Askama, compiled into the binary) | ours |
 | `web/` | the page side: `index.html` (dev page), `boot.js`, `platform.js`, `bridge.js`, `examples/`, `wasi_stubs.js` | ours |
 | `scripts/web-setup.sh`, `scripts/web-build.sh` | toolchain and build for the wasm | ours |
-| `third_party/mlua-sys` | Lua 5.1's C build for wasm | ours (vendored) |
 | `.github/workflows/check.yml` | the PR gate: wasm check + realm tests | ours |
 | `.github/workflows/bump-realm-pin.yml` | tells wenilla-realm about every new `main` head | ours |
 

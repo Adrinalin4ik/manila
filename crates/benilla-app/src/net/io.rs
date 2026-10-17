@@ -41,9 +41,8 @@ use bevy::platform::time::Instant;
 use anyhow::{anyhow, Result};
 use benilla_assets::LockRecover;
 use benilla_protocol::{
-    messages::{self, SurveyAnswer},
-    AuthReject, CharAction, LoginStage, Poll, RosterCause, SessionEnd, SessionEvent, WorldReader,
-    WorldSession, WorldWriter,
+    messages::SurveyAnswer, AuthReject, CharAction, LoginStage, Poll, RosterCause, SessionEnd,
+    SessionEvent, WorldReader, WorldSession, WorldWriter,
 };
 use crossbeam_channel::{Receiver, Sender};
 
@@ -594,7 +593,6 @@ async fn run(
                 let _ = events_tx.send(SessionEvent::LoginFailed {
                     refusal: if dial.is_some() { None } else { refusal },
                     reason: format!("{e:#}"),
-                    terminal: false,
                     dial,
                 });
                 return Ok(Cycle::Repark);
@@ -679,17 +677,10 @@ async fn world(
         let _ = events_tx.send(SessionEvent::LoginFailed {
             refusal,
             reason,
-            terminal: false,
             dial: None,
         });
         Ok(WorldEnd::Failed)
     };
-    // **There is no terminal login failure here, and that is a consequence rather than a choice.**
-    // Upstream's `terminal: true` closure has exactly one kind of caller, the Warden refusal arms,
-    // and this fork has none: `WorldSession::handle_warden` leaves an unanswerable message
-    // unanswered and reads on, so no `WardenRequired` reaches this function. Every failure a world
-    // attempt reports is one the app may retry. If a future failure genuinely cannot be retried,
-    // this is where its sender goes back.
 
     // ── The world half, once per realm ─────────────────────────────────────────────────────────
     //
@@ -741,7 +732,6 @@ async fn world(
                 if canceled() {
                     return Ok(WorldEnd::Failed);
                 }
-                // No Warden arm: see `fail` above.
                 // The world server's refusal code, for the screen's `AUTH_*` string.
                 if let Some(r) = e.downcast_ref::<benilla_protocol::WorldAuthReject>() {
                     return fail(
@@ -770,6 +760,8 @@ async fn world(
         // its wants.
         while park_rx.try_recv().is_ok() {}
         let epoch = WORLD_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+        // Whether this link's unanswered Warden request has been logged.
+        let mut warden_noted = false;
         // A server that sends the addon reply in front of the authentication answer (vmangos
         // builds it in the auth handler, `WorldSocket.cpp:447`) has had it read by now.
         let mut addon_news = AddonNews::default();
@@ -861,6 +853,7 @@ async fn world(
                     },
                     Fired::Login(msg) => msg.map_or(Parked::Exit, Parked::Login),
                 };
+                note_warden(&session, &mut warden_noted);
                 let (action, code) = match answer {
                     Parked::Exit => return Ok(WorldEnd::Cycle(Cycle::Exit)),
                     Parked::Repark => return Ok(WorldEnd::Cycle(Cycle::Repark)),
@@ -932,7 +925,7 @@ async fn world(
             // reference's does (`super::enter_world_on_self_create`); a server may drop it before then.
             session.player_login(refuse_once(guid))?;
 
-            let billing_time_rested = session.billing_time_rested();
+            let billing = session.billing();
             let tutorial_flags = session.take_tutorial_flags();
             // `SMSG_ADDON_INFO` carries no names, so it is paired back against the block we sent. No
             // reply means no AddOn index space at all, carried as `None`. The link's one reply
@@ -962,7 +955,7 @@ async fn world(
                 .send(SessionEvent::Connected {
                     self_guid: guid,
                     name,
-                    billing_time_rested,
+                    billing,
                     tutorial_flags,
                     addon_info,
                 })
@@ -1123,6 +1116,17 @@ async fn stream(
                 }
             }
         }
+    }
+}
+
+/// Logs, once per link, that the server asked for Warden before the world entry and was left
+/// unanswered ([`WorldSession::warden_asked`]).
+fn note_warden(session: &WorldSession, noted: &mut bool) {
+    if !*noted && session.warden_asked() {
+        *noted = true;
+        bevy::log::debug!(
+            "net: SMSG_WARDEN_DATA on this link: the Warden lane answers what its profile can"
+        );
     }
 }
 

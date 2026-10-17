@@ -125,14 +125,10 @@ pub fn survey(root: &Path) -> Vec<AddonReport> {
     // Folder -> the method names its source defines, memoised: one library folder is a dependency
     // of dozens of addons.
     let mut defined_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    // On benilla's own VM the stock interface is built once and each addon gets a fork of it.
-    #[cfg(feature = "benilla-vm")]
+    // The stock interface is built once and each addon gets a fork of it.
     let template = stock_vm(root, &registry);
     let make = || -> Result<UiScript, String> {
-        #[cfg(feature = "benilla-vm")]
-        return template.as_ref().map(UiScript::fork).map_err(Clone::clone);
-        #[cfg(not(feature = "benilla-vm"))]
-        stock_vm(root, &registry)
+        template.as_ref().map(UiScript::fork).map_err(Clone::clone)
     };
     names
         .iter()

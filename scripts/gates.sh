@@ -154,10 +154,6 @@ report_skips test
 # (set, empty) is the resolver's "no install"; no build reads it, so the test binaries are reused.
 run test-no-install env -u BENILLA_REQUIRE_DATA WOW_DATA= cargo test --no-fail-fast --workspace
 
-# vm-parity: the script host on benilla's own VM (`benilla-vm`) against the answers the C Lua
-# build recorded in `vm_parity.golden`; `test` runs the same cases on the C build.
-run vm-parity cargo test -p benilla-ui --features benilla-vm --test vm_parity
-
 # doc-links: refuses a doc link to a `crate::`, `super::`, `self::` or `Self::` path whose leaf is
 # declared nowhere in the workspace. Narrow on purpose: every other unresolved link is a convention.
 run doc-links scripts/doc-links.py

@@ -14,22 +14,23 @@
 //! the dismiss (`0x407f2b`, inside `0x407e80`), so a later raise such as the
 //! `SMSG_LOGIN_VERIFY_WORLD` snap keeps it.
 //!
-//! Layout, laid out once per raise and drawn between the background and the progress bar, in the
-//! screen's `[0,1]` ortho: scale and wrap width `s = 515 / (a·1024)`, where `a = [0x832a4c]` is
-//! aspect × 0.75 (`0x41ad10`); position `(0.5 − s·0.5, 0.1 + yoff)`, left-justified; `0xd7c8c8c8`
-//! ARGB with an opaque black shadow at `(+0.001, −0.001)`. In a height-fit 4:3 box the `a` cancels,
-//! so the box gives the reference's numbers at every aspect:
+//! Layout, drawn between the background and the progress bar: unlike them, which sit in the
+//! fitted viewport's `[0,1]` ortho, the tip is laid out in window terms. The font engine's width
+//! and height are the window rectangle's (`0x5c2b50` reads `0x58a240`), and its batch draws under
+//! a pixel ortho over the viewport's own window pixels (`0x5c70b0`). So the wrap width
+//! `s = 515 / (a·1024)` (the box width of the call at `0x40679c`; its box height 1.0 and spacing
+//! 0.005 follow) is a fraction of the window's width, where `a = [0x832a4c]` is aspect × 0.75
+//! (`0x41ad10`, read at `0x40668c`), the font is 0.018 of its height, and the position is
+//! `(0.5 − s·0.5, 0.1 + yoff)` of the window, left-justified, `yoff` being the letterbox band
+//! `(1 − a)·0.5` below 4:3 (`0x4066b9`) and zero otherwise; `0xd7c8c8c8` ARGB with an opaque black
+//! shadow at `(+0.001, −0.001)` of the window. `s·W` is `515·H/768` at every aspect:
 //!
 //! ```text
-//! ref wrap  = s·W          = 515·W / (a·1024)          = 515·H / (1024·0.75) = 0.6706·H
-//! our wrap  = s₁·(4H/3)    = (515/1024)·(4H/3)                               = 0.6706·H
-//! ref left  = (0.5 − s/2)·W                                   = 0.5·W − 0.3353·H
-//! our left  = (W − 4H/3)/2 + (0.5 − s₁/2)·(4H/3)              = 0.5·W − 0.3353·H
+//! wrap = 515·W / (a·1024) = 515·H / (1024·0.75) = 0.6706·H
+//! left = (W − wrap)/2                             = 0.5·W − 0.3353·H
 //! ```
 //!
-//! `yoff` is `(1 − a)·0.5` only for `a < 1` (`0x4066b9`), zero on any window at least 4:3 wide.
-//! Narrower than 4:3 the loading screen's box overflows where the reference letterboxes top and
-//! bottom, so the whole screen differs there, the tip with it.
+//! [`placement`] is that, relative to the fitted content area it is a child of.
 //!
 //! The face is the locale's (`0x406663`-`0x406678`, table `0x82f018` by `[0xc0e080]`): koKR's
 //! `2002.TTF`, zhCN's and zhTW's `FZLBJW.TTF`, `FRIZQT__.TTF` for the other five ([`tip_font`]).
@@ -44,23 +45,25 @@ use bevy::prelude::*;
 
 use benilla_formats::GameTipsCatalog;
 
-/// `s` at `a = 1`, the 4:3 box this draws into: the text's scale and also its wrap width
-/// (`0x406e18` passes `s` for both). Not a FrameXML length: `0x41ae40` divides `G44` back out, so
-/// the FrameXML-unit helper would be off by 1.25 at 4:3.
+/// `s` at `a = 1`: the wrap width only, as a fraction of the window's width (the box width the
+/// call at `0x40679c` passes; the font size is [`TIP_FONT_FRACTION`]). Not a FrameXML length:
+/// `0x41ae40` divides `G44` back out, so the FrameXML-unit helper would be off by 1.25 at 4:3.
 const TIP_SCALE: f32 = 515.0 / 1024.0;
 
-/// The baseline from the bottom of the `[0,1]` ortho. `0x4066ee` builds it as `0.05·0.5 + 0.075`,
-/// the progress bar's top edge, so the block sits on the bar.
+/// The baseline as a fraction of the window's height above the window's bottom, under the font
+/// engine's pixel ortho (`0x5c70b0`), before `yoff`. `0x4066ee` builds it as `0.05·0.5 + 0.075`,
+/// the progress bar's top edge in the viewport at 4:3, so the block sits on the bar there.
 const TIP_BOTTOM: f32 = 0.1;
 
-/// The font height as a fraction of the viewport height. In `0x406659`'s `0.018 · [0x832a48]` the
+/// The font height as a fraction of the window's height. In `0x406659`'s `0.018 · [0x832a48]` the
 /// slot is a unit conversion, not part of the size: `0x41ad10` writes it as height/diagonal and
 /// `[0x832a44]` as width/diagonal, the diagonal-normalized units `0x44d040` works in (`0x41ae70`
 /// and `0x41ae60` multiply by each). Applying its shipped `.data` value, 0.6, would shrink the
 /// line.
 const TIP_FONT_FRACTION: f32 = 0.018;
 
-/// The body colour `0xd7c8c8c8` (ARGB) and its shadow offset, in the same `[0,1]` space.
+/// The body colour `0xd7c8c8c8` (ARGB) and its shadow offset, 0.001 of the window's width and of
+/// its height (`0x5c7010`, `0x5c6fa0`).
 const TIP_COLOR: Color = Color::srgba(200.0 / 255.0, 200.0 / 255.0, 200.0 / 255.0, 215.0 / 255.0);
 const TIP_SHADOW_OFFSET: f32 = 0.001;
 
@@ -154,29 +157,86 @@ pub(crate) fn spans(tip: &str, base: Color) -> Vec<(String, Color)> {
     out
 }
 
-/// `(left, bottom, width)` as percentages of the 4:3 content box, so a mid-load resize cannot
-/// strand a node laid out once per raise.
-pub(crate) const fn geometry() -> (f32, f32, f32) {
-    (
-        (0.5 - TIP_SCALE * 0.5) * 100.0,
-        TIP_BOTTOM * 100.0,
-        TIP_SCALE * 100.0,
-    )
-}
-
-/// The font height and shadow offset in pixels, for a `width × height` content box.
-pub(crate) fn layout(width: f32, height: f32) -> TipLayout {
-    TipLayout {
-        font_size: height * TIP_FONT_FRACTION,
-        shadow: Vec2::new(width * TIP_SHADOW_OFFSET, height * TIP_SHADOW_OFFSET),
-    }
-}
-
-/// [`layout`]'s result, in logical pixels inside the 4:3 content box.
-pub(crate) struct TipLayout {
+/// The tip's box and type, in logical pixels, relative to the loading screen's content area.
+pub(crate) struct TipPlacement {
+    pub(crate) left: f32,
+    pub(crate) bottom: f32,
+    /// The wrap width.
+    pub(crate) width: f32,
     pub(crate) font_size: f32,
     /// The reference's `(+x, −y)`; Bevy's y grows down, so the sign already matches.
     pub(crate) shadow: Vec2,
+}
+
+/// Where the reference puts the tip for a window of this size (see the module doc), relative to
+/// the content area [`crate::loading_screen::fit_rect`] gives for it.
+pub(crate) fn placement(window: Vec2, widescreen: bool) -> TipPlacement {
+    let a = crate::loading_screen::scaled_aspect(window, widescreen);
+    let area = crate::loading_screen::fit_rect(window, widescreen);
+    let s = TIP_SCALE / a;
+    // `yoff` is the letterbox band; a NaN or a wider window keeps zero (`0x4066c6`-`0x4066c9`).
+    let yoff = if a < 1.0 { (1.0 - a) * 0.5 } else { 0.0 };
+    let from_window_left = (0.5 - s * 0.5) * window.x;
+    let from_window_bottom = (TIP_BOTTOM + yoff) * window.y;
+    let area_bottom = window.y - (area.y + area.height);
+    TipPlacement {
+        left: from_window_left - area.x,
+        bottom: from_window_bottom - area_bottom,
+        width: s * window.x,
+        font_size: window.y * TIP_FONT_FRACTION,
+        shadow: Vec2::new(window.x * TIP_SHADOW_OFFSET, window.y * TIP_SHADOW_OFFSET),
+    }
+}
+
+/// The window's logical size, 1024 x 768 when there is none (a headless run).
+fn window_size(windows: &Query<&Window, With<bevy::window::PrimaryWindow>>) -> Vec2 {
+    windows.iter().next().map_or(Vec2::new(1024.0, 768.0), |w| {
+        Vec2::new(w.width(), w.height())
+    })
+}
+
+/// Writes `p` to the tip node, and the font size to every run, only where it differs.
+fn apply(p: &TipPlacement, node: &mut Node, font: &mut TextFont, shadow: &mut TextShadow) {
+    let (left, bottom, width) = (Val::Px(p.left), Val::Px(p.bottom), Val::Px(p.width));
+    if node.left != left || node.bottom != bottom || node.width != width {
+        node.left = left;
+        node.bottom = bottom;
+        node.width = width;
+    }
+    if font.font_size != p.font_size {
+        font.font_size = p.font_size;
+    }
+    if shadow.offset != p.shadow {
+        shadow.offset = p.shadow;
+    }
+}
+
+/// Per frame: the tip follows the window, as the reference's font engine does when the viewport
+/// changes (`0x5c2b50` re-lays every font). The runs' own `TextFont`s follow the root's size.
+fn fit_game_tip(
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut tip: Query<
+        (&mut Node, &mut TextFont, &mut TextShadow, Option<&Children>),
+        With<crate::loading_screen::LoadingTip>,
+    >,
+    mut runs: Query<&mut TextFont, (With<TextSpan>, Without<crate::loading_screen::LoadingTip>)>,
+    cvars: Option<Res<crate::cvars::Cvars>>,
+) {
+    let Ok((mut node, mut font, mut shadow, children)) = tip.single_mut() else {
+        return;
+    };
+    let p = placement(
+        window_size(&windows),
+        crate::loading_screen::widescreen(cvars.as_deref()),
+    );
+    apply(&p, &mut node, &mut font, &mut shadow);
+    for run in children.into_iter().flatten() {
+        if let Ok(mut f) = runs.get_mut(*run) {
+            if f.font_size != p.font_size {
+                f.font_size = p.font_size;
+            }
+        }
+    }
 }
 
 /// The body colour the tip's `|r` restores.
@@ -233,7 +293,12 @@ impl Plugin for GameTipPlugin {
             // After the loading screen's drive, which sets the edge this reads.
             .add_systems(
                 Update,
-                drive_game_tip.after(benilla_world::schedule::WorldStage::Present),
+                (
+                    drive_game_tip.after(benilla_world::schedule::WorldStage::Present),
+                    fit_game_tip
+                        .after(drive_game_tip)
+                        .after(crate::loading_screen::fit_loading_area),
+                ),
             );
     }
 }
@@ -265,7 +330,7 @@ fn drive_game_tip(
         ),
         With<crate::loading_screen::LoadingTip>,
     >,
-    windows: Query<&Window>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     assets: Res<AssetServer>,
     mut commands: Commands,
     // The cursor persists through the registry, which composes the file and feeds the VM's mirror.
@@ -305,16 +370,18 @@ fn drive_game_tip(
         empty_tip(&mut commands.entity(entity), &mut vis);
         return;
     };
-    // The 4:3 content box is `100vh` tall, so the window height is the box height.
-    let height = windows.iter().next().map_or(768.0, |w| w.height());
-    let l = layout(height * 4.0 / 3.0, height);
-    let (left, bottom, width) = geometry();
-    n.left = Val::Percent(left);
-    n.bottom = Val::Percent(bottom);
-    n.width = Val::Percent(width);
+    // The runs below clone this font, so it carries the size they start with; [`fit_game_tip`]
+    // keeps the size and the box on the window from here.
+    apply(
+        &placement(
+            window_size(&windows),
+            crate::loading_screen::widescreen(Some(&cvars)),
+        ),
+        &mut n,
+        &mut font,
+        &mut shadow,
+    );
     font.font = tip_font(&assets, crate::ui_script::client_locale().index());
-    font.font_size = l.font_size;
-    shadow.offset = l.shadow;
     shadow.color = Color::BLACK;
     *vis = Visibility::Inherited;
 
@@ -524,24 +591,55 @@ mod tests {
         assert_eq!(runs[1].1, base);
     }
 
+    fn near(got: f32, want: f32) -> bool {
+        (got - want).abs() < 0.01
+    }
+
     /// At 4:3, where `yoff` is zero: `s = 515/1024`, left at `0.5 − s/2`, baseline at `0.1`.
     #[test]
     fn the_layout_is_the_reference_numbers_at_four_three() {
-        let (left, bottom, width) = geometry();
-        assert!(
-            (width * 0.01 * 1024.0 - 515.0).abs() < 0.01,
-            "s·width = 515 px"
-        );
-        assert!(
-            (left * 0.01 * 1024.0 - (1024.0 - 515.0) / 2.0).abs() < 0.01,
-            "centred column"
-        );
-        assert!((bottom - 10.0).abs() < 0.001, "0.1 of the box height");
-        let l = layout(1024.0, 768.0);
-        assert!(
-            (l.font_size - 13.824).abs() < 0.01,
-            "0.018 of the box height"
-        );
+        let p = placement(Vec2::new(1024.0, 768.0), true);
+        assert!(near(p.width, 515.0), "s·width = 515 px");
+        assert!(near(p.left, (1024.0 - 515.0) / 2.0), "centred column");
+        assert!(near(p.bottom, 76.8), "0.1 of the height");
+        assert!(near(p.font_size, 13.824), "0.018 of the height");
+        assert!(near(p.shadow.x, 1.024) && near(p.shadow.y, 0.768));
+    }
+
+    /// Wider than 4:3 the area is pillarboxed and the tip is the same size and height as in a 4:3
+    /// window of that height (`s·W = 515·H/768`), centred on the window.
+    #[test]
+    fn a_wide_window_keeps_the_tip_of_its_height() {
+        let p = placement(Vec2::new(1920.0, 1080.0), true);
+        assert!(near(p.width, 515.0 * 1080.0 / 768.0));
+        // Area x = 240; the column is centred on the window, 960.
+        assert!(near(p.left + 240.0, 960.0 - p.width / 2.0));
+        assert!(near(p.bottom, 108.0));
+        assert!(near(p.font_size, 19.44));
+    }
+
+    /// `widescreen` off is a 4/3 aspect: `a` is 1.0, so the area is the window and the wrap is
+    /// `515·W/1024`, centred, at any window shape.
+    #[test]
+    fn widescreen_off_lays_the_tip_out_on_the_whole_window() {
+        let p = placement(Vec2::new(1280.0, 1024.0), false);
+        assert!(near(p.width, 515.0 * 1280.0 / 1024.0), "{}", p.width);
+        assert!(near(p.left, (1280.0 - p.width) / 2.0));
+        assert!(near(p.bottom, 102.4), "0.1 of the height");
+    }
+
+    /// Narrower than 4:3 the area is letterboxed and the tip is laid out in window terms: its
+    /// width and type are fractions of the window height, and its baseline sits `yoff` plus 0.1 of
+    /// the window height above the window's bottom, which is 0.1 of the height above the area's.
+    #[test]
+    fn a_tall_window_lays_the_tip_out_in_window_terms() {
+        // 1280x1024: a = 0.9375, the area 1280x960 at y = 32.
+        let p = placement(Vec2::new(1280.0, 1024.0), true);
+        assert!(near(p.width, 515.0 * 1024.0 / 768.0), "{}", p.width);
+        assert!(near(p.left, 640.0 - p.width / 2.0), "area x is 0");
+        assert!(near(p.bottom, 102.4), "{}", p.bottom);
+        assert!(near(p.font_size, 18.432));
+        assert!(near(p.shadow.x, 1.28) && near(p.shadow.y, 1.024));
     }
 
     /// The real node and system with one tip, plus the text stack and `detect_text_needs_rerender`,
@@ -564,7 +662,7 @@ mod tests {
             .world_mut()
             .spawn((crate::loading_screen::LoadingTip, tip_bundle()))
             .id();
-        app.add_systems(Update, drive_game_tip);
+        app.add_systems(Update, (drive_game_tip, fit_game_tip.after(drive_game_tip)));
         (app, tip)
     }
 
@@ -603,14 +701,60 @@ mod tests {
         );
         // The paint's geometry puts the line above the bar, off the bundle's corner.
         let node = w.get::<Node>(tip).expect("Node");
-        assert_eq!(node.bottom, Val::Percent(geometry().1));
-        assert_eq!(node.width, Val::Percent(geometry().2));
+        let p = placement(Vec2::new(1024.0, 768.0), true);
+        assert_eq!(node.bottom, Val::Px(p.bottom));
+        assert_eq!(node.width, Val::Px(p.width));
         assert!(
             w.get::<TextFont>(tip).is_some_and(|f| f.font_size > 0.0),
             "the font height is resolved from the window"
         );
         // The cursor moved with it: `gameTip` holds the next row.
         assert_eq!(w.resource::<GameTipSetting>().next, 1);
+    }
+
+    /// The tip follows the window while the screen is up: a resize refits the box and the size of
+    /// the root and of every run, which a once-per-raise layout left at the raise's values.
+    #[test]
+    fn a_resize_refits_the_box_and_every_runs_size() {
+        let (mut app, tip) = tip_app();
+        let window = app
+            .world_mut()
+            .spawn((
+                Window {
+                    resolution: (1280_u32, 1024_u32).into(),
+                    ..default()
+                },
+                bevy::window::PrimaryWindow,
+            ))
+            .id();
+        set_edge(&mut app, crate::loading_screen::TipEdge::Pick);
+        app.update();
+        let want = placement(Vec2::new(1280.0, 1024.0), true);
+        let size_of_runs = |app: &App| {
+            let w = app.world();
+            let kids = w.get::<Children>(tip).expect("a run after the prefix");
+            let mut sizes = vec![w.get::<TextFont>(tip).expect("root").font_size];
+            sizes.extend(
+                kids.iter()
+                    .filter_map(|k| w.get::<TextFont>(k))
+                    .map(|f| f.font_size),
+            );
+            sizes
+        };
+        assert_eq!(size_of_runs(&app), vec![want.font_size; 2]);
+
+        // Resized tall, with no new raise.
+        app.world_mut()
+            .get_mut::<Window>(window)
+            .unwrap()
+            .resolution
+            .set(600.0, 1000.0);
+        app.update();
+        let want = placement(Vec2::new(600.0, 1000.0), true);
+        assert_eq!(size_of_runs(&app), vec![want.font_size; 2]);
+        let node = app.world().get::<Node>(tip).unwrap();
+        assert_eq!(node.width, Val::Px(want.width));
+        assert_eq!(node.bottom, Val::Px(want.bottom));
     }
 
     /// A raise with no edge on a live screen keeps the line and the cursor; only the dismiss takes

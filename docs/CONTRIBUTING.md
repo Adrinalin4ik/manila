@@ -100,7 +100,7 @@ out of scope is closed with the reason.
 ## Setting up
 
 - **The toolchain.** Stable Rust (`rust-toolchain.toml` adds clippy and rustfmt) and a C
-  compiler, because the client's Lua is vendored and built from source. On macOS the Xcode
+  compiler, which some dependencies build with. On macOS the Xcode
   command line tools, which also supply libclang for the audio bindings; on Linux the ALSA and
   udev development packages and pkg-config. `python3` runs two of the gates.
 - **A 1.12.1 install of your own.** `WOW_DATA=<its Data folder>`, or a `WoW` link at the repo

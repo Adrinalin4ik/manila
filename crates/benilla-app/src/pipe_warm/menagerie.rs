@@ -120,6 +120,8 @@ pub(super) fn spawn_menagerie(
                         FogPolicy::Scene,
                         // Not a `WowModelKey` axis: it swaps a sampled UV, not pipeline state.
                         false,
+                        None, // stage 1: a uniform and a binding, not pipeline state
+                        None, // …nor the stage-0 combine
                         ShadeSel::Lit,
                         0,
                         None,
@@ -158,6 +160,8 @@ pub(super) fn spawn_menagerie(
                         FogPolicy::Scene,
                         // Not a `WowModelKey` axis: it swaps a sampled UV, not pipeline state.
                         false,
+                        None, // stage 1: a uniform and a binding, not pipeline state
+                        None, // …nor the stage-0 combine
                         ShadeSel::Lit,
                         0,
                         None,
@@ -176,7 +180,7 @@ pub(super) fn spawn_menagerie(
         // The depth-prime twin (colour writes masked off), plain and cutout.
         for cutout in [false, true] {
             mats.push(zfill_material(
-                cache, materials, None, two_sided, cutout, light, torch,
+                cache, materials, None, false, None, two_sided, cutout, light, torch,
             ));
         }
         // The WMO-skybox lane: `sky_depth` is a `WowModelKey` axis (the forced-far-depth branch).
@@ -205,6 +209,8 @@ pub(super) fn spawn_menagerie(
                     false, // depth-test on
                     FogPolicy::Off,
                     false,
+                    None, // stage 1: a uniform and a binding, not pipeline state
+                    None, // …nor the stage-0 combine
                     ShadeSel::Lit,
                     0,
                     None,
@@ -242,6 +248,8 @@ pub(super) fn spawn_menagerie(
                 FogPolicy::Scene,
                 // Not a `WowModelKey` axis: it swaps a sampled UV, not pipeline state.
                 false,
+                None, // stage 1: a uniform and a binding, not pipeline state
+                None, // …nor the stage-0 combine
                 ShadeSel::Lit,
                 0,
                 None,
@@ -292,6 +300,8 @@ pub(super) fn spawn_menagerie(
                         FogPolicy::Scene,
                         // Not a `WowModelKey` axis: it swaps a sampled UV, not pipeline state.
                         false,
+                        None, // stage 1: a uniform and a binding, not pipeline state
+                        None, // …nor the stage-0 combine
                         ShadeSel::Lit,
                         0,
                         None,
@@ -815,6 +825,8 @@ fn warm_quad(colors: bool, skinned: bool) -> RenderSubmesh {
         no_depth_test: false,
         fog_policy: FogPolicy::Scene,
         env_map: false,
+        stage1: None,
+        combine: 1,
         billboard: None,
         welded_billboard: false,
         alpha_anim: None,
@@ -824,7 +836,6 @@ fn warm_quad(colors: bool, skinned: bool) -> RenderSubmesh {
         rgb_seq: None,
         wmo_batch: None,
         section: None,
-        stage1: None,
     }
 }
 

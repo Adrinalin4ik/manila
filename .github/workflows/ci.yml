@@ -44,8 +44,6 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
-      - name: vm-parity
-        run: cargo test -p benilla-ui --features benilla-vm --test vm_parity
       - name: doc-links
         run: scripts/doc-links.py
       - name: message-catalog

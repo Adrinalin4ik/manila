@@ -1,8 +1,8 @@
 # benilla's `kira` fork — what differs from upstream, and how to check
 
 Upstream: [`tesselode/kira`](https://github.com/tesselode/kira), MIT OR Apache-2.0, version
-`0.12.1` — the version the workspace lock resolves to. Wired in through `[patch.crates-io]` in
-the workspace root, the way `lua-src` is. The crate is copied from the cargo registry as
+`0.12.4` — the version the workspace lock resolves to. Wired in through `[patch.crates-io]` in
+the workspace root. The crate is copied from the cargo registry as
 published (`src/`, `Cargo.toml`, `README.md`) plus the two licence files from the repository;
 upstream files are CRLF and are left so, except the one file patched.
 

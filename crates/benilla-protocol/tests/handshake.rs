@@ -1,6 +1,5 @@
 //! The world handshake over a real socket against a fake server: packets may precede
-//! `SMSG_AUTH_RESPONSE`. Deviation: `SMSG_WARDEN_DATA` refuses the login, because benilla cannot
-//! run a Warden module (`WardenRequired` says why) and the server kicks a silent client 30 s later.
+//! `SMSG_AUTH_RESPONSE`, `SMSG_WARDEN_DATA` among them, which benilla reads past unanswered.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -86,6 +85,8 @@ fn packets_ahead_of_the_auth_response_are_skipped() {
     assert!(WorldSession::connect(&addr, "one", SESSION_KEY).is_ok());
 }
 
+/// A Warden request ahead of the auth response is read past, unanswered, and the connect
+/// completes; the session remembers it was asked.
 #[test]
 fn a_warden_message_we_cannot_answer_leaves_the_session_alive() {
     let addr = fake_server(vec![(opcode::SMSG_WARDEN_DATA, vec![0u8; 16])]);
@@ -474,6 +475,47 @@ fn a_module_offer_is_answered_and_its_challenge_completes() {
         &payload[1..],
         &[0x5A; 20],
         "answered in the MODULE's encoding, which replaced the profile's own"
+    );
+}
+
+#[test]
+fn warden_data_ahead_of_the_auth_response_is_read_past() {
+    let addr = fake_server(vec![(opcode::SMSG_WARDEN_DATA, vec![0u8; 16])]);
+    let session = WorldSession::connect(&addr, "one", SESSION_KEY).expect("the connect completes");
+    assert!(session.warden_asked());
+}
+
+/// A queued login as vmangos writes it: the billing group on the first `AUTH_WAIT_QUEUE`
+/// (`World.cpp:374-381`), then a position and the closing `AUTH_OK` without it
+/// (`WorldSession.cpp:961-976`). The session keeps the group the queue gave.
+#[test]
+fn the_billing_group_of_the_queue_outlasts_the_bare_auth_ok() {
+    let addr = fake_server(vec![
+        (
+            opcode::SMSG_AUTH_RESPONSE,
+            // 45 minutes left, trial and restricted, 90 minutes rested, second in line.
+            [
+                &[messages::AUTH_WAIT_QUEUE][..],
+                &45u32.to_le_bytes(),
+                &[0x44],
+                &90u32.to_le_bytes(),
+                &2u32.to_le_bytes(),
+            ]
+            .concat(),
+        ),
+        (
+            opcode::SMSG_AUTH_RESPONSE,
+            vec![messages::AUTH_WAIT_QUEUE, 0x01, 0x00, 0x00, 0x00],
+        ),
+    ]);
+    let session = WorldSession::connect(&addr, "one", SESSION_KEY).expect("the connect completes");
+    assert_eq!(
+        session.billing(),
+        messages::Billing {
+            time_remaining: 45,
+            plan_flags: 0x44,
+            time_rested: 90,
+        }
     );
 }
 

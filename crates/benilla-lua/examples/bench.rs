@@ -1,5 +1,4 @@
-//! Times each workload in this interpreter and in the fork benilla runs today (plain mlua, the
-//! same dialect). `cargo run --release -p benilla-lua --example bench`.
+//! Times each workload in this interpreter. `cargo run --release -p benilla-lua --example bench`.
 
 use std::time::Instant;
 
@@ -8,6 +7,8 @@ const WORKLOADS: &[(&str, &str)] = &[
     ("numeric loop", "local s = 0 for i = 1, 5000000 do s = s + i * 2 - 1 end return s"),
     ("table array", "local t = {} for i = 1, 1000000 do t[i] = i end local s = 0 for i = 1, 1000000 do s = s + t[i] end return s"),
     ("table hash (string keys)", "local t = {} for i = 1, 200000 do t['k' .. i] = i end local s = 0 for k, v in pairs(t) do s = s + v end return s"),
+    ("table hash (number keys)", "local t = {} for i = 1, 200000 do t[i * 7919] = i end local s = 0 for k, v in pairs(t) do s = s + t[k] end for i = 1, 200000 do s = s + t[i * 7919] end return s"),
+    ("pow (global __pow)", "local s = 0 for i = 1, 1000000 do s = s + i ^ 0.5 end return s"),
     ("method calls (OOP)", "local C = {} C.__index = C function C:add(x) self.v = self.v + x return self end local o = setmetatable({v = 0}, C) for i = 1, 1000000 do o:add(1) end return o.v"),
     ("closures", "local s = 0 for i = 1, 300000 do local f = function(x) return x + i end s = s + f(1) end return s"),
     ("string ops", "local n = 0 for i = 1, 100000 do local s = 'item' .. i .. ':' .. (i * 2) local a, b, k, v = string.find(s, '(%a+)(%d+)') n = n + string.len(s) + string.len(string.upper(k)) end return n"),
@@ -27,8 +28,7 @@ fn time<F: FnMut()>(mut f: F) -> f64 {
 }
 
 fn main() {
-    // `bench <name> [fork]`: that workload alone, five times, in this interpreter or the fork,
-    // for a profiler.
+    // `bench <name>`: that workload alone, five times, for a profiler.
     if let Some(only) = std::env::args().nth(1) {
         // `noop` measures the fixed cost: a fresh state and a trivial chunk.
         // `-e <chunk>`: any chunk, five times.
@@ -44,58 +44,23 @@ fn main() {
                 .expect("a workload name")
                 .1
         };
-        let fork = std::env::args()
-            .nth(if custom.is_some() { 3 } else { 2 })
-            .is_some_and(|a| a == "fork");
         for _ in 0..5 {
-            if fork {
-                let lua = mlua::Lua::new();
-                lua.load("math.mod = math.fmod").exec().unwrap();
-                let _: mlua::Value = lua.load(src).eval().expect("runs");
-            } else {
-                let mut vm = benilla_lua::new_state();
-                vm.exec(src.as_bytes(), b"=bench").expect("runs");
-            }
+            let mut vm = benilla_lua::new_state();
+            vm.exec(src.as_bytes(), b"=bench").expect("runs");
         }
         return;
     }
-    println!(
-        "{:<28} {:>10} {:>10} {:>8}",
-        "workload", "ours ms", "fork ms", "ratio"
-    );
-    let mut geo = 0.0;
+    println!("{:<28} {:>10}", "workload", "ms");
     for (name, src) in WORKLOADS {
-        // Measured as the LuaJIT script measures (`target/vmtest/luabench.lua`): one state, the
-        // chunk compiled once outside the clock, the best of three runs in that warm state.
+        // One state, the chunk compiled once outside the clock, the best of three runs in that
+        // warm state.
         let mut vm = benilla_lua::new_state();
         let f = vm.load(src.as_bytes(), b"=bench").expect("compiles");
         let fr = vm.root(f);
-        let mut ours_out = String::new();
-        let ours = time(|| {
+        let ms = time(|| {
             let f = vm.rooted(fr);
-            let r = vm.pcall_value(f, &[], -1).expect("runs");
-            ours_out = vm.display(r[0]);
+            vm.pcall_value(f, &[], -1).expect("runs");
         });
-        let lua = mlua::Lua::new();
-        // The fork's 5.1 has `math.fmod`; 1.12 calls it `math.mod`.
-        lua.load("math.mod = math.fmod").exec().unwrap();
-        let ff = lua.load(*src).into_function().expect("compiles");
-        let mut fork_out = String::new();
-        let fork = time(|| {
-            let v: mlua::Value = ff.call(()).expect("runs");
-            fork_out = lua.coerce_string(v).unwrap().unwrap().to_string_lossy();
-        });
-        let ratio = ours / fork;
-        geo += ratio.ln();
-        let check = if ours_out == fork_out {
-            ""
-        } else {
-            "  (answers differ!)"
-        };
-        println!("{name:<28} {ours:>10.1} {fork:>10.1} {ratio:>7.2}x{check}");
+        println!("{name:<28} {ms:>10.1}");
     }
-    println!(
-        "geometric mean: {:.2}x the fork's time",
-        (geo / WORKLOADS.len() as f64).exp()
-    );
 }
