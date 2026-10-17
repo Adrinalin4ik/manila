@@ -317,3 +317,186 @@ fn a_generic_for_with_many_names_runs() {
         assert_eq!(run(&src), want, "{n} names");
     }
 }
+
+/// A control byte outside a string is the lexer's own error (`iscntrl` at `0x6ffabb`), near
+/// `char(%d)` (`0x8721a8`); the control bytes `isspace` takes first are blanks (`0x6ff709`).
+#[test]
+fn a_control_byte_is_the_lexers_error() {
+    assert_eq!(
+        compile_error("x = 1 \x01"),
+        "t:1: invalid control char near `char(1)'"
+    );
+    assert_eq!(
+        compile_error("x = 1\n\x7f"),
+        "t:2: invalid control char near `char(127)'"
+    );
+    assert_eq!(
+        compile_error("x = \0"),
+        "t:1: invalid control char near `char(0)'"
+    );
+    assert_eq!(compile_error("x\t=\x0b1\x0c"), "ok");
+    assert_eq!(compile_error("x = '\x01\x7f'"), "ok");
+}
+
+/// `\n` alone ends a line: the lexer's switch sends only it to `inclinenumber` (`0x6ffb94`,
+/// `0x6ffc20`), which pairs nothing, and a `\r` is a blank (`0x6ff709`). In a quoted string a
+/// `\r` is a byte, plain (`0x700326`) or escaped (`0x700710`), and a long string keeps it
+/// (`0x700234`). A chunk name's first line also ends at `\n` alone (`0x835144`).
+#[test]
+fn only_a_newline_ends_a_line() {
+    assert_eq!(run("return loadstring('\\rerror(\\'e\\')')"), "function");
+    assert_eq!(
+        run("local _, e = pcall(loadstring('\\rerror(\\'e\\')')) return e"),
+        "[string \"\rerror('e')\"]:1: e"
+    );
+    assert_eq!(
+        compile_error("x = 1\r\ry = +"),
+        "t:1: unexpected symbol near `+'"
+    );
+    assert_eq!(
+        compile_error("x = 1\n\ry = +"),
+        "t:2: unexpected symbol near `+'"
+    );
+    assert_eq!(
+        compile_error("x = 1\r\ny = +"),
+        "t:2: unexpected symbol near `+'"
+    );
+    assert_eq!(compile_error("-- c\r y = +"), "ok");
+    assert_eq!(run("return 'a\rb'"), "a\rb");
+    assert_eq!(run("return 'a\\\rb'"), "a\rb");
+    assert_eq!(run("return 'a\\\nb'"), "a\nb");
+    assert_eq!(run("return [[a\r\nb]]"), "a\r\nb");
+    assert_eq!(run("return [[\r\nb]]"), "\r\nb");
+    assert_eq!(run("return [[\nb]]"), "b");
+}
+
+/// A `while` condition is at most 100 of 5.0's instructions (`whilestat`, `0x6fd03b`), else
+/// `` `while' condition too complex `` (`0x871d8c`) near the token after it. 5.0 counts what its
+/// code generator emits: a comparison of a local with a numeral is `OP_EQ` and its jump, one
+/// with a global loads it first, a boolean operand is loaded too (`0x701023`), arithmetic is
+/// never folded (`0x701610`), and a constant last term is a jump (`0x6fd00a`, `0x7013b4`).
+#[test]
+fn a_while_condition_is_at_most_100_instructions() {
+    let cond = |terms: &[&str]| {
+        format!(
+            "local x, y = 1, 2 while {} do x = 2 end return x",
+            terms.join(" and ")
+        )
+    };
+    let too_complex = "t:1: `while' condition too complex near `do'";
+    // 50 comparisons of two instructions each.
+    let local = vec!["x == 1"; 50];
+    assert_eq!(run(&cond(&local)), "2");
+    let mut over = vec!["x == 1"; 49];
+    over.push("g == 1");
+    assert_eq!(compile_error(&cond(&over)), too_complex);
+    // Three each with a boolean: 99, then a test of a local, two more.
+    let mut bools = vec!["x ~= true"; 33];
+    assert_eq!(compile_error(&cond(&bools)), "ok");
+    bools.push("y");
+    assert_eq!(compile_error(&cond(&bools)), too_complex);
+    // Three each with a folded sum.
+    let sums = vec!["x ~= 1 + 2"; 34];
+    assert_eq!(compile_error(&cond(&sums[..33])), "ok");
+    assert_eq!(compile_error(&cond(&sums)), too_complex);
+    // A last `true` is 5.0's jump back; a last `false` jumps nowhere.
+    let mut t = vec!["x == 1"; 50];
+    t.push("true");
+    assert_eq!(compile_error(&cond(&t)), too_complex);
+    let mut f = vec!["x == 1"; 50];
+    f.push("false");
+    assert_eq!(compile_error(&cond(&f)), "ok");
+    assert_eq!(compile_error("while true do end"), "ok");
+    // `not` of a folded sum: 5.0's `OP_ADD` and its test and jump, three, or with a second
+    // `OP_NOT`, four (`0x7012be`).
+    for (term, each) in [("not (1 + 2)", 3), ("not not (1 + 2)", 4)] {
+        let n = 100 / each;
+        let fits = vec![term; n];
+        assert_eq!(compile_error(&cond(&fits)), "ok", "{n} of {term}");
+        let over = vec![term; n + 1];
+        assert_eq!(
+            compile_error(&cond(&over)),
+            too_complex,
+            "{} of {term}",
+            n + 1
+        );
+    }
+}
+
+/// `getobjname` (`0x6fc4c0`) names a register by a local, `OP_MOVE`, `OP_GETGLOBAL`,
+/// `OP_GETTABLE` or `OP_SELF` (`0x6fc5e0`); `OP_GETUPVAL` takes the default arm, so a type error
+/// and an argument error name no upvalue.
+#[test]
+fn an_upvalue_is_named_nothing() {
+    assert_eq!(
+        run("local up return pcall(function() return up.x end)"),
+        "false,t:1: attempt to index a nil value"
+    );
+    assert_eq!(
+        run("local u return pcall(function() return u + 1 end)"),
+        "false,t:1: attempt to perform arithmetic on a nil value"
+    );
+    assert_eq!(
+        run("local u return pcall(function() u() end)"),
+        "false,t:1: attempt to call a nil value"
+    );
+    assert_eq!(
+        run("local strlen = string.len return pcall(function() return strlen(nil) end)"),
+        "false,t:1: bad argument #1 to `?' (string expected, got nil)"
+    );
+    // A local or global keeps its name.
+    assert_eq!(
+        run("return pcall(function() local l return l.x end)"),
+        "false,t:1: attempt to index local `l' (a nil value)"
+    );
+}
+
+/// `lua_dump` (`0x6f4370`) dumps a Lua function with no upvalues only (`0x6f4383`,
+/// `0x6f438a`); `str_dump` raises `unable to dump given function` (`0x7fc372`) for any other.
+#[test]
+fn string_dump_refuses_a_function_with_upvalues() {
+    assert_eq!(
+        run("local x = 1 return pcall(string.dump, function() return x end)"),
+        "false,unable to dump given function"
+    );
+    assert_eq!(
+        run("return pcall(string.dump, string.len)"),
+        "false,unable to dump given function"
+    );
+    assert_eq!(
+        run("return type(string.dump(function() return 1 end))"),
+        "string"
+    );
+}
+
+/// After a `.` the lexer tests the next byte against `.` alone (`0x6ff98a`, `0x6ff9b3`): a NUL
+/// there is the next character, a control byte (`0x6ffabb`).
+#[test]
+fn a_nul_after_a_dot_is_no_dot() {
+    for src in ["x = a.\0", "x = a..\0"] {
+        assert_eq!(
+            compile_error(src),
+            "t:1: invalid control char near `char(0)'",
+            "{src:?}"
+        );
+    }
+}
+
+/// `str_dump` checks argument 1 (`0x7fc343`) but `lua_dump` dumps the stack's top
+/// (`0x6f4373`): the last argument.
+#[test]
+fn string_dump_dumps_its_last_argument() {
+    assert_eq!(
+        run("return pcall(string.dump, function() end, 1)"),
+        "false,unable to dump given function"
+    );
+    assert_eq!(
+        run("local g = loadstring('return 1', '=g') \
+             return string.sub(string.dump(function() end, g), 13)"),
+        "=g"
+    );
+    assert_eq!(
+        run("return pcall(string.dump, 1, function() end)"),
+        "false,bad argument #1 to `?' (function expected, got number)"
+    );
+}

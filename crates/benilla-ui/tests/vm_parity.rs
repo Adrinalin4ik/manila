@@ -176,6 +176,7 @@ const CASES: &[(&str, &str)] = &[
     ("err_index_global", "return E(function() return undefined_thing.x end)"),
     ("err_index_local", "return E(function() local t return t.x end)"),
     ("err_index_field", "return E(function() local t = {} return t.a.b end)"),
+    // `getobjname` names no upvalue (`0x6fc5e0`).
     ("err_index_upvalue", "local up return E(function() return up.x end)"),
     ("err_call", "return E(function() undefined_fn() end) .. E(function() local t = {} t.m() end) .. E(function() local t = {} t:m() end)"),
     ("err_arith", "return E(function() local x return x + 1 end) .. E(function() return {} * 2 end)"),
@@ -216,6 +217,7 @@ const CASES: &[(&str, &str)] = &[
     ("for_var_assigned", "local s = 0 for i = 1, 5 do s = s + i i = i + 10 end return S(s)"),
     ("until_sees_body_locals", "local n = 0 repeat local stop = n >= 2 n = n + 1 until stop or n > 5 return S(n)"),
     ("pow_metamethod", "local t = setmetatable({}, {__pow = function(a, b) return 'mm' end}) return S(E(function() return t ^ 2 end), E(function() return 2 ^ t end))"),
+    // `getobjname` names no upvalue (`0x6fc5e0`).
     ("upvalue_error_name", "local u return S(E(function() return u + 1 end), E(function() return u.x end), E(function() u() end))"),
     ("vararg_expr", "return S(E(loadstring, 'return function(...) return ... end'))"),
     // ── Numbers as the C library reads and writes them ──
@@ -224,7 +226,8 @@ const CASES: &[(&str, &str)] = &[
     ("tonumber_edges", r#"return S(tonumber("inf"), tonumber("-inf"), tonumber("nan") ~= nil, tonumber("1e"), tonumber("0x"), tonumber(" 0x1A "), tonumber("0x1p4"), tonumber("1e+"), tonumber(".5"), tonumber("5."), tonumber("- 1"), tonumber("1 2"), tonumber(""), tonumber("  "), tonumber("0x10", 10), tonumber("10", 36), tonumber("z", 36))"#),
     ("tonumber_base_edges", r#"return S(tonumber("-1", 16), tonumber("0x10", 16), tonumber(" ff ", 16), tonumber("ffffffffffffffffffff", 16), tonumber("1z", 36), tonumber("8", 8), tonumber("", 16), tonumber("-ff", 16), tonumber("+7", 8))"#),
     ("numeral_lexing", "return S(1e10, .5, 5., 3e-2, 1E2, 2^53 + 1, 1.5e+3, .5E-1, 2., 5.e2)"),
-    // Input past the chunk's end is the client's bare `<eof> expected` (`0x6fca1a`).
+    // Input past the chunk's end is the client's bare `<eof> expected` (`0x6fca1a`). A NUL after
+    // a `.` is no `.` (`0x6ff98a`, `0x6ff9b3`).
     ("numeral_reader", r#"local o = {}
         for _, src in ipairs({"return 0x10", "return 0xA0", "a = 0x10()", "a=1b=2 return a, b",
             "return 1..2", "return 1.2.3", "return 3e", "return 3e+", "return .5.3", "return 1d2",
@@ -244,7 +247,9 @@ const CASES: &[(&str, &str)] = &[
     ("coerce_d_and_hex", r#"return S("1d2" + 0, "2" + 1, E(function() return "0x2" + 1 end), E(function() return "nan" * 1 end), " 5.D1 " * 2, E(string.rep, "x", "0x2"), string.rep("x", "2d0"))"#),
     ("coerce_edges", r#"return S(E(function() return "0x10" * 1 end), " 2 " * " 3 ", E(function() return "1e" + 1 end), E(function() return "inf" + 0 end), 10 .. "", 1e100 .. "", -0.0 .. "", 2^63 .. "")"#),
     // ── Syntax errors and the lexer's edges, through `loadstring` ──
-    // Input past the chunk's end is the client's bare `<eof> expected` (`0x6fca1a`).
+    // Input past the chunk's end is the client's bare `<eof> expected` (`0x6fca1a`). A control
+    // byte is the lexer's `invalid control char` (`0x6ffabb`). `\n` alone ends a line
+    // (`0x6ffb94`): a `\r` is a blank, and a byte in a string (`0x700326`).
     ("syntax_errors", r#"local o = {}
         for _, src in ipairs({"x = 1 +", "local function", "x = #t", "x = a % b",
             "return function(...) return ... end", "for x do end", "x = 1..2", "x = \"a\nb\"",
@@ -438,6 +443,8 @@ b]])"#),
     // `OP_CALL` or `OP_TAILCALL` called (`0x6fc499`..`0x6fc4a1`).
     ("fix-front_for_names", r#"return S(E(function() for k, v in pairs({1}), 5 do end end), E(function() for i in string.rep do end end),
         E(function() for i in next, 5 do end end), E(function() local t = {} for k in t.f do end end))"#),
+    // A NUL byte outside a string is a control byte, the lexer's `invalid control char`
+    // (`0x6ffabb`) near `char(0)`.
     ("fix-front_nul_in_messages", r#"local function L(src, name) local f, e = loadstring(src, name or "=t") return e end
         return S(L('x = "a\0b\n'), L("x = \0"), L("\0"), L("x = 1 \0 y"), L('x = "a\0b" +'),
           E(function() local t = {} t["a\0b"]() end), E(function() local t = {} t:m(1) end), E(function() return _G["g\0h"].x end))"#),
@@ -503,6 +510,8 @@ b]])"#),
     ("fix-libs format_ulong", r#"local z = 0 local o = {} for _, v in {2^64, 1e300, 1 / z, -1 / z, 0 / z, 2^63, -2^63, -1, 2^65, 2^63 + 2^11, -2^64, -1e300, 2^64 - 2^11} do table.insert(o, E(string.format, "%x %u %o %X", v, v, v, v)) end return table.concat(o, "|")"#),
     // `luaH_next` raises the client's text (`0x6fa467`, `0x871aac`): "for", not 5.1's "to".
     ("fix-libs foreach_invalid_key", r#"local t = {a = 1} return S(E(foreach, t, function(k) t[k] = nil for i = 1, 20 do t["x" .. i] = i end end), E(next, {}, "nope"))"#),
+    // A chunk name's first line ends at `\n` alone (`strcspn` set `0x835144`), and a `\r` ends
+    // no line of the source (`0x6ffb94`).
     ("fix-libs chunkid_cr", r#"local o = {}
         for _, s in {"error('e')\r--x", "error('e')\n--x", "error('e')\r\n--x", "error('e') --" .. string.rep("y", 100), "\rerror('e')", "error('e')", "error('e')\0--x"} do
           local f, e = loadstring(s) if f then table.insert(o, E(f)) else table.insert(o, e) end
@@ -714,7 +723,8 @@ b]])"#),
         local o = {}
         for i = 1, 3 do n = 0 local ok, e = pcall(f) table.insert(o, n .. ":" .. tostring(e)) end
         return table.concat(o, " ")"#),
-    // ── r2-vm: the script host's loadstring refuses a binary chunk with mlua's text ──
+    // ── r2-vm: a binary chunk is lexed as source (`luaD_protectedparser` zeroes the binary
+    // flag, `0x6f6a15`), so its `\27` is an `invalid control char` (`0x6ffabb`) ──
     ("r2-vm loadstring_binary", r#"return S(loadstring("\27Lua\81\0", "=bin"), loadstring("\27Lua"))"#),
 ];
 
