@@ -18,8 +18,9 @@ pub struct LuaError {
 /// 5.1.5's `LUAI_MAXCCALLS`: nested host-level calls (a host call, a metamethod, a library
 /// callback); past it by an eighth, an error handler's own calls are refused too.
 const MAXCCALLS: u32 = 200;
-/// 5.1.5's `LUAI_MAXCALLS`: the call-info array may not grow past it.
-const MAXCALLS: usize = 20000;
+/// The client's `LUA_MAXCALLS`, 5.0's 4096: `luaD_growCI` (`0x6f61c0`) refuses a call-info
+/// array past it (`0x6f61c7`, `0x6f61e4`).
+const MAXCALLS: usize = 4096;
 /// 5.1.5's `BASIC_CI_SIZE`: the call-info array's first size.
 const BASIC_CI_SIZE: usize = 8;
 /// Rust stack the nested host-level calls under one entry may use. C counts only levels, its
@@ -136,10 +137,9 @@ pub struct Vm {
     pub registry: TableRef,
     pub names: Names,
     c_depth: u32,
-    /// 5.1.5's `L->size_ci`: frames fit while `frames.len() + 1 < ci_size`. 5.1 doubles the array
-    /// as calls nest and raises "stack overflow" once a doubling passes `LUAI_MAXCALLS`, so the
-    /// first overflow comes at 16384 frames and, the array cut back to 20000, later ones at
-    /// 20000; the doubled array leaves the error's handler room to run.
+    /// `L->size_ci`: frames fit while `frames.len() + 1 < ci_size`. The array doubles as calls
+    /// nest and a doubling past [`MAXCALLS`] raises "stack overflow", so every overflow comes at
+    /// 4096 frames; the doubled array leaves the error's handler room to run.
     ci_size: usize,
     /// `ci_size - 1`: a call is made while `frames.len()` is below it, one compare on the call
     /// path.
@@ -546,7 +546,7 @@ impl Vm {
 
     /// Compile a chunk into a function over the globals.
     pub fn load(&mut self, src: &[u8], chunkname: &[u8]) -> Result<Value, crate::SyntaxError> {
-        let proto = crate::compile::compile(src, chunkname, &mut self.heap, self.c_depth)?;
+        let proto = crate::compile::compile(src, chunkname, &mut self.heap)?;
         self.heap.charge(proto.tree_bytes());
         // A constant the compiler could not make: 5.1's `LUA_ERRMEM`.
         if self.heap.oom {
@@ -935,10 +935,19 @@ impl Vm {
         }
     }
 
-    /// `callTMres`: `f(a, b)`'s first result.
+    /// `callTMres` (`0x6f7dd0`): `f(a, b)`'s first result, called on the stack's top and read
+    /// from where it lands, with nothing allocated.
     fn call_tm_res(&mut self, f: Value, a: Value, b: Value) -> Result<Value, LuaError> {
-        let r = self.call_value(f, &[a, b], 1)?;
-        Ok(r[0])
+        let func_idx = self.top;
+        self.ensure(func_idx + 4);
+        self.stack[func_idx] = f;
+        self.stack[func_idx + 1] = a;
+        self.stack[func_idx + 2] = b;
+        self.top = func_idx + 3;
+        self.call_at(func_idx, 2, 1)?;
+        let r = self.stack[func_idx];
+        self.top = func_idx;
+        Ok(r)
     }
 
     /// `call_binTM`: the first operand's metamethod, else the second's, called whatever it is
@@ -1073,8 +1082,8 @@ impl Vm {
         Err(self.rt_error("loop in settable"))
     }
 
-    /// 5.1's `Arith`. Numbers (and numeric strings) compute, `^` with C's `pow`; anything else
-    /// tries the operands' metamethods, `__pow` for `^`.
+    /// The client's `Arith` (`0x6f9a80`). Numbers (and numeric strings) compute, `^` through the
+    /// global `__pow`; anything else tries the operands' metamethods, `__pow` for `^`.
     #[cold]
     #[inline(never)]
     fn arith(
@@ -1090,8 +1099,7 @@ impl Vm {
                 Arith::Sub => x - y,
                 Arith::Mul => x * y,
                 Arith::Div => x / y,
-                // 5.1's `luai_numpow`: C's `pow`; a non-number goes to `__pow` below.
-                Arith::Pow => x.powf(y),
+                Arith::Pow => return self.pow_global(x, y),
             }));
         }
         let name = match op {
@@ -1113,6 +1121,41 @@ impl Vm {
                 Err(self.type_error(bad, reg, "perform arithmetic on"))
             }
         }
+    }
+
+    /// The client's `OP_FORLOOP` checks, in its order, of the loop at `stack[ra..ra + 3]`: the
+    /// counter must be a number, not coerced (`0x6f9262`, `` `for' initial value must be a
+    /// number ``), and the limit and step are made numbers where they stand (`0x6f928d`,
+    /// `0x6f92b3`) or the loop raises.
+    #[cold]
+    #[inline(never)]
+    fn for_controls(&mut self, ra: usize) -> Result<(f64, f64, f64), LuaError> {
+        let Some(idx) = self.stack[ra].as_num() else {
+            return Err(self.rt_error("`for' initial value must be a number"));
+        };
+        let mut controls = [0.0; 2];
+        for (i, what) in ["limit", "step"].into_iter().enumerate() {
+            let Some(n) = self.tonumber(self.stack[ra + 1 + i]) else {
+                return Err(self.rt_error(&format!("`for' {what} must be a number")));
+            };
+            self.stack[ra + 1 + i] = Value::Num(n);
+            controls[i] = n;
+        }
+        Ok((idx, controls[0], controls[1]))
+    }
+
+    /// `x ^ y` on numbers, as the client's `Arith` computes it: the global `__pow`, read raw from
+    /// the globals (`0x6f9b5e`), must be a function (`0x6f9b72`) and is called with the two
+    /// numbers (`0x6f9b8c`); its first result is the answer.
+    fn pow_global(&mut self, x: f64, y: f64) -> Result<Value, LuaError> {
+        let f = self
+            .heap
+            .table(self.globals)
+            .get_str(Value::Str(self.names.pow));
+        if !matches!(f.unpack(), V::Func(_)) {
+            return Err(self.rt_error("`__pow' (`^' operator) is not a function"));
+        }
+        self.call_tm_res(f, Value::Num(x), Value::Num(y))
     }
 
     /// `luaV_equalObj`: tables and userdata consult a shared `__eq`.
@@ -1643,9 +1686,9 @@ impl Vm {
         Ok(nargs + 1)
     }
 
-    /// 5.1.5's `growCI`: the call-info array doubles; past `LUAI_MAXCALLS` the call is refused
-    /// with "stack overflow", and a call while it is past the limit (the overflow's handler
-    /// recursing) with no handler at all.
+    /// `luaD_growCI` (`0x6f61c0`): the call-info array doubles; past [`MAXCALLS`] the call is
+    /// refused with "stack overflow" (`0x6f61f2`), and a call while it is past the limit (the
+    /// overflow's handler recursing) with no handler at all (`0x6f61d3`).
     #[cold]
     #[inline(never)]
     fn grow_ci(&mut self) -> Result<(), LuaError> {
@@ -1957,10 +2000,9 @@ impl Vm {
         let p = unsafe { caller.proto.as_ref() }?;
         let pc = caller.pc().checked_sub(1)?;
         match p.code.get(pc)? {
-            // 5.1's `getfuncname`: the generic for's call names its generator.
-            Op::Call(a, ..) | Op::TailCall(a, ..) | Op::TForLoop(a, _) => {
-                objname_in(p, &self.heap, pc, *a as usize)
-            }
+            // The client's `getfuncname` names a function only an `OP_CALL` or `OP_TAILCALL`
+            // called (`0x6fc499`..`0x6fc4a1`): a generic `for`'s generator is named nothing.
+            Op::Call(a, ..) | Op::TailCall(a, ..) => objname_in(p, &self.heap, pc, *a as usize),
             _ => None,
         }
     }
@@ -1981,10 +2023,9 @@ impl Vm {
         let p = unsafe { caller.proto.as_ref() }?;
         let pc = caller.pc().checked_sub(1)?;
         match p.code.get(pc)? {
-            // 5.1's `getfuncname`: the generic for's call names its generator.
-            Op::Call(a, ..) | Op::TailCall(a, ..) | Op::TForLoop(a, _) => {
-                objname_in(p, &self.heap, pc, *a as usize)
-            }
+            // The client's `getfuncname` names a function only an `OP_CALL` or `OP_TAILCALL`
+            // called (`0x6fc499`..`0x6fc4a1`): a generic `for`'s generator is named nothing.
+            Op::Call(a, ..) | Op::TailCall(a, ..) => objname_in(p, &self.heap, pc, *a as usize),
             _ => None,
         }
     }
@@ -2709,7 +2750,8 @@ impl Vm {
                     Op::JmpCmpK(cj, b, kx, off) => cmpk!(cj.cmp(), cj.cond(), r!(b), kv!(kx), off),
                     Op::JmpCmpKR(cj, kx, c, off) => cmpk!(cj.cmp(), cj.cond(), kv!(kx), r!(c), off),
                     Op::Pow(a, b, c) => {
-                        // 5.1's `OP_POW`: always `Arith`, numbers through `pow`.
+                        // The client's `OP_POW` (`0x6f8e47`): always `Arith`, which calls
+                        // the global `__pow` for numbers.
                         let (x, y) = (rk!(b), rk!(c));
                         let v = slow!(self.arith(Arith::Pow, x, y, (rkreg!(b), rkreg!(c))))?;
                         r!(a) = v;
@@ -2987,60 +3029,37 @@ impl Vm {
                         ret!(a, n);
                     }
                     Op::Return1(a) => ret!(a, 1),
-                    Op::ForPrep(a, off) => {
-                        // 5.1's `OP_FORPREP`: each control made a number, or the loop refused in
-                        // 5.1's order; the index primed one step back.
-                        save!();
-                        let Some(init) = self.tonumber(r!(a)) else {
-                            return Err(self.rt_error("`for' initial value must be a number"));
-                        };
-                        let Some(limit) = self.tonumber(r!(a + 1)) else {
-                            return Err(self.rt_error("`for' limit must be a number"));
-                        };
-                        let Some(step) = self.tonumber(r!(a + 2)) else {
-                            return Err(self.rt_error("`for' step must be a number"));
-                        };
-                        r!(a + 1) = Value::Num(limit);
-                        r!(a + 2) = Value::Num(step);
-                        r!(a) = Value::Num(init - step);
-                        jump!(off);
-                    }
-                    // The controls are numbers since `ForPrep` and no code can reach them.
+                    // The client's `OP_FORLOOP` (`0x6f9262`): the loop's own variable is the
+                    // counter, so the body may move it; each pass checks it is a number, makes
+                    // the limit and step numbers in place, steps it and, while within the
+                    // limit, writes it back and jumps. `ForLoopUp` knows the step is a positive
+                    // constant.
                     Op::ForLoopUp(a, off) => {
-                        let (idx, limit, step) = (
-                            r!(a).as_num().unwrap_or(f64::NAN),
-                            r!(a + 1).as_num().unwrap_or(f64::NAN),
-                            r!(a + 2).as_num().unwrap_or(f64::NAN),
-                        );
-                        let idx = idx + step;
+                        let (idx, limit, _) = match (r!(a).as_num(), r!(a + 1).as_num()) {
+                            (Some(i), Some(l)) => (i, l, 0.0),
+                            _ => slow!(self.for_controls(base!() + a as usize))?,
+                        };
+                        let idx = idx + r!(a + 2).as_num().unwrap_or(f64::NAN);
                         if idx <= limit {
-                            // Canonical numbers in, a canonical number out; written before
-                            // the jump, as `OP_FORLOOP` writes them, so a jump that leaves this
-                            // loop (to the slow one) finds them.
-                            let v = Value::num_raw(idx);
-                            r!(a) = v;
-                            r!(a + 3) = v;
+                            // Canonical numbers in, a canonical number out.
+                            r!(a) = Value::num_raw(idx);
                             jump!(off);
                         }
                     }
                     Op::ForLoop(a, off) => {
-                        let (idx, limit, step) = (
-                            r!(a).as_num().unwrap_or(f64::NAN),
-                            r!(a + 1).as_num().unwrap_or(f64::NAN),
-                            r!(a + 2).as_num().unwrap_or(f64::NAN),
-                        );
+                        let (idx, limit, step) =
+                            match (r!(a).as_num(), r!(a + 1).as_num(), r!(a + 2).as_num()) {
+                                (Some(i), Some(l), Some(s)) => (i, l, s),
+                                _ => slow!(self.for_controls(base!() + a as usize))?,
+                            };
                         let idx = idx + step;
                         if if step > 0.0 {
                             idx <= limit
                         } else {
                             limit <= idx
                         } {
-                            // Canonical numbers in, a canonical number out; written before
-                            // the jump, as `OP_FORLOOP` writes them, so a jump that leaves this
-                            // loop (to the slow one) finds them.
-                            let v = Value::num_raw(idx);
-                            r!(a) = v;
-                            r!(a + 3) = v;
+                            // Canonical numbers in, a canonical number out.
+                            r!(a) = Value::num_raw(idx);
                             jump!(off);
                         }
                     }
@@ -3057,22 +3076,29 @@ impl Vm {
                         }
                         jump!(off);
                     }
+                    // The client's `OP_TFORLOOP` (`0x6f933b`): the generator, the state and
+                    // the first variable, the control, copied above the variables
+                    // (`0x6f9344`..`0x6f93e0`), the call there for `nv` results (`0x6f940f`),
+                    // the results moved down into the variables (`0x6f9445`..`0x6f9464`), and
+                    // the loop ends when the first is nil (`0x6f9490`).
                     Op::TForLoop(a, nvar) => {
                         let nv = nvar as usize;
-                        let cb = a as usize + 3;
+                        let ctl = a as usize + 2;
+                        let cb = ctl + nv;
                         // The built-in `next` over a table, stepped without a call: what the
                         // call would do, minus the frame. An invalid key takes the call, which
                         // raises from inside `next` as before.
                         if r!(a) == self.builtin_next && !self.builtin_next.is_nil() {
                             let state = r!(a + 1);
                             if let V::Table(t) = state.unpack() {
-                                if let Ok(step) = self.heap.table(t).next(r!(a + 2)) {
+                                if let Ok(step) = self.heap.table(t).next(r!(ctl)) {
                                     // The registers from `cb` up as the call leaves them: the
                                     // state and control copied to `cb + 1` and `cb + 2`, then
                                     // `lua_next` writes the key over the control and the value
                                     // above it (or `next` one nil there), and `nv` results move
-                                    // down to `cb`, nil past those given. A body can read one
-                                    // past its variables (`Proto::clears`).
+                                    // down to `cb`, nil past those given; those then copy into
+                                    // the variables. A body can read past its variables
+                                    // (`Proto::clears`).
                                     let (k, v, n) = match step {
                                         Some((k, v)) => (k, v, 2),
                                         None => (Value::Nil, Value::Nil, 1),
@@ -3092,11 +3118,13 @@ impl Vm {
                                         if cb + i < maxstack!() {
                                             r!(cb + i) = x;
                                         }
+                                        if i < nv {
+                                            r!(ctl + i) = x;
+                                        }
                                     }
                                     if k.is_nil() {
                                         skip!(1);
                                     } else {
-                                        r!(a + 2) = k;
                                         // SAFETY: a `TForLoop` is always followed by its `Jmp`.
                                         let Op::Jmp(back) = (unsafe { *ip }) else {
                                             unreachable!()
@@ -3107,18 +3135,19 @@ impl Vm {
                                 }
                             }
                         }
-                        // 5.1's `OP_TFORLOOP`: the call at `R(a+3)`, its results the variables.
-                        r!(cb + 2) = r!(a + 2);
+                        r!(cb + 2) = r!(ctl);
                         r!(cb + 1) = r!(a + 1);
                         r!(cb) = r!(a);
                         self.top = base!() + cb + 3;
                         let call_at = base!() + cb;
                         slow!(self.call_at(call_at, 2, nv as i32))?;
                         self.top = base!() + maxstack!();
-                        if r!(cb).is_nil() {
+                        for i in (0..nv).rev() {
+                            r!(ctl + i) = r!(cb + i);
+                        }
+                        if r!(ctl).is_nil() {
                             skip!(1);
                         } else {
-                            r!(a + 2) = r!(cb);
                             // SAFETY: a `TForLoop` is always followed by its `Jmp`.
                             let Op::Jmp(back) = (unsafe { *ip }) else {
                                 unreachable!()
@@ -3286,14 +3315,14 @@ fn symbexec(p: &Proto, lastpc: usize, reg: usize) -> Option<usize> {
             | Op::Concat(a, ..)
             | Op::JmpIf(a, ..)
             | Op::TestSet(a, ..)
-            | Op::ForPrep(a, _)
             | Op::ForLoop(a, _)
             | Op::ForLoopUp(a, _)
             | Op::Closure(a, _) => writes(a),
             Op::LoadNil(a, b) => (a as usize..=b as usize).contains(&reg),
             Op::SelfOp(a, ..) | Op::SelfField(a, ..) => writes(a) || reg == a as usize + 1,
             Op::Call(a, ..) | Op::TailCall(a, ..) => reg >= a as usize,
-            Op::TForLoop(a, _) => reg >= a as usize + 2,
+            // The client's rule writes every register from `a` up (`0x6fc22c`).
+            Op::TForLoop(a, _) => reg >= a as usize,
             _ => false,
         };
         if hit {
@@ -3302,7 +3331,6 @@ fn symbexec(p: &Proto, lastpc: usize, reg: usize) -> Option<usize> {
         let jump = match op {
             Op::Jmp(off)
             | Op::TForPrep(_, off)
-            | Op::ForPrep(_, off)
             | Op::ForLoop(_, off)
             | Op::ForLoopUp(_, off)
             | Op::JmpIf(_, _, off)

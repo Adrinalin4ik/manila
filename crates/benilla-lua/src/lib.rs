@@ -304,7 +304,7 @@ pub fn chunkid(source: &[u8]) -> Vec<u8> {
 
 /// Compile a chunk and drop it, or answer the client's own syntax error.
 pub fn check(src: &[u8], chunkname: &[u8]) -> Result<(), SyntaxError> {
-    compile::compile(src, chunkname, &mut heap::Heap::default(), 0).map(|_| ())
+    compile::compile(src, chunkname, &mut heap::Heap::default()).map(|_| ())
 }
 
 #[cfg(test)]
@@ -341,10 +341,7 @@ mod tests {
         );
         assert_eq!(err("break"), "t:1: no loop to break near `<eof>'");
         assert_eq!(err("(a) = 1"), "t:1: syntax error near `='");
-        assert_eq!(
-            err("if x then\nend end"),
-            "t:2: `<eof>' expected near `end'"
-        );
+        assert_eq!(err("if x then\nend end"), "t:2: <eof> expected near `end'");
         assert_eq!(
             err("do\nx = 1"),
             "t:2: `end' expected (to close `do' at line 1) near `<eof>'"
@@ -365,7 +362,7 @@ mod tests {
         // The string constant a chunk returns.
         let one = |src: &[u8]| -> Vec<u8> {
             let mut heap = heap::Heap::default();
-            let p = compile::compile(src, b"=t", &mut heap, 0).unwrap();
+            let p = compile::compile(src, b"=t", &mut heap).unwrap();
             let value::V::Str(s) = p.consts[0].unpack() else {
                 panic!("{:?}", p.consts)
             };

@@ -31,10 +31,10 @@ const MAXARG_C: u32 = (1 << 9) - 1;
 /// `SHRT_MAX`, `registerlocalvar`'s limit on local declarations per function.
 const MAX_LOCVARS: usize = 32767;
 
-/// Compile a chunk into its main function. `ccalls` is the caller's nesting of host calls, which
-/// 5.1 counts toward the parser's level limit (`L->nCcalls`).
-pub fn compile(src: &[u8], chunkname: &[u8], heap: &mut Heap, ccalls: u32) -> R<Rc<Proto>> {
-    crate::parse::parse(src, chunkname, heap, ccalls)
+/// Compile a chunk into its main function. Its limits are its own: the host calls it runs
+/// under count toward none (the client's per-chunk `nestlevel`, `0x6fc9d0`).
+pub fn compile(src: &[u8], chunkname: &[u8], heap: &mut Heap) -> R<Rc<Proto>> {
+    crate::parse::parse(src, chunkname, heap)
 }
 
 /// 5.1's `luaO_int2fb`: a size as a "floating point byte", `eeeeexxx`, rounded up.
@@ -226,6 +226,9 @@ pub(crate) struct FuncState {
     pub maxstack: u8,
     /// [`Proto::c_maxstack`]: `maxstack` as `luaK_checkstack` alone raises it.
     c_maxstack: u8,
+    /// The registers a generic `for`'s call and results reach above its variables, which
+    /// `luaK_checkstack` does not count ([`Proto::maxstack`]).
+    pub tfor_top: u16,
     /// The last pc marked as a jump target (`luaK_getlabel`), in 5.1's count, or -1.
     lasttarget: i64,
     /// `LoadNil`s at the head of the function that 5.1 leaves out (see [`Parser::nil`]).
@@ -266,6 +269,7 @@ impl FuncState {
             freereg: 0,
             maxstack: 2,
             c_maxstack: 2,
+            tfor_top: 0,
             lasttarget: -1,
             silent_nils: 0,
             jpc: NO_JUMP,
@@ -342,7 +346,7 @@ impl FuncState {
             nparams: self.nparams,
             vararg: self.vararg,
             clears: self.clears,
-            maxstack: self.maxstack as u16 + 1,
+            maxstack: (self.maxstack as u16 + 1).max(self.tfor_top),
             c_maxstack: self.c_maxstack,
             source_id: heap.source_id(&self.source),
             source: self.source,
@@ -389,7 +393,6 @@ fn jump_of(op: &Op) -> Option<i32> {
         | Op::JmpCmpKR(_, _, _, o)
         | Op::JmpIf(_, _, o)
         | Op::TestSet(_, _, _, o)
-        | Op::ForPrep(_, o)
         | Op::ForLoop(_, o)
         | Op::ForLoopUp(_, o)
         | Op::TForPrep(_, o) => Some(o),
@@ -405,7 +408,6 @@ fn set_jump(op: &mut Op, off: i32) {
         | Op::JmpCmpKR(_, _, _, o)
         | Op::JmpIf(_, _, o)
         | Op::TestSet(_, _, _, o)
-        | Op::ForPrep(_, o)
         | Op::ForLoop(_, o)
         | Op::ForLoopUp(_, o)
         | Op::TForPrep(_, o) => *o = off,
@@ -458,7 +460,8 @@ fn is_k(x: Rk) -> bool {
 }
 
 /// 5.1's `constfolding`: two numerals fold unless the result would be a NaN or a division by
-/// zero is asked for.
+/// zero is asked for. `^` never folds: the client's `^` calls the global `__pow` (`0x6f9b52`),
+/// which a script may replace, so `2 ^ 3` in source calls it too.
 fn fold(op: BinOpr, a: f64, b: f64) -> Option<f64> {
     let r = match op {
         BinOpr::Add => a + b,
@@ -470,8 +473,6 @@ fn fold(op: BinOpr, a: f64, b: f64) -> Option<f64> {
             }
             a / b
         }
-        // `luai_numpow`: C's `pow`, as the VM computes it.
-        BinOpr::Pow => a.powf(b),
         _ => return None,
     };
     (!r.is_nan()).then_some(r)
