@@ -441,6 +441,10 @@ mod tests {
     fn stand(geosets: &[u16], showing: &[usize], characters: Option<CharacterGeosets>) -> Standing {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            // Each frame is 100 ms of game time, so `wear` can outlast `SETTLE_SECS` exactly.
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_millis(100),
+            ))
             .init_asset::<Mesh>()
             .init_asset::<Image>()
             .init_asset::<WowModelMaterial>()
@@ -549,7 +553,11 @@ mod tests {
                 .world_mut()
                 .get_mut::<Equipment>(self.player)
                 .unwrap() = gear;
-            self.app.update();
+            // A worn set re-dresses once it has held for `SETTLE_SECS` (the wenilla carry): four
+            // 100 ms frames outlast it.
+            for _ in 0..4 {
+                self.app.update();
+            }
         }
 
         /// Composite against the real tables and chain, landing each frame before the re-dress;

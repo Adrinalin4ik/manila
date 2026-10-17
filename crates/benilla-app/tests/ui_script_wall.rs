@@ -38,7 +38,13 @@ fn family(rel: &str) -> Family {
 }
 
 /// The standing count of `Game` files; raise it only with the reason written down.
-const CEILING: usize = 40;
+///
+/// wenilla carries: 40 is upstream's; the fork's five more name the VM on purpose —
+/// `bindings/hold_cast.rs` (press-and-hold casting reads the bound command off the VM),
+/// `webbridge/mod.rs` (the page bridge reads the UI's state), `perf/journal.rs` (the FPS journal
+/// times the VM's tick) and `debug_panel/{mod,lighting_controls}.rs` (the debug panel). 42 is the
+/// tree's count, upstream's own files having fallen under its ceiling.
+const CEILING: usize = 42;
 
 /// How far under [`CEILING`] the count may sit before the test asks for the ceiling to follow it.
 const SLACK: usize = 4;

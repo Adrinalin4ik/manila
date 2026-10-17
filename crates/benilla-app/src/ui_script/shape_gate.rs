@@ -25,6 +25,12 @@ const NOT_YET_ASSERTED: &[(&str, usize, &str)] = &[
         1,
         "Deviation: the same stack-top return (0x4dcd7c)",
     ),
+    (
+        "GetDebugStats",
+        0,
+        "wenilla carry: the reference answers nothing (0x488af0, xor eax,eax); this one answers \
+         a health line for StatsFrame (benilla-ui script/client.rs), on purpose",
+    ),
 ];
 
 /// The query verbs the negative-index rule reads: a verb that acts on its index (`PickupAction`)

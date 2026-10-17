@@ -1851,20 +1851,13 @@ fn ambient_occlusion_dropdown_is_localised_and_live() {
 
 // MONKEY (lampfog): the end-of-page quality row uses the same numeric tier contract as the pass.
 #[test]
-fn lamp_fog_dropdown_is_localised_and_live() {
+fn lamp_fog_slider_is_localised_and_live() {
     let xml = include_str!("../../assets/ui/OptionsFrame.xml");
     let strings = &xml[xml.find("BENILLA_ADVGFX_STRINGS = {").unwrap()
         ..xml.find("BENILLA_OPTIONS_PAGE_ROWS = {").unwrap()];
     let row = xml.split("<Frame name=\"$parentRowLampFog\"").nth(1).unwrap();
     let on_load = row.split("<OnLoad>").nth(1).unwrap().split("</OnLoad>").next().unwrap();
-    for (locale, title, labels) in [
-        ("enUS", "Lamp Fog", ["Off", "Low", "High"]),
-        (
-            "ruRU",
-            "Свечение фонарей в тумане",
-            ["Выкл", "Низкое", "Высокое"],
-        ),
-    ] {
+    for (locale, title) in [("enUS", "Lamp Fog"), ("ruRU", "Свечение фонарей в тумане")] {
         let mut s = audio_harness();
         s.run(&format!("function GetLocale() return '{locale}' end"))
             .unwrap();
@@ -1875,7 +1868,9 @@ fn lamp_fog_dropdown_is_localised_and_live() {
             function BenillaOptionsRow_OnLoad(row, cvar, title, tip)
                 row.cvar, row.title, row.tip = cvar, title, tip
             end
-            function BenillaOptionsDropdownRow_Setup(row, choices) row.choices = choices end
+            function BenillaOptionsSliderRow_Setup(row, min, max, step, fmt)
+                row.min, row.max, row.step, row.fmt = min, max, step, fmt
+            end
         "#,
         )
         .unwrap();
@@ -1886,27 +1881,18 @@ fn lamp_fog_dropdown_is_localised_and_live() {
                 "return getglobal(this.tip) == BENILLA_ADVGFX.tips.LAMP_FOG and string.len(getglobal(this.tip)) > 80",
             )
             .unwrap());
-        // `lampFog` registers at Off, so seed away from the first choice before asserting that
-        // every selection produces the expected live write (the CVar layer suppresses no-ops).
-        s.run("SetCVar(this.cvar, '2')").unwrap();
+        // A count of lamps, 0 to `volumetric_fog::MAX_FOG_LAMPS`, read out as a number.
+        assert_eq!(
+            s.eval::<(i64, i64, i64, String)>("return this.min, this.max, this.step, this.fmt")
+                .unwrap(),
+            (0, 32, 4, "raw".to_string())
+        );
         let _ = s.take_cvar_changes();
-        for (tier, label) in labels.iter().enumerate() {
-            assert_eq!(
-                s.eval::<String>(&format!("return this.choices[{}].text", tier + 1))
-                    .unwrap(),
-                *label
-            );
-            let _ = s.take_cvar_changes();
-            s.run(&format!(
-                "SetCVar(this.cvar, this.choices[{}].value)",
-                tier + 1
-            ))
-            .unwrap();
-            assert_eq!(
-                s.take_cvar_changes(),
-                vec![("lampFog".to_string(), tier.to_string())]
-            );
-        }
+        s.run("SetCVar(this.cvar, '8')").unwrap();
+        assert_eq!(
+            s.take_cvar_changes(),
+            vec![("lampFog".to_string(), "8".to_string())]
+        );
     }
 }
 

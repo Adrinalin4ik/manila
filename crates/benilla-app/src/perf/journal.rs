@@ -699,9 +699,7 @@ static MESH_ALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::ne
 /// The owner's reading of his own screen: a camera pointed at the floor should not cost 30 fps,
 /// so something works outside what the camera can see. The counts say he is right - journal 60
 /// stands at **4,210 bone-anchor writes a frame with 35 visible meshes** - and the mechanism is
-/// in `doodad_anim`'s parking rule, which asks
-///
-///     vis.get(e).is_ok_and(|v| *v != Visibility::Hidden)
+/// in `doodad_anim`'s parking rule, which asks `vis.get(e).is_ok_and(|v| *v != Visibility::Hidden)`.
 ///
 /// `Visibility` is "allowed to be seen"; `ViewVisibility` is "survived this frame's frustum".
 /// A doodad behind the camera keeps `Visibility::Inherited`, reads as drawn, and its rig is posed
@@ -2197,9 +2195,11 @@ mod tests {
     }
 
     #[test]
-    fn the_header_ends_with_the_gpu_cells_in_bucket_order() {
+    fn the_header_carries_the_gpu_cells_in_bucket_order() {
+        // Columns only grow at the end, so the GPU block sits where it was added, not last.
         let cols: Vec<&str> = JOURNAL_HEADER.trim_end().split(',').collect();
-        let gpu: Vec<&str> = cols[cols.len() - (GPU_BUCKETS + 1)..].to_vec();
+        let at = cols.iter().position(|c| *c == "gpu_ms").expect("gpu_ms");
+        let gpu: Vec<&str> = cols[at..at + GPU_BUCKETS + 1].to_vec();
         assert_eq!(
             gpu,
             [

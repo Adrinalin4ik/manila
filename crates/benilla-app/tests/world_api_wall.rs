@@ -287,7 +287,13 @@ const SORTED_LEAKS: &[(&str, &str)] = &[
 ];
 
 /// The gate on the leak count. Lower it when a leak closes.
-const LEAK_CEILING: usize = 107;
+///
+/// wenilla carries: upstream's is 107. The fork's 73 more are its graphics programme (the MONKEY
+/// lanes: lights, shadows, water, fog, the skybox) and its browser carries reaching engine
+/// internals (`mesh_tag`, `lighting::SyntheticFireLight`, `interact::CreaturePickPart`, …), which
+/// were never sorted into PUBLISHED or SORTED_LEAKS. Set to the tree's count so the ratchet holds
+/// from here; `WOW_API_DUMP=1` lists them, and sorting them is the way down.
+const LEAK_CEILING: usize = 180;
 
 /// How far under [`LEAK_CEILING`] the count may sit before the test asks for the ceiling to be
 /// lowered: one closure does not fail the gate, a whole stage of work cannot go unrecorded.

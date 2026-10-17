@@ -103,6 +103,13 @@ const VERDICTS: &[(&str, Verdict)] = &[
     ("WindowPlugin", Plumbing),
     ("WindowPosition", Plumbing),
     ("WindowResolution", Plumbing),
+    // wenilla carries: the web bridge's hidden-tab heartbeat (`webbridge/sink.rs`, a
+    // `WinitUserEvent::WakeUp` through the event-loop proxy that runs one update), and the
+    // capture mode's loop pacing (`capture/mod.rs`). Neither carries player input.
+    ("EventLoopProxyWrapper", Plumbing),
+    ("WinitUserEvent", Plumbing),
+    ("UpdateMode", Plumbing),
+    ("WinitSettings", Plumbing),
 ];
 
 /// The gate's source, which every `Swallowed` row must name.
