@@ -13,8 +13,13 @@
 //! last record the list awaits (`0x4de8b0`) run, with the active player in the world (`0x4de568`);
 //! at a fold (`0x4ded30`); when an item of ours that a listed quest needs is set up, restacked or
 //! destroyed (`0x4df7b0`); at each `SMSG_QUERY_TIME_RESPONSE` (`0x4def1b`); when a faction's rank
-//! moves (`0x4d58f3` into `0x4de52f`); and from the lookups' callbacks. Not built: the signal of
-//! `GetQuestTimers` when a timer runs out (`0x4e1554`).
+//! moves (`0x4d58f3` into `0x4de52f`); from `GetQuestTimers` when a timer that ran out latched
+//! (`0x4e1554`); and from the lookups' callbacks.
+//!
+//! A timed quest whose time ran out takes its row's expiry latch (`0x4df4f0`) unless it can be
+//! turned in: when its row is made (`0x4de6ca`), when `GetQuestTimers` reads it (`0x4e14f1`) and at
+//! `SMSG_QUESTUPDATE_FAILEDTIMER` (`0x5e5cd9`). The log then reads it as failed, and every rebuild
+//! clears the latch with the rows (`0x4de5e2`), latching again what is still expired.
 //!
 //! The engine owns the header folds, as the reference's mask does. The selection lives in the
 //! engine, as `QuestLog_SetSelection` sets and re-reads it in one call (`QuestLogFrame.lua:318`,
@@ -25,7 +30,7 @@
 //! `IsUnitOnQuest` reads a unit's quest-log window off its snapshot ([`super::UnitState`]).
 //!
 //! Not built: `GetAbandonQuestItems` answers nil; the leaderboard's `event` and reputation lines;
-//! a GameObject objective's name, which wears the placeholder; the expiry latch (`0x4df4f0`).
+//! a GameObject objective's name, which wears the placeholder.
 
 use std::collections::{HashMap, HashSet};
 
@@ -99,6 +104,14 @@ pub struct QuestRecordView {
     pub objectives: [QuestObjectiveView; 4],
     /// The item the quest hands out (`+0x34`), never a leaderboard line (`0x4e04fa`).
     pub src_item_id: u32,
+    /// The template's flags `+0x38 & 6`: the turn-in test needs the slot's complete bit
+    /// (`0x4df65b`, `0x4df6bd`).
+    pub needs_complete_bit: bool,
+    /// `(faction, standing)`: the least standing the turn-in test needs (`+0x14`, `+0x18`, `jl`
+    /// at `0x4df6d6`), faction 0 for none.
+    pub rep_min: (u32, i32),
+    /// `(faction, standing)`: the most standing it allows (`+0x1c`, `+0x20`, `jg` at `0x4df6eb`).
+    pub rep_max: (u32, i32),
     /// `GetQuestLogRequiredMoney` and `GetQuestLogRewardMoney`, in copper.
     pub required_money: u32,
     pub reward_money: u32,
@@ -121,6 +134,9 @@ pub(crate) struct QuestLogRow {
     pub(crate) is_header: bool,
     /// A header's name.
     pub(crate) header: String,
+    /// A header's `ZoneOrSort`, which the reference's row keeps where a quest row keeps its id
+    /// (`0x4de713`), so the by-id scans can stop on it (`0x4df4c2`, `0x4df562`).
+    pub(crate) zone_or_sort: i32,
     /// A collapsed header, whose quests the fold leaves out of the visible rows.
     pub(crate) collapsed: bool,
 }
@@ -164,6 +180,11 @@ pub(crate) struct QuestLogStore {
     /// Whether the active player is in the world: without one the rebuild returns before its
     /// signal (`0x4de568`-`0x4de572`).
     player: bool,
+    /// The quests whose row holds the expiry latch (`[row+0xc]`, `0x4df50d`), cleared with the
+    /// rows by every rebuild (`0x4de5e2`).
+    latched: HashSet<u32>,
+    /// The quest-giver refreshes (`0x5eb070`) the latch asked for since the app last drained.
+    giver_refreshes: u32,
 }
 
 impl QuestLogStore {
@@ -185,10 +206,13 @@ impl QuestLogStore {
 /// them, the fold re-seats the list and the watches of quests that left go (`0x4de7a7`). Whether
 /// it ran: the caller fires `QUEST_LOG_UPDATE`, the tail's signal (`0x4de811`).
 fn rebuild(model: &mut Model) -> bool {
+    // `0x4de5f0`: the offset as it stands, 0 before the sync.
+    let now = countdown_now(model);
     let store = &mut model.quest_store;
     if store.pending != 0 || !store.player {
         return false;
     }
+    store.latched.clear();
     let mut quests: Vec<(u8, u32, &QuestRecordView)> = Vec::new();
     for (slot, s) in store.slots.iter().enumerate() {
         // `cmp edi,ecx; jle` (`0x4de642`): an id that is not positive is no quest.
@@ -224,7 +248,7 @@ fn rebuild(model: &mut Model) -> bool {
         }
     });
     let mut rows = Vec::with_capacity(quests.len() + groups.len());
-    for (_, name, mut members) in groups {
+    for (zone_or_sort, name, mut members) in groups {
         members.sort_by_cached_key(|&i| {
             let (slot, _, r) = quests[i];
             (r.level, r.title.to_lowercase(), slot)
@@ -232,6 +256,7 @@ fn rebuild(model: &mut Model) -> bool {
         rows.push(QuestLogRow {
             is_header: true,
             header: name.to_string(),
+            zone_or_sort,
             ..Default::default()
         });
         rows.extend(members.into_iter().map(|i| QuestLogRow {
@@ -242,11 +267,67 @@ fn rebuild(model: &mut Model) -> bool {
     }
     let num_quests = quests.len() as u32;
     let ids: HashSet<u32> = quests.iter().map(|&(_, id, _)| id).collect();
+    // A timed quest whose time ran out latches as its row is made (`0x4de6a4`-`0x4de6ca`).
+    let expired: Vec<(u32, u8)> = quests
+        .iter()
+        .map(|&(slot, id, _)| (id, slot))
+        .filter(|&(_, slot)| {
+            store
+                .slot(slot)
+                .and_then(|s| seconds_left(s, now))
+                .is_some_and(|left| left < 0)
+        })
+        .collect();
     model.quest_log_watched.retain(|id| ids.contains(id));
     model.quest_log.num_quests = num_quests;
     model.quest_log_rows = rows;
+    for (id, slot) in expired {
+        latch_expiry(model, id, slot);
+    }
     fold(model);
     true
+}
+
+/// `0x4df4f0(row)`: unless the turn-in test passes, which a latched row fails (`0x4df64e`), the
+/// row's latch is set (`0x4df50d`) and, with a player, the quest givers refreshed (`0x4df531`).
+/// Whether it latched.
+fn latch_expiry(model: &mut Model, quest_id: u32, slot: u8) -> bool {
+    let store = &model.quest_store;
+    let passes = !store.latched.contains(&quest_id)
+        && match (store.records.get(&quest_id), store.slot(slot)) {
+            (Some(record), Some(slot)) => turn_in_passes(model, record, slot),
+            _ => false,
+        };
+    if passes {
+        owe_turn_in_tutorial(model);
+        return false;
+    }
+    let store = &mut model.quest_store;
+    store.latched.insert(quest_id);
+    if store.player {
+        store.giver_refreshes += 1;
+    }
+    true
+}
+
+impl QuestLogStore {
+    /// `0x4df480` on the quest's own row: whether it holds the latch.
+    fn is_latched(&self, quest_id: u32) -> bool {
+        self.latched.contains(&quest_id)
+    }
+}
+
+/// The by-id scans of `0x4df4b0` and `0x4df550` (`0x4df4c2`, `0x4df562`): the first row whose
+/// first dword is `id`, which on a header is its zone id (`0x4de713`), so a header whose zone id
+/// equals a quest's id can stand before that quest's row and answer for it.
+fn first_row_for(model: &Model, id: u32) -> Option<&QuestLogRow> {
+    model.quest_log.entries.iter().find(|e| {
+        if e.is_header {
+            e.zone_or_sort as u32 == id
+        } else {
+            e.quest_id == id
+        }
+    })
 }
 
 /// The rows off every row and the collapse set, as the rebuild `0x4dea50` orders them: the
@@ -288,6 +369,62 @@ pub(crate) fn fold(model: &mut Model) {
         })
         .map_or(0, |i| i as u32 + 1);
     model.quest_log.entries = entries;
+}
+
+/// Tutorial 0x21, "Quest Completion": a turn-in test that passes triggers it (`0x4df78d`-`0x4df792`
+/// into `0x4b5390`) from either caller, the latch (`0x4df4fc`) or `GetQuestLogTitle`
+/// (`0x4dfa8d`). The fire-once bank is the app's, which drains the ask.
+fn owe_turn_in_tutorial(model: &mut Model) {
+    const QUEST_COMPLETION: u32 = 0x21;
+    if !model.tutorial_triggers.contains(&QUEST_COMPLETION) {
+        model.tutorial_triggers.push(QUEST_COMPLETION);
+    }
+}
+
+/// The turn-in test `0x4df580` on a quest row's record and slot: no player (`0x4df5e1`) or failed
+/// (`0x4df642`) fails; a template whose flags `& 6` need the slot's complete bit (`0x4df6bd`); one
+/// with neither those flags nor a reputation id nor any creature or item id is never complete
+/// (`0x4df663`-`0x4df6b0`). Then the least and most standing (`0x4df6d6`, `0x4df6eb`), the coinage
+/// a negative money asks (`0x4df72e`), each creature or object count (`0x4df74a`) and the held
+/// count of each item id, the quest's own item included (`0x4df780`). The expiry latch
+/// (`0x4df64e`) its callers read first.
+fn turn_in_passes(model: &Model, record: &QuestRecordView, slot: &QuestSlotView) -> bool {
+    if !model.quest_store.player || slot.state & SLOT_FAILED != 0 {
+        return false;
+    }
+    let any_objective = record
+        .objectives
+        .iter()
+        .any(|o| o.creature_or_go != 0 || o.item_id != 0);
+    if !record.needs_complete_bit
+        && record.rep_min.0 == 0
+        && record.rep_max.0 == 0
+        && !any_objective
+    {
+        return false;
+    }
+    if record.needs_complete_bit && slot.state & SLOT_COMPLETE == 0 {
+        return false;
+    }
+    // `0x4d6370`: the base plus the wire standing, the base 0 where no race/class column fits,
+    // and 0 for a faction with no reputation index (`0x4d6377`).
+    let standing = |faction: u32| model.faction_standings.get(&faction).copied().unwrap_or(0);
+    if record.rep_min.0 != 0 && standing(record.rep_min.0) < record.rep_min.1 {
+        return false;
+    }
+    if record.rep_max.0 != 0 && standing(record.rep_max.0) > record.rep_max.1 {
+        return false;
+    }
+    if model.money < u64::from(record.required_money) {
+        return false;
+    }
+    let store = &model.quest_store;
+    record.objectives.iter().enumerate().all(|(i, o)| {
+        (o.creature_or_go == 0 || u32::from(slot.counters[i]) >= o.required_count)
+            && (o.item_id == 0
+                || store.held.get(&o.item_id).copied().unwrap_or(0) as i64
+                    >= i64::from(o.item_count as i32))
+    })
 }
 
 /// The visible rows' count, `GetNumQuestLogEntries`'s first return (`[0xbb7490]`).
@@ -546,6 +683,42 @@ impl super::UiScript {
         self.model_mut().quest_store.slots = slots;
     }
 
+    /// `0x4df4b0(quest)`: whether the quest's row holds the expiry latch, which the quest-update
+    /// packets read as done (`0x5e5b6c`, `0x5e5c16`). A header found first answers no
+    /// (`0x4df4dd`).
+    pub fn quest_log_latched(&self, quest_id: u32) -> bool {
+        let model = self.model_ref();
+        first_row_for(&model, quest_id)
+            .is_some_and(|row| !row.is_header && model.quest_store.is_latched(row.quest_id))
+    }
+
+    /// `0x4df550(quest)`, `SMSG_QUESTUPDATE_FAILEDTIMER`'s (`0x5e5cd9`): the first row the id
+    /// finds latches unless it can be turned in. A header found first fails the turn-in test
+    /// (`0x4df5b7`), so it takes the latch, which no reader sees (`0x4df493`), and the quest's own
+    /// row does not. Whether it latched.
+    pub fn quest_log_latch_quest(&mut self, quest_id: u32) -> bool {
+        let mut model = self.model_mut();
+        let Some((is_header, slot)) =
+            first_row_for(&model, quest_id).map(|e| (e.is_header, e.slot))
+        else {
+            return false;
+        };
+        if is_header {
+            // `0x4df50d`, then the givers' refresh with a player (`0x4df531`).
+            let store = &mut model.quest_store;
+            if store.player {
+                store.giver_refreshes += 1;
+            }
+            return true;
+        }
+        latch_expiry(&mut model, quest_id, slot)
+    }
+
+    /// The quest-giver refreshes the latch asked for (`0x4df531`) since the last drain.
+    pub fn take_quest_giver_refreshes(&mut self) -> u32 {
+        std::mem::take(&mut self.model_mut().quest_store.giver_refreshes)
+    }
+
     /// Whether the active player is in the world, which the rebuild needs (`0x4de568`).
     pub fn set_quest_log_player(&mut self, present: bool) {
         self.model_mut().quest_store.player = present;
@@ -749,22 +922,56 @@ impl super::UiScript {
     pub fn set_server_unix_time(&mut self, unix_secs: f64) {
         self.model_mut().server_unix_time = Some(unix_secs);
     }
+
+    /// Whether the last sync found the local and server clocks equal to the whole second, which
+    /// the reference stores as `G = 1` (`0x4def02`): its countdowns then read one second more.
+    pub fn set_clock_sync_zero(&mut self, zero: bool) {
+        self.model_mut().clock_sync_zero = zero;
+    }
+
+    /// Push the local clock in unix seconds each frame, `time(NULL)` (`0x429580`). Before the first
+    /// sync the reference's offset `G` is 0 (`0x4de3d3`), so the log's rebuild and the timer
+    /// verbs count a deadline down by this clock (`0x4de6b6`, `0x4e14b9`, `0x4e16c9`).
+    pub fn set_local_unix_time(&mut self, unix_secs: f64) {
+        self.model_mut().local_unix_time = Some(unix_secs);
+    }
+}
+
+/// The clock a countdown reads: the server's once synced, the local one before (`G == 0`). A
+/// sync that finds the two clocks equal to the second stores `G = 1`, not 0 (`0x4def00`,
+/// `0x4def02`), so its countdowns read one second more.
+fn countdown_now(model: &Model) -> Option<f64> {
+    match model.server_unix_time {
+        Some(server) if model.clock_sync_zero => Some(server - 1.0),
+        Some(server) => Some(server),
+        None => model.local_unix_time,
+    }
+}
+
+/// The slot the selection's verbs read: the selected quest's (`0x4df050`), or slot 0 when no row
+/// holds the selection, as `0x4df010`'s -1 reads (`0x4df063`).
+fn selected_slot(model: &Model) -> Option<&QuestSlotView> {
+    let slot = model
+        .quest_row(model.quest_log_selection as usize)
+        .filter(|r| !r.is_header)
+        .map_or(0, |r| r.slot);
+    model.quest_store.slot(slot)
 }
 
 /// Signed seconds left on a slot's timer, by the reference's formula at all four of its sites
-/// (`0x4e0905`, `0x4e14b9`, `0x4e16c9`, `0x4de6b6`): `slot.timer + G - now - 1`, `G` folded into
-/// `now`, so a quest's last second reads 0. A negative value drops the row from the lists (`js` at
+/// (`0x4e0905`, `0x4e14b9`, `0x4e16c9`, `0x4de6b6`): `slot.timer + G - time(NULL) - 1` in whole
+/// seconds, `G` folded into `now` ([`countdown_now`]: the local clock before the sync, when `G` is
+/// 0), so a quest's last second reads 0. A negative value drops the row from the lists (`js` at
 /// `0x4e14c5`) and clamps to 0 in `GetQuestLogTimeLeft`. `None` when there is nothing to show:
 /// - an untimed slot;
 /// - a failed one: vmangos sets its timer to 1 (`Player.cpp:13430`), and the reference tests the
 ///   fail bit `[slot+0x7] & 0x2` first;
-/// - no server clock yet, the reference's never-synced `G == 0`.
+/// - no clock pushed at all, a bare VM.
 fn seconds_left(slot: &QuestSlotView, now: Option<f64>) -> Option<i64> {
     if slot.timer == 0 || slot.state & SLOT_FAILED != 0 {
         return None;
     }
-    let now = now?;
-    Some((f64::from(slot.timer) - now - 1.0).floor() as i64)
+    Some(i64::from(slot.timer) - now?.floor() as i64 - 1)
 }
 
 /// [`seconds_left`] of row `row` for the list verbs, which skip a header (`0x4e1460`) and drop an
@@ -774,7 +981,7 @@ fn live_seconds_left(model: &Model, row: &QuestLogRow) -> Option<i64> {
         return None;
     }
     let slot = model.quest_store.slot(row.slot)?;
-    seconds_left(slot, model.server_unix_time).filter(|&s| s >= 0)
+    seconds_left(slot, countdown_now(model)).filter(|&s| s >= 0)
 }
 
 /// Register the quest-log globals.
@@ -796,9 +1003,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `title, level, tag, isHeader, isCollapsed, isComplete`, always six (`0x4df930`). The index
     // truncates as `_ftol` does, and a missing or non-number one raises `Usage:`; out of range it
     // answers `nil, 0, nil, nil, nil, nil`, and a header's level is 0 too. A quest's title, level
-    // and tag are its record's. `isComplete` is -1 on the slot's failed bit (`0x4dfa61`) and 1 on
-    // its complete bit; the reference's -1 also takes the expiry latch (`0x4df480`) and its 1 is
-    // the turn-in test (`0x4df580`) (#1793).
+    // and tag are its record's. `isComplete` is -1 on the slot's failed bit (`0x4dfa61`) or the
+    // row's expiry latch (`0x4dfa69`), else 1 when the turn-in test passes (`0x4df580`, at
+    // `0x4dfa8d`), else nil.
     g.set(
         "GetQuestLogTitle",
         lua.create_function(|lua, i: Value| {
@@ -843,21 +1050,28 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(t) => Value::String(lua.create_string(t)?),
                 None => Value::Nil,
             };
-            let complete = if slot.state & SLOT_FAILED != 0 {
+            let failed = slot.state & SLOT_FAILED != 0 || store.is_latched(row.quest_id);
+            let passed = !failed && turn_in_passes(&model, record, slot);
+            let complete = if failed {
                 Value::Integer(-1)
-            } else if slot.state & SLOT_COMPLETE != 0 {
+            } else if passed {
                 Value::Integer(1)
             } else {
                 Value::Nil
             };
-            Ok(MultiValue::from_vec(vec![
+            let out = MultiValue::from_vec(vec![
                 Value::String(lua.create_string(&record.title)?),
                 Value::Integer(i64::from(record.level)),
                 tag,
                 Value::Nil,
                 Value::Nil,
                 complete,
-            ]))
+            ]);
+            drop(model);
+            if passed {
+                owe_turn_in_tutorial(&mut lua.app_data_mut::<Model>().expect("model app_data"));
+            }
+            Ok(out)
         })?,
     )?;
 
@@ -1048,16 +1262,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // 1 or nil, whether the selected slot has failed; the stock title then appends " - (Failed)"
+    // 1 or nil, whether the selection's slot has failed or its row latched (`0x4e09a4`,
+    // `0x4e09aa`); with no selection slot 0's bit decides and no row is latched (`0x4df480` on
+    // -1). Nil with no player (`0x4e0983`). The stock title then appends " - (Failed)"
     // (`QuestLogFrame.lua:354`).
     g.set(
         "IsCurrentQuestFailed",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let selected = model
+                .quest_row(model.quest_log_selection as usize)
+                .filter(|r| !r.is_header);
             Ok(flag(
-                model
-                    .quest_row_parts(model.quest_log_selection as usize)
-                    .is_some_and(|(_, slot)| slot.state & SLOT_FAILED != 0),
+                model.quest_store.player
+                    && (selected_slot(&model).is_some_and(|slot| slot.state & SLOT_FAILED != 0)
+                        || selected.is_some_and(|r| model.quest_store.is_latched(r.quest_id))),
             ))
         })?,
     )?;
@@ -1141,20 +1360,72 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // ── Timed quests ─────────────────────────────────────────────────────────────
 
     // One return per live timer, in log order, re-read every OnUpdate: `QuestTimerFrame_Update`
-    // takes them as varargs and hides on none (`QuestTimerFrame.lua:11`, `:26`, `:37`).
+    // takes them as varargs and hides on none (`QuestTimerFrame.lua:11`, `:26`, `:37`). None
+    // without a player (`0x4e1417`). A latched row is skipped (`0x4e14a7`); one whose time ran out
+    // (`js`, `0x4e14c5`) latches unless it can be turned in (`0x4e14f1`) and prints
+    // `ERR_QUEST_FAILED_S` with its title there and then (`0x4e1529`), and after the walk one
+    // `QUEST_LOG_UPDATE` fires if any latched (`0x4e154d`-`0x4e1559`).
     g.set(
         "GetQuestTimers",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(MultiValue::from_vec(
+            let rows: Vec<(u32, u8)> = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                if !model.quest_store.player {
+                    return Ok(MultiValue::new());
+                }
                 model
                     .quest_log
                     .entries
                     .iter()
-                    .filter_map(|e| live_seconds_left(&model, e))
-                    .map(Value::Integer)
-                    .collect(),
-            ))
+                    .filter(|e| !e.is_header)
+                    .map(|e| (e.quest_id, e.slot))
+                    .collect()
+            };
+            let mut left = Vec::new();
+            let mut latched = false;
+            for (quest_id, slot) in rows {
+                let title = {
+                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    if model.quest_store.is_latched(quest_id) {
+                        continue;
+                    }
+                    let Some(secs) = model
+                        .quest_store
+                        .slot(slot)
+                        .and_then(|s| seconds_left(s, countdown_now(&model)))
+                    else {
+                        continue;
+                    };
+                    if secs >= 0 {
+                        left.push(Value::Integer(secs));
+                        continue;
+                    }
+                    if !latch_expiry(&mut model, quest_id, slot) {
+                        continue;
+                    }
+                    latched = true;
+                    model
+                        .quest_store
+                        .records
+                        .get(&quest_id)
+                        .map(|r| r.title.clone())
+                };
+                // The line is shown inside the walk, before the signal (`0x4e1529`, `0x4e1559`).
+                let template = lua
+                    .globals()
+                    .get::<String>("ERR_QUEST_FAILED_S")
+                    .unwrap_or_default();
+                if let Some(title) = title {
+                    let text = fill(&template, &[Arg::S(&title)]);
+                    if !text.is_empty() {
+                        super::tick::show_chat_line_into(lua, "ERR_QUEST_FAILED_S", text);
+                    }
+                }
+            }
+            if latched {
+                super::tick::fire_event_into(lua, "QUEST_LOG_UPDATE", Vec::new());
+            }
+            Ok(MultiValue::from_vec(left))
         })?,
     )?;
 
@@ -1164,16 +1435,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetQuestIndexForTimer",
         lua.create_function(|lua, Idx(t): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let index = t.checked_sub(1).and_then(|n| {
-                model
-                    .quest_log
-                    .entries
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, e)| live_seconds_left(&model, e).is_some())
-                    .nth(n)
-                    .map(|(i, _)| i as i64 + 1)
-            });
+            // Nil without a player (`0x4e165f`).
+            let index = t
+                .checked_sub(1)
+                .filter(|_| model.quest_store.player)
+                .and_then(|n| {
+                    model
+                        .quest_log
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, e)| live_seconds_left(&model, e).is_some())
+                        .nth(n)
+                        .map(|(i, _)| i as i64 + 1)
+                });
             Ok(match index {
                 Some(i) => Value::Integer(i),
                 None => Value::Nil,
@@ -1181,15 +1456,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // The selection's seconds left, nil without a timer, which hides the stock "Time Remaining:"
-    // row (`QuestLogFrame.lua:364`).
+    // The selection's seconds left, slot 0's with no selection (`0x4e08ca`), nil without a timer,
+    // which hides the stock "Time Remaining:" row (`QuestLogFrame.lua:364`). Nil too with no
+    // player (`0x4e08c8`) and before the first time sync (`G == 0`, `0x4e08fc`), which the timer
+    // list does not wait for.
     g.set(
         "GetQuestLogTimeLeft",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let left = model
-                .quest_row_parts(model.quest_log_selection as usize)
-                .and_then(|(_, slot)| seconds_left(slot, model.server_unix_time));
+            let synced = model.server_unix_time.is_some();
+            let left = selected_slot(&model)
+                .filter(|_| model.quest_store.player && synced)
+                .and_then(|slot| seconds_left(slot, countdown_now(&model)));
             Ok(match left {
                 // Clamped where the lists drop the row, as in the reference.
                 Some(s) => Value::Integer(s.max(0)),
@@ -1840,6 +2118,367 @@ mod tests {
                 "{call}"
             );
         }
+    }
+
+    /// One timed quest, row 2, its deadline 1000 and the clock at 1001.5: run out.
+    fn expired(r: QuestRecordView, counter: u8) -> UiScript {
+        let mut s = UiScript::new().unwrap();
+        s.set_server_unix_time(1001.5);
+        let mut slot = slot(50, counter, 0);
+        slot.timer = 1000;
+        s.set_quest_log_player(true);
+        // Seated by the field change after the clock, the rebuild latches it as it makes the row.
+        s.seed_quest_record(50, r);
+        let mut slots = [QuestSlotView::default(); QUEST_LOG_SLOTS];
+        slots[0] = slot;
+        s.set_quest_slots(slots);
+        s
+    }
+
+    /// `GetQuestTimers`' expired branch (`0x4e14c5`): the row latches (`0x4df50d`), the givers
+    /// refresh (`0x4df531`), the failure line reaches chat with the title inside the call
+    /// (`0x4e1529`) and then one `QUEST_LOG_UPDATE` fires (`0x4e1559`); the log reads it failed
+    /// (`0x4dfa69`, `0x4e09aa`), and a latched row is skipped after (`0x4e14a7`).
+    #[test]
+    fn a_timer_that_runs_out_latches_the_quest_failed() {
+        let mut hunt = record("Hunt", 1, 12, "Elwynn Forest");
+        hunt.objectives[0] = kill(40, 3);
+        let mut s = expired(hunt, 0);
+        // The row made while the deadline was ahead, then the deadline as it stands: the timers'
+        // read is the one to find it run out.
+        s.quest_log_changed({
+            let mut slots = s.model_ref().quest_store.slots;
+            slots[0].timer = 2000;
+            slots
+        });
+        s.take_quest_giver_refreshes();
+        let mut slots = s.model_ref().quest_store.slots;
+        slots[0].timer = 1000;
+        s.set_quest_slots(slots);
+        s.run("ERR_QUEST_FAILED_S = \"%s failed.\"").unwrap();
+        heard::listen(&s, &["CHAT_MSG_SYSTEM", "QUEST_LOG_UPDATE"], Some("arg1"));
+        assert_eq!(s.eval::<i64>("return getn({GetQuestTimers()})").unwrap(), 0);
+        assert_eq!(
+            heard::take(&s),
+            ["CHAT_MSG_SYSTEM Hunt failed.", "QUEST_LOG_UPDATE nil"]
+        );
+        assert_eq!(
+            s.take_shown_chat_lines(),
+            [("ERR_QUEST_FAILED_S", "Hunt failed.".to_string())]
+        );
+        assert_eq!(s.take_quest_giver_refreshes(), 1);
+        assert_eq!(is_complete(&s), Some(-1));
+        assert!(s.quest_log_latched(50));
+        s.run("SelectQuestLogEntry(2)").unwrap();
+        assert!(s
+            .eval::<bool>("return IsCurrentQuestFailed() == 1")
+            .unwrap());
+        s.eval::<i64>("return getn({GetQuestTimers()})").unwrap();
+        assert!(heard::take(&s).is_empty(), "a latched row is skipped");
+        assert!(s.take_shown_chat_lines().is_empty());
+    }
+
+    /// The latch is not taken by a quest that can be turned in (`0x4df4fc`), and every rebuild
+    /// clears it with the rows (`0x4de5e2`), latching again a row still expired as it is made
+    /// (`0x4de6ca`), with no line and no signal of its own.
+    #[test]
+    fn the_latch_spares_a_finished_quest_and_every_rebuild_remakes_it() {
+        let mut hunt = record("Hunt", 1, 12, "Elwynn Forest");
+        hunt.objectives[0] = kill(40, 3);
+        let mut done = expired(hunt.clone(), 3);
+        heard::listen(&done, &["QUEST_LOG_UPDATE"], None);
+        let slots = done.model_ref().quest_store.slots;
+        done.quest_log_changed(slots);
+        assert_eq!(heard::take(&done).len(), 1, "the rebuild's own");
+        assert!(!done.quest_log_latched(50));
+        assert_eq!(is_complete(&done), Some(1));
+        done.eval::<i64>("return getn({GetQuestTimers()})").unwrap();
+        assert!(heard::take(&done).is_empty());
+        assert!(!done.quest_log_latched(50));
+
+        let mut s = expired(hunt, 0);
+        heard::listen(&s, &["QUEST_LOG_UPDATE"], None);
+        let mut slots = s.model_ref().quest_store.slots;
+        s.quest_log_changed(slots);
+        assert!(s.quest_log_latched(50), "latched as its row was made");
+        assert_eq!(heard::take(&s).len(), 1, "the rebuild's signal alone");
+        assert!(
+            s.take_shown_chat_lines().is_empty(),
+            "no line from the rebuild"
+        );
+        assert_eq!(s.take_quest_giver_refreshes(), 1);
+        // The server moves the deadline: the next rebuild clears the latch.
+        slots[0].timer = 5000;
+        s.quest_log_changed(slots);
+        assert!(!s.quest_log_latched(50));
+        assert_eq!(is_complete(&s), None);
+        // `SMSG_QUESTUPDATE_FAILEDTIMER`'s latch (`0x4df550`).
+        assert!(s.quest_log_latch_quest(50));
+        assert_eq!(is_complete(&s), Some(-1));
+    }
+
+    /// A turn-in test that passes asks for tutorial 0x21, Quest Completion (`0x4df792`), from
+    /// `GetQuestLogTitle` (`0x4dfa8d`) and from the latch (`0x4df4fc`); one that fails asks
+    /// nothing.
+    #[test]
+    fn a_passing_turn_in_test_asks_for_the_quest_completion_tutorial() {
+        let mut hunt = record("Hunt", 1, 12, "Elwynn Forest");
+        hunt.objectives[0] = kill(40, 3);
+        let mut s = UiScript::new().unwrap();
+        seat(&mut s, &[(50, hunt.clone(), slot(50, 2, 0))]);
+        assert_eq!(is_complete(&s), None);
+        assert!(s.take_tutorial_triggers().is_empty());
+        let mut s = UiScript::new().unwrap();
+        seat(&mut s, &[(50, hunt, slot(50, 3, 0))]);
+        assert_eq!(is_complete(&s), Some(1));
+        assert_eq!(is_complete(&s), Some(1));
+        assert_eq!(s.take_tutorial_triggers(), [0x21], "one ask a drain");
+        assert!(!s.quest_log_latch_quest(50), "the latch's test passes");
+        assert_eq!(s.take_tutorial_triggers(), [0x21]);
+    }
+
+    /// One timed quest seated with its deadline at `timer`, no clock pushed: rows made, nothing
+    /// latched.
+    fn timed(timer: u32) -> UiScript {
+        let mut hunt = record("Hunt", 1, 12, "Elwynn Forest");
+        hunt.objectives[0] = kill(40, 3);
+        let mut slot = slot(50, 0, 0);
+        slot.timer = timer;
+        let mut s = UiScript::new().unwrap();
+        seat(&mut s, &[(50, hunt, slot)]);
+        s
+    }
+
+    fn timers(s: &UiScript) -> Vec<i64> {
+        s.eval::<Vec<i64>>("return {GetQuestTimers()}").unwrap()
+    }
+
+    /// The countdown is whole seconds, `deadline - time(NULL) - 1` (`0x4e14b9`-`0x4e14c1`): the
+    /// last second reads 0 and the deadline itself runs out.
+    #[test]
+    fn a_timer_reads_its_last_second_as_zero() {
+        let mut s = timed(1000);
+        s.set_server_unix_time(999.5);
+        assert_eq!(timers(&s), [0]);
+        assert!(!s.quest_log_latched(50));
+        s.set_server_unix_time(1000.0);
+        assert!(timers(&s).is_empty());
+        assert!(s.quest_log_latched(50));
+    }
+
+    /// A sync that finds the clocks equal to the second stores `G = 1` (`0x4def02`): the
+    /// countdowns read `deadline - time(NULL)`, a second more, and the deadline's own second
+    /// still reads 0.
+    #[test]
+    fn a_zero_difference_sync_reads_a_second_more() {
+        let mut s = timed(1000);
+        s.set_server_unix_time(999.5);
+        s.set_clock_sync_zero(true);
+        assert_eq!(timers(&s), [1]);
+        s.run("SelectQuestLogEntry(2)").unwrap();
+        assert_eq!(s.eval::<i64>("return GetQuestLogTimeLeft()").unwrap(), 1);
+        s.set_server_unix_time(1000.0);
+        assert_eq!(timers(&s), [0]);
+        assert!(!s.quest_log_latched(50));
+        s.set_server_unix_time(1001.0);
+        assert!(timers(&s).is_empty());
+        assert!(s.quest_log_latched(50));
+    }
+
+    /// The by-id scans stop on a header whose zone id is the quest's id (`0x4de713`): the
+    /// failed-timer latch takes the header, refreshing the givers (`0x4df531`) and leaving the
+    /// quest's row unlatched, and the by-id latch read answers no for the header (`0x4df4dd`)
+    /// even once the quest's own row is latched by its timer.
+    #[test]
+    fn a_header_with_the_quests_id_takes_its_by_id_latch() {
+        let mut hunt = record("Hunt", 1, 12, "Elwynn Forest");
+        hunt.objectives[0] = kill(40, 3);
+        let mut slot = slot(12, 0, 0);
+        slot.timer = 2000;
+        let mut s = UiScript::new().unwrap();
+        s.set_server_unix_time(1500.0);
+        seat(&mut s, &[(12, hunt, slot)]);
+        s.take_quest_giver_refreshes();
+        assert!(s.quest_log_latch_quest(12), "the header latches");
+        assert_eq!(s.take_quest_giver_refreshes(), 1);
+        assert_eq!(is_complete(&s), None, "the quest's row is not latched");
+        assert!(!s.quest_log_latched(12));
+        s.set_server_unix_time(2500.0);
+        assert!(timers(&s).is_empty());
+        assert_eq!(is_complete(&s), Some(-1), "its timer latches its own row");
+        assert!(!s.quest_log_latched(12), "the header answers first");
+    }
+
+    /// Before the first time sync `G` is 0 (`0x4de3d3`) and the countdowns read the local clock:
+    /// the timer list and the rebuild count and latch by it (`0x4e14b4`, `0x4de6b1`), while
+    /// `GetQuestLogTimeLeft` waits for the sync (`0x4e08fc`).
+    #[test]
+    fn before_the_sync_the_timers_count_by_the_local_clock() {
+        let mut s = timed(1000);
+        s.set_local_unix_time(900.0);
+        assert_eq!(timers(&s), [99]);
+        assert_eq!(s.eval::<i64>("return GetQuestIndexForTimer(1)").unwrap(), 2);
+        s.run("SelectQuestLogEntry(2)").unwrap();
+        assert!(s
+            .eval::<bool>("return GetQuestLogTimeLeft() == nil")
+            .unwrap());
+        s.set_server_unix_time(950.0);
+        assert_eq!(s.eval::<i64>("return GetQuestLogTimeLeft()").unwrap(), 49);
+        assert_eq!(timers(&s), [49], "the server's clock once synced");
+
+        let mut s = timed(1000);
+        s.set_local_unix_time(1200.0);
+        let slots = s.model_ref().quest_store.slots;
+        s.quest_log_changed(slots);
+        assert!(
+            s.quest_log_latched(50),
+            "the rebuild latches by the local clock"
+        );
+    }
+
+    /// No player, no timers: `GetQuestTimers` returns nothing and latches nothing (`0x4e1417`),
+    /// `GetQuestIndexForTimer` is nil (`0x4e165f`), and the turn-in test fails (`0x4df5e1`).
+    #[test]
+    fn the_timer_verbs_need_the_player() {
+        let mut s = timed(2000);
+        s.set_server_unix_time(1500.0);
+        s.set_quest_log_player(false);
+        assert!(timers(&s).is_empty());
+        assert!(s
+            .eval::<bool>("return GetQuestIndexForTimer(1) == nil")
+            .unwrap());
+        let mut slots = s.model_ref().quest_store.slots;
+        slots[0].timer = 1000;
+        s.set_quest_slots(slots);
+        heard::listen(&s, &["QUEST_LOG_UPDATE"], None);
+        assert!(timers(&s).is_empty());
+        assert!(!s.quest_log_latched(50), "nothing latched");
+        assert!(heard::take(&s).is_empty());
+        s.set_quest_log_player(true);
+        assert!(timers(&s).is_empty());
+        assert!(s.quest_log_latched(50));
+    }
+
+    /// With no selection the selection verbs read slot 0 (`0x4df010`'s -1 into `0x4df063`):
+    /// `GetQuestLogTimeLeft` its timer (`0x4e08ca`) and `IsCurrentQuestFailed` its fail bit
+    /// (`0x4e0985`-`0x4e09a4`), but no row's latch (`0x4df480` on -1).
+    #[test]
+    fn with_no_selection_the_selection_verbs_read_slot_zero() {
+        let mut s = timed(1000);
+        s.set_server_unix_time(900.0);
+        s.set_quest_log_selection(0);
+        assert_eq!(s.eval::<i64>("return GetQuestLogTimeLeft()").unwrap(), 99);
+        assert!(s
+            .eval::<bool>("return IsCurrentQuestFailed() == nil")
+            .unwrap());
+        assert!(s.quest_log_latch_quest(50));
+        assert!(
+            s.eval::<bool>("return IsCurrentQuestFailed() == nil")
+                .unwrap(),
+            "no row holds the selection, so no latch is read"
+        );
+        let mut slots = s.model_ref().quest_store.slots;
+        slots[0].state = SLOT_FAILED;
+        s.set_quest_slots(slots);
+        assert!(s
+            .eval::<bool>("return IsCurrentQuestFailed() == 1")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("return GetQuestLogTimeLeft() == nil")
+            .unwrap());
+        s.set_quest_log_player(false);
+        assert!(s
+            .eval::<bool>("return IsCurrentQuestFailed() == nil")
+            .unwrap());
+    }
+
+    /// `isComplete` of one quest seated alone, row 2 under its header.
+    fn is_complete(s: &UiScript) -> Option<i64> {
+        s.eval::<Option<i64>>("local _,_,_,_,_,c = GetQuestLogTitle(2) return c")
+            .unwrap()
+    }
+
+    /// `isComplete` is the turn-in test `0x4df580`, not the slot's complete bit: the counters
+    /// and the held items decide (`0x4df74a`, `0x4df780`), the bit only for flags `& 6`
+    /// (`0x4df6bd`), a quest with nothing to check never completes (`0x4df6b0`), and failed wins
+    /// (`0x4dfa61`).
+    #[test]
+    fn is_complete_runs_the_turn_in_test() {
+        let seated = |r: QuestRecordView, counter: u8, state: u8| {
+            let mut s = UiScript::new().unwrap();
+            seat(&mut s, &[(50, r, slot(50, counter, state))]);
+            s
+        };
+        let mut hunt = record("Hunt", 1, 12, "Elwynn Forest");
+        hunt.objectives[0] = kill(40, 3);
+        assert_eq!(
+            is_complete(&seated(hunt.clone(), 3, 0)),
+            Some(1),
+            "no bit needed"
+        );
+        assert_eq!(is_complete(&seated(hunt.clone(), 2, SLOT_COMPLETE)), None);
+        assert_eq!(
+            is_complete(&seated(hunt.clone(), 3, SLOT_COMPLETE | SLOT_FAILED)),
+            Some(-1)
+        );
+        let bare = record("Speak", 1, 12, "Elwynn Forest");
+        assert_eq!(is_complete(&seated(bare.clone(), 0, SLOT_COMPLETE)), None);
+        let mut explore = bare;
+        explore.needs_complete_bit = true;
+        assert_eq!(is_complete(&seated(explore.clone(), 0, 0)), None);
+        assert_eq!(is_complete(&seated(explore, 0, SLOT_COMPLETE)), Some(1));
+        let mut gated = hunt;
+        gated.needs_complete_bit = true;
+        assert_eq!(
+            is_complete(&seated(gated, 3, 0)),
+            None,
+            "the bit gates the met counters"
+        );
+
+        // Items count held copies, the quest's own item too.
+        let mut pelts = record("Pelts", 1, 12, "Elwynn Forest");
+        pelts.objectives[0] = collect(900, 5);
+        pelts.src_item_id = 900;
+        let mut s = seated(pelts, 0, 0);
+        s.set_quest_item_counts([(900, 4)].into());
+        assert_eq!(is_complete(&s), None);
+        s.set_quest_item_counts([(900, 5)].into());
+        assert_eq!(is_complete(&s), Some(1));
+    }
+
+    /// The standings are a least (`jl`, `0x4df6d6`) and a most (`jg`, `0x4df6eb`), read off the
+    /// base plus the wire (`0x4d6370`) of every reputation-indexed faction, 0 for one not pushed;
+    /// a negative money asks that much coinage (`0x4df72e`). A reputation id alone is enough to
+    /// be completable, and nothing passes with no player (`0x4df5e1`).
+    #[test]
+    fn the_turn_in_test_reads_the_standings_and_the_coinage() {
+        let mut r = record("Favor", 1, 12, "Elwynn Forest");
+        r.rep_min = (72, 3000);
+        r.rep_max = (76, 0);
+        r.required_money = 100;
+        let mut s = UiScript::new().unwrap();
+        seat(&mut s, &[(50, r, slot(50, 0, 0))]);
+        let reps = |s: &mut UiScript, min: i32, max: i32| {
+            s.set_faction_standings([(72, min), (76, max)].into());
+        };
+        s.set_money(100);
+        reps(&mut s, 3000, 0);
+        assert_eq!(is_complete(&s), Some(1));
+        reps(&mut s, 2999, 0);
+        assert_eq!(is_complete(&s), None, "short of the least");
+        reps(&mut s, 3000, 1);
+        assert_eq!(is_complete(&s), None, "past the most");
+        reps(&mut s, 3000, 0);
+        s.set_money(99);
+        assert_eq!(is_complete(&s), None, "short of the coinage");
+        s.set_money(100);
+        s.set_faction_standings([(72, 3000)].into());
+        assert_eq!(is_complete(&s), Some(1), "a faction not pushed reads 0");
+        s.set_faction_standings([(72, 3000), (76, 1)].into());
+        assert_eq!(is_complete(&s), None);
+        s.set_quest_log_player(false);
+        s.set_faction_standings([(72, 3000)].into());
+        assert_eq!(is_complete(&s), None, "no player");
     }
 
     /// The line reads the slot's counter and the bags at the call: a count that moves changes the
