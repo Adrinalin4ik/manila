@@ -3,37 +3,62 @@
 
 use super::common::script;
 
-// ── The positional format wrapper ──
+// ── format's positional items ──
 
+/// `str_format` (`0x7fd3d0`) reads one digit and `$` as the item's argument (`0x7fd4ac`) and goes on
+/// from the one after it, so a positional and a sequential item mix without an error.
 #[test]
-fn positional_format_reorders_and_mix_is_an_error() {
+fn format_takes_positional_items_as_the_client() {
     let s = script();
+    let f = |src: &str| s.eval::<String>(src).unwrap();
+    assert_eq!(f(r#"return format("%2$s %1$s", "a", "b")"#), "b a");
+    assert_eq!(f(r#"return format("%1$05d", 42)"#), "00042");
+    assert_eq!(f(r#"return string.format("%d-%s", 1, "x")"#), "1-x");
+    assert_eq!(f(r#"return format("%1$d%%", 50)"#), "50%");
+    // The cursor goes on from a positional item.
+    assert_eq!(f(r#"return format("%1$s %s", "a", "b")"#), "a b");
     assert_eq!(
-        s.eval::<String>(r#"return format("%2$s %1$s", "a", "b")"#)
-            .unwrap(),
-        "b a"
+        f(r#"return format("%2$s %s %1$s", "a", "b", "c")"#),
+        "b c a"
     );
-    // width/precision travel with the positional spec
+    // `%0$s` is the format itself.
+    assert_eq!(f(r#"return format("<%0$s>")"#), "<<%0$s>>");
+}
+
+/// A bad call raises from `format` itself, at its caller's line, in the client's words.
+#[test]
+fn format_errors_are_the_clients() {
+    let s = script();
+    // The message past the chunk's name: the caller's line, then the text.
+    let err = |src: &str| {
+        let e = s
+            .eval::<String>(&format!(
+                "local ok, e = pcall(function()\n{src}\nend) return e"
+            ))
+            .unwrap();
+        e[e.find(":2: ").expect("the caller's line")..].to_string()
+    };
     assert_eq!(
-        s.eval::<String>(r#"return format("%1$05d", 42)"#).unwrap(),
-        "00042"
+        err(r#"return format("%d")"#),
+        ":2: bad argument #2 to `format' (number expected, got no value)"
     );
-    // sequential still works, through the patched `string.format` too
     assert_eq!(
-        s.eval::<String>(r#"return string.format("%d-%s", 1, "x")"#)
-            .unwrap(),
-        "1-x"
+        err(r#"return string.format("%d", "x")"#),
+        ":2: bad argument #2 to `format' (number expected, got string)"
     );
-    // %% is preserved
     assert_eq!(
-        s.eval::<String>(r#"return format("%1$d%%", 50)"#).unwrap(),
-        "50%"
+        err(r#"return format("%y", 1)"#),
+        ":2: invalid option in `format'"
     );
-    // mixing positional and sequential is an error, as in the reference
-    let mixed_ok: bool = s
-        .eval(r#"return pcall(format, "%1$s %s", "a", "b")"#)
-        .unwrap();
-    assert!(!mixed_ok, "mixed positional+sequential must error");
+    // A positional item is one digit: `%10$s` is a width of 10 and the conversion `$`.
+    assert_eq!(
+        err(r#"return format("%10$s", "a")"#),
+        ":2: invalid option in `format'"
+    );
+    assert_eq!(
+        err(r#"return format("%123d", 1)"#),
+        ":2: invalid format (width or precision too long)"
+    );
 }
 
 // ── getglobal and the alias layer ──
@@ -233,6 +258,45 @@ fn loadstring_is_text_only_bytecode_rejected() {
         )
         .unwrap();
     assert!(ok, "loadstring must reject bytecode");
+}
+
+/// `luaB_loadstring` (`0x703280`) names a chunk by its source's bytes as a C string, which
+/// `luaO_chunkid` (`0x6f5c40`) cuts at the first `\n` alone; a NUL in the source compiles.
+#[test]
+fn loadstring_names_a_chunk_by_its_raw_bytes() {
+    let s = script();
+    let err = |src: &str| {
+        s.eval::<String>(&format!(
+            "local f, e = loadstring({src}) if not f then return e end \
+             local ok, m = pcall(f) return m"
+        ))
+        .unwrap()
+    };
+    assert_eq!(
+        s.eval::<i64>(r#"return string.len(loadstring("return '\0'")())"#)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        err(r#""error('e') --\0x""#),
+        "[string \"error('e') --\"]:1: e"
+    );
+    assert_eq!(
+        err(r#""error('e')\r--x""#),
+        "[string \"error('e')\r--x\"]:1: e"
+    );
+    assert_eq!(
+        err(r#""error('e')\n--x""#),
+        "[string \"error('e')...\"]:1: e"
+    );
+    assert!(
+        s.eval::<bool>(
+            r#"local f = loadstring("error('e') --\233") local ok, m = pcall(f)
+               return string.find(m, "\233", 1, true) ~= nil"#
+        )
+        .unwrap(),
+        "a Latin-1 byte in the name stays itself"
+    );
 }
 
 // ── GetTime: the session clock ──

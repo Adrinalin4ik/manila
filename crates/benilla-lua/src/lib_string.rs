@@ -90,22 +90,105 @@ fn sub(vm: &mut Vm, nargs: usize) -> R<usize> {
     }
 }
 
+/// The client's `str_lower` (`0x7fbdf0`): each UTF-8 code point through `LowerCodepoint`
+/// (`0x7fc0a0`), `A`-`Z` and U+00C0-U+00DE up by 32.
 fn lower(vm: &mut Vm, nargs: usize) -> R<usize> {
+    case_map(vm, nargs, |c| match c {
+        0x41..=0x5a | 0xc0..=0xde => c + 0x20,
+        _ => c,
+    })
+}
+
+/// The client's `str_upper` (`0x7fc0c0`): the same walk through `UpperCodepoint` (`0x7fc180`),
+/// `a`-`z` and U+00E0-U+00FE down by 32.
+fn upper(vm: &mut Vm, nargs: usize) -> R<usize> {
+    case_map(vm, nargs, |c| match c {
+        0x61..=0x7a | 0xe0..=0xfe => c - 0x20,
+        _ => c,
+    })
+}
+
+/// `str_lower`'s loop: decode a code point, map it, encode it, advance by the bytes the decoder
+/// read (`0x7fbe8a`). A string of ASCII without a NUL maps byte by byte, as the loop would.
+///
+/// Deviation: the decoder reads a NUL as no bytes (`0x7fbeda`), so the client's loop never
+/// passes one and the call never returns; here the result ends there.
+fn case_map(vm: &mut Vm, nargs: usize, map: fn(u32) -> u32) -> R<usize> {
     let s = vm.check_str(nargs, 1)?;
     let r = vm.heap.intern_with(|h, b| {
-        b.extend_from_slice(h.str(s));
-        b.make_ascii_lowercase();
+        let src = h.str(s);
+        if src.iter().all(|&c| c != 0 && c < 0x80) {
+            b.extend(src.iter().map(|&c| map(c as u32) as u8));
+            return;
+        }
+        let mut i = 0;
+        while i < src.len() {
+            let (c, n) = utf8_decode(src, i);
+            if n == 0 {
+                break;
+            }
+            utf8_encode(map(c), b);
+            i += n;
+        }
     });
     Ok(vm.ret1(Value::Str(r)))
 }
 
-fn upper(vm: &mut Vm, nargs: usize) -> R<usize> {
-    let s = vm.check_str(nargs, 1)?;
-    let r = vm.heap.intern_with(|h, b| {
-        b.extend_from_slice(h.str(s));
-        b.make_ascii_uppercase();
-    });
-    Ok(vm.ret1(Value::Str(r)))
+/// The client's `Utf8DecodeChar` (`0x7fbeb0`) at `s[i]`: the code point and the bytes read, the
+/// string ending in the NUL a C string ends in. A lead byte gives its count of continuations by
+/// its masks (`0x7fbef2`-`0x7fbf4e`), up to five, with no check of the value; a byte that leads
+/// nothing, or a continuation that is not `10xxxxxx` (`0x7fbf7c`, counted first at `0x7fbf75`),
+/// is `0x80000000`; a NUL is `0xffffffff`, its own byte not read.
+fn utf8_decode(s: &[u8], i: usize) -> (u32, usize) {
+    let at = |k: usize| s.get(k).copied().unwrap_or(0);
+    let lead = at(i);
+    let (bits, n) = match lead {
+        0 => return (u32::MAX, 0),
+        _ if lead & 0xfe == 0xfc => (lead & 0x01, 5),
+        _ if lead & 0xfc == 0xf8 => (lead & 0x03, 4),
+        _ if lead & 0xf8 == 0xf0 => (lead & 0x07, 3),
+        _ if lead & 0xf0 == 0xe0 => (lead & 0x0f, 2),
+        _ if lead & 0xe0 == 0xc0 => (lead & 0x1f, 1),
+        _ if lead & 0x80 != 0 => return (0x8000_0000, 1),
+        _ => return (lead as u32, 1),
+    };
+    let mut c = bits as u32;
+    for k in 1..=n {
+        let x = at(i + k);
+        if x == 0 {
+            return (u32::MAX, k);
+        }
+        if x & 0xc0 != 0x80 {
+            return (0x8000_0000, k + 1);
+        }
+        c = c << 6 | (x & 0x3f) as u32;
+    }
+    (c, n + 1)
+}
+
+/// The client's `Utf8EncodeChar` (`0x7fbfb0`), by its limits (`0x7fbfb6`-`0x7fc05a`): one byte
+/// below 0x80, two below 0x800, three below 0x10000, four below 0x200000, five below 0x400000,
+/// six below 0x80000000, and none from there.
+fn utf8_encode(c: u32, out: &mut Vec<u8>) {
+    let cont = |shift: u32| 0x80 | (c >> shift) as u8 & 0x3f;
+    match c {
+        0..0x80 => out.push(c as u8),
+        0x80..0x800 => out.extend([0xc0 | (c >> 6) as u8, cont(0)]),
+        0x800..0x1_0000 => out.extend([0xe0 | (c >> 12) as u8, cont(6), cont(0)]),
+        0x1_0000..0x20_0000 => out.extend([0xf0 | (c >> 18) as u8, cont(12), cont(6), cont(0)]),
+        0x20_0000..0x40_0000 => {
+            out.extend([0xf8 | (c >> 24) as u8, cont(18), cont(12), cont(6), cont(0)])
+        }
+        0x40_0000..0x8000_0000 => out.extend([
+            0xfc | (c >> 30) as u8,
+            cont(24),
+            cont(18),
+            cont(12),
+            cont(6),
+            cont(0),
+        ]),
+        _ => {}
+    }
 }
 
 fn char_(vm: &mut Vm, nargs: usize) -> R<usize> {
@@ -145,26 +228,20 @@ fn rep(vm: &mut Vm, nargs: usize) -> R<usize> {
     r
 }
 
-/// 5.1's `byte`: the bytes from `i` (1) to `j` (`i`), each a number.
+/// The client's `str_byte` (`0x7fc210`): the byte at one position, `luaL_optnumber` (default 1,
+/// `0x7fc238`) truncated to 32 bits by `__ftol` and counted from the end when negative
+/// (`0x7fc247`), or nothing outside 1 to the length (`0x7fc24c`-`0x7fc252`). A third argument is
+/// never read.
 fn byte(vm: &mut Vm, nargs: usize) -> R<usize> {
     let s = vm.check_str(nargs, 1)?;
     let l = vm.heap.str(s).len();
-    let posi = posrelat(vm.opt_integer(nargs, 2, 1)?, l);
-    let pose = posrelat(vm.opt_integer(nargs, 3, posi)?, l);
-    let posi = posi.max(1);
-    let pose = pose.min(l as i64);
-    if posi > pose {
+    let pos = crate::api::c_int(vm.opt_number(nargs, 2, 1.0)?) as i64;
+    let pos = if pos < 0 { pos + l as i64 + 1 } else { pos };
+    if pos <= 0 || pos > l as i64 {
         return Ok(0);
     }
-    let n = (pose - posi + 1) as usize;
-    if !vm.check_stack(n) {
-        return Err(vm.error_at(1, "stack overflow (string slice too long)"));
-    }
-    for i in 0..n {
-        let b = vm.heap.str(s)[posi as usize - 1 + i];
-        vm.push(Value::Num(b as f64));
-    }
-    Ok(n)
+    let b = vm.heap.str(s)[pos as usize - 1];
+    Ok(vm.ret1(Value::Num(b as f64)))
 }
 
 /// 5.1's `dump`: a Lua function becomes a binary chunk, a native one cannot. The chunk carries
@@ -188,6 +265,12 @@ fn dump(vm: &mut Vm, nargs: usize) -> R<usize> {
 
 // ── string.format ────────────────────────────────────────────────────────────────────────────
 
+/// The client's `str_format` (`0x7fd3d0`): in its Lua 5.0 library, this one function is Lua 4.0's
+/// `lstrlib.c` code. The format is a C string, read up to its first NUL. Each item may name its
+/// argument with one digit and `$` (`0x7fd4ac`), which sets the cursor the next items go on from;
+/// its flags, width and precision are matched as `[-+ #0]*(%d*)%.?(%d*)` (`0x8823ec`), two digits
+/// at most each and 18 bytes in all (`0x7fd50c`-`0x7fd51c`), and go to `sprintf` with the
+/// conversion.
 fn format(vm: &mut Vm, nargs: usize) -> R<usize> {
     let mut b = vm.take_bufs::<2>();
     let r = format_in(vm, nargs, &mut b);
@@ -197,8 +280,9 @@ fn format(vm: &mut Vm, nargs: usize) -> R<usize> {
 
 fn format_in(vm: &mut Vm, nargs: usize, [f, out]: &mut [Vec<u8>; 2]) -> R<usize> {
     let fs = vm.check_str(nargs, 1)?;
-    f.extend_from_slice(vm.heap.str(fs));
+    f.extend_from_slice(crate::lex::cstr(vm.heap.str(fs)));
     let f = &f[..];
+    let at = |j: usize| f.get(j).copied().unwrap_or(0);
     let mut arg = 1;
     let mut i = 0;
     while i < f.len() {
@@ -208,109 +292,89 @@ fn format_in(vm: &mut Vm, nargs: usize, [f, out]: &mut [Vec<u8>; 2]) -> R<usize>
             continue;
         }
         i += 1;
-        if i < f.len() && f[i] == b'%' {
+        if at(i) == b'%' {
             out.push(b'%');
             i += 1;
             continue;
         }
-        arg += 1;
-        // `if (++arg > top) luaL_argerror(L, arg, "no value")`, before the item is read.
-        if arg > nargs {
-            return Err(vm.arg_error(arg, "no value"));
-        }
         // A number's text is short: the bound on the whole is enough for it.
         vm.check_len(out)?;
-        // `scanformat`: flags, two width digits, a point and two precision digits at most.
+        let mut initf = i;
+        if at(i).is_ascii_digit() && at(i + 1) == b'$' {
+            arg = (at(i) - b'0') as usize;
+            initf = i + 2;
+        }
+        arg += 1;
         let mut spec = Spec::default();
-        let at = |j: usize| f.get(j).copied().unwrap_or(0);
-        let flags_at = i;
-        while at(i) != 0 && b"-+ #0".contains(&at(i)) {
-            match at(i) {
+        let mut j = initf;
+        while at(j) != 0 && b"-+ #0".contains(&at(j)) {
+            match at(j) {
                 b'-' => spec.minus = true,
                 b'+' => spec.plus = true,
                 b' ' => spec.space = true,
                 b'#' => spec.alt = true,
                 _ => spec.zero = true,
             }
-            i += 1;
+            j += 1;
         }
-        // 5.1's `scanformat`: six flags or more, which `FLAGS` cannot hold.
-        if i - flags_at >= 6 {
-            return Err(vm.error_at(1, "invalid format (repeated flags)"));
+        let width_at = j;
+        while at(j).is_ascii_digit() {
+            spec.width = spec.width.saturating_mul(10) + (at(j) - b'0') as usize;
+            j += 1;
         }
-        for _ in 0..2 {
-            if at(i).is_ascii_digit() {
-                spec.width = spec.width * 10 + (at(i) - b'0') as usize;
-                i += 1;
-            }
+        let width_len = j - width_at;
+        if at(j) == b'.' {
+            j += 1;
+            spec.precision = Some(0);
         }
-        if at(i) == b'.' {
-            i += 1;
-            let mut p = 0;
-            for _ in 0..2 {
-                if at(i).is_ascii_digit() {
-                    p = p * 10 + (at(i) - b'0') as usize;
-                    i += 1;
-                }
-            }
-            spec.precision = Some(p);
+        let prec_at = j;
+        while at(j).is_ascii_digit() {
+            spec.precision = spec
+                .precision
+                .map(|p| p.saturating_mul(10) + (at(j) - b'0') as usize);
+            j += 1;
         }
-        if at(i).is_ascii_digit() {
+        let prec_len = j - prec_at;
+        if width_len > 2 || prec_len > 2 || j - initf > 18 {
             return Err(vm.error_at(1, "invalid format (width or precision too long)"));
         }
-        let conv = at(i);
-        i += 1;
+        let conv = at(j);
+        i = j + 1;
         match conv {
-            b'c' => {
-                // `(int)luaL_checknumber`: the double cast straight to 32 bits.
-                let c = crate::api::c_int_direct(vm.check_number(nargs, arg)?);
-                let item = cfmt::fmt_str(
-                    &[c as u8],
-                    &Spec {
-                        precision: None,
-                        ..spec
-                    },
-                );
-                // `luaL_addlstring(b, buff, strlen(buff))`: a `%c` of 0 ends the item.
-                let item = &item[..item.iter().position(|&b| b == 0).unwrap_or(item.len())];
-                out.extend_from_slice(item);
-            }
-            b'd' | b'i' => {
-                // `(long)luaL_checknumber`.
-                let n = crate::api::c_integer(vm.check_number(nargs, arg)?);
-                let item = if spec.is_plain() {
-                    // A bare `%d`: the digits alone.
-                    n.to_string()
-                } else {
-                    cfmt::fmt_int(n, &spec)
-                };
-                out.extend_from_slice(item.as_bytes());
-            }
-            b'o' | b'u' | b'x' | b'X' => {
-                let n = vm.check_number(nargs, arg)?;
-                // `(unsigned long)luaL_checknumber`.
-                let n = crate::api::c_ulong(n);
-                let item = cfmt::fmt_uint(n, conv, &spec);
-                out.extend_from_slice(item.as_bytes());
+            b'c' | b'd' | b'i' | b'o' | b'u' | b'x' | b'X' => {
+                // `luaL_checknumber` and `__ftol` (`0x7fd570`, `0x7fd575`): the low 32 bits.
+                let n = crate::api::c_int(vm.check_number(nargs, arg)?);
+                match conv {
+                    b'c' => {
+                        let start = out.len();
+                        let spec = Spec {
+                            precision: None,
+                            ..spec
+                        };
+                        cfmt::write_str(out, &[n as u8], &spec);
+                        // `luaL_addlstring(b, buff, strlen(buff))`: a `%c` of 0 ends the item.
+                        if let Some(end) = out[start..].iter().position(|&b| b == 0) {
+                            out.truncate(start + end);
+                        }
+                    }
+                    b'd' | b'i' => cfmt::write_int(out, n as i64, &spec),
+                    _ => cfmt::write_uint(out, n as u32, conv, &spec),
+                }
             }
             b'e' | b'E' | b'f' | b'g' | b'G' => {
                 let n = vm.check_number(nargs, arg)?;
-                let item = cfmt::fmt_float(n, conv, &spec);
-                out.extend_from_slice(item.as_bytes());
+                cfmt::write_float(out, n, conv, &spec);
             }
             b'q' => {
                 let s = vm.check_str(nargs, arg)?;
-                // `addquoted`: two quotes, and up to four bytes for each byte quoted.
+                // `luaI_addquoted` (`0x7fd6d0`), by its table at `0x7fd7b0`: `"`, `\` and a
+                // newline take a backslash, a NUL is `\000`, and every other byte is itself.
                 let len = vm.heap.str(s).len();
                 vm.reserve(out, len.saturating_mul(4).saturating_add(2))?;
                 out.push(b'"');
                 for &c in vm.heap.str(s) {
                     match c {
-                        b'"' | b'\\' | b'\n' => {
-                            out.push(b'\\');
-                            out.push(c);
-                        }
-                        b'\r' => out.extend_from_slice(b"\\r"),
+                        b'"' | b'\\' | b'\n' => out.extend_from_slice(&[b'\\', c]),
                         0 => out.extend_from_slice(b"\\000"),
                         _ => out.push(c),
                     }
@@ -323,28 +387,20 @@ fn format_in(vm: &mut Vm, nargs: usize, [f, out]: &mut [Vec<u8>; 2]) -> R<usize>
                 let len = vm.heap.str(s).len();
                 vm.reserve(out, len.saturating_add(99))?;
                 let b = vm.heap.str(s);
-                if spec.precision.is_none() && b.len() >= 100 {
+                // No precision digits and 100 bytes or more: the string whole (`0x7fd609`).
+                if prec_len == 0 && b.len() >= 100 {
                     out.extend_from_slice(b);
                 } else {
                     // `sprintf` reads a C string.
-                    let c = &b[..b.iter().position(|&x| x == 0).unwrap_or(b.len())];
+                    let c = crate::lex::cstr(b);
                     if spec.is_plain() {
                         out.extend_from_slice(c);
                     } else {
-                        out.extend_from_slice(&cfmt::fmt_str(c, &spec));
+                        cfmt::write_str(out, c, &spec);
                     }
                 }
             }
-            c => {
-                // 5.1 names the option; past the end it is the C string's NUL, which prints as
-                // nothing.
-                let opt = if c == 0 {
-                    String::new()
-                } else {
-                    (c as char).to_string()
-                };
-                return Err(vm.error_at(1, &format!("invalid option `%{opt}' to `format'")));
-            }
+            _ => return Err(vm.error_at(1, "invalid option in `format'")),
         }
     }
     Ok(vm.ret_str(out))
@@ -879,7 +935,7 @@ fn gfind_in(vm: &mut Vm, _nargs: usize, [src, cpat]: &mut [Vec<u8>; 2]) -> R<usi
     Ok(0)
 }
 
-/// 5.1's `gsub`: a string, table or function replacement; `nil` or `false` keeps the match.
+/// The client's `str_gsub` (`0x7fd0e0`): 5.0's, a string or a function replacement.
 fn gsub(vm: &mut Vm, nargs: usize) -> R<usize> {
     let mut b = vm.take_bufs::<4>();
     let r = gsub_in(vm, nargs, &mut b);
@@ -894,16 +950,16 @@ fn gsub_in(vm: &mut Vm, nargs: usize, [src, cpat, out, repl_buf]: &mut [Vec<u8>;
     let repl = vm.arg(nargs, 2);
     // `luaL_optint(L, 4, srcl+1)`: the default cast to `int` as C casts it.
     let max_s = vm.opt_int(nargs, 4, (srcl as i64 + 1) as i32)?;
-    // 5.1's `str_gsub`: a string or number, a function, or a table.
+    // `lua_isstring(L, 3) || lua_type(L, 3) == LUA_TFUNCTION`, else `string or function expected`
+    // (`0x7fd163`-`0x7fd195`): no table.
     let kind = match repl.unpack() {
         _ if nargs < 3 => None,
         V::Str(_) | V::Num(_) => Some(0),
         V::Func(_) => Some(1),
-        V::Table(_) => Some(2),
         _ => None,
     };
     let Some(kind) = kind else {
-        return Err(vm.arg_error(3, "string/function/table expected"));
+        return Err(vm.arg_error(3, "string or function expected"));
     };
     if kind == 0 {
         // `lua_tolstring(L, 3)`: a number replacement is its text.
@@ -966,18 +1022,7 @@ fn gsub_in(vm: &mut Vm, nargs: usize, [src, cpat, out, repl_buf]: &mut [Vec<u8>;
     Ok(2)
 }
 
-/// 5.1's `push_onecapture`: capture `i`, or the whole match `s..e` for 0 when there are none.
-fn one_capture(vm: &mut Vm, ms: &MatchState, i: usize, s: usize, e: usize) -> R<Value> {
-    if i >= ms.level {
-        if i == 0 {
-            return Ok(vm.str(&ms.src[s..e]));
-        }
-        return Err(pat_err(vm, PatErr("invalid capture index")));
-    }
-    ms.capture_value(vm, i).map_err(|e| pat_err(vm, e))
-}
-
-/// 5.1's `add_value`: one match's replacement onto `out`.
+/// The client's `add_s` (`0x7fd2a0`): one match's replacement onto `out`.
 #[allow(clippy::too_many_arguments)]
 fn add_value(
     vm: &mut Vm,
@@ -989,59 +1034,46 @@ fn add_value(
     s: usize,
     e: usize,
 ) -> R<()> {
-    let v = match kind {
-        0 => {
-            // `add_s`: `%0` the whole match, `%1`-`%9` a capture, `%` and anything else itself.
-            vm.check_len(out)?;
-            let mut i = 0;
-            while i < repl_bytes.len() {
-                let c = repl_bytes[i];
-                if c != b'%' {
-                    out.push(c);
-                } else {
-                    i += 1;
-                    let d = repl_bytes.get(i).copied().unwrap_or(0);
-                    if !d.is_ascii_digit() {
-                        out.push(d);
-                    } else if d == b'0' {
-                        vm.reserve(out, e - s)?;
-                        out.extend_from_slice(&ms.src[s..e]);
-                    } else {
-                        let v = one_capture(vm, ms, (d - b'1') as usize, s, e)?;
-                        let sv = vm.tostr(v).unwrap();
-                        vm.reserve(out, vm.heap.str(sv).len())?;
-                        out.extend_from_slice(vm.heap.str(sv));
-                    }
-                }
+    if kind == 0 {
+        // `%` and a digit is a capture through `check_capture` (`0x7fd34d`), so `%0`, and `%1`
+        // with no capture, raise `invalid capture index`; `%` and anything else is that byte.
+        vm.check_len(out)?;
+        let mut i = 0;
+        while i < repl_bytes.len() {
+            let c = repl_bytes[i];
+            if c != b'%' {
+                out.push(c);
+            } else {
                 i += 1;
+                let d = repl_bytes.get(i).copied().unwrap_or(0);
+                if !d.is_ascii_digit() {
+                    out.push(d);
+                } else {
+                    let v = ms
+                        .check_capture(d)
+                        .and_then(|l| ms.capture_value(vm, l))
+                        .map_err(|err| pat_err(vm, err))?;
+                    let sv = vm.tostr(v).unwrap();
+                    vm.reserve(out, vm.heap.str(sv).len())?;
+                    out.extend_from_slice(vm.heap.str(sv));
+                }
             }
-            return Ok(());
+            i += 1;
         }
-        1 => {
-            let caps = ms
-                .captures(vm, Some((s, e)))
-                .map_err(|err| pat_err(vm, err))?;
-            vm.call_value(repl, &caps, 1)?[0]
-        }
-        _ => {
-            let k = one_capture(vm, ms, 0, s, e)?;
-            vm.index(repl, k, None)?
-        }
-    };
-    if !v.truthy() {
-        // Nil or false keeps the matched text.
-        vm.reserve(out, e - s)?;
-        out.extend_from_slice(&ms.src[s..e]);
-    } else if let Some(sv) = matches!(v.unpack(), V::Str(_) | V::Num(_))
+        return Ok(());
+    }
+    let caps = ms
+        .captures(vm, Some((s, e)))
+        .map_err(|err| pat_err(vm, err))?;
+    let v = vm.call_value(repl, &caps, 1)?[0];
+    // A string or number result is added, anything else dropped with the match
+    // (`0x7fd392`-`0x7fd3b7`).
+    if let Some(sv) = matches!(v.unpack(), V::Str(_) | V::Num(_))
         .then(|| vm.tostr(v))
         .flatten()
     {
         vm.reserve(out, vm.heap.str(sv).len())?;
         out.extend_from_slice(vm.heap.str(sv));
-    } else {
-        // `luaL_error`: the position of `gsub`'s caller.
-        let t = v.type_name();
-        return Err(vm.error_at(1, &format!("invalid replacement value (a {t})")));
     }
     Ok(())
 }

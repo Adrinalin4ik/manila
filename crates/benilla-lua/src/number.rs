@@ -1,6 +1,6 @@
-//! Numbers to and from text as benilla's Lua 5.1 build read and wrote them over glibc: the
-//! client's `luaO_str2d` and `strtod`, `tonumber`'s `strtoul` with a 64-bit `unsigned long`, and
-//! `lua_number2str`'s `%.14g`.
+//! Numbers to and from text as the client reads and writes them: its `luaO_str2d` and `strtod`,
+//! its 32-bit `strtoul` for `tonumber`, and `lua_number2str`'s `%.14g` in its MSVC runtime's
+//! spelling.
 
 use std::fmt::Write;
 
@@ -130,32 +130,32 @@ pub fn ldexp(x: f64, n: i32) -> f64 {
     y * two(n)
 }
 
-/// glibc's `strtoul` with a 64-bit `unsigned long`: the value and the index after the last digit,
-/// that index `0` when no digit was read. A `-` negates modulo 2^64; an overflow is `u64::MAX`.
-pub fn strtoul(s: &[u8], base: u32) -> (u64, usize) {
+/// The client's `strtoul` (`0x40dd0e`), MSVC's `_strtoxl` (`0x40db09`) with its 32-bit
+/// `unsigned long`, for a base from 2 to 36: the value and the index after the last digit, that
+/// index `0` when no digit was read. Spaces and one sign lead; base 16 skips a `0x` or `0X`
+/// whether or not a digit follows (`0x40dbb7`); a digit is `0`-`9` or a letter, up to the base.
+/// An overflow keeps reading and answers `0xffffffff` (`0x40dccc`), and a `-` then negates
+/// modulo 2^32 (`0x40dcf4`), so `-fffffffff` is 1.
+pub fn strtoul(s: &[u8], base: u32) -> (u32, usize) {
+    debug_assert!((2..=36).contains(&base));
     let mut i = 0;
     while i < s.len() && is_space(s[i]) {
         i += 1;
     }
-    let neg = matches!(s.get(i), Some(b'-'));
+    let neg = s.get(i) == Some(&b'-');
     if matches!(s.get(i), Some(b'+' | b'-')) {
         i += 1;
     }
-    if base == 16
-        && s.get(i) == Some(&b'0')
-        && matches!(s.get(i + 1), Some(b'x' | b'X'))
-        && s.get(i + 2).is_some_and(|b| b.is_ascii_hexdigit())
-    {
+    if base == 16 && s.get(i) == Some(&b'0') && matches!(s.get(i + 1), Some(b'x' | b'X')) {
         i += 2;
     }
     let at = i;
-    let mut n: u64 = 0;
-    let mut over = false;
-    while let Some(d) = s.get(i).and_then(|&c| (c as char).to_digit(base)) {
-        match n
-            .checked_mul(base as u64)
-            .and_then(|x| x.checked_add(d as u64))
-        {
+    let (mut n, mut over) = (0u32, false);
+    while let Some(d) = s.get(i).and_then(|&c| (c as char).to_digit(36)) {
+        if d >= base {
+            break;
+        }
+        match n.checked_mul(base).and_then(|x| x.checked_add(d)) {
             Some(x) => n = x,
             None => over = true,
         }
@@ -164,36 +164,70 @@ pub fn strtoul(s: &[u8], base: u32) -> (u64, usize) {
     if i == at {
         return (0, 0);
     }
-    let n = if over {
-        u64::MAX
-    } else if neg {
-        n.wrapping_neg()
-    } else {
-        n
-    };
-    (n, i)
+    let n = if over { u32::MAX } else { n };
+    (if neg { n.wrapping_neg() } else { n }, i)
 }
 
-/// `%.14g` as glibc's `printf` writes it: a two-digit exponent at least (`1e+20`), and `inf`,
-/// `-inf`, `nan` and `-nan` for the non-finite values. The client's MSVC text (`1e+020`,
-/// `1.#INF`) is later work (#1376).
+/// The NaN the client's x87 makes of an invalid operation, the real indefinite: the sign set, so
+/// it prints `-1.#IND`.
+pub(crate) const INDEFINITE: u64 = 0xFFF8_0000_0000_0000;
+
+/// `r = a op b` as the client's x87 answers it: a NaN the operation made from operands that are
+/// not NaN is the indefinite, and a NaN operand passes through with its own sign. x86's SSE makes
+/// the same indefinite and passes a NaN operand through, so only another host (arm64's default NaN
+/// has no sign) pays the test.
+#[inline(always)]
+pub fn x87_op(r: f64, a: f64, b: f64) -> f64 {
+    // Of two NaN operands SSE answers the first, where the x87 answers the one with the larger
+    // significand (Intel SDM vol. 1, table 4-7), and of two canonical NaNs the client's `faddp`
+    // answers the positive one in emulation: `(0/0) + -(0/0)` and `-(0/0) + 0/0` are both
+    // `1.#QNAN` there, and the first is `-1.#IND` on an x86 host. benilla does not follow there: no addon meets two NaNs of opposite
+    // sign, and the test would cost every operation on x86.
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    if r.is_nan() {
+        return x87_fn(r, a, b);
+    }
+    let _ = (a, b);
+    r
+}
+
+/// [`x87_op`] for a C library function of `a` and `b` (`b` 0 for one argument), on every host,
+/// when `r` is NaN: a NaN operand is the answer, the positive one of two (the x87's pick of two
+/// canonical NaNs), and a NaN made from numbers is the indefinite. A host's libm picks its own
+/// sign: macOS's `acos(2)` is positive, its `acos` flips a NaN operand's sign and its `cos` and
+/// `fmod` answer a positive NaN for a negative one.
+#[cold]
+pub fn x87_fn(r: f64, a: f64, b: f64) -> f64 {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) if a.is_sign_negative() => b,
+        (true, _) => a,
+        (false, true) => b,
+        (false, false) if r.is_nan() => f64::from_bits(INDEFINITE),
+        (false, false) => r,
+    }
+}
+
+/// `lua_number2str`: the client's `luaV_tostring` (`0x6f7c80`) formats with `%.14g` (`0x871960`)
+/// through its MSVC `sprintf` (`0x73fec4`): `1e+020`, `1.#INF`, `-1.#IND` and `0` for `-0`.
 pub fn fmt_g14(n: f64) -> String {
-    fmt_g(n, 14)
+    with_g14(n, |b| String::from_utf8(b.to_vec()).expect("ASCII"))
 }
 
-/// `10^p`, exact for the precisions `%g` is asked for.
-fn pow10(p: usize) -> f64 {
-    const P: [f64; 18] = [
-        1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
-        1e17,
-    ];
-    P.get(p).copied().unwrap_or_else(|| 10f64.powi(p as i32))
+/// `f` of [`fmt_g14`]'s text, which lives on the stack.
+pub fn with_g14<R>(n: f64, f: impl FnOnce(&[u8]) -> R) -> R {
+    // At most a sign, 14 digits, a point and `e-308`.
+    let mut b = crate::cfmt::StackBuf::<32>::new();
+    write_g14(n, &mut b);
+    f(b.as_slice())
 }
 
-/// `fmt_g14(n)` appended to `out`; an integer is written without a temporary string.
+/// [`fmt_g14`]'s text appended to `out`.
 pub fn push_g14(n: f64, out: &mut Vec<u8>) {
-    if n.fract() == 0.0 && n.abs() < 1e14 && n != 0.0 {
-        let mut v = n as i64;
+    write_g14(n, out);
+}
+
+fn write_g14(n: f64, out: &mut impl crate::cfmt::Out) {
+    if let Some(mut v) = small_integer(n) {
         if v < 0 {
             out.push(b'-');
             v = -v;
@@ -205,97 +239,64 @@ pub fn push_g14(n: f64, out: &mut Vec<u8>) {
             digits[i] = b'0' + (v % 10) as u8;
             v /= 10;
         }
-        out.extend_from_slice(&digits[i..]);
+        out.extend(&digits[i..]);
     } else {
-        out.extend_from_slice(fmt_g14(n).as_bytes());
+        let spec = crate::cfmt::Spec {
+            precision: Some(14),
+            ..Default::default()
+        };
+        crate::cfmt::write_float(out, n, b'g', &spec);
     }
 }
 
-/// `%.<prec>g` in glibc's spelling: a two-digit exponent at least, `inf` and `nan`.
-pub fn fmt_g(n: f64, prec: usize) -> String {
-    // An integer below `10^prec` prints as its digits: the common case, without float
-    // formatting's exact-decimal arithmetic.
-    if n.fract() == 0.0 && n.abs() < pow10(prec) && n != 0.0 {
-        return (n as i64).to_string();
-    }
-    if n.is_nan() {
-        // The sign bit prints, as glibc prints it: x86's default NaN, from `0/0`, has it set.
-        // Which NaN an operation answers is the host's; the client's MSVC text (`-1.#IND`) is
-        // later work (#1376).
-        return if n.is_sign_negative() {
-            "-nan".into()
-        } else {
-            "nan".into()
-        };
-    }
-    if n.is_infinite() {
-        return if n < 0.0 { "-inf".into() } else { "inf".into() };
-    }
-    let p = prec.max(1);
-    if n == 0.0 {
-        return if n.is_sign_negative() {
-            "-0".into()
-        } else {
-            "0".into()
-        };
-    }
-    // The exponent after rounding to `p` significant digits decides the style.
-    let sci = format!("{:.*e}", p - 1, n);
-    let (mant, exp) = sci.split_once('e').unwrap();
-    let x: i32 = exp.parse().unwrap();
-    if x < -4 || x >= p as i32 {
-        let mant = strip_zeros(mant);
-        let sign = if x < 0 { '-' } else { '+' };
-        format!("{mant}e{sign}{:02}", x.abs())
-    } else {
-        let decimals = (p as i32 - 1 - x).max(0) as usize;
-        strip_zeros(&format!("{:.*}", decimals, n)).to_string()
-    }
-}
-
-fn strip_zeros(s: &str) -> &str {
-    if s.contains('.') {
-        s.trim_end_matches('0').trim_end_matches('.')
-    } else {
-        s
-    }
+/// A non-zero integer below 10^14, which `%.14g` prints as its digits.
+fn small_integer(n: f64) -> Option<i64> {
+    (n.fract() == 0.0 && n.abs() < 1e14 && n != 0.0).then_some(n as i64)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The client's `%.14g`, as `fmtg_probe` in benilla-re pins it by running its `sprintf`.
     #[test]
-    fn g14_matches_glibc() {
-        assert_eq!(fmt_g14(1.0), "1");
-        assert_eq!(fmt_g14(0.1), "0.1");
-        assert_eq!(fmt_g14(1e20), "1e+20");
-        assert_eq!(fmt_g14(1e-5), "1e-05");
-        assert_eq!(fmt_g14(1e100), "1e+100");
-        assert_eq!(fmt_g14(123456789012345.0), "1.2345678901234e+14");
-        assert_eq!(fmt_g14(12345678901234.0), "12345678901234");
-        assert_eq!(fmt_g14(-2.5), "-2.5");
-        for n in [
-            1.0,
-            -7.0,
-            42.0,
-            99999999999999.0,
-            -12345678901234.0,
-            0.0,
-            -0.0,
-            0.5,
-            1e14,
-            1e20,
-        ] {
+    fn g14_is_the_clients() {
+        let cases: &[(f64, &str)] = &[
+            (0.0, "0"),
+            (-0.0, "0"),
+            (3.0, "3"),
+            (0.8, "0.8"),
+            (-0.5, "-0.5"),
+            (0.1, "0.1"),
+            (0.1 + 0.2, "0.3"),
+            (1.0 / 3.0, "0.33333333333333"),
+            (1e13, "10000000000000"),
+            (1e14, "1e+014"),
+            (1e15, "1e+015"),
+            (1e20, "1e+020"),
+            (1e100, "1e+100"),
+            (1e-4, "0.0001"),
+            (1e-5, "1e-005"),
+            (1.5e-5, "1.5e-005"),
+            (2147483648.0, "2147483648"),
+            (1.2345678901234568e17, "1.2345678901235e+017"),
+            (1e308, "1e+308"),
+            (1e-308, "1e-308"),
+            (5e-324, "4.9406564584125e-324"),
+            (f64::INFINITY, "1.#INF"),
+            (f64::NEG_INFINITY, "-1.#INF"),
+            (f64::from_bits(0x7ff8_0000_0000_0000), "1.#QNAN"),
+            (f64::from_bits(0xfff8_0000_0000_0000), "-1.#IND"),
+            // 17 digits half-up, then 14 half-up: a correctly rounded `%.14g` differs on these.
+            (f64::from_bits(0xbfbd_ae46_18cc_a433), "-0.11594045739607"),
+            (123456789012345.0, "1.2345678901235e+014"),
+        ];
+        for &(n, want) in cases {
+            assert_eq!(fmt_g14(n), want, "{n:e}");
             let mut out = Vec::new();
             push_g14(n, &mut out);
-            assert_eq!(out, fmt_g14(n).into_bytes(), "{n}");
+            assert_eq!(out, want.as_bytes(), "{n:e}");
         }
-        assert_eq!(fmt_g14(1.0 / 3.0), "0.33333333333333");
-        assert_eq!(fmt_g14(f64::INFINITY), "inf");
-        assert_eq!(fmt_g14(f64::NEG_INFINITY), "-inf");
-        assert_eq!(fmt_g14(-f64::NAN), "-nan");
-        assert_eq!(fmt_g14(0.0001), "0.0001");
     }
 
     #[test]
@@ -401,13 +402,24 @@ mod tests {
         }
     }
 
+    /// Against the client's own `strtoul`, run at `0x40dd0e`.
     #[test]
-    fn strtoul_is_glibc_64() {
+    fn strtoul_is_msvc_32() {
         assert_eq!(strtoul(b"ff", 16), (255, 2));
         assert_eq!(strtoul(b"0x10", 16), (16, 4));
-        assert_eq!(strtoul(b"-1", 16), (u64::MAX, 2));
-        assert_eq!(strtoul(b"ffffffffffffffffffff", 16).0, u64::MAX);
+        assert_eq!(strtoul(b"-0x10", 16), (0xffff_fff0, 5));
+        assert_eq!(strtoul(b"ffffffff", 16), (u32::MAX, 8));
+        assert_eq!(strtoul(b"fffffffff", 16), (u32::MAX, 9));
+        assert_eq!(strtoul(b"100000000", 16), (u32::MAX, 9));
+        assert_eq!(strtoul(b"4294967296", 10), (u32::MAX, 10));
+        assert_eq!(strtoul(b"-1", 16), (u32::MAX, 2));
+        assert_eq!(strtoul(b"-ffffffff", 16), (1, 9));
+        assert_eq!(strtoul(b"-fffffffff", 16), (1, 10));
+        assert_eq!(strtoul(b"zz", 36), (1295, 2));
+        assert_eq!(strtoul(b"101", 2), (5, 3));
         assert_eq!(strtoul(b"8", 8), (0, 0));
-        assert_eq!(strtoul(b"  +7", 8), (7, 4));
+        assert_eq!(strtoul(b"  +ff", 16), (255, 5));
+        assert_eq!(strtoul(b"0x", 16), (0, 0));
+        assert_eq!(strtoul(b"0xg", 16), (0, 0));
     }
 }
