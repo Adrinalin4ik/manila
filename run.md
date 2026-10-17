@@ -175,7 +175,7 @@ mapping is mechanical: `WOW_<NAME>` is the query key `<name>`, lowercased, prefi
 | `WOW_HOST` | `?host=` | the realmlist for this session. Also settable on the login screen; `$WOW_HOST` pins it and greys that control out. |
 | `WOW_USER` / `WOW_PASS` | `?user=` / `?pass=` | credentials. The query spellings answer **only** when the page opts in with `dev_query_creds` — a production page never wants a password in a shareable URL. |
 | `WOW_CHAR` | `?char=` | character to auto-pick |
-| `WOW_WARDEN_MODULES` | `?warden_modules=` | `1` enables the Warden module lane — see below |
+| `WOW_WARDEN_MODULES` | `?warden_modules=` | the Warden module lane, **on by default**; `0` turns it off — see below |
 | `WOW_WARDEN_PROFILE` | `?warden_profile=` | a fixed scan encoding, for a server that agreed one instead of offering a module. Rarely needed now. |
 
 **`?host=` sets the realmlist, and the proxy follows it** unless the host was started with
@@ -189,9 +189,9 @@ is answerable — but it needs the server's own module files.
 1. Copy the server's `warden_modules/*.cr` into `<Data>/warden_modules/`. Only `.cr` is read;
    `.bin` and `.key` are the server's business. Copy **all** of them: the server picks a module at
    random per session, so one file covers roughly one session in seventy.
-2. Start with the lane enabled:
-   - desktop: `WOW_WARDEN_MODULES=1`
-   - browser: `?warden_modules=1`
+2. Start the client: the lane is on by default. To turn it off:
+   - desktop: `WOW_WARDEN_MODULES=0`
+   - browser: `?warden_modules=0`
 
 `wenilla-host` serves those files at `/data/warden_modules/<ID>.cr`, reading them loose from
 `--data`. They cannot come from the patch chain — they sit beside the archives, not inside them.

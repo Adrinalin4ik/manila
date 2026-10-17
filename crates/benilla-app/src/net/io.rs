@@ -719,11 +719,13 @@ async fn world(
             }
             !canceled()
         };
-        let mut session = match WorldSession::connect_queued_async(
+        // The Warden lane armed as `run.md` documents it (`warden::profile`, a wenilla carry).
+        let mut session = match WorldSession::connect_queued_with_warden_async(
             &world_addr,
             &req.user,
             logon.session_key,
             &mut on_queue,
+            warden::profile(),
         )
         .await
         {
@@ -1836,6 +1838,9 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
 }
 
 mod wire_trace;
+
+// wenilla carry: the Warden lane's witness, module source and switches.
+mod warden;
 
 #[cfg(test)]
 mod cycle_tests;
