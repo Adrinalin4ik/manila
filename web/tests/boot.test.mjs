@@ -2,8 +2,14 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-const source = (await readFile(new URL('../boot.js', import.meta.url), 'utf8'))
-  .replaceAll('import.meta.url', JSON.stringify(new URL('../boot.js', import.meta.url).href));
+// boot.js runs from a data: URL here, so whatever it resolves against its own address is pointed
+// at the real file: `import.meta.url`, and its sibling imports (`./skin_worker.js`,
+// `./frame_trace.js`), which a data: URL cannot resolve.
+const bootUrl = new URL('../boot.js', import.meta.url);
+const source = (await readFile(bootUrl, 'utf8'))
+  .replaceAll('import.meta.url', JSON.stringify(bootUrl.href))
+  .replace(/(\bimport\s*(?:[^'";]*?\bfrom\s*)?)(['"])(\.\.?\/[^'"]+)\2/g,
+    (_, head, quote, rel) => `${head}${quote}${new URL(rel, bootUrl).href}${quote}`);
 const { boot } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const wasmBytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
 const deferred = () => {
