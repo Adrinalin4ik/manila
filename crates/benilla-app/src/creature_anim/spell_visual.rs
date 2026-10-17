@@ -433,11 +433,13 @@ fn play_kit(
 ) {
     if let Some(anim_id) = kit.anim_id {
         if play.stage_2 {
-            // Stage 2 compares, never plays; the driver holds the armed id and compares.
+            // Stage 2 compares, never plays; the driver holds the armed id and compares. Any id of
+            // 0 or more reaches it (`0x60f366 jl`), Stand included.
             out.recomputes.write(BaseAnimRecompute { entity, anim_id });
         } else if (8..=10).contains(&anim_id) {
             // A CombatWound id (8 to 10) lays a severity-0 wound in the blend slot, not the
-            // kit's own id (`0x60f3ad` → `0x60f510`, `0x60f3b8`).
+            // kit's own id (`0x60f3ad` → `0x60f510`, `0x60f3b8`). Every other id, Stand included
+            // (`0x60f510(0)` is false), plays through `0x5fe2f0` (`0x60f3c5`).
             out.wounds.write(WoundAnim { entity });
         } else {
             out.oneshots.write(EmoteAnim {
@@ -666,7 +668,8 @@ pub(super) fn route_cast_visuals(
                     } else {
                         commands.entity(ev.entity).try_remove::<super::RangedHold>();
                     }
-                    if let Some(anim_id) = kit.anim_id {
+                    // The hold resolver takes only an id above 0 (`0x612a0a jle`).
+                    if let Some(anim_id) = kit.positive_anim() {
                         commands.entity(ev.entity).try_insert(CastHold {
                             anim_id,
                             spell_id: ev.spell_id,
@@ -860,11 +863,12 @@ pub(super) fn route_cast_visuals(
             // Only an empty hit array consults the ground point (`0x6e8abc … je 0x6e8ba2`).
             let ground_aim = targets.is_empty().then_some(go.dest).flatten();
             if !targets.is_empty() || ground_aim.is_some() {
-                // The release gate (`0x6e7a70`, inverted).
+                // The release gate (`0x6e7a70`, inverted): a cast kit animation above 0 waits for
+                // the release keyframe (`0x6e8295 jg`); Stand launches at once (`0x6e829d`).
                 let awaits_release = stages
                     .filter(|s| s.cast != 0)
                     .and_then(|s| visuals.0.kit(s.cast))
-                    .is_some_and(|k| k.anim_id.is_some());
+                    .is_some_and(|k| k.positive_anim().is_some());
                 missiles.write(MissileSpawn {
                     caster: go.caster,
                     spell_id: go.spell_id,
@@ -903,7 +907,8 @@ pub(super) fn route_cast_visuals(
             }
             // No ranged fallback on the channel poll (`0x612a30`).
             if let Some(kit) = resolve_kit(spells, &visuals.0, cur, |s| s.channel, || None) {
-                if let Some(anim_id) = kit.anim_id {
+                // The hold resolver takes only an id above 0 (`0x612a0a jle`).
+                if let Some(anim_id) = kit.positive_anim() {
                     // Fallible: a unit mid-stream-out is un-indexed but still in this query.
                     commands.entity(entity).try_insert(CastHold {
                         anim_id,
@@ -1092,8 +1097,8 @@ pub(crate) fn arm_aura_state_fx(
             // (`0x5fdeb5 jle`); the recompute skips only a negative one (`0x60f366`).
             if let Some(anim_id) = kit.anim_id {
                 recomputes.write(BaseAnimRecompute { entity, anim_id });
-                if anim_id > 0 {
-                    pins.insert(0, (spell_id, anim_id));
+                if let Some(pin) = kit.positive_anim() {
+                    pins.insert(0, (spell_id, pin));
                 }
             }
             next.push(spell_id);
