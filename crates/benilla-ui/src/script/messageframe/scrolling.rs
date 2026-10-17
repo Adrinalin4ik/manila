@@ -9,7 +9,7 @@ use mlua::{Lua, MultiValue, Table, Value};
 use super::{channel, is_number};
 use crate::script::object::frame_handle_of;
 use crate::script::{Model, UiScript};
-use crate::widget::{KindState, ScrollingMessageState};
+use crate::widget::{KindState, ScrollingMessageState, Viewport};
 
 /// Registry key of the ScrollingMessageFrame method table (the MAXCSTACK discipline).
 pub(crate) const REG_SCROLLINGMESSAGEFRAME_METHODS: &str =
@@ -40,11 +40,11 @@ fn with_smf<T>(
 fn with_viewport<T>(
     lua: &Lua,
     this: &Table,
-    f: impl FnOnce(&mut ScrollingMessageState, usize) -> T,
+    f: impl FnOnce(&mut ScrollingMessageState, Viewport) -> T,
 ) -> mlua::Result<T> {
     let h = frame_handle_of(lua, this)?;
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-    let viewport_rows = UiScript::message_viewport_rows(&model, h);
+    let viewport_rows = UiScript::message_viewport(&model, h);
     let frame = model
         .arena
         .frame_mut(h)
@@ -59,7 +59,7 @@ fn with_viewport<T>(
 fn scroll(
     lua: &Lua,
     this: &Table,
-    op: impl FnOnce(&mut ScrollingMessageState, usize),
+    op: impl FnOnce(&mut ScrollingMessageState, Viewport),
 ) -> mlua::Result<()> {
     with_viewport(lua, this, op)
 }
@@ -94,7 +94,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 } else {
                     (1.0, 1.0, 1.0)
                 };
-                with_smf(lua, &this, |smf| smf.add_with_id(text, r, g, b, id))
+                with_viewport(lua, &this, |smf, rows| {
+                    smf.add_with_id(text, r, g, b, id, rows);
+                })
             },
         )?,
     )?;
@@ -116,8 +118,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let id =
                     crate::script::binding_abi::ftol(is_number(lua, &id).unwrap_or(0.0)) as u32;
                 let (r, g, b) = (channel(lua, &r), channel(lua, &g), channel(lua, &b));
-                with_smf(lua, &this, |smf| {
-                    smf.update_color_by_id(id, r, g, b);
+                with_viewport(lua, &this, |smf, viewport| {
+                    smf.update_color_by_id(id, r, g, b, viewport);
                 })
             },
         )?,
@@ -312,14 +314,14 @@ mod tests {
         };
         s.add("x".into(), 1.0, 1.0, 1.0);
         // Phase 1: full alpha while timeVisible remains.
-        s.tick(0.5);
+        s.tick(0.5, 8);
         assert_eq!(s.lines[0].alpha, 1.0);
         // 0.5 more spends timeVisible; the ticks after ramp over fadeDuration.
-        s.tick(0.5);
+        s.tick(0.5, 8);
         assert_eq!(s.lines[0].alpha, 1.0, "phase 1 just expired, ramp not yet");
-        s.tick(1.0); // fade_left 2.0 → 1.0 → alpha = trunc(1.0/2.0*255)/255 = 127/255
+        s.tick(1.0, 8); // fade_left 2.0 → 1.0 → alpha = trunc(1.0/2.0*255)/255 = 127/255
         assert!((s.lines[0].alpha - 127.0 / 255.0).abs() < 1e-6);
-        s.tick(1.0); // fade_left → 0 → retired
+        s.tick(1.0, 8); // fade_left → 0 → retired
         assert_eq!(s.lines[0].alpha, 0.0);
     }
 
@@ -331,9 +333,9 @@ mod tests {
             ..Default::default()
         };
         s.add("x".into(), 1.0, 1.0, 1.0);
-        s.tick(0.6); // spends timeVisible, still full this tick
+        s.tick(0.6, 8); // spends timeVisible, still full this tick
         assert_eq!(s.lines[0].alpha, 1.0);
-        s.tick(0.1); // past phase 1 with no ramp: straight to 0
+        s.tick(0.1, 8); // past phase 1 with no ramp: straight to 0
         assert_eq!(s.lines[0].alpha, 0.0);
     }
 
@@ -350,16 +352,16 @@ mod tests {
         assert!(!s.links_dirty, "the ctor clears it");
         s.add("x".into(), 1.0, 1.0, 1.0);
         assert!(std::mem::take(&mut s.links_dirty), "AddMessage relayouts");
-        s.tick(0.6);
-        s.tick(0.5);
+        s.tick(0.6, 8);
+        s.tick(0.5, 8);
         assert!(
             s.lines[0].alpha > 0.0 && !s.links_dirty,
             "mid-ramp: no flag"
         );
-        s.tick(0.6);
+        s.tick(0.6, 8);
         assert_eq!(s.lines[0].alpha, 0.0);
         assert!(std::mem::take(&mut s.links_dirty), "the hide raises it");
-        s.tick(0.6);
+        s.tick(0.6, 8);
         assert!(!s.links_dirty, "a hidden line is not hidden again");
         s.scroll_down(4);
         assert!(
@@ -368,7 +370,8 @@ mod tests {
         );
     }
 
-    /// With a one-row viewport the scroll re-arms one line; the lines either side show the freeze.
+    /// With a one-row viewport the scroll re-arms the line in view and the one past it; the line
+    /// on the other side shows the freeze.
     #[test]
     fn scrolled_up_freezes_the_fade() {
         let mut s = ScrollingMessageState {
@@ -380,20 +383,22 @@ mod tests {
         for n in 0..3 {
             s.add(format!("l{n}"), 1.0, 1.0, 1.0);
         }
-        s.tick(2.0); // half-way down the ramp: trunc(2.0/4.0*255) = 127
+        s.tick(2.0, 8); // half-way down the ramp: trunc(2.0/4.0*255) = 127
         let half = 127.0 / 255.0;
         assert_eq!(s.lines[0].alpha, half);
-        // Scrolled up, ticks stop; the scroll re-arms only l1, the line now in view.
+        // Scrolled up, ticks stop; the scroll re-arms l1, the line now in view, and l0, the one
+        // the relayout walked that did not fit (`0x7888be`).
         s.scroll_up(1);
         assert!(!s.at_bottom());
         assert_eq!(s.lines[1].alpha, 1.0, "the displayed line was re-armed");
-        s.tick(2.0);
-        assert_eq!(s.lines[0].alpha, half, "frozen while scrolled up");
+        assert_eq!(s.lines[0].alpha, 1.0, "so was the first that did not fit");
+        s.tick(2.0, 8);
+        assert_eq!(s.lines[0].alpha, 1.0, "frozen while scrolled up");
         assert_eq!(s.lines[2].alpha, half);
         assert_eq!(s.lines[1].alpha, 1.0);
         // Back at the bottom, the fade resumes.
         s.scroll_to_bottom(1);
-        s.tick(2.0);
+        s.tick(2.0, 8);
         assert!(s.lines[2].alpha < 1.0);
     }
 
@@ -411,8 +416,8 @@ mod tests {
             for n in 0..3 {
                 s.add(format!("l{n}"), 1.0, 1.0, 1.0);
             }
-            s.tick(1.5); // spend phase 1
-            s.tick(1.5); // spend phase 2: all gone
+            s.tick(1.5, 8); // spend phase 1
+            s.tick(1.5, 8); // spend phase 2: all gone
             assert!(s.lines.iter().all(|l| l.alpha == 0.0), "faded out first");
             op(&mut s, 8);
             s
@@ -441,6 +446,61 @@ mod tests {
         }
     }
 
+    /// The fade ticks the shown messages only (`0x788460`, bounded by `+0x34c`): a line out of view
+    /// keeps its fade where it stopped, and shows at that alpha when the window grows.
+    #[test]
+    fn the_fade_ticks_only_the_shown_messages() {
+        let mut s = ScrollingMessageState {
+            max_lines: 8,
+            time_visible: 0.0,
+            fade_duration: 4.0,
+            ..Default::default()
+        };
+        for n in 0..5 {
+            s.add(format!("l{n}"), 1.0, 1.0, 1.0);
+        }
+        s.tick(2.0, 2); // l3 and l4 are in view
+        let half = 127.0 / 255.0;
+        assert_eq!(s.lines[4].alpha, half);
+        assert_eq!(s.lines[3].alpha, half);
+        for hidden in 0..3 {
+            assert_eq!(s.lines[hidden].alpha, 1.0, "l{hidden} is out of view");
+            assert_eq!(s.lines[hidden].fade_left, 4.0);
+        }
+        s.tick(2.0, 8); // the window grew: all five tick from where each stopped
+        assert_eq!(s.lines[0].alpha, half);
+        assert_eq!(s.lines[4].alpha, 0.0);
+    }
+
+    /// A moving scroll re-arms the messages its relayout walks, the shown ones and the first older
+    /// one that did not fit (`0x788af0` at `0x7888be`); a refused one re-arms the shown only
+    /// (`0x788b80`).
+    #[test]
+    fn a_moving_scroll_re_arms_what_the_relayout_walks() {
+        let faded = || {
+            let mut s = ScrollingMessageState {
+                max_lines: 8,
+                time_visible: 0.0,
+                fade_duration: 1.0,
+                ..Default::default()
+            };
+            for n in 0..5 {
+                s.add(format!("l{n}"), 1.0, 1.0, 1.0);
+            }
+            s.tick(2.0, 8);
+            assert!(s.lines.iter().all(|l| l.alpha == 0.0));
+            s
+        };
+        let alphas =
+            |s: &ScrollingMessageState| s.lines.iter().map(|l| l.alpha).collect::<Vec<_>>();
+        let mut s = faded();
+        s.scroll_up(2); // shows l2 l3 (anchor l3), walks l1 as well
+        assert_eq!(alphas(&s), [0.0, 1.0, 1.0, 1.0, 0.0]);
+        let mut s = faded();
+        s.scroll_down(2); // refused at the bottom: l3 and l4 only
+        assert_eq!(alphas(&s), [0.0, 0.0, 0.0, 1.0, 1.0]);
+    }
+
     /// `0x788b80` walks the lines on display, not the ring.
     #[test]
     fn the_re_arm_reaches_only_the_displayed_lines() {
@@ -453,8 +513,8 @@ mod tests {
         for n in 0..3 {
             s.add(format!("l{n}"), 1.0, 1.0, 1.0);
         }
-        s.tick(1.5);
-        s.tick(1.5);
+        s.tick(1.5, 8);
+        s.tick(1.5, 8);
         s.scroll_down(1); // a no-op scroll at the bottom, one row of viewport
         assert_eq!(s.lines[2].alpha, 1.0, "the one displayed line came back");
         assert_eq!(s.lines[1].alpha, 0.0, "off-screen lines are untouched");
@@ -504,6 +564,50 @@ mod tests {
             off + 1,
             "offset tracks so the same lines stay in view"
         );
+    }
+
+    /// A full ring writes over its oldest slot and leaves the anchor slot where it is
+    /// (`0x788150`): a scrolled-up view keeps its messages (`0x788220`), and scrolls one line
+    /// newer only when the write lands on the topmost shown one (`0x78819e`-`0x7881bb`,
+    /// `0x78823f`-`0x78824a`).
+    #[test]
+    fn a_full_ring_holds_a_scrolled_up_view_still() {
+        let full = || {
+            let mut s = ScrollingMessageState {
+                max_lines: 4,
+                ..Default::default()
+            };
+            for n in 0..4 {
+                s.add(format!("l{n}"), 1.0, 1.0, 1.0);
+            }
+            s
+        };
+        let anchor =
+            |s: &ScrollingMessageState| s.lines[s.lines.len() - 1 - s.scroll_offset].text.clone();
+        // Two rows, one line back: l2 l1 are in view, the oldest is not.
+        let mut s = full();
+        s.scroll_up(2);
+        assert_eq!(anchor(&s), "l2");
+        s.add_with_id("l4".into(), 1.0, 1.0, 1.0, 0, 2);
+        assert_eq!(anchor(&s), "l2", "the same messages stay in view");
+        // Now l1 is the oldest and shows, so the next write lands on the topmost shown message.
+        s.add_with_id("l5".into(), 1.0, 1.0, 1.0, 0, 2);
+        assert_eq!(anchor(&s), "l3", "one line newer as the oldest went");
+        // The oldest shows (l1 l0), so the write lands on the topmost shown message.
+        let mut s = full();
+        s.scroll_up(2);
+        s.scroll_up(2);
+        assert_eq!(anchor(&s), "l1");
+        s.add_with_id("l4".into(), 1.0, 1.0, 1.0, 0, 2);
+        assert_eq!(
+            anchor(&s),
+            "l2",
+            "scrolled one line newer as the oldest went"
+        );
+        // At the bottom the view is the newest.
+        let mut s = full();
+        s.add_with_id("l4".into(), 1.0, 1.0, 1.0, 0, 2);
+        assert!(s.at_bottom());
     }
 
     #[test]
@@ -608,6 +712,17 @@ mod tests {
         }
     }
 
+    /// `ScrollToTop` and `ScrollToBottom` on an empty frame return at once (`0x788697`-`0x78869a`,
+    /// `0x7886d6`-`0x7886d9`): no re-arm, no link rebuild.
+    #[test]
+    fn scrolling_to_either_end_of_an_empty_frame_does_nothing() {
+        let mut s = ScrollingMessageState::default();
+        s.scroll_to_top(8);
+        s.scroll_to_bottom(8);
+        assert!(!s.links_dirty);
+        assert_eq!(s.scroll_offset, 0);
+    }
+
     /// `ScrollToTop` on a single message anchors the newest (`0x788799`-`0x7887aa`); a frame
     /// already at the bottom skips the re-arm (`0x788aff`), which two messages do not.
     #[test]
@@ -621,7 +736,7 @@ mod tests {
             for n in 0..count {
                 s.add(format!("l{n}"), 1.0, 1.0, 1.0);
             }
-            s.tick(2.0);
+            s.tick(2.0, 8);
             s.links_dirty = false;
             s.scroll_to_top(8);
             s
@@ -685,6 +800,77 @@ mod tests {
         );
     }
 
+    /// `CF` holds `l0`..`l5`, three rows high, scrolled up one line (shown `l4 l3 l2`, walked
+    /// `l1`), with every line's alpha knocked to 0.5; `bottom` scrolls it back down first.
+    fn faded_chat(bottom: bool) -> UiScript {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        s.run(
+            "CF = CreateFrame('ScrollingMessageFrame', 'CF')\n\
+             CF:SetPoint('BOTTOMLEFT', 32, 90)\n\
+             CF:SetWidth(430)\n\
+             CF:SetHeight(44)\n\
+             for n = 0, 5 do CF:AddMessage('l' .. n, 1, 1, 1, 5) end",
+        )
+        .unwrap();
+        s.resolve();
+        s.tick(0.0); // the first relayout
+        s.run(if bottom { "" } else { "CF:ScrollUp()" }).unwrap();
+        let mut model = s.model_mut();
+        let fh = model.arena.lookup("CF").expect("CF");
+        let Some(crate::widget::KindState::ScrollingMessage(smf)) =
+            model.arena.frame_mut(fh).map(|f| &mut f.kind_state)
+        else {
+            unreachable!("a scrolling frame")
+        };
+        smf.lines.iter_mut().for_each(|l| l.alpha = 0.5);
+        drop(model);
+        s
+    }
+
+    fn alphas(s: &UiScript) -> Vec<f32> {
+        let model = s.model_ref();
+        let fh = model.arena.lookup("CF").expect("CF");
+        match model.arena.frame(fh).map(|f| &f.kind_state) {
+            Some(crate::widget::KindState::ScrollingMessage(smf)) => {
+                smf.lines.iter().map(|l| l.alpha).collect()
+            }
+            _ => unreachable!("a scrolling frame"),
+        }
+    }
+
+    /// A relayout that is not a scroll re-arms what it walks off the bottom, as a scroll does:
+    /// force 0 re-arms unless `+0x354` is set (`0x788aff`). A resize (`0x788427`), a font change
+    /// (`0x788086`), a show (`0x788451`) and `UpdateColorByID` (`0x78829e`) are such relayouts.
+    #[test]
+    fn a_relayout_without_a_scroll_re_arms_what_it_walks_off_the_bottom() {
+        let (half, full) = (0.5, 1.0);
+        let case = |action: &str, after: &[f32]| {
+            let mut s = faded_chat(false);
+            // Nothing relayouts on its own.
+            s.resolve();
+            s.tick(0.0);
+            assert_eq!(alphas(&s), [half; 6], "{action}: before");
+            s.run(action).unwrap();
+            s.resolve();
+            s.tick(0.0);
+            assert_eq!(alphas(&s), after, "{action}");
+        };
+        // Grown to six rows, the view places l1 and l0 as well: l5 is newer than the anchor.
+        case("CF:SetHeight(86)", &[full, full, full, full, full, half]);
+        // A new font: the three rows in view and the one that did not fit.
+        let four = [half, full, full, full, full, half];
+        case("CF:SetFont('Fonts\\\\FRIZQT__.TTF', 12)", &four);
+        case("CF:Hide() CF:Show()", &four);
+        case("CF:UpdateColorByID(5, 1, 0, 0)", &four);
+        // At the bottom a relayout re-arms nothing (`0x788aff`).
+        let mut s = faded_chat(true);
+        s.run("CF:SetHeight(86)").unwrap();
+        s.resolve();
+        s.tick(0.0);
+        assert_eq!(alphas(&s), [half; 6]);
+    }
+
     /// A scrolling frame `CF` of the given height holding `messages`, bottom left at (32, 90),
     /// after the host answered each message's row count with `rows(index)`: what it draws as
     /// `(text, bottom, top)` in draw order, and the count its layout reports.
@@ -730,7 +916,7 @@ mod tests {
             .collect();
         let model = s.model_mut();
         let fh = fh.expect("a line drew");
-        let viewport = UiScript::message_viewport_rows(&model, fh);
+        let viewport = UiScript::message_viewport(&model, fh);
         let count = match &model.arena.frame(fh).expect("the frame").kind_state {
             crate::widget::KindState::ScrollingMessage(smf) => smf.displayed_count(viewport),
             _ => unreachable!("a scrolling frame"),
@@ -991,12 +1177,12 @@ mod tests {
     #[test]
     fn update_color_by_id_recolours_only_that_ids_lines() {
         let mut smf = ScrollingMessageState::default();
-        smf.add_with_id("a".into(), 1.0, 1.0, 1.0, 11);
-        smf.add_with_id("b".into(), 1.0, 1.0, 1.0, 1);
-        smf.add_with_id("c".into(), 1.0, 1.0, 1.0, 11);
+        smf.add_with_id("a".into(), 1.0, 1.0, 1.0, 11, 8);
+        smf.add_with_id("b".into(), 1.0, 1.0, 1.0, 1, 8);
+        smf.add_with_id("c".into(), 1.0, 1.0, 1.0, 11, 8);
         smf.add("d".into(), 1.0, 1.0, 1.0);
         let gen = smf.lines_gen;
-        assert_eq!(smf.update_color_by_id(11, 0.0, 0.5, 1.0), 2);
+        assert_eq!(smf.update_color_by_id(11, 0.0, 0.5, 1.0, 8), 2);
         let colors: Vec<[u8; 3]> = smf.lines.iter().map(|l| l.color).collect();
         assert_eq!(
             colors,
@@ -1008,12 +1194,20 @@ mod tests {
             ]
         );
         assert_ne!(smf.lines_gen, gen, "a recolour is a redraw");
-        assert_eq!(smf.update_color_by_id(11, 0.0, 0.5, 1.0), 0, "idempotent");
-        assert_eq!(smf.update_color_by_id(99, 0.0, 0.0, 0.0), 0, "no such id");
+        assert_eq!(
+            smf.update_color_by_id(11, 0.0, 0.5, 1.0, 8),
+            0,
+            "idempotent"
+        );
+        assert_eq!(
+            smf.update_color_by_id(99, 0.0, 0.0, 0.0, 8),
+            0,
+            "no such id"
+        );
         // Id 0 matches nothing (`0x788250`). REPLY's chat type has id 0 and `UPDATE_CHAT_COLOR`
         // mirrors WHISPER into it, so without the guard every id-less line turns whisper pink.
         assert_eq!(
-            smf.update_color_by_id(0, 1.0, 0.5, 1.0),
+            smf.update_color_by_id(0, 1.0, 0.5, 1.0, 8),
             0,
             "id 0 never reaches the record walk"
         );
