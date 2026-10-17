@@ -161,6 +161,8 @@ impl AssetReader for MpqAssetReader {
                 .await
                 .map_err(fail)?,
         };
+        decode_gate().await;
+        reserve_decode_heap(bytes.len());
         Ok(VecReader::new(bytes))
     }
 
@@ -180,6 +182,118 @@ impl AssetReader for MpqAssetReader {
     async fn is_directory<'a>(&'a self, _path: &'a Path) -> Result<bool, AssetReaderError> {
         Ok(false)
     }
+}
+
+/// wenilla carry: **an asset's bytes reach its loader only inside a frame's decode window.**
+///
+/// On wasm every loader runs on the page's one thread, in `wasm-bindgen-futures`' queue, and that
+/// queue polls every ready task inside ONE microtask. A wave of fetches answering together (a
+/// crowd's models, textures and skins) was therefore decoded back to back with no frame between:
+/// the owner's Chrome trace (2026-10-17T212356) has single `RunMicrotasks` tasks of 7.4 s, 0.9 s
+/// and 2.4 s whose stacks are this reader's callers and `fetch`, while every system in the frame
+/// summed to tens of ms - invisible to the journal, which times the schedule.
+///
+/// So a read that arrives once [`DECODE_WINDOW`] of the current window is spent waits for the next
+/// animation frame. Loaders decode synchronously right after `read` returns and before the queue
+/// polls the next task, so the wall time since the window opened is the decode time spent in it.
+/// The first read of a window always passes, so a single large file still loads.
+#[cfg(target_arch = "wasm32")]
+const DECODE_WINDOW: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// A window older than this has no frame left in it: the next read opens a fresh one.
+#[cfg(target_arch = "wasm32")]
+const WINDOW_SPAN: std::time::Duration = std::time::Duration::from_millis(16);
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    /// When the current decode window opened, and whether anything has passed in it.
+    static WINDOW: std::cell::Cell<Option<web_time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Wait until this frame's decode window has room (see [`DECODE_WINDOW`]).
+#[cfg(target_arch = "wasm32")]
+async fn decode_gate() {
+    loop {
+        let now = web_time::Instant::now();
+        let open = WINDOW.with(|w| match w.get() {
+            Some(start) if now.duration_since(start) < WINDOW_SPAN => {
+                now.duration_since(start) < DECODE_WINDOW
+            }
+            // No window, or a stale one: this read opens it and always passes.
+            _ => {
+                w.set(Some(now));
+                true
+            }
+        });
+        if open {
+            return;
+        }
+        if next_animation_frame().await.is_err() {
+            // No `window` (a worker) or rAF refused: never block a load on the gate.
+            return;
+        }
+        // A new frame: the next pass through the loop opens a fresh window if the old one is
+        // stale; several readers waking on the same frame share it.
+        WINDOW.with(|w| {
+            if w
+                .get()
+                .is_some_and(|s| web_time::Instant::now().duration_since(s) >= WINDOW_SPAN)
+            {
+                w.set(None);
+            }
+        });
+    }
+}
+
+/// wenilla carry: **grow the heap once for a file's decode, not thousands of times during it.**
+///
+/// The owner's Chrome trace with symbols (2026-10-17T220344) put `gnomefemale.m2` (20.7 MB) at a
+/// 5.4 s task and `nightelfmale.m2` (19.0 MB) at 8.5 s, inside `M2ModelLoader::load`, and half of
+/// every sample in `<dlmalloc::sys::System as Allocator>::alloc` - `memory.grow`. The same file
+/// loads in 86 ms natively. The animation parse makes a great many small `Vec`s, and std's wasm
+/// `dlmalloc` takes memory from the page in 64 KiB steps (`granularity: 64 * 1024`, read in
+/// dlmalloc-0.2.14 `src/dlmalloc.rs:135`; std links its own copy, assumed the same), each a
+/// `memory.grow`, each costly on a large heap.
+///
+/// `dlmalloc` on wasm has no separate large-block path (`sys_alloc`, ibid. 440, grows by exactly
+/// the aligned request) and never gives memory back (`src/wasm.rs:109`, `free` is `false`), so one block of
+/// [`DECODE_HEADROOM`] x the file, freed at once, joins the free pool the decode then draws from: a
+/// single `memory.grow` when the pool is short, none when it already holds that much.
+#[cfg(target_arch = "wasm32")]
+const DECODE_HEADROOM: usize = 8;
+
+/// The largest single reservation, so a pathological file cannot ask for most of the 4 GiB space.
+#[cfg(target_arch = "wasm32")]
+const DECODE_HEADROOM_MAX: usize = 512 << 20;
+
+#[cfg(target_arch = "wasm32")]
+fn reserve_decode_heap(file_len: usize) {
+    let want = file_len
+        .saturating_mul(DECODE_HEADROOM)
+        .min(DECODE_HEADROOM_MAX);
+    if want == 0 {
+        return;
+    }
+    // `black_box`, or the optimiser elides an allocation nothing reads.
+    let block: Vec<u8> = Vec::with_capacity(want);
+    drop(std::hint::black_box(block));
+}
+
+/// Resolve on the next `requestAnimationFrame`.
+#[cfg(target_arch = "wasm32")]
+async fn next_animation_frame() -> std::result::Result<(), ()> {
+    let window = web_sys::window().ok_or(())?;
+    let mut failed = false;
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        failed = window.request_animation_frame(&resolve).is_err();
+    });
+    if failed {
+        return Err(());
+    }
+    wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map(|_| ())
+        .map_err(|_| ())
 }
 
 /// What can go wrong fetching one asset over the web host's Data URL scheme — collapsed to the two
