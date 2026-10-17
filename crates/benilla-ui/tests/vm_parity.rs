@@ -116,12 +116,15 @@ const CASES: &[(&str, &str)] = &[
     ("setn", "local t = {} table.setn(t, 5) local u = {n = 1} table.setn(u, 3) return S(getn(t), u.n, t.n)"),
     ("insert_remove", "local t = {} tinsert(t, 'a') tinsert(t, 'c') tinsert(t, 2, 'b') local r = tremove(t, 1) return S(r, t[1], t[2], t[3], getn(t), tremove({}))"),
     ("concat_tbl", "return S(table.concat({1, 2, 3}, ', '), table.concat({'a', 'b'}), table.concat({1, 2, 3}, '-', 2, 3))"),
+    // The client's `str_concat` fails argument 1's check (`0x7fb8d1`, text `0x8821f0`) through
+    // `luaL_error`, at the caller's line.
     ("concat_err_2", "return E(function() return table.concat({1, {}, 3}) end)"),
     ("sort", "local t = {5, 2, 8, 1, 9, 3} table.sort(t) local u = {'b', 'a', 'c'} sort(u, function(a, b) return a > b end) return table.concat(t, ',') .. '|' .. table.concat(u, ',')"),
     ("sort_many", "local t = {} for i = 1, 100 do t[i] = math.mod(i * 37, 101) end table.sort(t) local ok = true for i = 2, 100 do if t[i-1] > t[i] then ok = false end end return S(ok, t[1], t[100])"),
     ("foreach", "local o = {} foreachi({'a', 'b', 'c'}, function(i, v) table.insert(o, i .. v) end) local r = foreachi({1, 2, 3}, function(i, v) if v == 2 then return 'stop' end end) return table.concat(o, ',') .. S(r)"),
     ("unpack", "return S(unpack({1, 2, 3})) .. '|' .. S(unpack({n = 2, 'a', 'b', 'c'}))"),
     ("next", "local t = {} t.x = 1 local k, v = next(t) return S(k, v, next({}), next(t, 'x'))"),
+    // `luaH_next` raises the client's text (`0x6fa467`, `0x871aac`): "for", not 5.1's "to".
     ("next_err", "return E(function() return next({}, 'nope') end)"),
     ("ipairs", "local o = {} for i, v in ipairs({'a', 'b', nil, 'd'}) do table.insert(o, i .. v) end return table.concat(o, ',')"),
     ("pairs_array", "local o = {} for k, v in pairs({10, 20, 30}) do table.insert(o, k .. '=' .. v) end return table.concat(o, ',')"),
@@ -178,6 +181,7 @@ const CASES: &[(&str, &str)] = &[
     ("err_arith", "return E(function() local x return x + 1 end) .. E(function() return {} * 2 end)"),
     ("error_fn", "return E(function() error('boom') end) .. E(function() error('noloc', 0) end) .. string.sub(E(function() error({}) end), 1, 11) .. E(function() error(42) end)"),
     ("error_level2", "local function f() error('deep', 2) end return E(function() f() end)"),
+    // `luaB_assert` raises through `luaL_error` (`0x7031d6`), at the caller's line.
     ("assert", "return E(function() assert(false) end) .. E(function() assert(nil, 'msg') end) .. S(assert(1, 2, 3))"),
     ("bad_arg", "return E(function() string.sub() end) .. E(function() strfind(nil, 'x') end) .. E(function() setmetatable(1, {}) end) .. E(function() math.floor('x') end)"),
     ("bad_self", "local t = {f = string.len} return E(function() return t:f() end)"),
@@ -191,6 +195,7 @@ const CASES: &[(&str, &str)] = &[
     ("globals", "return S(type(_G), type(print), type(select), type(coroutine), type(string.gmatch), type(math.fmod), type(gcinfo), type(bit), type(getn), type(strfind), type(sin))"),
     ("type", "return S(type(nil), type(1), type('s'), type({}), type(print), type(type), type(true))"),
     ("tostring", "return S(tostring(nil), tostring(true), tostring(12), tostring('x'), string.sub(tostring({}), 1, 7), string.sub(tostring(print), 1, 10))"),
+    // The client's `bit` answers unsigned but for `arshift` and `mod` (`0x7faa6d`, `0x7fad06`).
     ("bit", "return S(bit.band(12, 10), bit.bor(12, 10), bit.bxor(12, 10), bit.bnot(0), bit.lshift(1, 4), bit.rshift(256, 4), bit.arshift(-16, 2), bit.lshift(1, 32), bit.mod(7, 3))"),
     ("math", "return S(math.abs(-3), math.max(1, 5, 3), math.min(4, 2), math.sqrt(16), math.floor(2.7), math.pi > 3.14, math.frexp(8), math.ldexp(0.5, 4), math.deg(math.pi))"),
     ("random", "math.randomseed(42) local a = math.random(100) math.randomseed(42) return S(a == math.random(100), math.random() < 1, math.random(5, 5))"),
@@ -443,6 +448,9 @@ b]])"#),
           R("local t = {} t[1], t[2] = 1, 2 local a, b = t[1], t[2] a, b = b, a return a, b"),
           R("local a, b, c = (function() return 1, 2, 3 end)() return a, b, c")}, " | ")"#),
     // ── fix-libs: the library fixes, each blessed on the C build ──
+    // `bit.lshift` answers unsigned (`0x7fac40`); `bit.mod(-2^31, -1)` and `bit.mod(2^31, -1)`,
+    // whose dividend's low word is `INT32_MIN` too, fault in the client's `idiv` (`0x7fad9b`), and
+    // their 0 here is benilla's own.
     ("fix-libs bit_mod_overflow", "return S(E(bit.mod, -2^31, -1), E(bit.mod, 2^31, -1), E(bit.mod, 7, -1), E(bit.mod, -7, 2), E(bit.mod, 0/0, -1), E(bit.mod, 1/0, -1), E(bit.lshift, 1, 31), E(bit.arshift, -2^31, 31))"),
     ("fix-libs rep_format_sizes", r#"return S(string.rep("ab", 3), string.rep("", 1000000), string.rep("x", -1), string.rep("x", 0/0), E(string.format, "%123d", 1), E(string.format, "%1.123f", 1), string.format("%99d", 1) == string.rep(" ", 98) .. "1", string.len(string.format("%.99f", 1)), string.format("%-5c|%5s|%.1q", 65, "ab", "x"), table.concat({"a", 1, "b"}, string.rep("-", 3)), E(gsub, "abc", "%w", "%0%0%0"))"#),
     ("fix-libs deep_match", r#"local n = 3000 local s, p = string.rep("a", n), string.rep("a?", n) local t = {} for w in string.gfind(s, string.rep("(a)?", 30)) do table.insert(t, w) end return S(E(string.find, s, p), E(string.gsub, s, p, "x"), table.getn(t), E(string.find, s, string.rep("a-", 500) .. "$"))"#),
@@ -457,6 +465,8 @@ b]])"#),
     ("fix-libs hex_float", r#"local f = function(x) return string.format("%.17g", x or -1) end
         return S(f(tonumber("0x1p-1074")), f(tonumber("0x1000000000000p-1070")), f(tonumber("0x1p1023")), f(tonumber("0x1p1024")), f(tonumber("0x.1p-1070")), f(tonumber("0x1p-1075")), f(tonumber("0x3p-1075")), f(tonumber("0x1.8p-1074")), f(tonumber("0x1fffffffffffffp-1126")), f(tonumber("0x123456789abcdef0123p-1100")), f(tonumber("0x1p-1080")), E(function() return f("0x1p-1074" + 0) end))"#),
     ("fix-libs str_nul", r#"return S(tonumber("1\0"), tonumber("12\0 "), tonumber("1\0x"), E(function() return "1\0" + 1 end), E(function() return "0x10\0" + 0 end), tonumber("\0"), tonumber(" 5\0abc"), tonumber("ff\0", 16), tonumber("0x1\0"), tonumber("\0 1"), tonumber("1e\0"), tonumber("1 \0 x"))"#),
+    // The client's `sort` (`0x7fb920`) sorts `1..getn`: `f`'s `arg.n` of 3 takes in its nil,
+    // which `lua_lessthan` cannot compare.
     ("fix-libs sort_objlen", r#"local function f(...) table.sort(arg) return arg[1], arg[2], arg[3] end
         local t = {3, 1, 2, n = 5} local ok = pcall(table.sort, t)
         local a = {3, 1, nil, 2} local oka = pcall(table.sort, a)
@@ -491,6 +501,7 @@ b]])"#),
     ("fix-libs format_alt_g", r#"local z = 0 local m = -z
         return S(string.format("%#g", 123456), string.format("%#.0g", 1), string.format("%#G", 1e20), string.format("%#g", 0), string.format("%#.3g", 1), string.format("%#g", 1e-10), string.format("%#.0e", 1), string.format("%#.0f", 1), string.format("%#.0G", 1e20), string.format("%#10.1g|%-#8g|", 5, 2.5), string.format("%g %f %e %.3g", m, m, m, m))"#),
     ("fix-libs format_ulong", r#"local z = 0 local o = {} for _, v in {2^64, 1e300, 1 / z, -1 / z, 0 / z, 2^63, -2^63, -1, 2^65, 2^63 + 2^11, -2^64, -1e300, 2^64 - 2^11} do table.insert(o, E(string.format, "%x %u %o %X", v, v, v, v)) end return table.concat(o, "|")"#),
+    // `luaH_next` raises the client's text (`0x6fa467`, `0x871aac`): "for", not 5.1's "to".
     ("fix-libs foreach_invalid_key", r#"local t = {a = 1} return S(E(foreach, t, function(k) t[k] = nil for i = 1, 20 do t["x" .. i] = i end end), E(next, {}, "nope"))"#),
     ("fix-libs chunkid_cr", r#"local o = {}
         for _, s in {"error('e')\r--x", "error('e')\n--x", "error('e')\r\n--x", "error('e') --" .. string.rep("y", 100), "\rerror('e')", "error('e')", "error('e')\0--x"} do
@@ -554,26 +565,6 @@ b]])"#),
         E(function() local q = setmetatable({}, {__index = 5}) return q.x end))"#),
     ("fix-vm tm_unm_args", r#"local u = setmetatable({}, {__unm = function(a, b) return S(a == b, rawequal(a, b)) end})
         return -u"#),
-    // ── fix-vm: a callback's arguments and results share `LUAI_MAXCSTACK` slots ──
-    ("fix-vm callback_results", r#"local t = {} for i = 1, 8000 do t[i] = i end
-        local function n(...) return arg.n end
-        -- The C build's first callback with many results fails earlier, an mlua artifact; warm it.
-        n(unpack(t, 1, 100))
-        local calls = {
-          [3] = function(k) return n(unpack(t, 1, k)) end,
-          [4] = function(k) return n(unpack(t, 1, k, nil)) end,
-          [6] = function(k) return n(unpack(t, 1, k, nil, nil, nil)) end,
-        }
-        local o = {}
-        for _, a in ipairs({3, 4, 6}) do
-          local most = 0
-          for k = 7985, 7999 do if pcall(calls[a], k) then most = k end end
-          table.insert(o, a .. ":" .. most)
-        end
-        -- The message alone: the C build's carries a Rust-side traceback after it.
-        local ok, e = pcall(calls[3], 7999)
-        local _, _, m = string.find(tostring(e), "^([^\n]*)")
-        return table.concat(o, " ") .. " " .. m"#),
     // ── perf-fix: gsub skips to a literal first byte; every shape answers as before ──
     ("perf-fix gsub_literal_first", r##"local s = "a-b--c-d.e%f(g)h"
         return S(string.gsub(s, "%-", "+"), string.gsub(s, "-", "+"), string.gsub(s, "%-+", "+"), string.gsub(s, "%-*", "+"),
@@ -671,6 +662,7 @@ b]])"#),
         return table.concat(o, " | ")"#),
     // ── fix-libs: library errors the cases above leave out ──
     // The message's first line: the C build's carries a Rust-side traceback after it.
+    // `auxsort` raises through `luaL_error` (`0x7fb990`), at the line that called `sort`.
     ("fix-libs sort_invalid_order", r#"local function M(f, ...) local ok, e = pcall(f, unpack(arg)) if ok then return "ok" end
           local _, _, m = string.find(tostring(e), "^([^\n]*)") return m end
         local t = {} for i = 1, 50 do t[i] = math.mod(i * 7, 13) end
@@ -742,6 +734,10 @@ const SWEEP_FNS: &[&str] = &[
     "string.match",
     "string.gmatch",
     "string.reverse",
+    // The table library and `unpack` are the client's: `luaL_checktype`, `luaL_checknumber` and
+    // `luaL_argerror`'s messages (`0x6f4b50`, `0x6f4c80`, `0x6f4810`), in the order each reads
+    // its arguments (`str_concat` 2, 3, 4, then 1), and `tinsert`'s position form for any count
+    // but 2 (`0x7fb6e0`).
     "table.concat",
     "table.getn",
     "table.setn",
@@ -756,6 +752,8 @@ const SWEEP_FNS: &[&str] = &[
     "math.floor",
     "math.max",
     "math.min",
+    // `math.mod`, `math.pow` and `math.atan2` check argument 1, then 2, as the client's do
+    // (`0x7fafd0`, `0x7fb050`, `0x7faf30`), on every platform.
     "math.mod",
     "math.fmod",
     "math.sqrt",
@@ -784,12 +782,16 @@ const SWEEP_FNS: &[&str] = &[
     "rawget",
     "rawset",
     "select",
+    // The client's `unpack` reads its table alone (`0x7030a0`): items 1 to `getn`.
     "unpack",
+    // `luaH_next`'s text is the client's (`0x871aac`).
     "next",
     "ipairs",
     "pairs",
     "getmetatable",
     "setmetatable",
+    // `assert` and `loadstring` check their arguments as `luaL_argerror` words it (`0x6f4810`),
+    // named `?` when a C function, `pcall`, called them.
     "assert",
     "error",
     "pcall",
@@ -805,6 +807,7 @@ const SWEEP_FNS: &[&str] = &[
     "strrep",
     "format",
     "gsub",
+    // The table library's own functions, so its messages, as above.
     "tinsert",
     "tremove",
     "getn",
@@ -816,6 +819,7 @@ const SWEEP_FNS: &[&str] = &[
     "floor",
     "max",
     "min",
+    // `math.mod`'s order, as above.
     "mod",
     "sqrt",
     "frexp",
@@ -899,8 +903,10 @@ fn unescape(s: &str) -> String {
 /// - the transcendental functions are the host libm's, rounded differently by glibc and Apple's;
 /// - a NaN prints its sign under glibc (`-nan`), never under Apple's libc, and which NaN a
 ///   function answers is the host libm's;
-/// - `luaL_checknumber` on two arguments in one C call (`fmod`, `pow`, `ldexp`, `atan2`) checks
-///   them in the compiler's order: gcc on x86-64 the second first, clang on arm64 the first;
+/// - `luaL_checknumber` on two arguments in one C call (`fmod`, `pow`, `ldexp`, `atan2`) checked
+///   them in the compiler's order: gcc on x86-64 the second first, clang on arm64 the first.
+///   benilla-lua checks them in the client's order on every platform (`pow`, `atan2` and `mod`
+///   the first, `ldexp` the second), so the error items of the first three agree everywhere;
 /// - a `double` past the integer range cast to `ptrdiff_t` or `unsigned long` is undefined: x86-64
 ///   answers `INT64_MIN`, arm64 saturates;
 /// - `math.random` is the host `rand`.

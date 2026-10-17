@@ -194,7 +194,8 @@ fn next(vm: &mut Vm, nargs: usize) -> R<usize> {
             vm.top = base + 1;
             Ok(vm.ret1(Value::Nil))
         }
-        Err(crate::table::InvalidKey) => Err(vm.rt_error("invalid key to `next'")),
+        // `luaH_next`'s `luaG_runerror` (`0x6fa467`, text `0x871aac`).
+        Err(crate::table::InvalidKey) => Err(vm.rt_error("invalid key for `next'")),
     }
 }
 
@@ -307,61 +308,66 @@ fn assert(vm: &mut Vm, nargs: usize) -> R<usize> {
     let v = vm.check_any(nargs, 1)?;
     if !v.truthy() {
         let msg = vm.opt_str(nargs, 2, b"assertion failed!")?;
-        let m = String::from_utf8_lossy(vm.heap.str(msg)).into_owned();
-        return Err(vm.error_at(1, &m));
+        // `luaL_error(L, "%s", msg)` (`0x7031d0`): the bytes, up to a NUL.
+        let m = vm.heap.str(msg);
+        let m = m[..m.iter().position(|&b| b == 0).unwrap_or(m.len())].to_vec();
+        return Err(vm.error_at_bytes(1, &m));
     }
     Ok(vm.ret1(v))
 }
 
-/// `luaL_getn`: `t.n` if numeric, else the size `setn` remembered, else a count to the first nil.
+/// `checkint` (`0x6f4f80`): `lua_tonumber` (`0x6f4f8a`) and `__ftol`'s low word, so a numeric
+/// string counts; -1 for a value that is no number (`lua_isnumber`, `0x6f4f9f`).
+fn checkint(vm: &Vm, v: Value) -> i32 {
+    vm.tonumber(v).map_or(-1, c_int)
+}
+
+/// `luaL_getn` (`0x6f5050`): `t.n` if `checkint` takes it, else the size `setn` remembered, else
+/// a count to the first nil.
 pub fn getn(vm: &mut Vm, t: crate::value::TableRef) -> usize {
-    let n = vm.heap.table(t).get(Value::Str(vm.names.n));
-    if let V::Num(x) = n.unpack() {
-        let i = c_int(x);
-        if i >= 0 {
-            return i as usize;
-        }
+    let n = checkint(vm, vm.heap.table(t).get(Value::Str(vm.names.n)));
+    if n >= 0 {
+        return n as usize;
     }
-    if let Some(n) = vm.heap.table(t).setn {
-        return n;
+    if let Some(n) = vm.heap.table(t).setn.filter(|&n| n >= 0) {
+        return n as usize;
     }
     vm.heap.table(t).border()
 }
 
-/// `luaL_setn`: into `t.n` when the table has a numeric one, else the remembered size.
-pub fn setn(vm: &mut Vm, t: crate::value::TableRef, n: usize) {
+/// `luaL_setn` (`0x6f4ea0`): into `t.n`, as a number, when `checkint` takes the one there, else the
+/// remembered size; either keeps a negative size as given.
+pub fn setn(vm: &mut Vm, t: crate::value::TableRef, n: i32) {
     let key = Value::Str(vm.names.n);
-    let has_n = matches!((vm.heap.table(t).get(key)).unpack(), V::Num(x) if c_int(x) >= 0);
-    if has_n {
-        vm.heap.table_mut(t).set(key, Value::Num(n as f64)).unwrap();
+    if checkint(vm, vm.heap.table(t).get(key)) >= 0 {
+        vm.heap
+            .table_mut(t)
+            .set(key, Value::Num(f64::from(n)))
+            .unwrap();
     } else {
         vm.heap.table_mut(t).setn = Some(n);
     }
 }
 
-/// 5.1's `luaB_unpack`: items `i` (1) to `j`, `j` by default the table's `getn`; more than the
-/// stack's room raises.
+/// 5.0's `LUA_MAXCSTACK`: the client's `lua_checkstack` (`0x6f2f30`) refuses once the slots in
+/// use plus those asked for pass it (`cmp ecx,0x800` at `0x6f2f43`).
+const MAXCSTACK_50: usize = 0x800;
+
+/// `luaB_unpack` (`0x7030a0`): items 1 to `getn(t)`, every argument after the table unread,
+/// after `luaL_checkstack(n, "table too big to unpack")` (`0x7030c8`, text `0x872bc4`), whose
+/// slots in use are the arguments.
 fn unpack(vm: &mut Vm, nargs: usize) -> R<usize> {
     let t = vm.check_table(nargs, 1)?;
-    let i = vm.opt_int(nargs, 2, 1)?;
-    let e = if vm.arg(nargs, 2).is_nil() {
-        getn(vm, t) as i32
-    } else {
-        vm.check_int(nargs, 3)?
-    };
-    if i > e {
-        return Ok(0);
+    let n = getn(vm, t);
+    if vm.top - vm.native_base() + n > MAXCSTACK_50 {
+        // `luaL_checkstack` (`0x6f4b20`): `luaL_error` with `stack overflow (%s)` (`0x8716b0`).
+        return Err(vm.error_at(1, "stack overflow (table too big to unpack)"));
     }
-    // `n <= 0` is 5.1's test for an overflowed `e - i + 1`.
-    let n = e.wrapping_sub(i).wrapping_add(1);
-    if n <= 0 || !vm.check_stack(n as usize) {
-        return Err(vm.error_at(1, "too many results to unpack"));
-    }
-    for k in 0..n {
-        let v = vm.heap.table(t).get_int(i.wrapping_add(k));
+    for k in 1..=n {
+        let v = vm.heap.table(t).get_int(k as i32);
         vm.push(v);
     }
-    Ok(n as usize)
+    Ok(n)
 }
 
 fn rawequal(vm: &mut Vm, nargs: usize) -> R<usize> {

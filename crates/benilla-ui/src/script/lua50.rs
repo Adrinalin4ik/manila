@@ -24,7 +24,9 @@ const REMOVED: &[(&str, &[&str])] = &[
     ("math", &["fmod", "modf", "huge", "cosh", "sinh", "tanh"]),
 ];
 
-/// Lua 5.0's remembered table size and the `n`-based table library that reads and updates it.
+/// Lua 5.0's remembered table size and the `n`-based table library that reads and updates it,
+/// which are benilla-lua's own natives.
+#[cfg(test)]
 mod table_size;
 
 /// Install the dialect. Runs before the WoW stdlib layer, so its aliases bind the 5.0-shaped
@@ -32,10 +34,7 @@ mod table_size;
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
-    // ── 1 · the `n`-based table library ───────────────────────────────────────────────────────
-    table_size::install(lua)?;
-
-    // ── 2 · the 5.1-only members go ───────────────────────────────────────────────────────────
+    // ── 1 · the 5.1-only members go ───────────────────────────────────────────────────────────
     for (lib, names) in REMOVED {
         let Ok(t) = g.get::<Table>(*lib) else {
             continue;
@@ -58,7 +57,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // rejects a non-table in both.
     lua.set_type_metatable::<mlua::String>(None);
 
-    // ── 3 · the 5.0 compat globals ────────────────────────────────────────────────────────────
+    // ── 2 · the 5.0 compat globals ────────────────────────────────────────────────────────────
     // The client's compat chunk (`0x8722e8`) publishes these three bare, and no bare `setn`
     // (`reference/lua_globals.tsv`).
     let table: Table = g.get("table")?;
@@ -72,7 +71,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // Bound here, not left to the stdlib layer, so the bare `getn` is `table.getn` itself.
     g.set("getn", table.get::<Value>("getn")?)?;
 
-    // ── 4 · the base library's own shape ──────────────────────────────────────────────────────
+    // ── 3 · the base library's own shape ──────────────────────────────────────────────────────
     // `print` and `_VERSION` are neither in the base array (`0x811e28`) nor in 1.12's `_G`.
     g.set("print", Value::Nil)?;
     g.set("_VERSION", Value::Nil)?;
@@ -85,66 +84,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     install_bit(lua)?;
     install_gc(lua)?;
-    install_assert(lua)?;
 
     Ok(())
 }
 
-/// The `bit` library 1.12 opens (`0x7fadc0`, array `0x822c18`): its eight functions, in the
-/// array's order, on 32-bit two's complement.
+/// The `bit` library 1.12 opens (`0x7fadc0`, array `0x822c18`): benilla-lua's natives for its
+/// eight functions, in the array's order.
 fn install_bit(lua: &Lua) -> mlua::Result<()> {
     let bit = lua.create_table()?;
-    // The client truncates to a 32-bit int and answers signed. `as i64 as u32` is C's wrapping
-    // `(unsigned)(int)x`, not a saturating cast, so `bnot(0)` is -1 as there.
-    fn u32_of(v: f64) -> u32 {
-        v as i64 as u32
+    for (name, f) in mlua::benilla_lua::bit_library() {
+        bit.set(name, lua.create_native(name, f)?)?;
     }
-    fn out(v: u32) -> i64 {
-        v as i32 as i64
-    }
-    bit.set(
-        "bnot",
-        lua.create_function(|_, a: f64| Ok(out(!u32_of(a))))?,
-    )?;
-    bit.set(
-        "band",
-        lua.create_function(|_, (a, b): (f64, f64)| Ok(out(u32_of(a) & u32_of(b))))?,
-    )?;
-    bit.set(
-        "bor",
-        lua.create_function(|_, (a, b): (f64, f64)| Ok(out(u32_of(a) | u32_of(b))))?,
-    )?;
-    bit.set(
-        "bxor",
-        lua.create_function(|_, (a, b): (f64, f64)| Ok(out(u32_of(a) ^ u32_of(b))))?,
-    )?;
-    // Shift counts mask to 5 bits, as the client's x86 shifts do: `lshift(1, 32)` is 1.
-    bit.set(
-        "lshift",
-        lua.create_function(|_, (a, n): (f64, f64)| Ok(out(u32_of(a) << (u32_of(n) & 31))))?,
-    )?;
-    bit.set(
-        "rshift",
-        lua.create_function(|_, (a, n): (f64, f64)| Ok(out(u32_of(a) >> (u32_of(n) & 31))))?,
-    )?;
-    bit.set(
-        "arshift",
-        lua.create_function(|_, (a, n): (f64, f64)| {
-            Ok(out(((u32_of(a) as i32) >> (u32_of(n) & 31)) as u32))
-        })?,
-    )?;
-    // `bit.mod`: an integer remainder, unlike `math.mod`'s float one.
-    bit.set(
-        "mod",
-        lua.create_function(|_, (a, b): (f64, f64)| {
-            let b = u32_of(b) as i32;
-            if b == 0 {
-                return Err(mlua::Error::runtime("bit.mod: division by zero"));
-            }
-            // `wrapping_rem`: `INT32_MIN % -1` is 0, not a Rust panic.
-            Ok((u32_of(a) as i32).wrapping_rem(b) as i64)
-        })?,
-    )?;
     lua.globals().set("bit", bit)
 }
 
@@ -238,42 +188,6 @@ fn install_gc(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
     Ok(())
-}
-
-/// `assert` in its 5.0 shape (`luaB_assert 0x7031a0`): it answers only its first argument
-/// (`lua_settop(L, 1)` at `0x7031e5`) where 5.1 answers them all, and a false value raises
-/// argument 2 or `assertion failed!` (`0x872bdc`) through `luaL_error 0x6f4940`.
-fn install_assert(lua: &Lua) -> mlua::Result<()> {
-    let f = lua.create_function(|lua, args: mlua::MultiValue| {
-        let mut it = args.into_iter();
-        // `luaL_checkany 0x6f4bb0`: an absent argument 1 raises; an explicit `nil` takes the
-        // falsy leg below.
-        let Some(v) = it.next() else {
-            return Err(mlua::Error::RuntimeError(
-                "bad argument #1 to `assert' (value expected)".into(),
-            ));
-        };
-        if matches!(v, Value::Nil | Value::Boolean(false)) {
-            // `luaL_optlstring`: a string or a number; anything else raises its own bad
-            // argument, the type spelled as `luaT_typenames 0x811cd0` spells it.
-            let msg = match it.next() {
-                None | Some(Value::Nil) => "assertion failed!".to_string(),
-                Some(other) => match lua.coerce_string(other.clone())? {
-                    Some(s) => s.to_string_lossy(),
-                    None => {
-                        return Err(mlua::Error::RuntimeError(format!(
-                            "bad argument #2 to `assert' (string expected, got {})",
-                            type_name(&other)
-                        )))
-                    }
-                },
-            };
-            return Err(mlua::Error::RuntimeError(msg));
-        }
-        // `lua_settop(L, 1)`: the first argument alone, whatever else was passed.
-        Ok(v)
-    })?;
-    lua.globals().set("assert", f)
 }
 
 fn type_name(v: &Value) -> &'static str {
@@ -518,6 +432,39 @@ mod tests {
         }
     }
 
+    /// `math_atan2`, `math_mod` and `math_pow` (`0x7faf30`, `0x7fafd0`, `0x7fb050`) check
+    /// argument 1, then 2 (`0x7fb057`, `0x7fb066`); only `math_ldexp` (`0x7fb1f0`) checks 2 first.
+    #[test]
+    fn two_argument_math_checks_its_first_argument_first() {
+        let s = UiScript::new().unwrap();
+        let raised = |call: &str| -> String {
+            s.eval::<String>(&format!(
+                "local ok, e = pcall(function() return {call} end) return e"
+            ))
+            .unwrap()
+        };
+        for (call, want) in [
+            (
+                "math.pow()",
+                "bad argument #1 to `pow' (number expected, got no value)",
+            ),
+            (
+                "math.atan2('x', 'y')",
+                "bad argument #1 to `atan2' (number expected, got string)",
+            ),
+            (
+                "math.mod(nil, {})",
+                "bad argument #1 to `mod' (number expected, got nil)",
+            ),
+            (
+                "math.ldexp()",
+                "bad argument #2 to `ldexp' (number expected, got no value)",
+            ),
+        ] {
+            assert!(raised(call).ends_with(want), "{call}: {}", raised(call));
+        }
+    }
+
     /// The bare `mod` is `math.mod`, so it survives `math.fmod`'s removal.
     #[test]
     fn the_bare_math_family_survives_the_removals() {
@@ -673,8 +620,43 @@ mod tests {
                 "bit.{name} is one of the array's eight entries"
             );
         }
-        // Two's complement, signed out: `bnot(0)` is -1, not 4294967295.
-        assert_eq!(s.eval::<i64>("return bit.bnot(0)").unwrap(), -1);
+        // Unsigned out, the word loaded by `fild qword` with its high word zeroed (`0x7faa6d`).
+        assert_eq!(s.eval::<i64>("return bit.bnot(0)").unwrap(), 4_294_967_295);
+        assert_eq!(
+            s.eval::<i64>("return bit.band(4294967295, 4294967295)")
+                .unwrap(),
+            4_294_967_295
+        );
+        assert_eq!(
+            s.eval::<i64>("return bit.bor(-1, 0)").unwrap(),
+            4_294_967_295
+        );
+        assert_eq!(
+            s.eval::<i64>("return bit.bxor(-1, 1)").unwrap(),
+            4_294_967_294
+        );
+        assert_eq!(
+            s.eval::<i64>("return bit.lshift(1, 31)").unwrap(),
+            2_147_483_648
+        );
+        assert_eq!(
+            s.eval::<i64>("return bit.rshift(-1, 0)").unwrap(),
+            4_294_967_295
+        );
+        // `arshift` and `mod` alone load `fild dword`: signed (`0x7fad06`, `0x7fadab`).
+        assert_eq!(s.eval::<i64>("return bit.arshift(-8, 1)").unwrap(), -4);
+        assert_eq!(s.eval::<i64>("return bit.mod(-7, 4)").unwrap(), -3);
+        // `__ftol` truncates to 64 bits and the low word is read: past 64 bits is 0.
+        assert_eq!(s.eval::<i64>("return bit.bor(2^32 + 5, 0)").unwrap(), 5);
+        assert_eq!(
+            s.eval::<i64>("return bit.bnot(2^64)").unwrap(),
+            4_294_967_295
+        );
+        // A shift reads its count, argument 2, first (`0x7fac18`).
+        assert!(s
+            .eval::<String>("local ok, e = pcall(function() return bit.lshift() end) return e")
+            .unwrap()
+            .ends_with("bad argument #2 to `lshift' (number expected, got no value)"));
         assert_eq!(s.eval::<i64>("return bit.band(4660, 255)").unwrap(), 0x34);
         assert_eq!(s.eval::<i64>("return bit.bor(240, 15)").unwrap(), 0xFF);
         assert_eq!(s.eval::<i64>("return bit.bxor(255, 15)").unwrap(), 0xF0);
@@ -685,6 +667,45 @@ mod tests {
         // The shift count masks to 5 bits, as the x86 instruction does.
         assert_eq!(s.eval::<i64>("return bit.lshift(1, 32)").unwrap(), 1);
         assert_eq!(s.eval::<i64>("return bit.mod(17, 5)").unwrap(), 2);
+    }
+
+    /// `bit.band`, `bor` and `bxor` fold every argument from 2 to `lua_gettop` into the first
+    /// (`0x7faac0`..`0x7faad9`): one argument answers itself, and each is checked in turn.
+    #[test]
+    fn band_bor_and_bxor_fold_every_argument() {
+        let s = UiScript::new().unwrap();
+        assert_eq!(s.eval::<i64>("return bit.bor(1, 2, 4)").unwrap(), 7);
+        assert_eq!(s.eval::<i64>("return bit.band(15, 7, 3)").unwrap(), 3);
+        assert_eq!(s.eval::<i64>("return bit.bxor(1, 3, 7, 15)").unwrap(), 10);
+        assert_eq!(s.eval::<i64>("return bit.band(-1)").unwrap(), 4_294_967_295);
+        assert!(s
+            .eval::<String>(
+                "local ok, e = pcall(function() return bit.bor(1, 2, 'x') end) return e"
+            )
+            .unwrap()
+            .ends_with("bad argument #3 to `bor' (number expected, got string)"));
+        assert!(s
+            .eval::<String>("local ok, e = pcall(function() return bit.band() end) return e")
+            .unwrap()
+            .ends_with("bad argument #1 to `band' (number expected, got no value)"));
+    }
+
+    /// `bit.mod` tests only the low word of its divisor's `__ftol` (`0x7fad32`); a 0 there answers
+    /// 1 divided by the divisor (`0x7fad42`), with argument 1 never read, and raises nothing.
+    #[test]
+    fn bit_mod_by_a_zero_word_answers_one_over_the_divisor() {
+        let s = UiScript::new().unwrap();
+        assert_eq!(s.eval::<f64>("return bit.mod(7, 0.5)").unwrap(), 2.0);
+        assert_eq!(
+            s.eval::<f64>("return bit.mod(7, 0)").unwrap(),
+            f64::INFINITY
+        );
+        assert_eq!(
+            s.eval::<f64>("return bit.mod(7, 2^32)").unwrap(),
+            1.0 / 4_294_967_296.0
+        );
+        assert_eq!(s.eval::<f64>("return bit.mod(nil, '0.25')").unwrap(), 4.0);
+        assert_eq!(s.eval::<i64>("return bit.mod(7, 2^32 + 3)").unwrap(), 1);
     }
 
     /// `print` and `_VERSION` are not in 1.12's `_G`, and `__pow` is.
@@ -921,6 +942,152 @@ mod error_quoting_tests {
                 "a 5.1-quoted element survives in: {e}"
             );
         }
+    }
+
+    /// The client's engine functions and libraries raise through `luaL_error` (`0x6f4940`), which
+    /// prefixes `luaL_where(1)` (`0x6f48e0`), the calling Lua function's `chunk:line: `, and word
+    /// a bad argument as `luaL_argerror` (`0x6f4810`) does. Only `PlaySound`, `PlayMusic` and
+    /// `PlaySoundFile` raise bare, through `lua_error` (`0x458708`, `0x458758`, `0x4587a1`).
+    #[test]
+    fn a_rust_callbacks_error_carries_its_callers_position() {
+        let s = UiScript::new().unwrap();
+        let raised = |body: &str| -> String {
+            s.lua()
+                .load(format!(
+                    "local ok, e = pcall(function()\n{body}\nend) return tostring(e)"
+                ))
+                .set_name("=X.lua")
+                .eval::<String>()
+                .unwrap()
+        };
+        assert_eq!(raised("GetCVar()"), "X.lua:2: Usage: GetCVar(\"cvar\")");
+        assert_eq!(raised("assert(false, 'x')"), "X.lua:2: x");
+        assert_eq!(raised("assert(nil)"), "X.lua:2: assertion failed!");
+        for sound in ["PlaySound()", "PlayMusic()", "PlaySoundFile()"] {
+            assert!(
+                raised(sound).starts_with("Usage: "),
+                "{sound}: {}",
+                raised(sound)
+            );
+        }
+        // A typed argument fails as `luaL_checktype` words it, under the name it was called by.
+        let typed = s
+            .lua()
+            .create_function(|_, (_t, _n): (mlua::Table, f64)| Ok(()))
+            .unwrap();
+        s.lua().globals().set("Typed", typed).unwrap();
+        assert_eq!(
+            raised("Typed(nil)"),
+            "X.lua:2: bad argument #1 to `Typed' (table expected, got nil)"
+        );
+        assert_eq!(
+            raised("local f = Typed f({})"),
+            "X.lua:2: bad argument #2 to `f' (number expected, got no value)"
+        );
+        assert_eq!(
+            raised("local o = {m = Typed} o:m()"),
+            "X.lua:2: bad argument #1 to `m' (number expected, got no value)"
+        );
+    }
+
+    /// Error text is bytes, as the client's C strings are: `assert`'s message goes through
+    /// `luaL_error("%s")` (`0x7031d0`), byte for byte up to a NUL, and `luaL_argerror`
+    /// (`0x6f4810`) and the type errors name a function, field or chunk with its raw bytes.
+    #[test]
+    fn error_text_keeps_its_bytes() {
+        let s = UiScript::new().unwrap();
+        let caught = |body: &str| -> String {
+            s.eval::<String>(&format!(
+                "local ok, e = pcall(function() {body} end) \
+                 local o = {{}} for i = 1, string.len(e) do o[i] = string.byte(e, i) end \
+                 return table.concat(o, ' ')"
+            ))
+            .unwrap()
+        };
+        let ends = |body: &str, want: &[u8]| {
+            let got: Vec<u8> = caught(body)
+                .split(' ')
+                .map(|b| b.parse::<u8>().unwrap())
+                .collect();
+            assert!(got.ends_with(want), "{body}: {got:?}");
+        };
+        ends("assert(false, '\\233')", b":1: \xe9");
+        ends("assert(false, 'a\\0b')", b":1: a");
+        // A function stored under a Latin-1 name, then called with a bad argument and as a
+        // non-function.
+        ends(
+            "_G['\\233'] = string.rep _G['\\233']()",
+            b"bad argument #1 to `\xe9' (string expected, got no value)",
+        );
+        ends(
+            "local t = {} t['\\233'] = 1 t['\\233']()",
+            b"attempt to call field `\xe9' (a number value)",
+        );
+        // A chunk named by its own source keeps its bytes, through `RunScript` too.
+        ends(
+            "local f, e = loadstring('return \\233 +') error(e, 0)",
+            b"[string \"return \xe9 +\"]:1: unexpected symbol near `\xe9'",
+        );
+    }
+
+    /// The error handler is called with the value raised, as `lua_pcall` hands its error
+    /// function the value (`0x703b40`): a table as itself, a message with its bytes.
+    #[test]
+    fn the_error_handler_hears_the_value_raised() {
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            "caught = {} seterrorhandler(function(e) table.insert(caught, e) end) \
+             E = {} local f = CreateFrame('Frame') f:RegisterEvent('PLAYER_ALIVE') \
+             f:SetScript('OnEvent', function() error(E) end) \
+             local g = CreateFrame('Frame') g:RegisterEvent('PLAYER_ALIVE') \
+             g:SetScript('OnEvent', function() error('\\233', 0) end)",
+        )
+        .unwrap();
+        s.fire_event("PLAYER_ALIVE", vec![]);
+        s.run("RunScript('return \\233 +')").unwrap();
+        s.dispatch_script_errors_to_handler();
+        // `RunScript`'s chunk is named by its source's bytes (`0x48b9bb`).
+        assert!(s
+            .eval::<bool>(
+                "return caught[3] == '[string \"return \\233 +\"]:1: unexpected symbol near `\\233\\''"
+            )
+            .unwrap());
+        assert!(s.eval::<bool>("return caught[1] == E").unwrap());
+        assert!(s.eval::<bool>("return caught[2] == '\\233'").unwrap());
+    }
+
+    /// A Lua error that comes back through a Rust callback goes on as it was raised: the value
+    /// itself, as `lua_error` raises what a protected call left, never its text again, and never
+    /// with a second position.
+    #[test]
+    fn a_lua_error_passes_through_a_callback_unchanged() {
+        let s = UiScript::new().unwrap();
+        let through = s
+            .lua()
+            .create_function(|_, f: mlua::Function| f.call::<()>(()))
+            .unwrap();
+        s.lua().globals().set("Through", through).unwrap();
+        assert!(s
+            .eval::<bool>(
+                "local E = {} local ok, e = pcall(Through, function() error(E) end) return e == E"
+            )
+            .unwrap());
+        assert_eq!(
+            s.lua()
+                .load(
+                    "local ok, e = pcall(function() Through(function() error('boom') end) end) \
+                     return e"
+                )
+                .set_name("=Y.lua")
+                .eval::<String>()
+                .unwrap(),
+            "Y.lua:1: boom"
+        );
+        assert!(s
+            .eval::<bool>(
+                "local ok, e = pcall(Through, function() error('\\233', 0) end) return e == '\\233'"
+            )
+            .unwrap());
     }
 
     /// `select` is 5.1's; 5.0 counts arguments with `arg.n`, and the host with

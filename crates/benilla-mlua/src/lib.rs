@@ -8,10 +8,10 @@
 //! used after its state is gone panics. A Rust callback runs with the `&mut Vm` the interpreter
 //! hands it; while it runs, every access reaches the VM through that reference, so one chain of
 //! borrows covers each access, and a handle lets go of its root through the root table alone,
-//! never the VM. A callback's error is raised in Lua as its message, a string, as a 1.12 C
-//! function raises one; a callback's panic is raised as an error value `pcall` can catch, and
-//! resumes as a panic if it reaches Rust, as mlua's does. A Lua error that reaches Rust is a
-//! [`Error::RuntimeError`] with that value's text.
+//! never the VM. A callback's error is raised in Lua as a 1.12 C function raises one, through
+//! `luaL_error`'s rules ([`raise`]); a callback's panic is raised as an error value `pcall` can
+//! catch, and resumes as a panic if it reaches Rust, as mlua's does. A Lua error that reaches
+//! Rust is an [`Error::LuaValue`] with that value and its text.
 
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::c_void;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use benilla_lua::heap::HostFn;
 use benilla_lua::value::V;
@@ -221,6 +222,150 @@ fn take_panic(vm: &Vm, e: benilla_lua::Value) -> Option<Box<dyn Any + Send>> {
         return None;
     }
     PANICS.with(|p| p.borrow_mut().get_mut(&tag).and_then(|e| e.0.take()))
+}
+
+/// A callback's error raised in Lua as the client's C functions raise theirs. A message goes
+/// through `luaL_error` (`0x6f4940`), which prefixes `luaL_where(1)` (`0x6f48e0`), the calling
+/// Lua function's `chunk:line: `; a bad argument is worded as `luaL_argerror` (`0x6f4810`) and
+/// `luaL_typerror` (`0x6f48a0`) word it, named as the caller called the function; a Lua error
+/// that came back through the callback, or an [`Error::bare`] one, is raised as it is, as
+/// `lua_error` (`0x6f4440`) raises a value.
+fn raise(lua: &Lua, nargs: usize, e: Error) -> LuaError {
+    let vm = lua.vm();
+    match e {
+        Error::LuaValue {
+            value: Some(v),
+            message,
+        } => {
+            // Another family's value, or one gone with its thread, raises its text.
+            let x = match v.get(lua) {
+                Some(v) => lua.unwrap(&v),
+                None => vm.str(message.as_bytes()),
+            };
+            vm.throw(x)
+        }
+        Error::LuaValue {
+            message,
+            value: None,
+        } => {
+            let msg = vm.str(message.as_bytes());
+            vm.throw(msg)
+        }
+        Error::SyntaxError { raw, .. } => {
+            let msg = vm.str(&raw);
+            vm.throw(msg)
+        }
+        // 5.0's memory error carries no position.
+        Error::MemoryError(_) => vm.memory_error(),
+        Error::CallbackError { cause, .. } | Error::WithContext { cause, .. } => {
+            raise(lua, nargs, (*cause).clone())
+        }
+        Error::BadArgument { pos, cause, .. } => match &*cause {
+            // `luaL_checktype` and the `luaL_check*` family: `T expected, got U`, `no value` for
+            // an argument past the last.
+            Error::FromLuaConversionError { to, message, .. }
+                if message.as_deref() != Some("out of range") =>
+            {
+                match lua_type(to) {
+                    Some(t) => vm.type_arg_error(nargs, pos, t),
+                    None => vm.arg_error(pos, &cause.lua_message()),
+                }
+            }
+            other => vm.arg_error(pos, &other.lua_message()),
+        },
+        other => vm.error_at(1, &other.lua_message()),
+    }
+}
+
+/// The Lua type a conversion's Rust target reads, as `luaT_typenames` (`0x811cd0`) spells it.
+fn lua_type(rust: &str) -> Option<&'static str> {
+    Some(match rust {
+        "table" | "Vec" | "HashMap" | "BTreeMap" => "table",
+        "function" => "function",
+        "string" | "String" => "string",
+        "lightuserdata" => "userdata",
+        "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "i64" | "u64" | "i128" | "u128" | "isize"
+        | "usize" | "f32" | "f64" => "number",
+        _ => return None,
+    })
+}
+
+thread_local! {
+    /// Each Lua error value an [`Error::LuaValue`] carries, by its tag: the value, rooted, and
+    /// the family of the state that made it. An entry goes when the last copy of its error does.
+    static RAISED: RefCell<HashMap<u64, (u64, Value)>> = RefCell::new(HashMap::new());
+}
+
+static NEXT_RAISED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The Lua value an [`Error::LuaValue`] carries, held out of the error on its state's thread so
+/// the error stays `Send` and `Sync` and prints without its state: the error holds only this tag.
+#[derive(Clone)]
+pub struct ErrorValue(Arc<RaisedTag>);
+
+struct RaisedTag(u64);
+
+impl Drop for RaisedTag {
+    fn drop(&mut self) {
+        // `try_with`: the thread may be ending. The value drops outside the borrow.
+        let gone = RAISED
+            .try_with(|r| r.borrow_mut().remove(&self.0))
+            .ok()
+            .flatten();
+        drop(gone);
+    }
+}
+
+impl std::fmt::Debug for ErrorValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ErrorValue({})", self.0 .0)
+    }
+}
+
+impl ErrorValue {
+    fn new(family: u64, v: Value) -> ErrorValue {
+        let tag = NEXT_RAISED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        RAISED.with(|r| r.borrow_mut().insert(tag, (family, v)));
+        ErrorValue(Arc::new(RaisedTag(tag)))
+    }
+
+    /// The value, for a state of the family that made it, on the thread that made it.
+    pub fn get(&self, lua: &Lua) -> Option<Value> {
+        RAISED.with(|r| {
+            r.borrow()
+                .get(&self.0 .0)
+                .filter(|(family, _)| *family == lua.0.family)
+                .map(|(_, v)| v.clone())
+        })
+    }
+}
+
+impl Error {
+    /// The error as Lua sees it, as bytes: a string or number value it carries as written, a
+    /// syntax error as the compiler wrote it, else [`Error`]'s message text.
+    pub fn lua_bytes(&self, lua: &Lua) -> Vec<u8> {
+        match self {
+            Error::SyntaxError { raw, .. } => raw.clone(),
+            Error::CallbackError { cause, .. } | Error::WithContext { cause, .. } => {
+                cause.lua_bytes(lua)
+            }
+            _ => match self.lua_value(lua) {
+                Some(Value::String(s)) => s.as_bytes().to_vec(),
+                _ => self.lua_message().into_bytes(),
+            },
+        }
+    }
+
+    /// The Lua value this error carries, when it came out of Lua: [`ErrorValue::get`].
+    pub fn lua_value(&self, lua: &Lua) -> Option<Value> {
+        match self {
+            Error::LuaValue { value: Some(v), .. } => v.get(lua),
+            Error::CallbackError { cause, .. } | Error::WithContext { cause, .. } => {
+                cause.lua_value(lua)
+            }
+            _ => None,
+        }
+    }
 }
 
 const DESTROYED: &str = "Lua instance is destroyed";
@@ -541,11 +686,7 @@ impl Lua {
                 }));
                 let out = match res {
                     Ok(Ok(n)) => Ok(n),
-                    Ok(Err(e)) => {
-                        let vm = lua.vm();
-                        let msg = vm.str(e.lua_message().as_bytes());
-                        Err(vm.throw(msg))
-                    }
+                    Ok(Err(e)) => Err(raise(&lua, nargs, e)),
                     Err(payload) => Err(raise_panic(lua.vm(), payload)),
                 };
                 out
@@ -553,6 +694,18 @@ impl Lua {
         });
         let f = self.vm().new_host("?", host);
         Ok(Function(self.make_ref(f)))
+    }
+
+    /// A Lua function over one of the interpreter's own natives, such as
+    /// [`benilla_lua::bit_library`]'s: it runs on the VM directly, as a C function of the
+    /// client's library runs, with the interpreter's argument checks and messages.
+    pub fn create_native(
+        &self,
+        name: &'static str,
+        f: benilla_lua::heap::NativeFn,
+    ) -> Result<Function> {
+        let v = self.vm().new_native(name, f);
+        Ok(Function(self.make_ref(v)))
     }
 
     /// mlua's `create_function_mut`: the closure behind a `RefCell`.
@@ -799,7 +952,10 @@ impl Lua {
         if let Some(payload) = take_panic(self.vm(), e) {
             std::panic::resume_unwind(payload);
         }
-        Error::RuntimeError(self.vm().display(e))
+        Error::LuaValue {
+            message: self.vm().display(e),
+            value: Some(ErrorValue::new(self.0.family, self.wrap(e))),
+        }
     }
 }
 
@@ -1961,6 +2117,7 @@ impl<'a> Chunk<'a> {
                 _ => "attempt to load a binary chunk".into(),
             };
             return Err(Error::SyntaxError {
+                raw: std::string::String::as_bytes(&message).to_vec(),
                 message,
                 incomplete_input: false,
             });
@@ -1971,6 +2128,7 @@ impl<'a> Chunk<'a> {
         let f = lua.vm().load(src, name).map_err(|e| Error::SyntaxError {
             message: e.to_string(),
             incomplete_input: e.0.ends_with(b"near `<eof>'"),
+            raw: e.0,
         })?;
         let f = Function(lua.make_ref(f));
         if let Some(env) = &self.env {
