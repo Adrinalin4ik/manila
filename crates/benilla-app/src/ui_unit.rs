@@ -15,6 +15,7 @@ use benilla_ui::script::{
 use crate::creature_type::CreatureTypeSources;
 use crate::names::NameCache;
 use crate::net::{Guid, NetCommands, ObjectStore, Reputations, SelfPlayer};
+use crate::query_cache::Ask;
 use crate::target::{ring_reaction, Factions, Selection};
 use crate::ui_script::{gate, SweepApp, UiInput};
 
@@ -1231,8 +1232,11 @@ fn player_snapshot(
     factions: Option<&Factions>,
     guild: &mut crate::ui_guild::GuildState,
 ) -> UnitState {
+    // The unit's create looked its name up with a callback (`0x5dec12`); a frame asks only
+    // a name the cache holds nothing for, as one invalidated since, and a refused one waits
+    // for the next create.
     let name = names
-        .resolve_unit(guid, Some(store), commands)
+        .resolve_unit(guid, Some(store), Ask::New(commands))
         .map(str::to_string);
     let mut s = snapshot(
         store,

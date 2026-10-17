@@ -9,6 +9,7 @@ use benilla_assets::coords::wow_to_bevy;
 use benilla_ui::script::{DeathAction, DeathUiState, ScriptValue, UiScript};
 
 use crate::net::{ClientCommand, NetCommands, ObjectStore, Objects, SelfGuid, SelfPlayer};
+use crate::query_cache::Ask;
 use crate::ui_action::Spells;
 use crate::ui_script::{UiFeed, UiInput};
 
@@ -102,6 +103,9 @@ struct DeathAnnounced {
     reclaim_generation: u32,
     /// Held back while a player caster's name is still resolving.
     offer_generation: u32,
+    /// The offer whose caster's name was looked up as its packet's (`0x5e7c82`, callback
+    /// `0x5e7ca0`): the frames that wait on it read.
+    offer_asked: u32,
     /// A fresh ask re-fires `CONFIRM_XP_LOSS`.
     confirm_generation: u32,
 }
@@ -197,7 +201,7 @@ fn feed_death(
         spirit_healer_in_range,
         sickness_duration: sickness,
         // `HasSoulstone()`; the dead gate is first, so the inventory walk runs only while dead.
-        self_res_label: resolve_self_res(&store.0, &objects, &items, spells.as_deref(), &net)
+        self_res_label: resolve_self_res(&store.0, &objects, &items, spells.as_deref())
             .map(|r| r.label().to_owned()),
     });
 
@@ -241,10 +245,15 @@ fn feed_death(
     fire_vm_edges(&mut script, prev.map(|(_, d, g)| (d, g)), dead, ghost);
 
     // ── The offer and confirm announcements ──
+    let ask = Ask::at(
+        std::mem::replace(&mut memo.offer_asked, death_net.resurrect_generation)
+            != death_net.resurrect_generation,
+        &net,
+    );
     if let Some(name) = offer_announcement(memo, &death_net, store.0.is_dead_or_ghost(), |offer| {
         // A player caster's name is empty on the wire; hold the popup until the cache resolves it.
         if offer.name.is_empty() {
-            names.resolve_player(offer.caster, &net).map(str::to_owned)
+            names.resolve_player(offer.caster, ask).map(str::to_owned)
         } else {
             Some(offer.name.clone())
         }
@@ -344,13 +353,13 @@ impl SelfRes {
 /// 3. On a zero field, the carried inventory at the walker's default mask (`0x47`) for an item
 ///    whose on-use spell carries [`SPELL_EFFECT_SELF_RESURRECT`].
 ///
-/// An item template still in flight reads as no self-res until it lands.
+/// An item template still in flight reads as no self-res until it lands: the item test only reads
+/// (`0x5ed68e`).
 fn resolve_self_res(
     store: &benilla_protocol::ObjectFields,
     objects: &Objects,
     items: &crate::items::Items,
     spells: Option<&Spells>,
-    commands: &NetCommands,
 ) -> Option<SelfRes> {
     if !store.unit_is_dead() {
         return None;
@@ -368,7 +377,7 @@ fn resolve_self_res(
     );
     slots.into_iter().find_map(|(bag_index, slot, guid)| {
         let entry = objects.object(guid)?.object_entry()?;
-        let t = items.template(entry, guid, commands)?;
+        let t = items.template(entry, guid, Ask::Read)?;
         let self_res = t.spells.iter().any(|sp| {
             sp.trigger == 0
                 && spells.is_some_and(|c| {
@@ -482,7 +491,6 @@ fn drain_death(
                         &ladder.objects,
                         &ladder.items,
                         ladder.spells.as_deref(),
-                        &ladder.commands,
                     )
                 });
                 match res {
@@ -507,10 +515,8 @@ fn drain_death(
                             Ok(())
                         } else {
                             let mut ladder = cast.p0();
-                            let t = ladder
-                                .items
-                                .template(entry, guid, &ladder.commands)
-                                .cloned();
+                            // The use reads its record (`0x5d8d57`).
+                            let t = ladder.items.template(entry, guid, Ask::Read).cloned();
                             let it = crate::ui_items::ItemUse {
                                 guid: Some(guid),
                                 start_quest: t.as_ref().map_or(0, |t| t.start_quest),
@@ -607,6 +613,70 @@ mod tests {
             sickness: false,
             has_timer: true,
         }
+    }
+
+    /// The offer's packet looks a player caster's name up with the callback `0x5e7ca0`
+    /// (`0x5e7c82`); the frames the popup waits through read. A refused name is asked by no frame
+    /// after it, only by the next offer.
+    #[test]
+    fn a_refused_resurrecter_is_asked_by_the_next_offer_never_by_a_frame() {
+        use benilla_protocol::messages::ObjectType;
+        use benilla_protocol::ObjectFields;
+        const ME: u64 = 0x7;
+        const CASTER: u64 = 0x9;
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx))
+            .insert_resource(crate::net::NetStatus {
+                connected: true,
+                last_reason: None,
+            })
+            .init_resource::<SelfGuid>()
+            .init_resource::<DeathNet>()
+            .init_resource::<DeathFeedState>()
+            .init_resource::<crate::names::NameCache>()
+            .init_resource::<crate::net::GuidIndex>()
+            .init_resource::<crate::items::Items>()
+            .init_resource::<Time<Real>>()
+            .add_systems(Update, feed_death);
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        // `UNIT_FIELD_HEALTH` 0 of a `UNIT_FIELD_MAXHEALTH` 100: dead.
+        let dead = ObjectFields::from_pairs(&[(22, 0), (28, 100)]).into_created(ObjectType::Player);
+        let me = app
+            .world_mut()
+            .spawn((ObjectStore(dead), Transform::default(), SelfPlayer))
+            .id();
+        app.world_mut()
+            .resource_mut::<crate::net::GuidIndex>()
+            .0
+            .insert(ME, me);
+        app.world_mut().resource_mut::<SelfGuid>().0 = Some(ME);
+        let offer = |app: &mut App| {
+            net::resurrect_request_for_tests(
+                CASTER,
+                &mut app.world_mut().resource_mut::<DeathNet>(),
+            );
+            app.update();
+        };
+        app.update();
+        offer(&mut app);
+        assert_eq!(crate::query_cache::queries(&rx).len(), 1);
+        app.world_mut()
+            .resource_mut::<crate::names::NameCache>()
+            .insert_player(CASTER, String::new(), None);
+        for _ in 0..600 {
+            app.update();
+        }
+        assert!(
+            crate::query_cache::queries(&rx).is_empty(),
+            "no frame asks a refusal"
+        );
+        offer(&mut app);
+        assert_eq!(
+            crate::query_cache::queries(&rx).len(),
+            1,
+            "the next offer asks again"
+        );
     }
 
     /// PLAYER_UNGHOST hides the popup with `StaticPopup_Hide`, which runs no `OnCancel`, so no
@@ -758,7 +828,7 @@ mod tests {
                 icon: None,
                 min_made: 1,
                 max_made: 1,
-                cooldown_secs: None,
+                cooldown: None,
                 product_item: 2996,
                 product_inv_type: 0,
                 product_item_level: 0,
@@ -1159,7 +1229,6 @@ mod self_res_tests {
 
     use super::{resolve_self_res, SelfRes, SPELL_EFFECT_SELF_RESURRECT};
     use crate::items::Items;
-    use crate::net::{ClientCommand, NetCommands};
     use crate::ui_action::Spells;
 
     /// Reincarnation's effect spell, what the server writes into the field.
@@ -1171,11 +1240,6 @@ mod self_res_tests {
     const F_MAXHEALTH: u16 = 28;
     /// `PLAYER_FIELD_PACK_SLOT_1`: the backpack's 16 slots, two dwords per guid.
     const F_PACK_1: u16 = 532;
-
-    fn commands() -> (NetCommands, crossbeam_channel::Receiver<ClientCommand>) {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        (NetCommands(tx), rx)
-    }
 
     fn catalog(pairs: impl IntoIterator<Item = (u32, SpellDisplay)>) -> Spells {
         Spells {
@@ -1196,7 +1260,6 @@ mod self_res_tests {
     /// (`BuildPlayerRepop`).
     #[test]
     fn the_dead_gate_precedes_the_field() {
-        let (net, _rx) = commands();
         let items = Items::default();
         // Nothing streamed: the spell leg answers before the inventory walk.
         let mut objs = crate::ui_items::TestObjects::new();
@@ -1209,7 +1272,7 @@ mod self_res_tests {
             (F_SELF_RES, REINCARNATION),
         ]);
         assert_eq!(
-            resolve_self_res(&alive, &objects, &items, Some(&spells), &net),
+            resolve_self_res(&alive, &objects, &items, Some(&spells)),
             None,
             "alive with a self-res owed: nil"
         );
@@ -1220,7 +1283,7 @@ mod self_res_tests {
             (F_SELF_RES, REINCARNATION),
         ]);
         assert_eq!(
-            resolve_self_res(&ghost, &objects, &items, Some(&spells), &net),
+            resolve_self_res(&ghost, &objects, &items, Some(&spells)),
             None,
             "a released ghost still holds the field, and still answers nil"
         );
@@ -1231,7 +1294,7 @@ mod self_res_tests {
             (F_SELF_RES, REINCARNATION),
         ]);
         assert_eq!(
-            resolve_self_res(&dead, &objects, &items, Some(&spells), &net),
+            resolve_self_res(&dead, &objects, &items, Some(&spells)),
             Some(SelfRes::Spell {
                 spell: REINCARNATION,
                 label: "Reincarnation".into(),
@@ -1242,7 +1305,6 @@ mod self_res_tests {
     /// The reference pushes the literal (`0x48ad1d`).
     #[test]
     fn an_unresolvable_spell_id_reads_unknown_not_nil() {
-        let (net, _rx) = commands();
         let items = Items::default();
         let mut objs = crate::ui_items::TestObjects::new();
         let objects = objs.get();
@@ -1250,7 +1312,7 @@ mod self_res_tests {
             ObjectFields::from_pairs(&[(F_MAXHEALTH, 4000), (F_HEALTH, 0), (F_SELF_RES, 999_999)]);
         for spells in [None, Some(catalog([]))] {
             assert_eq!(
-                resolve_self_res(&dead, &objects, &items, spells.as_ref(), &net),
+                resolve_self_res(&dead, &objects, &items, spells.as_ref()),
                 Some(SelfRes::Spell {
                     spell: 999_999,
                     label: "UNKNOWN".into(),
@@ -1264,7 +1326,6 @@ mod self_res_tests {
     /// on-use spell, and the real one.
     #[test]
     fn a_zero_field_falls_through_to_a_carried_item() {
-        let (net, _rx) = commands();
         let mut items = Items::default();
         let mut objs = crate::ui_items::TestObjects::new();
 
@@ -1309,7 +1370,7 @@ mod self_res_tests {
         }
         let dead = ObjectFields::from_pairs(&pairs);
 
-        match resolve_self_res(&dead, &objects, &items, Some(&spells), &net) {
+        match resolve_self_res(&dead, &objects, &items, Some(&spells)) {
             Some(SelfRes::Item { entry, label, .. }) => {
                 assert_eq!(
                     entry, 12,
@@ -1323,7 +1384,7 @@ mod self_res_tests {
         // Without it the answer is nil, not the spell leg's "UNKNOWN".
         let bare = ObjectFields::from_pairs(&[(F_MAXHEALTH, 4000), (F_HEALTH, 0)]);
         assert_eq!(
-            resolve_self_res(&bare, &objects, &items, Some(&spells), &net),
+            resolve_self_res(&bare, &objects, &items, Some(&spells)),
             None
         );
     }

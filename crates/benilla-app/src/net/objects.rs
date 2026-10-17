@@ -13,6 +13,7 @@ use bevy::prelude::*;
 use crate::go_templates::GameObjectTemplates;
 use crate::items::Items;
 use crate::names::NameCache;
+use crate::query_cache::Ask;
 use benilla_world::model_fade::DespawnFade;
 use benilla_world::vis_chain::VisChainOnly;
 
@@ -156,14 +157,19 @@ fn notify_values(sc: &mut Scene, guid: u64, edges: &[(u16, u32, u32)]) {
     let around = crate::field_watch::Around {
         me,
         // An entry of 0 has no key (`0x556aad`).
-        creature_lookup: &|entry| entry != 0 && names.lookup_creature(entry, guid, net),
+        creature_lookup: &|entry| {
+            names
+                .resolve_creature(entry, guid, Ask::Event(net))
+                .is_some()
+        },
         others: &others,
         pet_bar: sc.pet_bar.as_ref().map_or(0, |bar| bar.spells.pet_guid),
     };
     let fired = crate::field_watch::values(&around, guid, kind, fields, edges);
     let notices = item_watch(&sc.index, &sc.stores, &sc.self_guid, &sc.items)
         .values(guid, kind, fields, edges);
-    // An entry change that missed the cache waits on the answer (`0x5d9652` asks with `0x5d96b0`).
+    // An entry change that missed the cache asks and waits on the answer (`0x5d9652` asks with
+    // `0x5d96b0`).
     for n in &notices {
         if let crate::item_watch::ItemNotice::Entry {
             guid,
@@ -172,6 +178,7 @@ fn notify_values(sc: &mut Scene, guid: u64, edges: &[(u16, u32, u32)]) {
             ..
         } = *n
         {
+            sc.items.template(new, guid, Ask::Event(&sc.net));
             sc.items.wait_for_entry(guid, new);
         }
     }
@@ -248,15 +255,16 @@ fn compare_party_record(sc: &mut Scene, guid: u64, fields: &ObjectFields) {
         .and_then(|&e| sc.stores.get(e).ok());
     let pet_name = pet_guid
         .zip(pet)
-        .and_then(|(g, p)| sc.names.peek_unit(g, Some(p)));
+        .and_then(|(g, p)| sc.names.resolve_unit(g, Some(p), Ask::Read));
     let mut live = old.clone();
     live.snapshot_descriptor(fields, pet.map(|p| &p.0), pet_name);
     let notices = crate::ui_party::record_notices(guid, &old, &live);
     sc.field_notices.write_batch(notices);
 }
 
-/// Items: a descriptor-only create, `SMSG_ITEM_QUERY_SINGLE_RESPONSE` (a miss is cached as `None`
-/// and never re-asked), and the lifetime and enchant countdowns, written into the item's own
+/// Items: a descriptor-only create, which asks for the item's record;
+/// `SMSG_ITEM_QUERY_SINGLE_RESPONSE`, whose refusal the next create or entry change of that entry
+/// asks again; and the lifetime and enchant countdowns, written into the item's own
 /// [`crate::items::Countdowns`].
 fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
     match ev {
@@ -268,12 +276,18 @@ fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
             // A first create runs the item's create hook, the record set-up (`0x5d8400` →
             // `0x5d8300`); a create of an object already shown (`+0xe4` bit 4, which the hook's
             // `0x613af0` sets) runs the field watchers over every field instead (`0x465d79`).
-            let hook = (!sc.index.0.contains_key(&guid))
+            let first = !sc.index.0.contains_key(&guid);
+            let hook = first
                 .then(|| {
                     item_watch(&sc.index, &sc.stores, &sc.self_guid, &sc.items)
                         .created(guid, &fields)
                 })
                 .flatten();
+            // The set-up asks for the record of every item, whoever's, with the callback
+            // `0x5d8390` (`0x5d8300` into `0x55ba30`): the readers of a held item only read it.
+            if let Some(entry) = fields.object_entry().filter(|_| first) {
+                sc.items.template(entry, guid, Ask::Event(&sc.net));
+            }
             let edges = item_create(
                 guid,
                 container,
@@ -293,7 +307,7 @@ fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
             // The answer finishes the set-up of every item of ours waiting on it (`0x5d8390`); a
             // negative answer finishes nothing (its found byte is clear, `0x5d83b8`).
             let answered = info.is_some();
-            let landed = answered && sc.items.template_cached(entry).is_none();
+            let landed = answered && sc.items.template(entry, 0, Ask::Read).is_none();
             sc.items.insert_template(entry, info);
             // A negative answer releases the waiters with nothing run (`0x5d96bb`).
             let waiters = sc.items.take_entry_waiters(entry);
@@ -1710,6 +1724,54 @@ mod tests {
             .collect()
     }
 
+    /// Every item's first create asks for its record with the callback `0x5d8390` (`0x5d8300`),
+    /// and so does an entry change to an uncached entry (`0x5d9652`); a re-create and a zero
+    /// entry ask nothing. A refused record is asked again by the next create or entry change.
+    #[test]
+    fn an_items_record_is_asked_at_its_create_and_entry_change_only() {
+        use benilla_protocol::field::FIELD_OBJECT_ENTRY;
+        const A: u64 = 0x4000_0000_0000_00a1;
+        const B: u64 = 0x4000_0000_0000_00b2;
+        let mut app = watch_world(&[]);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.world_mut().insert_resource(NetCommands(tx));
+        let asked = |rx: &crossbeam_channel::Receiver<ClientCommand>| -> Vec<u32> {
+            crate::query_cache::queries(rx)
+                .into_iter()
+                .filter_map(|c| match c {
+                    ClientCommand::ItemQuery { entry, .. } => Some(entry),
+                    _ => None,
+                })
+                .collect()
+        };
+        let dispatch = |app: &mut App, ev: SessionEvent| {
+            super::super::handlers::dispatch(app.world_mut(), vec![ev]);
+        };
+        dispatch(&mut app, watched_item(A, 955, false));
+        assert_eq!(asked(&rx), [955], "the create asks");
+        dispatch(
+            &mut app,
+            SessionEvent::ItemTemplate {
+                entry: 955,
+                info: None,
+            },
+        );
+        dispatch(&mut app, watched_item(A, 955, false));
+        assert!(asked(&rx).is_empty(), "a re-create runs no set-up");
+        dispatch(&mut app, watched_item(B, 955, false));
+        assert_eq!(asked(&rx), [955], "the next create asks again");
+        dispatch(
+            &mut app,
+            SessionEvent::ObjectValues {
+                guid: A,
+                fields: ObjectFields::from_pairs(&[(FIELD_OBJECT_ENTRY, 956)]),
+            },
+        );
+        assert_eq!(asked(&rx), [956], "an entry change to a miss asks");
+        dispatch(&mut app, watched_item(0x4000_0000_0000_00c3, 0, false));
+        assert!(asked(&rx).is_empty(), "entry 0 has no key (`0x55ba42`)");
+    }
+
     /// An entry change to an uncached entry waits on the answer with its own callback
     /// (`0x5d96b0`), not the create's set-up; a negative answer runs nothing.
     #[test]
@@ -1786,10 +1848,10 @@ mod tests {
         );
         assert!(templates.is_unknown(ENTRY));
         assert!(rx.try_recv().is_err(), "reading it asks nothing");
-        // A hover asks every frame while the template is missing (`ui_tooltip`): within the
-        // window of the refusal, none of those asks is sent.
+        // A hover reads the record every frame and never asks: the builder (`0x52aa20`) calls no
+        // object cache lookup.
         for _ in 0..600 {
-            templates.request(0x11, &fields, &commands);
+            assert!(templates.of(&fields).is_none());
         }
         assert!(
             rx.try_recv().is_err(),
