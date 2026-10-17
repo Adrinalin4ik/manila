@@ -257,6 +257,7 @@ pub(crate) fn on_cvar(
         // player who asked for nothing, and exactly what a player who turned the journal on is
         // asking for.
         benilla_world::sysprof::arm(journal.0);
+        super::systime::arm(journal.0);
     }
 }
 
@@ -735,20 +736,96 @@ fn count_world_shape(world: &World) {
 static ARCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static ENT_ALLOC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// **Which rigs stay live, and why** — the `# rigs` line.
+///
+/// Journal 2026-10-17T152415, camera at the floor: `mesh_vis` 35 while `rigs_live` held at 964
+/// of ~1,100, and `rig_wr`, `moved` and `p_xform` sat where they were with the camera level. Both
+/// gates (`creature_anim::lod`, `doodad_anim`) read as correct, so this counts instead of
+/// arguing: per class, the live rigs, the live ones that are not drawn at all
+/// (`InheritedVisibility` false, so their pose cannot be seen), the live ones whose gate sphere is
+/// outside this frame's frustum, and the parked. Classes, first match wins: `unit` (a
+/// `WorldUnit` body), `doodad` (a `DoodadAnimHost`), `stage` (a portrait booth), `child` (anything
+/// parented: worn items, props, spell models), `other`.
+///
+/// Journal-only: costs nothing while the journal is off.
+const RIG_CLASSES: [&str; 5] = ["unit", "doodad", "stage", "child", "other"];
+/// Per class: live, live-but-undrawn, live-but-out-of-frustum, parked.
+static RIG_CENSUS: [std::sync::atomic::AtomicU64; 20] = [ZERO; 20];
+static RIG_CENSUS_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[allow(clippy::type_complexity)] // one census query
 fn count_rigs(
-    rigs: Query<Has<benilla_world::rig_anim::AnimParked>, With<benilla_world::rig_anim::RigPose>>,
+    rigs: Query<
+        (
+            Has<benilla_world::rig_anim::AnimParked>,
+            &GlobalTransform,
+            Option<&InheritedVisibility>,
+            Option<&crate::target::SelectionRadius>,
+            Has<benilla_world::world_unit::WorldUnit>,
+            Has<benilla_world::doodad_anim::DoodadAnimHost>,
+            Has<crate::portrait::StageRig>,
+            Has<ChildOf>,
+        ),
+        With<benilla_world::rig_anim::RigPose>,
+    >,
+    journal: Option<Res<FpsJournalSetting>>,
+    cam: Query<&bevy::camera::primitives::Frustum, With<benilla_world::view::WorldCamera>>,
 ) {
     use std::sync::atomic::Ordering::Relaxed;
     let (mut live, mut park) = (0u64, 0u64);
-    for parked in &rigs {
+    let census = journal.is_some_and(|j| j.0);
+    let frustum = cam.single().ok();
+    let mut cells = [0u64; 20];
+    for (parked, tf, inherited, radius, unit, doodad, stage, child) in &rigs {
         if parked {
             park += 1;
         } else {
             live += 1;
         }
+        if !census {
+            continue;
+        }
+        let class = if unit {
+            0
+        } else if doodad {
+            1
+        } else if stage {
+            2
+        } else if child {
+            3
+        } else {
+            4
+        };
+        let base = class * 4;
+        if parked {
+            cells[base + 3] += 1;
+            continue;
+        }
+        cells[base] += 1;
+        if inherited.is_some_and(|v| !v.get()) {
+            cells[base + 1] += 1;
+        }
+        // The creature gate's own sphere (`creature_anim::lod`: radius x scale x 2 + 4, else 6).
+        if let Some(f) = frustum {
+            let scale = tf.to_scale_rotation_translation().0.max_element();
+            let r = radius.map_or(6.0, |r| r.0 * scale * 2.0 + 4.0);
+            let sphere = bevy::camera::primitives::Sphere {
+                center: tf.translation().into(),
+                radius: r,
+            };
+            if !f.intersects_sphere(&sphere, false) {
+                cells[base + 2] += 1;
+            }
+        }
     }
     RIGS_LIVE.fetch_add(live, Relaxed);
     RIGS_PARK.fetch_add(park, Relaxed);
+    if census {
+        for (cell, n) in RIG_CENSUS.iter().zip(cells) {
+            cell.fetch_add(n, Relaxed);
+        }
+        RIG_CENSUS_FRAMES.fetch_add(1, Relaxed);
+    }
 }
 
 fn count_visible_meshes(
@@ -861,6 +938,8 @@ fn take_stream_us() -> [u64; 5] {
 impl Plugin for FpsJournalPlugin {
     fn build(&self, app: &mut App) {
         super::upload_budget::plugin(app);
+        // Every system's own time, the `# sysus` line; armed with the journal.
+        app.add_plugins(super::systime::SysTimePlugin);
         // The page-side way back from `/console uiLua 0`; see `journal_web::install_ui_lua_hook`.
         #[cfg(target_arch = "wasm32")]
         web::install_ui_lua_hook();
@@ -2022,6 +2101,28 @@ vm {:.1}   ui {:.1}",
     // `Assets<WowModelMaterial>` holds; this says who asked for them. At one pin 19 yards apart
     // that total read 883 (flat for 90 s) in journal 33 and 6,002 (still climbing) in journal 36,
     // with the frame 41 -> 70 ms, and nothing in the code could say which lane widened.
+    // **Which rigs stay live** - see [`RIG_CENSUS`]. `class=live/undrawn/offview/parked`, per frame.
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        let frames = RIG_CENSUS_FRAMES.swap(0, Relaxed);
+        let cells: Vec<u64> = RIG_CENSUS.iter().map(|c| c.swap(0, Relaxed)).collect();
+        if frames > 0 {
+            let mut names = String::from("\n# rigs");
+            for (i, name) in RIG_CLASSES.iter().enumerate() {
+                let c = &cells[i * 4..i * 4 + 4];
+                let _ = write!(
+                    names,
+                    " {name}={}/{}/{}/{}",
+                    c[0] / frames,
+                    c[1] / frames,
+                    c[2] / frames,
+                    c[3] / frames
+                );
+            }
+            names.push('\n');
+            line.push_str(&names);
+        }
+    }
     {
         let counts = benilla_assets::materials::material_counts();
         if counts.iter().any(|&n| n > 0) {
@@ -2050,6 +2151,19 @@ vm {:.1}   ui {:.1}",
     // **The costliest systems of that second, by name.** A `#` line, so every existing reader of
     // this file skips it and the columns stay a table. This is what ends the
     // guess-a-suspect-then-rebuild loop: one capture names them all.
+    // **Every system's own time** (`perf::systime`), us per frame, costliest first.
+    {
+        let top = super::systime::take_top(30);
+        if !top.is_empty() {
+            let per = frames.max(1);
+            let mut names = String::from("\n# sysus");
+            for (name, ns) in top {
+                let _ = write!(names, " {name}={}", ns / 1000 / per);
+            }
+            names.push('\n');
+            line.push_str(&names);
+        }
+    }
     let top = benilla_world::sysprof::take_top(12);
     if !top.is_empty() {
         // **Its own line.** The first build appended this to the end of the data row, so every

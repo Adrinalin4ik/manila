@@ -43,6 +43,8 @@ mod hud;
 // `pub(crate)` for its two `note_*` sinks alone: the UI pass writes the script-cost columns
 // from outside this module, and a meter whose producer cannot reach it is no meter.
 pub(crate) mod journal;
+// wenilla carry: per-system wall time for the journal's `# sysus` line.
+mod systime;
 pub(crate) mod upload_budget;
 #[cfg(feature = "dev")]
 mod main_split;
