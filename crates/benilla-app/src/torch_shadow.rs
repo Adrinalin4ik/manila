@@ -733,7 +733,8 @@ fn update_torch_shadows(
     mut lane: ResMut<TorchLane>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut views: ResMut<TorchShadowViews>,
-    cameras: Query<&GlobalTransform, With<WorldCamera>>,
+    // The `Frustum` rides along for the view gate on the entity gather (see `any_in_view`).
+    cameras: Query<(&GlobalTransform, Option<&bevy::camera::primitives::Frustum>), With<WorldCamera>>,
     // MONKEY (torch caster selection): the RANKING ANCHOR. Shadows are for the player's own
     // surroundings — a free-look camera swung across the room must not re-pick the casters — so
     // scoring is done at the body, and only falls back to the camera when there is none (the glue
@@ -794,7 +795,8 @@ fn update_torch_shadows(
         teardown(&mut lane, &mut meshes, &mut views);
         return;
     }
-    let Some(cam) = cameras.iter().next().map(GlobalTransform::translation) else {
+    let view_frustum = cameras.iter().next().and_then(|(_, f)| f.copied());
+    let Some(cam) = cameras.iter().next().map(|(t, _)| t.translation()) else {
         return;
     };
 
@@ -1382,14 +1384,35 @@ fn update_torch_shadows(
         // NEW position every frame, so a mesh gathered two frames ago puts the room's other bodies
         // in the wrong place relative to the light, which is the smear this change is about. The
         // rate is untouched for the settled case, which is every other slot in the room.
+        // wenilla carry: **no gather while no dynamic fixture's light reaches the view.** A
+        // fixture's direct term is zero past its reach, so when no reach sphere meets the frustum
+        // no pixel on screen is lit by any of them, and their shadows cannot be seen. The slots
+        // stay picked (the ranking anchor is the body, so a camera swing re-picks nothing); only
+        // the CPU skin + mesh re-upload is skipped, and the first frame a sphere enters the view
+        // the gather is due again, since `entity_at` has aged. Measured by the per-system timer
+        // (`perf::systime`, journal 2026-10-17T200606): `update_torch_shadows` 1,487 us and
+        // `R:allocate_and_free_meshes` 1,521 us a frame with the owner facing a wall, torches
+        // beside him and none on screen.
+        let any_in_view = view_frustum.is_none_or(|f| {
+            dynamic_positions.iter().any(|&(_, pos, radius, _)| {
+                f.intersects_sphere(
+                    &bevy::camera::primitives::Sphere {
+                        center: pos.into(),
+                        radius,
+                    },
+                    false,
+                )
+            })
+        });
         let due = fresh
-            || moving_mask != 0
-            || entity_gather_due(
-                video.interior_shadow_entity_rate,
-                now - lane.entity_at,
-                dynamic,
-                lane.entity_mask,
-            );
+            || any_in_view
+                && (moving_mask != 0
+                    || entity_gather_due(
+                        video.interior_shadow_entity_rate,
+                        now - lane.entity_at,
+                        dynamic,
+                        lane.entity_mask,
+                    ));
         if due {
             if let Some(mesh) = lane.entity_mesh.as_ref().and_then(|h| meshes.get_mut(h)) {
                 let (mut positions, mut indices) = take_mesh_buffers(mesh);
