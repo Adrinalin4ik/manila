@@ -17,8 +17,6 @@ tracy = ["benilla-app/tracy"]
 trace_chrome = ["benilla-app/trace_chrome"]
 # Forwards to benilla-app's `bevy_dynamic_linking`, which enables bevy/dynamic_linking.
 bevy_dynamic_linking = ["benilla-app/bevy_dynamic_linking"]
-# Experimental: the UI scripts on benilla's own 1.12 interpreter.
-benilla-vm = ["benilla-app/benilla-vm"]
 
 [dependencies]
 # `default-features = false`, or `--no-default-features` here still builds benilla-app with `dev`.

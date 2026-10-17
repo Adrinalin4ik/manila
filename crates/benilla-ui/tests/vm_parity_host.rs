@@ -1,6 +1,6 @@
-//! The script host's Rust-facing behaviour on either VM: cases that need a host callback, which
-//! `vm_parity` cannot write in Lua. Each expected answer is the C Lua build's, recorded by running
-//! this file on it (the default features); `--features benilla-vm` must give the same.
+//! The script host's Rust-facing behaviour: cases that need a host callback, which `vm_parity`
+//! cannot write in Lua. Each expected answer is the one the C Lua build gave before benilla-lua
+//! replaced it.
 
 use benilla_ui::mlua::{self, Function, Lua, Table, Value};
 use benilla_ui::script::UiScript;

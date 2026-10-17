@@ -84,8 +84,8 @@ pub(crate) fn node_deferred(
     }
 }
 
-/// The Rust-side model behind the Lua VM, in `lua.app_data`. It holds no mlua handles, whose
-/// persistent count the vendored `LUAI_MAXCSTACK` caps.
+/// The Rust-side model behind the Lua VM, in `lua.app_data`. It holds no Lua handles, each of
+/// which is a collector root.
 #[derive(Clone)]
 pub(crate) struct Model {
     /// Which FrameScript state this VM is: it picks the event table and the frame types.

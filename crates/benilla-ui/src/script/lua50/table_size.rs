@@ -58,7 +58,7 @@ fn set_n(sizes: &Table, t: &Table, n: i64) -> mlua::Result<()> {
     }
 }
 
-/// Install the `n`-based table library over mlua's 5.1 one. `concat` and `sort` wrap the C bodies
+/// Install the `n`-based table library over the VM's 5.1 one. `concat` and `sort` wrap its bodies
 /// for their error messages and algorithm (Rust's `sort_by` panics on an inconsistent comparator).
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();

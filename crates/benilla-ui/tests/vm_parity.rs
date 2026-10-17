@@ -1,7 +1,12 @@
-//! The script host on either VM: every case runs through `UiScript`, and its answer must equal
-//! the one the C Lua build recorded in `vm_parity.golden` (`vm_parity_surface.golden` for the
-//! cases that list every global). `BENILLA_BLESS=1` rewrites the answers this platform records
-//! (`PLATFORM_CASES`) and the surface file; only the C Lua build may bless them.
+//! The script host against the C Lua 5.1 build it replaced: every case runs through `UiScript`,
+//! and its answer must equal the one that build gave, recorded in `vm_parity.golden` per platform
+//! where the C library decides it (`PLATFORM_CASES`), with mlua's `runtime error: ` and
+//! `stack traceback:` wrapper taken out. A new case's answer comes from the reference, written in
+//! by hand.
+//!
+//! The cases that list every global answer with each binding the script host has, not with the
+//! VM, so they live in `vm_parity_surface.golden`, which `BENILLA_BLESS=1` rewrites when a
+//! binding changes; the diff is the review.
 
 use benilla_ui::script::UiScript;
 
@@ -843,35 +848,6 @@ fn unescape(s: &str) -> String {
     out
 }
 
-/// The C Lua build hands Lua an error from a Rust callback through mlua's wrapper:
-/// `runtime error: ` before the message, and a Rust-side `stack traceback:` block after it.
-/// Neither Lua nor the 1.12 client writes either, and benilla's own VM raises the message alone,
-/// so the wrapper is taken out of a golden answer before it is compared; the message must match.
-fn without_mlua_wrapper(s: &str) -> String {
-    let s = s.replace("runtime error: ", "");
-    let mut out = String::new();
-    let mut rest = s.as_str();
-    while let Some(i) = rest.find("\nstack traceback:") {
-        out.push_str(&rest[..i]);
-        rest = &rest[i + "\nstack traceback:".len()..];
-        // The block's lines each open with a tab; one newline after it goes with it.
-        while let Some(r) = rest.strip_prefix("\n\t") {
-            rest = r.find('\n').map_or("", |j| &r[j..]);
-        }
-        rest = rest.strip_prefix('\n').unwrap_or(rest);
-        rest = rest.strip_prefix("stack traceback:").map_or(rest, |r| {
-            // A second block straight after the first, as a rethrown error carries.
-            let mut r = r;
-            while let Some(x) = r.strip_prefix("\n\t") {
-                r = x.find('\n').map_or("", |j| &x[j..]);
-            }
-            r.strip_prefix('\n').unwrap_or(r)
-        });
-    }
-    out.push_str(rest);
-    out
-}
-
 /// Cases whose answer on the C build depends on the platform's C library or compiler, so the
 /// golden file holds one answer per platform, `name@<os>-<arch>`, each blessed there:
 /// - the transcendental functions are the host libm's, rounded differently by glibc and Apple's;
@@ -983,21 +959,6 @@ fn golden_key(name: &str, platform: &str) -> String {
     }
 }
 
-/// The golden file, `key\tanswer` a line, the answer escaped onto one line: each case in order,
-/// a platform case's answers sorted by platform.
-fn render(names: &[&str], golden: &std::collections::BTreeMap<String, String>) -> String {
-    let mut out = String::new();
-    for name in names {
-        let prefix = format!("{name}@");
-        for (k, a) in golden {
-            if k == name || (PLATFORM_CASES.contains(name) && k.starts_with(&prefix)) {
-                out.push_str(&format!("{k}\t{a}\n"));
-            }
-        }
-    }
-    out
-}
-
 /// Each answer against its golden line; a difference goes into `failures`.
 fn compare(golden: &str, answers: &[(&str, String)], failures: &mut Vec<String>) {
     let want: std::collections::HashMap<&str, &str> =
@@ -1006,20 +967,8 @@ fn compare(golden: &str, answers: &[(&str, String)], failures: &mut Vec<String>)
         let got = got.escape_default().to_string();
         match want.get(name) {
             Some(w) if *w == got => {}
-            Some(w)
-                if without_mlua_wrapper(&unescape(w))
-                    .escape_default()
-                    .to_string()
-                    == got => {}
-            Some(w) => {
-                let w = without_mlua_wrapper(&unescape(w))
-                    .escape_default()
-                    .to_string();
-                failures.push(format!("{name}\n    got:  {got}\n    want: {w}"))
-            }
-            None => failures.push(format!(
-                "{name}: no golden answer; bless on the C Lua build"
-            )),
+            Some(w) => failures.push(format!("{name}\n    got:  {got}\n    want: {w}")),
+            None => failures.push(format!("{name}: no golden answer")),
         }
     }
 }
@@ -1054,11 +1003,10 @@ fn every_case_answers_as_the_c_lua_build_recorded() {
     let (surface, answers): (Vec<_>, Vec<_>) = answers
         .into_iter()
         .partition(|(name, _)| SURFACE_CASES.contains(name));
-    let names: Vec<&str> = answers.iter().map(|c| c.0).collect();
     let platform = platform();
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let golden = std::fs::read_to_string(dir.join(GOLDEN)).expect("the golden file");
-    let mut want: std::collections::BTreeMap<String, String> = golden
+    let want: std::collections::BTreeMap<String, String> = golden
         .lines()
         .filter_map(|l| l.split_once('\t'))
         .map(|(k, a)| (k.to_string(), a.to_string()))
@@ -1073,21 +1021,13 @@ fn every_case_answers_as_the_c_lua_build_recorded() {
             "{k}: a platform case's answers are per platform, any other case's one for all"
         );
     }
+    // The VM's answers are the C build's record, and no C build is left to bless them.
     if std::env::var_os("BENILLA_BLESS").is_some() {
-        if cfg!(feature = "benilla-vm") {
-            panic!("the golden answers come from the C Lua build");
-        }
-        // This platform's answers replace its own; another platform's stay.
-        for (name, a) in &answers {
-            want.insert(golden_key(name, &platform), a.escape_default().to_string());
-        }
-        std::fs::write(dir.join(GOLDEN), render(&names, &want)).expect("write the golden file");
         let surface_lines: String = surface
             .iter()
             .map(|(n, a)| format!("{n}\t{}\n", a.escape_default()))
             .collect();
         std::fs::write(dir.join(SURFACE_GOLDEN), surface_lines).expect("write the golden file");
-        return;
     }
     let mut failures = Vec::new();
     let mut skipped = Vec::new();
@@ -1097,16 +1037,14 @@ fn every_case_answers_as_the_c_lua_build_recorded() {
         // benilla-lua answers a whole platform case as the C build only where its pins were
         // taken; elsewhere, and where no answer was blessed, the items every platform agrees on.
         let own = want.get(&golden_key(name, &platform));
-        if platform_case
-            && (own.is_none() || (cfg!(feature = "benilla-vm") && platform != REFERENCE_PLATFORM))
-        {
+        if platform_case && (own.is_none() || platform != REFERENCE_PLATFORM) {
             let prefix = format!("{name}@");
             let recorded: Vec<String> = want
                 .iter()
                 .filter(|(k, _)| k.starts_with(&prefix))
-                .map(|(_, a)| without_mlua_wrapper(&unescape(a)))
+                .map(|(_, a)| unescape(a))
                 .collect();
-            match check_items(name, &without_mlua_wrapper(got), &recorded) {
+            match check_items(name, got, &recorded) {
                 Some((f, unchecked, n)) => {
                     failures.extend(f);
                     unchecked_items += unchecked;
@@ -1119,20 +1057,8 @@ fn every_case_answers_as_the_c_lua_build_recorded() {
         let got = got.escape_default().to_string();
         match own {
             Some(w) if *w == got => {}
-            Some(w)
-                if without_mlua_wrapper(&unescape(w))
-                    .escape_default()
-                    .to_string()
-                    == got => {}
-            Some(w) => {
-                let w = without_mlua_wrapper(&unescape(w))
-                    .escape_default()
-                    .to_string();
-                failures.push(format!("{name}\n    got:  {got}\n    want: {w}"))
-            }
-            None => failures.push(format!(
-                "{name}: no golden answer; bless on the C Lua build"
-            )),
+            Some(w) => failures.push(format!("{name}\n    got:  {got}\n    want: {w}")),
+            None => failures.push(format!("{name}: no golden answer")),
         }
     }
     let surface_golden =

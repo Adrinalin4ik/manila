@@ -3,7 +3,7 @@ name = "benilla-mlua"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Experimental: the slice of mlua's API benilla uses, over benilla-lua's 1.12 VM"
+description = "The slice of mlua's API benilla uses, over benilla-lua"
 
 [lints]
 workspace = true

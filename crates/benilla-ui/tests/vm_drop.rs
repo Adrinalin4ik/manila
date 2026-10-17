@@ -32,8 +32,6 @@ fn a_dropped_script_host_frees_its_vm() {
     assert!(gone.get(), "the VM and its app data went with the host");
 }
 
-/// Forks exist on benilla's own VM alone.
-#[cfg(feature = "benilla-vm")]
 #[test]
 fn a_dropped_fork_frees_its_vm_and_leaves_the_template() {
     let template = UiScript::new().expect("a script host");

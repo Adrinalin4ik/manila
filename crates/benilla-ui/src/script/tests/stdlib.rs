@@ -278,7 +278,7 @@ fn the_rest_of_the_bare_globals() {
     .unwrap();
 }
 
-/// 1.12 runs Lua 5.0 (`0x811b30`, "Lua: Lua 5.0 Copyright..."); this VM is mlua's `lua51`, and the
+/// 1.12 runs Lua 5.0 (`0x811b30`, "Lua: Lua 5.0 Copyright..."); this VM is 5.1.5's runtime, and the
 /// 5.0 idioms vanilla addons use run on it, above all the implicit vararg `arg` table.
 #[test]
 fn the_lua_5_0_dialect_vanilla_addons_are_written_in_runs_here() {

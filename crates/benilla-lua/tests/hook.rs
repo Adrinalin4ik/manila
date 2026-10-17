@@ -183,7 +183,8 @@ fn a_hook_set_while_lua_runs_counts_from_there() {
          local s = 0 arm() for i = 1, 200 do if i > 100 then s = s + i else s = s - 1 end end \
          local function f(x) return x end arm() for i = 1, 100 do f(i) end",
     ] {
-        counts_from_the_arming(src);
+        // The C build's count for each, recorded while it was in the tree.
+        counts_from_the_arming(src, 1214);
     }
 }
 
@@ -218,7 +219,7 @@ fn a_loop_moved_by_a_hook_keeps_its_index() {
     }
 }
 
-fn counts_from_the_arming(src: &str) {
+fn counts_from_the_arming(src: &str, c: u64) {
     let ours = {
         let mut vm = benilla_lua::new_state();
         let n = Rc::new(Cell::new(0u64));
@@ -242,53 +243,10 @@ fn counts_from_the_arming(src: &str) {
         assert!(!r.starts_with("<raised>"), "{r}");
         n.get()
     };
-    let c = {
-        let lua = mlua::Lua::new();
-        let n = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let seen = n.clone();
-        let arm = lua
-            .create_function(move |lua, ()| {
-                let seen = seen.clone();
-                lua.set_hook(
-                    mlua::HookTriggers {
-                        every_nth_instruction: Some(1),
-                        ..Default::default()
-                    },
-                    move |_, _| {
-                        seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        Ok(mlua::VmState::Continue)
-                    },
-                )
-            })
-            .unwrap();
-        lua.globals().set("arm", arm).unwrap();
-        lua.load(src).exec().unwrap();
-        n.load(std::sync::atomic::Ordering::Relaxed)
-    };
     assert!(
         ours <= c && c - ours <= 10,
         "{src}: ours {ours}, the C build's {c}"
     );
-}
-
-/// What the C build's count hook counts for `src`, run at every instruction.
-fn c_instructions(src: &str) -> u64 {
-    let lua = mlua::Lua::new();
-    let n = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let seen = n.clone();
-    lua.set_hook(
-        mlua::HookTriggers {
-            every_nth_instruction: Some(1),
-            ..Default::default()
-        },
-        move |_, _| {
-            seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok(mlua::VmState::Continue)
-        },
-    )
-    .unwrap();
-    lua.load(src).exec().unwrap();
-    n.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The count at every instruction is the C build's: an instruction 5.1 never dispatches is not
@@ -296,27 +254,28 @@ fn c_instructions(src: &str) -> u64 {
 /// constant loaded into a scratch register), whichever way the code branches.
 #[test]
 fn the_count_is_the_c_builds() {
-    for src in [
-        "local x, y = 1, 2 local b = x < y",
-        "local x, y = 2, 1 local b = x < y",
-        "local x, y = 1, 2 for i = 1, 10 do local b = x < y local c = y < x end",
-        "table.sort({5, 3, 1, 4, 2, 9, 7}, function(a, b) return a < b end)",
-        "local function f() local a, b return a end for i = 1, 10 do f() end",
-        "local b = 'a' < 'b'",
-        "local x = 'a' .. 'b'",
-        "local x = 1 local y = x == 1",
-        "local t = {1, 2, 3} for k, v in pairs(t) do end",
-        "local t = {1, 2, 3} for k in next, t do end",
-        "local function it(s, c) if c < 5 then return c + 1 end end for i in it, nil, 0 do end",
-        "local t = {} for i = 1, 5 do t[i] = i end local s = 0 for i = 5, 1, -1 do s = s + t[i] end",
-        "local a = nil local b = a and 1 or 2 local c = a or 3 local d = not a",
-        "local function f(...) return arg.n end f(1, 2, 3)",
-        "local t = {1, 2, 3, x = 1, y = 2}",
-        "local x = 0 while x < 5 do x = x + 1 end repeat x = x - 1 until x == 0",
-        "local n = 0 for i = 1, 20 do if math.mod(i, 3) == 0 then n = n + 1 elseif i > 10 then n = n - 1 else n = n * 2 end end",
-        "string.gsub('abcabc', 'b', function(c) return c == 'b' and 'x' or c end)",
-        "local t = setmetatable({}, {__index = function(t, k) return k > 2 end}) for i = 1, 5 do local _ = t[i] end",
+    // The C build's count for each, recorded while it was in the tree.
+    for (src, c) in [
+        ("local x, y = 1, 2 local b = x < y", 5),
+        ("local x, y = 2, 1 local b = x < y", 5),
+        ("local x, y = 1, 2 for i = 1, 10 do local b = x < y local c = y < x end", 58),
+        ("table.sort({5, 3, 1, 4, 2, 9, 7}, function(a, b) return a < b end)", 62),
+        ("local function f() local a, b return a end for i = 1, 10 do f() end", 47),
+        ("local b = 'a' < 'b'", 3),
+        ("local x = 'a' .. 'b'", 4),
+        ("local x = 1 local y = x == 1", 4),
+        ("local t = {1, 2, 3} for k, v in pairs(t) do end", 14),
+        ("local t = {1, 2, 3} for k in next, t do end", 14),
+        ("local function it(s, c) if c < 5 then return c + 1 end end for i in it, nil, 0 do end", 29),
+        ("local t = {} for i = 1, 5 do t[i] = i end local s = 0 for i = 5, 1, -1 do s = s + t[i] end", 38),
+        ("local a = nil local b = a and 1 or 2 local c = a or 3 local d = not a", 6),
+        ("local function f(...) return arg.n end f(1, 2, 3)", 9),
+        ("local t = {1, 2, 3, x = 1, y = 2}", 8),
+        ("local x = 0 while x < 5 do x = x + 1 end repeat x = x - 1 until x == 0", 28),
+        ("local n = 0 for i = 1, 20 do if math.mod(i, 3) == 0 then n = n + 1 elseif i > 10 then n = n - 1 else n = n * 2 end end", 194),
+        ("string.gsub('abcabc', 'b', function(c) return c == 'b' and 'x' or c end)", 15),
+        ("local t = setmetatable({}, {__index = function(t, k) return k > 2 end}) for i = 1, 5 do local _ = t[i] end", 37),
     ] {
-        assert_eq!(instructions(src), c_instructions(src), "{src}");
+        assert_eq!(instructions(src), c, "{src}");
     }
 }

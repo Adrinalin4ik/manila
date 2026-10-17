@@ -1,4 +1,4 @@
-//! The parser: 5.1.5's `lparser.c` with the 1.12 grammar (`third_party/lua-src/BENILLA.md`),
+//! The parser: 5.1.5's `lparser.c` with the 1.12 grammar (`GRAMMAR.md`),
 //! generating code as it reads, through [`crate::compile`]. Messages, limits and the token they
 //! quote are 5.1's. Left-associative chains (binary operators, `and`/`or`, suffixes such as
 //! `f()()`, `t.a.b`, `o:m()`) are read in loops, so only nesting recurses, and nesting is bounded
