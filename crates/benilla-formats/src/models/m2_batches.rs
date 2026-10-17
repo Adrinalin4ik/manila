@@ -536,11 +536,7 @@ pub fn parse_m2_render_submeshes(
                     .texture_lookup_table
                     .get(batch.texture_combo_index as usize + 1)
                     .and_then(|&ti| model.textures.get(ti as usize))?;
-                let set = model
-                    .texture_unit_lookup
-                    .get(batch.texture_coord_combo_index as usize + 1)
-                    .copied()
-                    .unwrap_or(0);
+                let set = model.stage_coord(batch, 1).unwrap_or(0);
                 // MONKEY (reviewfix): 0xffff is the no-transform sentinel. Advancing stage 1 must
                 // keep it absent rather than wrap it onto stage 0's transform at index zero.
                 let combo = batch.texture_transform_combo_index.checked_add(1);
