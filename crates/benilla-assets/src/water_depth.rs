@@ -39,7 +39,9 @@ impl Default for WaterUniform {
 pub struct WaterQuality(pub u8);
 
 impl Default for WaterQuality {
-    fn default() -> Self { Self(1) }
+    // The `waterQuality` CVar's and `VideoConfig`'s default, High since planar water shipped, so
+    // the first frame draws the tier the bridge would set on the second.
+    fn default() -> Self { Self(2) }
 }
 
 /// MONKEY (planar water): how the High tier reflects the scenery. 1 = planar (the scene rendered
