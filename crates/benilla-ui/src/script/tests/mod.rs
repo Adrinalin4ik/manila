@@ -61,6 +61,7 @@ mod reference_surface;
 mod region_map;
 mod regions;
 mod resize_bounds;
+mod saved_reader;
 mod scrollframe;
 mod set_font_args;
 mod setparent;

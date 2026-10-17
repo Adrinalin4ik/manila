@@ -28,7 +28,8 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use bevy::platform::time::Instant;
+use std::time::Duration;
 
 use benilla_assets::LockRecover;
 use bevy::prelude::*;

@@ -19,6 +19,14 @@ pub type AddonChainReader = Box<dyn Fn(&str) -> Option<Vec<u8>>>;
 /// [`AddonChainReader`], shared so a load can call it without holding the model.
 pub(crate) type SharedChainReader = std::rc::Rc<dyn Fn(&str) -> Option<Vec<u8>>>;
 
+/// wenilla carry: the host's reader for a saved-variables file. The browser has no filesystem,
+/// where `std::fs::read` answers "operation not supported" for every file; the host reads its own
+/// state store there. `NotFound` is the first-run case, as from `std::fs`.
+pub type SavedReader = Box<dyn Fn(&std::path::Path) -> std::io::Result<Vec<u8>>>;
+
+/// [`SavedReader`], shared so a load can call it without holding the model.
+pub(crate) type SharedSavedReader = std::rc::Rc<dyn Fn(&std::path::Path) -> std::io::Result<Vec<u8>>>;
+
 /// The security state `[rec+0x24]`, indexing the table at `0x85367c`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AddonSecurity {
@@ -756,7 +764,17 @@ fn load_saved_variables(lua: &Lua, i: usize) {
         }
         let Some(dir) = dir else { continue };
         let path = dir.join(format!("{name}.lua"));
-        let bytes = match std::fs::read(&path) {
+        // wenilla carry: through the host's reader where it seated one (the browser's store).
+        let reader = lua
+            .app_data_ref::<Model>()
+            .expect("model")
+            .addons_saved_reader
+            .clone();
+        let read = match &reader {
+            Some(reader) => reader(&path),
+            None => std::fs::read(&path),
+        };
+        let bytes = match read {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue, // the first-run case
             Err(e) => {
@@ -931,6 +949,10 @@ impl super::UiScript {
     /// Seat the reader chain-sourced addons (`AddOnInfo::chain`) are read through.
     pub fn set_addon_chain_reader(&self, reader: AddonChainReader) {
         self.model_mut().addons_chain_reader = Some(std::rc::Rc::from(reader));
+    }
+    /// wenilla carry: seat the reader saved-variables files are read through ([`SavedReader`]).
+    pub fn set_addon_saved_reader(&self, reader: SavedReader) {
+        self.model_mut().addons_saved_reader = Some(std::rc::Rc::from(reader));
     }
     /// Replace the AddOn registry; called once at world entry, after discovery.
     pub fn register_addons(

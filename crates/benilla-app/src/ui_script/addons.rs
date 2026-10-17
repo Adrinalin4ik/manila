@@ -833,6 +833,8 @@ pub(super) fn load_third_party(
     let mut infos: Vec<_> = addons.iter().map(info_for).collect();
     // Chain rows read their files off the player's patch chain.
     script.set_addon_chain_reader(Box::new(super::reference_ui::read));
+    // wenilla carry: saved variables come back through the state store the logout wrote them to.
+    script.set_addon_saved_reader(Box::new(|path| crate::local_state::read(path)));
     // Each enable bit through the reference's query: the character's explicit row, else what the
     // realm's other characters agree on, else the manifest's `## DefaultState`.
     let store = load_store(
@@ -931,6 +933,8 @@ pub(super) fn open_third_party(
     let addons = discover();
     let mut infos: Vec<_> = addons.iter().map(info_for).collect();
     script.set_addon_chain_reader(Box::new(super::reference_ui::read));
+    // wenilla carry: saved variables come back through the state store the logout wrote them to.
+    script.set_addon_saved_reader(Box::new(|path| crate::local_state::read(path)));
     let store = load_store(
         identity
             .map(|(realm, _)| realm.as_str())

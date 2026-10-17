@@ -107,6 +107,8 @@ pub(crate) struct Model {
     pub(crate) addons_root: Option<std::path::PathBuf>,
     /// The host's reader for chain-sourced addon files; without one such an addon is `MISSING`.
     pub(crate) addons_chain_reader: Option<super::addon::SharedChainReader>,
+    /// wenilla carry: the host's saved-variables reader; `std::fs` without one.
+    pub(crate) addons_saved_reader: Option<super::addon::SharedSavedReader>,
     /// The host's font engine, so a metric answers inside the asking call, not a frame later.
     pub(crate) measurer: Option<super::measure::SharedMeasurer>,
     /// Whether a texture path resolves (patch chain or loose addon file), so the path form of
@@ -1394,6 +1396,7 @@ impl Model {
             addon_enable_saved: Default::default(),
             addons_root: None,
             addons_chain_reader: None,
+            addons_saved_reader: None,
             measurer: None,
             texture_probe: None,
             world_loc_projector: None,

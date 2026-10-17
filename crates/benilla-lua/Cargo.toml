@@ -10,6 +10,11 @@ workspace = true
 
 [dependencies]
 
+# wenilla carry: the profile's clock. `std::time::Instant` panics on wasm32 ("time not implemented
+# on this platform"); `web-time` is the browser's `performance.now()` behind the same API.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+
 [dev-dependencies]
 benilla-formats = { path = "../benilla-formats" }
 roxmltree = "0.20"
