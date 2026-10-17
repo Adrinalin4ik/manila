@@ -503,3 +503,31 @@ fn a_runscript_error_reaches_the_handler_and_not_the_caller() {
         "a compile failure is reported under the same name, undecorated: {errs:?}"
     );
 }
+
+/// `date("*t")` sets its fields in the client's order, `sec` to `isdst` (`0x703452`..`0x7034e2`),
+/// so `pairs` walks the table as the client's does for the same sets, run in its code.
+#[test]
+fn date_star_t_walks_as_the_clients() {
+    let s = script();
+    let got: String = s
+        .eval(
+            r#"local o = {} for k in pairs(date("*t", 1000000000)) do table.insert(o, k) end
+               return table.concat(o, " ")"#,
+        )
+        .unwrap();
+    assert_eq!(got, "hour min wday year yday month sec day isdst");
+}
+
+/// The host's `setglobal` is the client's (`0x702770`): the global gets the top value, so a lone
+/// name sets it to itself and a third argument wins over the second.
+#[test]
+fn setglobal_sets_the_top_value_as_the_clients() {
+    let s = script();
+    let got: Vec<String> = s
+        .eval(
+            "setglobal('SgOne') setglobal('SgThree', 5, 6)
+             return { tostring(SgOne), tostring(SgThree), tostring(getglobal('SgThree')) }",
+        )
+        .unwrap();
+    assert_eq!(got, ["SgOne", "6", "6"]);
+}

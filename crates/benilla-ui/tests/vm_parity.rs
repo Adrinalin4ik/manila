@@ -189,10 +189,11 @@ const CASES: &[(&str, &str)] = &[
     ("xpcall", "local ok, msg = xpcall(function() error('x') end, function(e) return 'handled: ' .. e end) return S(ok, msg) .. '|' .. S(xpcall(function() return 1, 2 end, print))"),
     ("pcall_args", "return S(pcall(function(a, b) return a + b end, 1, 2))"),
     ("nested_pcall", "return E(function() local ok, e = pcall(error, 'inner') error('outer:' .. e, 0) end)"),
-    ("fenv", "local env = {x = 'env'} local function f() return x end setfenv(f, env) return S(f(), getfenv(f) == env, getfenv(0) == _G, getfenv() == _G)"),
+    ("fenv", "local env = {x = 'env'} local function f() return x end setfenv(f, env) return S(f(), getfenv(f) == env, getfenv(0) == getfenv(), getfenv(1) == getfenv())"),
     ("fenv_level", "x = 'global' local function f() setfenv(1, {x = 'set'}) return x end return S(f())"),
     ("loadstring", "local f = loadstring('return 1 + 1') local g, e = loadstring('return +') return S(f(), g, e)"),
     ("loadstring_name", "local f = loadstring('error(\"x\")', '=named') return E(f)"),
+    // 1.12's base array (`0x811e28`) has no `_G`: an addon reaches the globals by `getfenv(0)`.
     ("globals", "return S(type(_G), type(print), type(select), type(coroutine), type(string.gmatch), type(math.fmod), type(gcinfo), type(bit), type(getn), type(strfind), type(sin))"),
     ("type", "return S(type(nil), type(1), type('s'), type({}), type(print), type(type), type(true))"),
     ("tostring", "return S(tostring(nil), tostring(true), tostring(12), tostring('x'), string.sub(tostring({}), 1, 7), string.sub(tostring(print), 1, 10))"),
@@ -266,6 +267,10 @@ first newline skipped]], [=[
 also]=], [[a
 b]])"#),
     // ── Table layout, which `pairs` order shows ──
+    // The orders of `pairs_constructors`, `pairs_mixed`, `fix-front_setlist_order` and
+    // `fix-vm dead_keys` are the client's, run in its own `ltable.c` (`0x6fa1a0`..`0x6fad80`):
+    // `n` keys sit in `2^(log2(n)+1)` nodes, the constructor's `luaO_log2(nh) + 1` (`0x6fd563`)
+    // and `rehash`'s (`0x6fa9e5`), so an eight-key constructor walks otherwise than 5.1's.
     ("pairs_constructors", r#"local o = {}
         for n = 1, 20 do
           local parts = {}
@@ -275,8 +280,7 @@ b]])"#),
           table.insert(o, table.concat(ks, " "))
         end
         return table.concat(o, " | ")"#),
-    // Number keys hash as the client's `hashnum` (`0x6fa260`) does, the key plus 1.0; the hash
-    // part is still sized as 5.1 sizes it (#1487), so this order is not yet the client's.
+    // Number keys hash as the client's `hashnum` (`0x6fa260`) does, the key plus 1.0.
     ("pairs_mixed", r#"local function keys(t) local ks = {} for k, v in pairs(t) do table.insert(ks, tostring(k) .. "=" .. tostring(v)) end return table.concat(ks, " ") end
         local a = {1, 2, 3, x = 1, y = 2, [10] = 5, [1.5] = 6, [-1] = 7, z = 3}
         local b = {} for i = 1, 10 do b[i] = i end b[5] = nil b[20] = 20 b.k = 1
@@ -318,14 +322,16 @@ b]])"#),
         return S(E(function() return a <= b end), E(function() return b >= a end), a < b)"#),
     ("varargs_arg", r#"local function f(...) return arg.n, arg[1], arg[3] end
         return S(E(f, 1, nil, 3), E(function(a, ...) return a, arg.n end, 9))"#),
+    // The client's order, run in its code: `luaL_openlib` (`0x6f4dc0`) fills each table from empty
+    // in its array's order.
     ("pairs_libraries", r#"local o = {}
         for _, lib in ipairs({"string", "table", "math", "bit"}) do
-          local ks = {} for k in pairs(_G[lib]) do table.insert(ks, k) end
+          local ks = {} for k in pairs(getfenv(0)[lib]) do table.insert(ks, k) end
           table.insert(o, lib .. ": " .. table.concat(ks, " "))
         end
         return table.concat(o, " | ")"#),
     ("pairs_globals", r#"local ks, n = {}, 0
-        for k in pairs(_G) do n = n + 1 if n <= 400 then table.insert(ks, tostring(k)) end end
+        for k in pairs(getfenv(0)) do n = n + 1 if n <= 400 then table.insert(ks, tostring(k)) end end
         return n .. ": " .. table.concat(ks, " ")"#),
     ("getn_holes", r#"local function g(t) return table.getn(t) end
         local a = {1, 2, nil, 4}
@@ -338,10 +344,10 @@ b]])"#),
         return S(g(a), g(b), g(c), g(d), g(e), g(f), g(h), g({}), g({nil}), g({1, nil, 3, nil, 5, 6, 7, 8}))"#),
     ("string_metatable", r#"return S(E(function() return ("abc"):upper() end), getmetatable("x") ~= nil, E(function() local s = "x" return s.len end))"#),
     // ── The whole library surface: every global and every library member, with its type ──
-    ("global_surface", r#"local o = {} for k, v in pairs(_G) do if type(k) == "string" then table.insert(o, k .. ":" .. type(v)) end end table.sort(o) return table.concat(o, " ")"#),
+    ("global_surface", r#"local o = {} for k, v in pairs(getfenv(0)) do if type(k) == "string" then table.insert(o, k .. ":" .. type(v)) end end table.sort(o) return table.concat(o, " ")"#),
     ("libraries", r#"local o = {}
         for _, lib in ipairs({"string", "table", "math", "bit", "os", "coroutine", "debug", "io"}) do
-          local t = _G[lib]
+          local t = getfenv(0)[lib]
           if type(t) == "table" then
             local ks = {} for k, v in pairs(t) do table.insert(ks, k .. ":" .. type(v)) end table.sort(ks)
             table.insert(o, lib .. "={" .. table.concat(ks, " ") .. "}")
@@ -349,8 +355,9 @@ b]])"#),
         end
         return table.concat(o, " ")"#),
     // ── fix-front: the single-pass front end, 5.1.5's `lparser.c` and `lcode.c` ──
-    // Number keys hash as the client's `hashnum` (`0x6fa260`) does, the key plus 1.0; the hash
-    // part is still sized as 5.1 sizes it (#1487), so this order is not yet the client's.
+    // 5.0's parser flushes a constructor's items every 32 (`closelistfield`, `0x6fd6d0`), and
+    // `OP_SETLIST` stores each by `luaH_setnum` (`0x6f95b1`) into the array part `OP_NEWTABLE`
+    // sized; a trailing call counts as one item toward that size (`0x6fd72b`).
     ("fix-front_setlist_order", r#"local function K(t) local o = {} for k in pairs(t) do table.insert(o, tostring(k)) end return table.concat(o, " ") end
         local function list(n) local o = {} for i = 1, n do o[i] = i end return table.concat(o, ",") end
         local function f() return 1, 2, 3 end
@@ -447,7 +454,7 @@ b]])"#),
     // (`0x6ffabb`) near `char(0)`.
     ("fix-front_nul_in_messages", r#"local function L(src, name) local f, e = loadstring(src, name or "=t") return e end
         return S(L('x = "a\0b\n'), L("x = \0"), L("\0"), L("x = 1 \0 y"), L('x = "a\0b" +'),
-          E(function() local t = {} t["a\0b"]() end), E(function() local t = {} t:m(1) end), E(function() return _G["g\0h"].x end))"#),
+          E(function() local t = {} t["a\0b"]() end), E(function() local t = {} t:m(1) end), E(function() return getfenv(0)["g\0h"].x end))"#),
     ("fix-front_constants_and_folding", r#"local function R(src) return S(loadstring(src)()) end
         return table.concat({R("return 1 + 2 * 3 - 4 / 2, 2^10, -(-3), - - 2, 10 / 0 > 1, 3 .. 4"),
           R("local a = 5 return a + 1 * 2, 2 * a, a / 2, 1 - a, a ^ 2, -a"),
@@ -490,7 +497,7 @@ b]])"#),
         table.insert(o, E(function() setfenv(f, e) return getfenv(f) == e end))
         table.insert(o, E(setfenv, tostring, t))
         table.insert(o, E(setfenv, 1, t))
-        table.insert(o, E(function() return getfenv(0) == _G, getfenv(tostring) == _G, getfenv() == getfenv(1) end))
+        table.insert(o, E(function() return getfenv(0) == getfenv(1), getfenv(tostring) == getfenv(0), getfenv() == getfenv(1) end))
         table.insert(o, E(setfenv, 100, t))
         table.insert(o, E(getfenv, 100))
         table.insert(o, E(getfenv, -1))
@@ -500,7 +507,7 @@ b]])"#),
         table.insert(o, E(getfenv, {}))
         local function g() local env = {S = S} setfenv(1, env) x = 5 return env.x end
         table.insert(o, E(g))
-        local function h() return getfenv(2) == _G end
+        local function h() return getfenv(2) == getfenv(0) end
         table.insert(o, E(h))
         table.insert(o, E(function() local G = getfenv(0) setfenv(0, G) return getfenv(0) == G end))
         return table.concat(o, "|")"#),
@@ -649,9 +656,10 @@ b]])"#),
           table.insert(o, E(function() local t = chain(n, "__newindex") t.y = 1 return "set" end))
         end
         return table.concat(o, "|")"#),
-    // A collection marks a deleted key dead (5.1.5's `removeentry`): a key set again takes a new
-    // node by `newkey`'s rules, not its old one, so `pairs` order shows it. A key equal to an
-    // existing one keeps that key, `-0` or `0`.
+    // A collection leaves a deleted key whose string lives in its node (5.0's `traversetable`
+    // passes an empty entry by, `0x6f76be`), so a key set again finds its old node, as it does
+    // with no collection: each pair of orders is one. A key equal to an existing one keeps that
+    // key, `-0` or `0`.
     ("fix-vm dead_keys", r#"local function order(t) local o = {} for k in pairs(t) do table.insert(o, k) end return table.concat(o, " ") end
         local o = {}
         for _, c in {{5, 4}, {6, 5}, {7, 6}, {8, 4}, {13, 10}, {14, 14}} do
@@ -796,6 +804,7 @@ const SWEEP_FNS: &[&str] = &[
     "unpack",
     // `luaH_next`'s text is the client's (`0x871aac`).
     "next",
+    // 5.0's `ipairs` (`0x702cd0`): any second argument steps once, as the client answers.
     "ipairs",
     "pairs",
     "getmetatable",
@@ -855,8 +864,8 @@ local function ARGS() return {
 end
 local function name(f)
   local t, k = string.find(f, ".", 1, true)
-  if t then return _G[string.sub(f, 1, t - 1)][string.sub(f, t + 1)] end
-  return _G[f]
+  if t then return getfenv(0)[string.sub(f, 1, t - 1)][string.sub(f, t + 1)] end
+  return getfenv(0)[f]
 end
 function SWEEP(fname)
   local f = name(fname)

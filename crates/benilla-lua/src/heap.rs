@@ -882,9 +882,10 @@ impl Heap {
         out
     }
 
-    /// `luaH_new`: `narray` array slots and room for `nhash` keys.
-    pub fn new_table(&mut self, narray: usize, nhash: usize) -> TableRef {
-        let mut t = Table::new(narray, nhash);
+    /// `luaH_new`: `narray` array slots and `2^lnhash` nodes, the dummy node for 0
+    /// ([`crate::table::lsize_for`] gives the log for a key count).
+    pub fn new_table(&mut self, narray: usize, lnhash: u8) -> TableRef {
+        let mut t = Table::new(narray, lnhash);
         t.owner = self.cur_source;
         t.growth = Growth(Some(self.tables.acct.clone()));
         self.bytes += t.bytes();
@@ -1008,6 +1009,8 @@ impl Heap {
         gray.push(Value::Str(self.oom_str));
         let mut gray_upvals: Vec<u32> = extra_upvals.to_vec();
         let mut weak_tables: Vec<u32> = Vec::new();
+        // Empty entries with a collectable key, `(table, node)`: the key dies with its object.
+        let mut empty_keys: Vec<(u32, u32)> = Vec::new();
         // Constants of every reached prototype, once each.
         // A number no other collection, in any VM, has used: prototypes are shared by forks.
         let epoch = GC_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -1069,10 +1072,19 @@ impl Heap {
                     for &v in &tab.array {
                         reach(v, wv);
                     }
-                    for n in tab.node.iter_mut() {
+                    for (i, n) in tab.node.iter().enumerate() {
                         if n.val.is_nil() {
-                            // 5.1.5's `removeentry`: an empty entry's collectable key is dead.
-                            n.dead |= is_collectable(n.key);
+                            // `cleartablekeys`' `valismarked` marks every string key (`0x6f79f0`).
+                            if wk && matches!(n.key.unpack(), V::Str(_)) {
+                                reach(n.key, wk);
+                                continue;
+                            }
+                            // 5.0's `traversetable` (`0x6f7590`) passes an empty entry by
+                            // (`0x6f76be`) and leaves its key as it is: found again while its
+                            // object lives, which only the end of the marking settles.
+                            if !n.dead && is_collectable(n.key) {
+                                empty_keys.push((t.0, i as u32));
+                            }
                             continue;
                         }
                         reach(n.key, wk);
@@ -1109,7 +1121,24 @@ impl Heap {
                 _ => {}
             }
         }
-        // Weak tables drop entries whose collectable key or value died.
+        // An empty entry whose key's object is unmarked loses its key: the object is freed, and
+        // a new one may take its handle.
+        for (t, i) in empty_keys {
+            let n = &self.tables.arena.items[t as usize].node[i as usize];
+            let marked = match n.key.unpack() {
+                V::Str(s) => self.strs.state.get(s.id as usize) == Some(&MARKED),
+                V::Table(r) => self.tables.arena.state.get(r.0 as usize) == Some(&MARKED),
+                V::Func(r) => self.funcs.state.get(r.0 as usize) == Some(&MARKED),
+                V::User(r) => self.users.state.get(r.0 as usize) == Some(&MARKED),
+                _ => true,
+            };
+            if !marked {
+                self.tables.arena.items[t as usize].node[i as usize].dead = true;
+            }
+        }
+        // Weak tables drop entries whose collectable key or value died: 5.0's `cleartablekeys`
+        // (`0x6f7970`), every node of a weak-keyed table, and `cleartablevalues`, every live
+        // node of a weak-valued one, each by `removekey`.
         for t in weak_tables {
             let (tables, funcs, users) = (
                 &self.tables.arena.state,
@@ -1124,15 +1153,18 @@ impl Heap {
                 _ => true,
             };
             let tab = &mut self.tables.arena.items[t as usize];
-            for v in tab.array.iter_mut() {
-                if !alive(*v) {
-                    *v = Value::Nil;
+            let (wk, wv) = (tab.weak & 1 != 0, tab.weak & 2 != 0);
+            if wv {
+                for v in tab.array.iter_mut() {
+                    if !alive(*v) {
+                        *v = Value::Nil;
+                    }
                 }
             }
-            for n in tab.node.iter_mut() {
-                if !n.val.is_nil() && (!alive(n.key) || !alive(n.val)) {
-                    n.val = Value::Nil;
-                    n.dead = is_collectable(n.key);
+            for i in 0..tab.node.len() {
+                let n = &tab.node[i];
+                if (wk && !alive(n.key)) || (wv && !alive(n.val)) {
+                    tab.remove_node(i);
                 }
             }
         }
@@ -1186,8 +1218,8 @@ impl Heap {
             let size = self.strt.len();
             self.resize_strt(size);
         }
-        // A dead key may name a freed object, whose handle a new one may take; as 5.1's dead key,
-        // it is found only by `next`, by identity (`Table::slot_for`).
+        // A dead key may name a freed object, whose handle a new one may take: it is found only
+        // by `next`, by identity (`Table::slot_for`).
         // Every live table's size is counted whole above, its uncounted growth with it.
         self.tables.acct.growth.set(0);
         self.bytes = live + proto_bytes + strt_bytes(self.strt_buckets) + self.concat50;

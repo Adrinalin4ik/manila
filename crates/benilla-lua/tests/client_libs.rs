@@ -3,7 +3,7 @@
 
 /// Run `src` in the script host's state; its results as text, or the error.
 fn run(src: &str) -> Result<Vec<String>, String> {
-    let mut vm = benilla_lua::new_script_host_state();
+    let mut vm = benilla_lua::new_state();
     match vm.exec(src.as_bytes(), b"=t") {
         Ok(vs) => Ok(vs.into_iter().map(|v| vm.display(v)).collect()),
         Err(e) => Err(vm.display(e)),
@@ -228,7 +228,7 @@ fn format_converts_at_32_bits() {
 /// down on the first value, up on the second.
 #[test]
 fn number_digits_round_as_the_clients_arithmetic() {
-    let mut vm = benilla_lua::new_script_host_state();
+    let mut vm = benilla_lua::new_state();
     for (bits, want) in [
         (0x4317_1eee_124d_37a7u64, "1.6269830806113057e+015"),
         (0x4319_1f38_6560_ea63, "1.7678003743115768e+015"),
@@ -277,7 +277,7 @@ fn a_made_nan_is_the_x87_indefinite() {
             "{expr}"
         );
     }
-    let mut vm = benilla_lua::new_script_host_state();
+    let mut vm = benilla_lua::new_state();
     vm.set_global(
         "V",
         benilla_lua::Value::Num(f64::from_bits(0x7ff8_0000_0000_0000)),
@@ -307,7 +307,7 @@ fn a_made_nan_is_the_x87_indefinite() {
 /// (`0x7fd8db`).
 #[test]
 fn the_math_library_answers_the_clients_specials() {
-    let mut vm = benilla_lua::new_script_host_state();
+    let mut vm = benilla_lua::new_state();
     vm.set_global(
         "V",
         benilla_lua::Value::Num(f64::from_bits(0x7ff8_0000_0000_0000)),
@@ -330,5 +330,65 @@ fn the_math_library_answers_the_clients_specials() {
             "-1.#IND", "-1.#IND", "-1.#IND", "-1.#IND", "1.#QNAN", "1.#QNAN", "1.#QNAN", "-1.#IND",
             "-1.#IND", "1.#INF", "-1.#IND", "-1.#IND", "-1", "1.#QNAN", "-1", "1.#INF", "0"
         ]
+    );
+}
+
+/// 5.0's `ipairs` (`0x702cd0`), each answer the client's own, run in its opened state: a loop's
+/// start answers the global `ipairs`, the table and 0; a second argument, even nil, steps once;
+/// a loop keeps the generator it started with, which is the global read at its start.
+#[test]
+fn ipairs_answers_as_the_clients() {
+    assert_eq!(
+        ok("local t = {10, 20, 30}
+            local f, s, i = ipairs(t)
+            local k, v = ipairs(t, 0)
+            local k2, v2 = ipairs(t, 2)
+            local k4, v4 = ipairs(t, nil)
+            return f == ipairs, s == t, i, k, v, k2, v2, ipairs(t, 3) == nil, k4, v4"),
+        ["true", "true", "0", "1", "10", "3", "30", "true", "1", "10"]
+    );
+    // `__ftol` (`0x40a2b0`) keeps the low dword of the truncation: 2^32 + 1 and -2^32 + 1 read
+    // `t[1]`.
+    assert_eq!(
+        ok("local a, b = ipairs({10, 20}, 2^32)
+            return a, b, ipairs({10, 20}, -2^32)"),
+        ["4294967297", "10", "-4294967295", "10"]
+    );
+    assert_eq!(
+        ok("local t, n, orig = {10, 20, 30}, 0, ipairs
+            for i, v in ipairs(t) do n = n + v if i == 1 then ipairs = function() end end end
+            ipairs = orig
+            local seen = 0
+            ipairs = function(t, i) if i == nil then return orig(t) end seen = seen + 1 return orig(t, i) end
+            for i, v in orig(t) do end
+            ipairs = orig
+            return n, seen"),
+        ["60", "4"]
+    );
+}
+
+/// `setglobal` (`0x702770`) sets the global to the top value, so a lone name sets it to itself,
+/// and it and `getglobal` (`0x7027b0`) go through the globals' metamethods; each answer the
+/// client's own, run in its opened state.
+#[test]
+fn setglobal_sets_the_top_value_as_the_clients() {
+    assert_eq!(
+        ok(
+            "setglobal('X1') setglobal('X2', 5) setglobal('X3', 5, 6) setglobal('X4', nil)
+            X5 = 1 setglobal('X5')
+            return X1, X2, X3, X4, X5, getglobal('X2')"
+        ),
+        ["X1", "5", "6", "nil", "X5", "5"]
+    );
+    assert_eq!(
+        ok(
+            "setmetatable(getfenv(0), {__newindex = function(t, k, v) rawset(t, k, 'ni') end,
+                                      __index = function(t, k) return 'idx' end})
+            setglobal('Z2', 7)
+            local z1 = getglobal('nothere')
+            setmetatable(getfenv(0), nil)
+            return rawget(getfenv(0), 'Z2'), z1"
+        ),
+        ["ni", "idx"]
     );
 }

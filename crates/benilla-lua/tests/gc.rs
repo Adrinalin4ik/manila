@@ -100,10 +100,8 @@ fn forks_sharing_code_each_keep_its_constants() {
 /// stepped as `next` instead of called.
 #[test]
 fn the_builtin_next_outlives_its_globals() {
-    for mut vm in [
-        benilla_lua::new_state(),
-        benilla_lua::new_script_host_state(),
-    ] {
+    {
+        let mut vm = benilla_lua::new_state();
         run(&mut vm, "next = nil pairs = nil ipairs = nil foreach = nil");
         vm.full_gc();
         assert_eq!(
@@ -138,7 +136,7 @@ fn vararg_calls_wait_for_the_next_check() {
     assert!(vm.heap.counts()[1] < 50000, "the next check collects them");
 }
 
-/// A table's growth counts toward the heap, as 5.1's `luaM_reallocvector` charges it: an array
+/// A table's growth counts toward the heap, as `luaM_irealloc` (`0x6fc980`) counts it: an array
 /// filled to a hundred thousand slots shows in `gcinfo` before any collection.
 #[test]
 fn table_growth_counts_toward_the_heap() {
@@ -301,11 +299,12 @@ fn a_snapshot_counts_its_own_growth() {
     );
 }
 
-/// 5.1.5's dead keys: a collection marks a deleted string key dead, so setting it again takes a
-/// node by `newkey`'s rules, and `pairs` walks in the C build's order; a number key is never
-/// dead, and one equal to it keeps its bits.
+/// A collection leaves a deleted key whose string lives (here the chunk's constant `k4`) in its
+/// node, as the client's `traversetable` passes an empty entry by (`0x6f76be`): setting it again
+/// takes the same node, with a collection between or none, the client's order for both. A number
+/// key is never dead, and one equal to it keeps its bits.
 #[test]
-fn a_collected_deleted_key_is_set_again_as_a_new_one() {
+fn a_collected_deleted_key_is_set_again_in_its_node() {
     let mut vm = benilla_lua::new_state();
     let order = "local function order(t) local o = {} for k in pairs(t) do table.insert(o, k) end \
                  return table.concat(o, ' ') end ";
@@ -315,7 +314,7 @@ fn a_collected_deleted_key_is_set_again_as_a_new_one() {
             &mut vm,
             &format!("{order}{set} collectgarbage() t.k4 = 0 return order(t)")
         ),
-        "k4 k5 k1 k3 k2"
+        "k5 k1 k4 k3 k2"
     );
     assert_eq!(
         run(&mut vm, &format!("{order}{set} t.k4 = 0 return order(t)")),
@@ -327,5 +326,41 @@ fn a_collected_deleted_key_is_set_again_as_a_new_one() {
             "local z = 0 local t = {} t[-z] = 1 t[0] = 2 local k = next(t) return 1 / k"
         ),
         "-1.#INF"
+    );
+}
+
+/// A weak table's clearing removes the key (`removekey`, `0x6f79d0`, retags it `LUA_TNONE`), so
+/// `next` from it raises (`luaH_index`, `0x6fa467`), the last step's key included; a key deleted
+/// by a write stays valid through a collection.
+#[test]
+fn a_key_a_weak_table_cleared_is_invalid_for_next() {
+    let mut vm = benilla_lua::new_state();
+    assert_eq!(
+        run(
+            &mut vm,
+            "local t = setmetatable({}, {__mode = 'v'}) t.gone = {} t.cut = 1 t.kept = 2 t.cut = nil \
+             local k = next(t) while k ~= 'gone' do k = next(t, k) end \
+             collectgarbage() \
+             local ok, e = pcall(next, t, 'gone') \
+             return tostring(pcall(next, t, 'cut')) .. ' ' .. tostring(ok) .. ' ' .. e .. ' ' .. tostring(t.gone)"
+        ),
+        "true false invalid key for `next' nil"
+    );
+}
+
+/// A weak-keyed table's clearing marks every string key (`valismarked`, `0x6f79f0`), an empty
+/// entry's too: the string survives the collection, so the same string rebuilt is still a key
+/// `next` finds.
+#[test]
+fn a_weak_keyed_tables_empty_string_key_survives_a_collection() {
+    let mut vm = benilla_lua::new_state();
+    assert_eq!(
+        run(
+            &mut vm,
+            "local t = setmetatable({}, {__mode = 'k'}) local a, b = 'wk', 'key' \
+             t[a .. b] = 1 t[a .. b] = nil collectgarbage() \
+             return tostring(pcall(next, t, a .. b))"
+        ),
+        "true"
     );
 }

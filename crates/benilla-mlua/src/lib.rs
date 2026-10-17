@@ -205,7 +205,7 @@ fn panic_meta(vm: &mut Vm) -> benilla_lua::value::TableRef {
         vm.push(s);
         Ok(1)
     }
-    let meta = vm.heap.new_table(0, 1);
+    let meta = vm.heap.new_table(0, benilla_lua::table::lsize_for(1));
     let f = vm.new_native("__tostring", tostring);
     let name = vm.str(b"__tostring");
     vm.heap.table_mut(meta).set(name, f).expect("a string key");
@@ -392,10 +392,11 @@ impl Default for Lua {
 }
 
 impl Lua {
-    /// A state with Lua 5.1's standard libraries open, as mlua's `Lua::new()` opens them.
+    /// A state opened as the client opens its own ([`benilla_lua::new_state`]): the base array,
+    /// the `string`, `table`, `math` and `bit` libraries and the compat globals, in its order.
     pub fn new() -> Lua {
         Lua::over(
-            Box::new(benilla_lua::new_script_host_state()),
+            Box::new(benilla_lua::new_state()),
             NEXT_FAMILY.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         )
     }
@@ -580,33 +581,26 @@ impl Lua {
         Ok(Table(self.make_ref(benilla_lua::Value::Table(t))))
     }
 
-    pub fn create_table_with_capacity(&self, narr: usize, nrec: usize) -> Result<Table> {
-        // `lua_createtable(L, narr, nrec)`.
-        let t = self.vm().heap.new_table(narr, nrec);
-        Ok(Table(self.make_ref(benilla_lua::Value::Table(t))))
-    }
-
-    /// A table with room for the iterator's lower bound of keys, set raw in order, as mlua's.
+    /// A table made empty and its pairs set raw in the iterator's order, as the client's C code
+    /// builds one (`lua_newtable`, then a set per key): the layout grows by rehash, as there.
     pub fn create_table_from<K: IntoLua, V2: IntoLua>(
         &self,
         iter: impl IntoIterator<Item = (K, V2)>,
     ) -> Result<Table> {
-        let iter = iter.into_iter();
-        let t = self.create_table_with_capacity(0, iter.size_hint().0)?;
+        let t = self.create_table()?;
         for (k, v) in iter {
             t.raw_set(k, v)?;
         }
         Ok(t)
     }
 
-    /// A table with an array part of the iterator's lower bound, `1..` set raw, as mlua's.
+    /// A table made empty and `1..` set raw in order, as the client's C code builds a list.
     pub fn create_sequence_from<T: IntoLua>(
         &self,
         iter: impl IntoIterator<Item = T>,
     ) -> Result<Table> {
-        let iter = iter.into_iter();
-        let t = self.create_table_with_capacity(iter.size_hint().0, 0)?;
-        for (i, v) in iter.enumerate() {
+        let t = self.create_table()?;
+        for (i, v) in iter.into_iter().enumerate() {
             t.raw_set(i + 1, v)?;
         }
         Ok(t)
@@ -1310,10 +1304,11 @@ impl Table {
         let lua = &self.lua();
         let ((kx, vx), _held) = lua.raw_pair(key, value)?;
         let t = self.tref();
-        lua.vm().heap.table_mut(t).set(kx, vx).map_err(|e| match e {
-            benilla_lua::table::KeyError::Nil => Error::runtime("table index is nil"),
-            benilla_lua::table::KeyError::NaN => Error::runtime("table index is NaN"),
-        })
+        lua.vm()
+            .heap
+            .table_mut(t)
+            .set(kx, vx)
+            .map_err(|e| Error::runtime(e.message()))
     }
 
     pub fn raw_get<V2: FromLua>(&self, key: impl IntoLua) -> Result<V2> {

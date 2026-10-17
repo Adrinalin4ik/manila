@@ -6,45 +6,33 @@ use crate::heap::FuncObj;
 use crate::value::{Value, V};
 use crate::vm::Vm;
 
-/// The base function benilla has under `name`, for a state that registers its own list.
-pub(crate) fn native(name: &str) -> Option<crate::heap::NativeFn> {
-    Some(match name {
-        "error" => error,
-        "getmetatable" => getmetatable,
-        "setmetatable" => setmetatable,
-        "getfenv" => getfenv,
-        "setfenv" => setfenv,
-        "next" => next,
-        "pairs" => pairs,
-        "tonumber" => tonumber,
-        "tostring" => tostring,
-        "type" => type_,
-        "assert" => assert,
-        "unpack" => unpack,
-        "rawequal" => rawequal,
-        "rawget" => rawget,
-        "rawset" => rawset,
-        "pcall" => pcall,
-        "xpcall" => xpcall,
-        "collectgarbage" => collectgarbage,
-        "gcinfo" => gcinfo,
-        "loadstring" => loadstring,
-        _ => return None,
-    })
-}
-
-/// 5.1's `pairs`, whose `next` is the one it was opened with (its upvalue), not the global's
-/// value now.
-pub(crate) fn pairs_51(vm: &mut Vm, nargs: usize) -> R<usize> {
-    let t = vm.check_table(nargs, 1)?;
-    let next = vm.upvalue(0);
-    vm.push(next);
-    vm.push(Value::Table(t));
-    vm.push(Value::Nil);
-    Ok(3)
-}
-
-pub fn open(vm: &mut Vm) {
+/// The client's base array (`0x811e28`), its 36 functions set as globals in the array's order
+/// (`0x703ab0`). `host` stands in for the ones only the host gives, which it replaces.
+pub fn open(vm: &mut Vm, host: crate::heap::NativeFn) {
+    // `debugload` to `debugtimestamp` do nothing: `xor eax,eax; ret` (`0x7027e0`..`0x702830`).
+    fn nothing(_: &mut Vm, _: usize) -> R<usize> {
+        Ok(0)
+    }
+    vm.register("setglobal", setglobal);
+    vm.register("getglobal", getglobal);
+    for name in [
+        "debugload",
+        "debuginfo",
+        "debugprint",
+        "debugdump",
+        "debugbreak",
+        "debugtimestamp",
+    ] {
+        vm.register(name, nothing);
+    }
+    for name in [
+        "debugprofilestart",
+        "debugprofilestop",
+        "seterrorhandler",
+        "geterrorhandler",
+    ] {
+        vm.register(name, host);
+    }
     vm.register("error", error);
     vm.register("getmetatable", getmetatable);
     vm.register("setmetatable", setmetatable);
@@ -52,25 +40,25 @@ pub fn open(vm: &mut Vm) {
     vm.register("setfenv", setfenv);
     vm.register("next", next);
     vm.builtin_next = vm.get_global("next");
-    let aux = vm.new_native("ipairs_aux", ipairs_aux);
-    let ip = vm.new_closure("ipairs", ipairs, vec![aux]);
-    vm.set_global("ipairs", ip);
+    vm.register("ipairs", ipairs);
+    // `0x702da0`: the global `next`, read raw, as the generator.
     vm.register("pairs", pairs);
+    vm.register("type", type_);
     vm.register("tonumber", tonumber);
     vm.register("tostring", tostring);
-    vm.register("type", type_);
-    vm.register("assert", assert);
     vm.register("unpack", unpack);
     vm.register("rawequal", rawequal);
     vm.register("rawget", rawget);
     vm.register("rawset", rawset);
+    vm.register("assert", assert);
+    vm.register("gcinfo", gcinfo);
+    vm.register("collectgarbage", collectgarbage);
+    vm.register("loadstring", loadstring);
     vm.register("pcall", pcall);
     vm.register("xpcall", xpcall);
-    vm.register("collectgarbage", collectgarbage);
-    vm.register("gcinfo", gcinfo);
-    vm.register("loadstring", loadstring);
-    let g = Value::Table(vm.globals);
-    vm.set_global("_G", g);
+    for name in ["date", "time", "debugstack"] {
+        vm.register(name, host);
+    }
 }
 
 /// `luaB_error`: a string message gets the position `level` up (default 1).
@@ -209,26 +197,52 @@ fn pairs(vm: &mut Vm, nargs: usize) -> R<usize> {
     Ok(3)
 }
 
-/// 5.1's `ipairs`: its iterator, the table and 0.
-pub(crate) fn ipairs(vm: &mut Vm, nargs: usize) -> R<usize> {
-    let t = vm.check_table(nargs, 1)?;
-    let aux = vm.upvalue(0);
-    vm.push(aux);
-    vm.push(Value::Table(t));
-    vm.push(Value::Num(0.0));
-    Ok(3)
+/// `setglobal` (`0x702770`): argument 1 made a string in place (`lua_tostring`), a copy of it
+/// pushed and moved under the top value (`lua_insert(-2)`), then `lua_settable` on the globals,
+/// metamethods and all. So the global gets the top value: the last argument, or the name itself
+/// when it is the only one, so `setglobal("x")` sets `x` to `"x"`. Nothing is answered.
+fn setglobal(vm: &mut Vm, nargs: usize) -> R<usize> {
+    let key = vm.tostr(vm.arg(nargs, 0)).map_or(Value::Nil, Value::Str);
+    let val = if nargs >= 2 {
+        vm.arg(nargs, nargs - 1)
+    } else {
+        key
+    };
+    let g = Value::Table(vm.globals);
+    vm.setindex(g, key, val, None)?;
+    Ok(0)
 }
 
-/// 5.1's `ipairsaux`: the next index and its value, or nothing at the first nil.
-pub(crate) fn ipairs_aux(vm: &mut Vm, nargs: usize) -> R<usize> {
-    let i = vm.check_int(nargs, 2)?;
+/// `getglobal` (`0x7027b0`): argument 1 made a string, then `lua_gettable` on the globals,
+/// metamethods and all; one value.
+fn getglobal(vm: &mut Vm, nargs: usize) -> R<usize> {
+    let key = vm.tostr(vm.arg(nargs, 0)).map_or(Value::Nil, Value::Str);
+    let g = Value::Table(vm.globals);
+    let v = vm.index(g, key, None)?;
+    Ok(vm.ret1(v))
+}
+
+/// 5.0's `ipairs` (`0x702cd0`). With no second argument (none, not nil) and so a count of 0, a
+/// loop's start: the global `ipairs` read raw, the table and 0 (`0x702d15`..`0x702d41`); the
+/// loop then calls what it was given, whatever the global holds later. Otherwise one step: the
+/// count plus 1 and the table's raw value there, or nothing at a nil (`0x702d50`..`0x702d8e`).
+pub(crate) fn ipairs(vm: &mut Vm, nargs: usize) -> R<usize> {
+    let a2 = vm.arg(nargs, 1);
+    let n = vm.tonumber(a2).unwrap_or(0.0);
     let t = vm.check_table(nargs, 1)?;
-    let i = i.wrapping_add(1);
-    let v = vm.heap.table(t).get_int(i);
+    if n == 0.0 && nargs < 2 {
+        let g = vm.heap.table(vm.globals).get(Value::Str(vm.names.ipairs));
+        vm.push(g);
+        vm.push(Value::Table(t));
+        vm.push(Value::Num(0.0));
+        return Ok(3);
+    }
+    let n = n + 1.0;
+    let v = vm.heap.table(t).get_int(crate::api::c_int(n));
     if v.is_nil() {
         return Ok(0);
     }
-    vm.push(Value::Num(i as f64));
+    vm.push(Value::Num(n));
     vm.push(v);
     Ok(2)
 }
@@ -388,11 +402,7 @@ fn rawset(vm: &mut Vm, nargs: usize) -> R<usize> {
     let k = vm.check_any(nargs, 2)?;
     let v = vm.check_any(nargs, 3)?;
     if let Err(e) = vm.heap.table_mut(t).set(k, v) {
-        let msg = match e {
-            crate::table::KeyError::Nil => "table index is nil",
-            crate::table::KeyError::NaN => "table index is NaN",
-        };
-        return Err(vm.rt_error(msg));
+        return Err(vm.rt_error(e.message()));
     }
     Ok(vm.ret1(Value::Table(t)))
 }
