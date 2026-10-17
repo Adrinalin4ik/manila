@@ -292,10 +292,12 @@ impl UiScript {
             })
     }
 
-    /// How many rows frame `fh`'s resolved rect holds at its font's pitch, the client's
-    /// `numLinesDisplayed`: the scrolling class's page size and the plain class's capacity. Both
-    /// the rect and the pitch are scaled (`0x785f0a`, `0x785f1f`); a pitch of 0 or less, which a
-    /// negative spacing can make on the plain class, holds nothing (`0x785f8f`).
+    /// How many rows frame `fh`'s resolved rect holds at its font's pitch: the plain class's
+    /// capacity (`+0x318`) and the height the scrolling class's layout spends in whole messages.
+    /// The plain class scales both the rect and the pitch (`0x785f0a`, `0x785f1f`) and holds
+    /// nothing at a pitch of 0 or less, which a negative spacing can make (`0x785f8f`). The
+    /// scrolling class divides the rect by the scale (`0x7887d4`) and charges each message its
+    /// height plus the snapped unscaled spacing (`0x78899e`-`0x7889ad`); scaled, that is this pitch.
     pub(super) fn message_viewport_rows(model: &Model, fh: FrameHandle) -> usize {
         let font = Self::message_frame_font(model, fh);
         let Some(frame) = model.arena.frame(fh) else {
@@ -443,8 +445,10 @@ impl UiScript {
     /// own pitch, the raw spacing included ([`MessageFont::plain_pitch`]). A scrolling frame stacks
     /// up from the bottom, `scroll_offset` choosing the bottom message. A MessageFrame does too for `insertMode` BOTTOM, and for TOP hangs the newest off
     /// the top edge (`UIErrorsFrame.xml:4`); the reference's anchor per mode is untraced, and this
-    /// reading reproduces both stock uses. A message that partly fits draws clipped; a faded
-    /// scrolling line keeps its rows, as the reference never re-packs chat.
+    /// reading reproduces both stock uses. The scrolling class draws the messages its layout
+    /// places ([`crate::widget::ScrollingMessageState::displayed_count`]): the anchored one, then
+    /// only those that fit whole. A faded one keeps its rows, as the reference never re-packs
+    /// chat. The plain class draws its bands as far as the frame reaches.
     pub(super) fn emit_message_lines(
         model: &Model,
         fh: FrameHandle,
@@ -503,9 +507,15 @@ impl UiScript {
         // one, the order its link rebuild walks them (`0x788c8d`-`0x788d7d`), so the spans reach
         // [`super::hyperlink`] in the reference's placement order.
         let first = out.len();
-        let reverse = matches!(frame.kind_state, KindState::ScrollingMessage(_));
-        for idx in (0..=top_index).rev() {
-            if used >= fr.top - fr.bottom {
+        let (reverse, shown) = match &frame.kind_state {
+            KindState::ScrollingMessage(smf) => (
+                true,
+                smf.displayed_count(Self::message_viewport_rows(model, fh)),
+            ),
+            _ => (false, usize::MAX),
+        };
+        for idx in (0..=top_index).rev().take(shown) {
+            if !reverse && used >= fr.top - fr.bottom {
                 break; // the next band starts outside the frame
             }
             let line = &lines[idx];

@@ -157,12 +157,22 @@ impl ScrollingMessageState {
         self.scroll_offset == 0
     }
 
-    /// Whether the view is scrolled as far back as the ring allows (`AtTop`).
-    pub fn at_top(&self) -> bool {
-        self.scroll_offset >= self.max_scroll()
+    /// `AtTop` (`0x793130`), which reads the flag `+0x350`: the relayout sets it when every older
+    /// message was placed (`0x788a37`-`0x788a3c`), so the oldest is on screen. An empty frame
+    /// answers false: the constructor, `Clear` after its relayout and `SetMaxLines` all zero it
+    /// (`0x787775`, `0x7882ce`, `0x787eb1`). This reads the layout live, while the reference caches
+    /// the flag per relayout, so the two differ on a hidden frame, whose relayout does nothing
+    /// (`0x78878e`), and after an `AddMessage` while scrolled up (`0x788220`-`0x78824a`).
+    pub fn at_top(&self, viewport_rows: usize) -> bool {
+        if self.lines.is_empty() {
+            return false;
+        }
+        let available = self.lines.len().saturating_sub(self.scroll_offset);
+        self.displayed_count(viewport_rows) == available
     }
 
-    /// The furthest the view can scroll up: enough to bring the oldest line to the bottom row.
+    /// The furthest the view can scroll: the oldest line as the anchor, where `ScrollToTop`
+    /// relayouts (`0x788690`).
     fn max_scroll(&self) -> usize {
         self.lines.len().saturating_sub(1)
     }
@@ -171,7 +181,7 @@ impl ScrollingMessageState {
         self.scroll_offset = self.scroll_offset.min(self.max_scroll());
     }
 
-    /// Re-arm the fade of the displayed lines only (`0x788b80`): full alpha and the frame's
+    /// Re-arm the fade of the displayed lines only, on a frame with lines (`0x788b80`): full alpha and the frame's
     /// current `timeVisible`/`fadeDuration`, so even a fully faded line comes back (expiry frees
     /// nothing, `0x788525`). Engine-only, not a 1.12 Lua verb; every scroll entry reaches it.
     pub fn reset_all_fade_times(&mut self, viewport_rows: usize) {
@@ -204,14 +214,38 @@ impl ScrollingMessageState {
 
     /// `ScrollUp` (`0x788610`): one line older, then re-arm.
     pub fn scroll_up(&mut self, viewport_rows: usize) {
-        self.scroll_offset = (self.scroll_offset + 1).min(self.max_scroll());
-        self.reset_all_fade_times(viewport_rows);
+        self.step_up(viewport_rows);
     }
 
     /// `ScrollDown` (`0x788650`): one line newer, then re-arm.
     pub fn scroll_down(&mut self, viewport_rows: usize) {
+        self.step_down(viewport_rows);
+    }
+
+    /// `0x788610`'s answer: whether the view moved. An empty frame answers 0 and touches nothing
+    /// (`0x788619`); one whose oldest message is on screen re-arms and answers 0 (`0x78861c`-
+    /// `0x788626`).
+    pub fn step_up(&mut self, viewport_rows: usize) -> bool {
+        if self.lines.is_empty() {
+            return false;
+        }
+        let moved = !self.at_top(viewport_rows);
+        if moved {
+            self.scroll_offset += 1;
+        }
+        self.reset_all_fade_times(viewport_rows);
+        moved
+    }
+
+    /// `0x788650`'s answer: the same, toward the newest line (`0x788659`, `0x788666`).
+    pub fn step_down(&mut self, viewport_rows: usize) -> bool {
+        if self.lines.is_empty() {
+            return false;
+        }
+        let moved = !self.at_bottom();
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
         self.reset_all_fade_times(viewport_rows);
+        moved
     }
 
     /// `ScrollToBottom` (`0x7886d0`): to the newest line, then re-arm.
@@ -220,44 +254,65 @@ impl ScrollingMessageState {
         self.reset_all_fade_times(viewport_rows);
     }
 
-    /// `ScrollToTop` (`0x788690`): to the oldest line, then re-arm, as its relayout always lands
-    /// off the bottom.
+    /// `ScrollToTop` (`0x788690`): the oldest line as the anchor, then re-arm, as its relayout
+    /// lands off the bottom. With exactly one message the anchor is the newest (`0x788799`-
+    /// `0x7887aa`), and a frame already at the bottom skips the re-arm (`0x788aff`); the links
+    /// still rebuild (`0x788a8e`).
     pub fn scroll_to_top(&mut self, viewport_rows: usize) {
+        let stays_at_bottom = self.at_bottom() && self.lines.len() == 1;
         self.scroll_offset = self.max_scroll();
-        self.reset_all_fade_times(viewport_rows);
+        if stays_at_bottom {
+            self.links_dirty = true;
+        } else {
+            self.reset_all_fade_times(viewport_rows);
+        }
     }
 
-    /// How many messages fit `viewport_rows` from the anchor, each costing its wrapped rows; a
-    /// partly fitting one counts, as in the draw's band walk (`emit_message_lines`).
+    /// How many messages the layout places for a frame `viewport_rows` tall, the client's lines
+    /// shown (`+0x34c`, which paging reads at `0x7885b4`). From the anchor outward each message
+    /// costs its wrapped rows (`0x7889ad`); one that does not fit whole ends the walk
+    /// (`0x7889b3`-`0x7889be`, `0x788a2f`) unless it is the anchored one (`0x7889c0`-`0x7889c5`),
+    /// which always shows. A faded message is placed all the same (`0x7889c7`-`0x7889ee` only
+    /// hides it), so it holds its rows. The draw (`emit_message_lines`) walks this many.
     pub fn displayed_count(&self, viewport_rows: usize) -> usize {
-        if self.lines.is_empty() || viewport_rows == 0 {
+        if self.lines.is_empty() {
             return 0;
         }
         let top_index = self.lines.len().saturating_sub(1 + self.scroll_offset);
-        let mut used = 0usize;
+        let mut left = viewport_rows;
         let mut count = 0usize;
         for idx in (0..=top_index).rev() {
-            if used >= viewport_rows {
+            let rows = usize::from(self.lines[idx].rows.max(1));
+            if count > 0 && rows > left {
                 break;
             }
-            used += usize::from(self.lines[idx].rows.max(1));
+            left = left.saturating_sub(rows);
             count += 1;
         }
-        count.max(1)
+        count
     }
 
-    /// `PageUp` (`0x7885b0`): back by the displayed count less one, then re-arm.
+    /// `PageUp` (`0x7885b0`): `ScrollUp` once per displayed line, the count read once up front
+    /// (`0x7885b4`); a step that cannot move ends the page there (`0x7885ca`), else one `ScrollDown`
+    /// follows (`0x7885d4`). A page is the displayed count less one, and one displayed line nets 0.
     pub fn page_up(&mut self, viewport_rows: usize) {
-        let page = self.displayed_count(viewport_rows).saturating_sub(1).max(1);
-        self.scroll_offset = (self.scroll_offset + page).min(self.max_scroll());
-        self.reset_all_fade_times(viewport_rows);
+        for _ in 0..self.displayed_count(viewport_rows) {
+            if !self.step_up(viewport_rows) {
+                return;
+            }
+        }
+        self.step_down(viewport_rows);
     }
 
-    /// `PageDown`: the same page toward the newest line, then re-arm.
+    /// `PageDown` (`0x7885e0`): the mirror, `ScrollDown` per displayed line (`0x7885f3`), a refusal
+    /// ending the page (`0x7885fa`), else one `ScrollUp` (`0x788604`).
     pub fn page_down(&mut self, viewport_rows: usize) {
-        let page = self.displayed_count(viewport_rows).saturating_sub(1).max(1);
-        self.scroll_offset = self.scroll_offset.saturating_sub(page);
-        self.reset_all_fade_times(viewport_rows);
+        for _ in 0..self.displayed_count(viewport_rows) {
+            if !self.step_down(viewport_rows) {
+                return;
+            }
+        }
+        self.step_up(viewport_rows);
     }
 
     /// Advance the fade by `dt` (OnUpdate, `0x788460`), only at the bottom with fading on; the

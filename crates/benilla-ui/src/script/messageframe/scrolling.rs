@@ -34,13 +34,14 @@ fn with_smf<T>(
     }
 }
 
-/// Run a scroll call with the viewport's row count, which every scroll needs: each re-arms the
-/// fade of the lines on display ([`ScrollingMessageState::reset_all_fade_times`]).
-fn scroll(
+/// Run `f` over the state with the viewport's row count, which every scroll needs: each re-arms
+/// the fade of the lines on display ([`ScrollingMessageState::reset_all_fade_times`]), and `AtTop`
+/// reads the layout's flag.
+fn with_viewport<T>(
     lua: &Lua,
     this: &Table,
-    op: impl FnOnce(&mut ScrollingMessageState, usize),
-) -> mlua::Result<()> {
+    f: impl FnOnce(&mut ScrollingMessageState, usize) -> T,
+) -> mlua::Result<T> {
     let h = frame_handle_of(lua, this)?;
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
     let viewport_rows = UiScript::message_viewport_rows(&model, h);
@@ -49,12 +50,18 @@ fn scroll(
         .frame_mut(h)
         .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
     match &mut frame.kind_state {
-        KindState::ScrollingMessage(smf) => {
-            op(smf, viewport_rows);
-            Ok(())
-        }
+        KindState::ScrollingMessage(smf) => Ok(f(smf, viewport_rows)),
         _ => Err(mlua::Error::runtime("not a ScrollingMessageFrame")),
     }
+}
+
+/// Run a scroll call: [`with_viewport`] for an op with no answer.
+fn scroll(
+    lua: &Lua,
+    this: &Table,
+    op: impl FnOnce(&mut ScrollingMessageState, usize),
+) -> mlua::Result<()> {
+    with_viewport(lua, this, op)
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -159,8 +166,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "AtTop",
         lua.create_function(|lua, this: Table| {
-            with_smf(lua, &this, |smf| {
-                crate::script::binding_abi::flag(smf.at_top())
+            with_viewport(lua, &this, |smf, rows| {
+                crate::script::binding_abi::flag(smf.at_top(rows))
             })
         })?,
     )?;
@@ -466,11 +473,15 @@ mod tests {
         assert!(s.at_bottom());
         s.scroll_down(8); // already at the bottom: no move
         assert!(s.at_bottom());
-        // 3 lines → max_scroll = 2; scroll past it clamps.
+        // A frame showing every line is at the top already (`+0x350`, `0x788a37`).
+        assert!(s.at_top(8));
+        s.scroll_up(8);
+        assert_eq!(s.scroll_offset, 0, "refused: the oldest is on screen");
+        // One row high, the oldest shows only at offset 2; scrolling past it is refused.
         for _ in 0..10 {
-            s.scroll_up(8);
+            s.scroll_up(1);
         }
-        assert!(s.at_top());
+        assert!(s.at_top(1));
         assert_eq!(s.scroll_offset, 2);
         s.scroll_to_bottom(8);
         assert!(s.at_bottom());
@@ -485,7 +496,7 @@ mod tests {
         for n in 0..4 {
             s.add(format!("l{n}"), 1.0, 1.0, 1.0);
         }
-        s.scroll_up(8); // viewing one line back (bottom row = l2)
+        s.scroll_up(1); // viewing one line back (bottom row = l2)
         let off = s.scroll_offset;
         s.add("l4".into(), 1.0, 1.0, 1.0);
         assert_eq!(
@@ -505,78 +516,263 @@ mod tests {
             s.add(format!("l{n}"), 1.0, 1.0, 1.0);
         }
         s.lines[1].rows = 3;
-        // 4 rows: the newest (1) and the middle (3) fill it; a partly fitting message counts.
+        // 4 rows: the newest (1) and the middle (3) fill it. A message that does not fit whole
+        // ends the walk (`0x7889c0`-`0x7889c5`) unless it is the anchored one.
         assert_eq!(s.displayed_count(4), 2);
-        assert_eq!(s.displayed_count(3), 2, "partial middle line still counts");
+        assert_eq!(
+            s.displayed_count(3),
+            1,
+            "a partly fitting middle line is out"
+        );
         assert_eq!(s.displayed_count(1), 1);
-        // A page is displayed − 1, one message of overlap, never 0.
-        s.page_up(4);
+        assert_eq!(s.displayed_count(0), 1, "the anchored message always shows");
+        // `PageUp` (`0x7885b0`) scrolls up once per displayed line and then down once, so a page
+        // is the displayed count less one, and one displayed line nets nothing.
+        s.page_up(4); // 2 displayed: up moves, the second up is refused (the oldest shows)
         assert_eq!(s.scroll_offset, 1);
-        s.page_up(1); // displayed 1 → page clamps to 1 message
-        assert_eq!(s.scroll_offset, 2);
-        s.page_down(4);
-        assert_eq!(s.scroll_offset, 1);
-        s.page_down(4);
+        s.page_up(1); // 1 displayed: up, down
+        assert_eq!(s.scroll_offset, 1, "a page of one line nets 0");
+        // `PageDown` (`0x7885e0`): a step refused at the bottom ends the page with no step back.
+        s.page_down(4); // 2 displayed: down moves, down is refused
+        assert!(s.at_bottom());
+        s.page_down(4); // 2 displayed: both refused at the first
         assert!(s.at_bottom());
     }
 
+    /// A refused step ends the page where it stands (`0x7885ca`), with no step back; an empty
+    /// frame moves nothing and re-arms nothing (`0x788619`).
     #[test]
-    fn emit_stacks_wrapped_rows_and_clips_partial_top() {
+    fn a_page_stopped_by_an_end_takes_no_step_back() {
+        let mut s = ScrollingMessageState {
+            max_lines: 8,
+            ..Default::default()
+        };
+        assert!(!s.step_up(4), "an empty frame answers 0");
+        s.page_up(4);
+        s.page_down(4);
+        assert!(!s.links_dirty, "an empty frame is left alone");
+        for n in 0..4 {
+            s.add(format!("l{n}"), 1.0, 1.0, 1.0);
+        }
+        // Two rows high: the oldest shows from offset 2, where every step up is refused.
+        s.scroll_up(2);
+        s.scroll_up(2);
+        assert_eq!(s.scroll_offset, 2);
+        assert!(s.at_top(2));
+        // The first up is refused, so the page ends with no down after it.
+        s.page_up(2);
+        assert_eq!(s.scroll_offset, 2);
+        // One row high there, `PageDown` is a down and an up: it nets 0.
+        s.page_down(1);
+        assert_eq!(s.scroll_offset, 2, "down then up nets 0");
+    }
+
+    /// With two or more lines displayed and room to move, the page runs its whole loop and then
+    /// steps back: a page is the displayed count less one (`0x7885b0`, `0x7885e0`).
+    #[test]
+    fn a_page_with_room_runs_the_loop_and_steps_back() {
+        let mut s = ScrollingMessageState {
+            max_lines: 8,
+            ..Default::default()
+        };
+        for n in 0..8 {
+            s.add(format!("l{n}"), 1.0, 1.0, 1.0);
+        }
+        s.page_up(3); // 3 displayed: up, up, up, down
+        assert_eq!(s.scroll_offset, 2);
+        s.page_up(3);
+        assert_eq!(s.scroll_offset, 4);
+        s.page_down(3); // down, down, down, up
+        assert_eq!(s.scroll_offset, 2);
+    }
+
+    /// `AtTop` answers nil on an empty frame: the constructor, `Clear` and `SetMaxLines` zero the
+    /// flag (`0x787775`, `0x7882ce`, `0x787eb1`).
+    #[test]
+    fn at_top_is_nil_on_an_empty_frame() {
+        let s = UiScript::new().unwrap();
+        s.run(
+            "CF = CreateFrame('ScrollingMessageFrame', 'CF')\n\
+             EMPTY = CF:AtTop()\n\
+             CF:AddMessage('a') CF:Clear()\n\
+             CLEARED = CF:AtTop()\n\
+             CF:AddMessage('a') CF:SetMaxLines(4)\n\
+             WIPED = CF:AtTop()",
+        )
+        .unwrap();
+        for name in ["EMPTY", "CLEARED", "WIPED"] {
+            assert!(
+                s.eval::<bool>(&format!("return {name} == nil")).unwrap(),
+                "{name}"
+            );
+        }
+    }
+
+    /// `ScrollToTop` on a single message anchors the newest (`0x788799`-`0x7887aa`); a frame
+    /// already at the bottom skips the re-arm (`0x788aff`), which two messages do not.
+    #[test]
+    fn scroll_to_top_with_one_message_skips_the_re_arm_at_the_bottom() {
+        let faded = |count: usize| {
+            let mut s = ScrollingMessageState {
+                time_visible: 0.0,
+                fade_duration: 4.0,
+                ..Default::default()
+            };
+            for n in 0..count {
+                s.add(format!("l{n}"), 1.0, 1.0, 1.0);
+            }
+            s.tick(2.0);
+            s.links_dirty = false;
+            s.scroll_to_top(8);
+            s
+        };
+        let one = faded(1);
+        assert_eq!(one.lines[0].alpha, 127.0 / 255.0, "left as it was");
+        assert!(one.links_dirty, "the links still rebuild");
+        let two = faded(2);
+        assert_eq!(two.scroll_offset, 1);
+        assert_eq!(two.lines[0].alpha, 1.0, "the oldest was re-armed");
+    }
+
+    /// `ScrollUp` is refused once the oldest message is on screen (`0x78861c`-`0x788624`, the flag
+    /// the relayout sets at `0x788a3c`), not when it is the bottom row; `ScrollToTop` (`0x788690`)
+    /// anchors the oldest. `AtTop` (`0x793130`) reads the same flag.
+    #[test]
+    fn scroll_up_stops_when_the_oldest_message_shows() {
+        let mut s = ScrollingMessageState {
+            max_lines: 8,
+            ..Default::default()
+        };
+        for n in 0..5 {
+            s.add(format!("l{n}"), 1.0, 1.0, 1.0);
+        }
+        // Three rows show 3 of 5: l4 l3 l2, then l3 l2 l1, then l2 l1 l0.
+        assert!(!s.at_top(3));
+        s.scroll_up(3);
+        s.scroll_up(3);
+        assert_eq!(s.scroll_offset, 2);
+        assert!(s.at_top(3), "l0 is on screen");
+        s.scroll_up(3);
+        assert_eq!(s.scroll_offset, 2, "refused");
+        s.scroll_to_top(3);
+        assert_eq!(s.scroll_offset, 4, "the oldest as the anchor");
+    }
+
+    /// The Lua `AtTop` follows the viewport the frame's rect gives.
+    #[test]
+    fn at_top_reads_the_layout_through_lua() {
         let mut s = UiScript::new().unwrap();
         s.set_screen_size(800.0, 600.0);
         s.run(
+            "CF = CreateFrame('ScrollingMessageFrame', 'CF')\n\
+             CF:SetPoint('BOTTOMLEFT', 32, 90)\n\
+             CF:SetWidth(430)\n\
+             CF:SetHeight(44)\n\
+             for n = 1, 5 do CF:AddMessage('m' .. n) end",
+        )
+        .unwrap();
+        s.resolve();
+        // 44 px hold three rows of 14.
+        assert!(s.eval::<bool>("return CF:AtTop() == nil").unwrap());
+        s.run("CF:ScrollUp() CF:ScrollUp()").unwrap();
+        assert!(s.eval::<bool>("return CF:AtTop() == 1").unwrap());
+        // Shrunk to two rows, the oldest message no longer shows.
+        s.run("CF:SetHeight(30)").unwrap();
+        s.resolve();
+        assert!(
+            s.eval::<bool>("return CF:AtTop() == nil").unwrap(),
+            "a shorter frame places fewer messages, so the oldest drops off"
+        );
+    }
+
+    /// A scrolling frame `CF` of the given height holding `messages`, bottom left at (32, 90),
+    /// after the host answered each message's row count with `rows(index)`: what it draws as
+    /// `(text, bottom, top)` in draw order, and the count its layout reports.
+    fn laid_out(
+        height: u32,
+        messages: &[&str],
+        rows: impl Fn(u32) -> u16,
+    ) -> (Vec<(String, f32, f32)>, usize) {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        s.run(&format!(
             "local f = CreateFrame('ScrollingMessageFrame', 'CF')\n\
              f:SetPoint('BOTTOMLEFT', 32, 90)\n\
              f:SetWidth(430)\n\
-             f:SetHeight(34)",
-        )
+             f:SetHeight({height})"
+        ))
         .unwrap();
-        s.run("CF:AddMessage('old', 1, 1, 1)").unwrap();
-        s.run("CF:AddMessage('wrapped', 1, 1, 1)").unwrap();
-        s.run("CF:AddMessage('new', 1, 1, 1)").unwrap();
+        for m in messages {
+            s.run(&format!("CF:AddMessage('{m}', 1, 1, 1)")).unwrap();
+        }
         s.resolve();
-        let reqs = s.message_lines_needing_measure();
-        assert_eq!(reqs.len(), 3);
-        assert!(reqs.iter().all(|r| (r.wrap_width - 430.0).abs() < 0.5));
-        let answers: Vec<(u32, u32, u16, u64)> = reqs
+        let answers: Vec<(u32, u32, u16, u64)> = s
+            .message_lines_needing_measure()
             .iter()
-            .map(|r| (r.frame, r.index, if r.index == 1 { 2 } else { 1 }, r.key))
+            .map(|r| (r.frame, r.index, rows(r.index), r.key))
             .collect();
         s.set_message_line_rows(&answers);
-        assert!(
-            s.message_lines_needing_measure().is_empty(),
-            "answered keys satisfy the cache"
-        );
-        // Default font, pitch 14. Frame [90, 124): 'new' is [90, 104), 'wrapped' [104, 132)
-        // overflows and draws clipped, and 'old' would start at 132, outside, so does not draw.
-        let quads = s.extract();
-        let texts: Vec<(String, f32, f32)> = quads
+        let mut fh = None;
+        let texts = s
+            .extract()
             .iter()
-            .filter_map(|q| match (&q.content, q.rect) {
-                (crate::script::QuadContent::Text { text: Some(t), .. }, Some(r)) => {
+            .filter_map(|q| match (&q.content, q.rect, q.target) {
+                (
+                    crate::script::QuadContent::Text { text: Some(t), .. },
+                    Some(r),
+                    crate::order::ZTarget::Frame(h),
+                ) => {
+                    fh = Some(h);
                     Some((t.clone(), r.bottom, r.top))
                 }
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            texts.len(),
-            2,
-            "partial top line draws, off-top line doesn't"
-        );
-        // Farthest displayed line first, the link rebuild's walk (`0x788c8d`-`0x788d7d`).
+        let model = s.model_mut();
+        let fh = fh.expect("a line drew");
+        let viewport = UiScript::message_viewport_rows(&model, fh);
+        let count = match &model.arena.frame(fh).expect("the frame").kind_state {
+            crate::widget::KindState::ScrollingMessage(smf) => smf.displayed_count(viewport),
+            _ => unreachable!("a scrolling frame"),
+        };
+        (texts, count)
+    }
+
+    /// The layout places the anchored message, then only what fits whole (`0x7889b3`-`0x7889c5`).
+    /// Default font, pitch 14: at 34 px (two rows and a bit) 'wrapped' starts inside the frame at 104
+    /// and runs to 132, past its top at 124, so it is neither drawn nor counted, and 'old' beyond it
+    /// is not either.
+    #[test]
+    fn emit_stacks_wrapped_rows_and_hides_a_partial_top() {
+        let rows = |i| if i == 1 { 2 } else { 1 };
+        let (texts, count) = laid_out(34, &["old", "wrapped", "new"], rows);
+        assert_eq!(texts.len(), 1, "only the anchored message: {texts:?}");
+        assert_eq!(texts[0].0, "new");
+        assert!((texts[0].1 - 90.0).abs() < 0.01 && (texts[0].2 - 104.0).abs() < 0.01);
+        assert_eq!(count, 1, "the displayed count agrees with the draw");
+
+        // 48 px (three rows and a bit) holds 'new' and 'wrapped' whole; 'old' would be the
+        // fraction at the top edge, so it stays out. Farthest displayed line first, the link
+        // rebuild's walk (`0x788c8d`-`0x788d7d`).
+        let (texts, count) = laid_out(48, &["old", "wrapped", "new"], rows);
+        assert_eq!(count, 2);
+        assert_eq!(texts.len(), 2, "{texts:?}");
         assert_eq!(texts[0].0, "wrapped");
         assert!((texts[0].1 - 104.0).abs() < 0.01 && (texts[0].2 - 132.0).abs() < 0.01);
         assert_eq!(texts[1].0, "new");
         assert!((texts[1].1 - 90.0).abs() < 0.01 && (texts[1].2 - 104.0).abs() < 0.01);
-        let clip = quads
-            .iter()
-            .find_map(|q| match &q.content {
-                crate::script::QuadContent::Text { text: Some(t), .. } if t == "wrapped" => q.clip,
-                _ => None,
-            })
-            .expect("wrapped line carries a clip");
-        assert!((clip.top - 124.0).abs() < 0.01 && (clip.bottom - 90.0).abs() < 0.01);
+    }
+
+    /// The anchored message shows even when it alone is taller than the frame (`0x7889c0`): the
+    /// frame's 20 px hold a row and a bit, the newest message wraps to three rows, and it draws
+    /// from the bottom edge while the older one does not.
+    #[test]
+    fn the_anchored_message_shows_though_taller_than_the_frame() {
+        let (texts, count) = laid_out(20, &["old", "tall"], |i| if i == 1 { 3 } else { 1 });
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert_eq!(texts[0].0, "tall");
+        assert!((texts[0].1 - 90.0).abs() < 0.01 && (texts[0].2 - 132.0).abs() < 0.01);
+        assert_eq!(count, 1);
     }
 
     /// The lines draw at the frame's ARTWORK layer: a BACKGROUND texture, such as the chat
