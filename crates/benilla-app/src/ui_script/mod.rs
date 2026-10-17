@@ -75,6 +75,11 @@ pub(crate) struct CapturePointerPinned(pub(crate) bool);
 #[derive(Resource, Default)]
 pub(crate) struct EguiPointerOver(pub(crate) bool);
 
+/// Whether a dev overlay's text field has the keyboard: the UI and the bindings get no keys, as
+/// when an EditBox has focus.
+#[derive(Resource, Default)]
+pub(crate) struct EguiKeyboard(pub(crate) bool);
+
 /// Whether the dev `I` inspector's world picking is armed; `player::control` and `target::click`
 /// read it every frame, so it lives here, and the default (disarmed) is the player's.
 #[derive(Resource, Default)]
@@ -316,6 +321,7 @@ impl Plugin for UiScriptPlugin {
                     || std::env::var_os("WOW_CAPTURE_UI").is_some(),
             ))
             .init_resource::<EguiPointerOver>()
+            .init_resource::<EguiKeyboard>()
             .init_resource::<InspectMode>()
             .init_resource::<PlayerUiHover>()
             .init_resource::<UiKeyboardCapture>()

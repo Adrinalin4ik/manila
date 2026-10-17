@@ -134,16 +134,16 @@ fn a_table_from_an_iterator_is_sized_for_it() {
         .unwrap();
     lua.globals().set("Seq", seq).unwrap();
     lua.globals().set("Map", map).unwrap();
-    // SAFETY: plain heap reads; nothing else reaches the VM while the reference lives.
-    let vm = unsafe { lua.raw_vm() };
-    let seq = vm.get_global("Seq").as_table().unwrap();
-    let map = vm.get_global("Map").as_table().unwrap();
-    assert_eq!(vm.heap.table(seq).array.len(), 5);
-    assert_eq!(
-        (
-            vm.heap.table(map).array.len(),
-            vm.heap.table(map).node.len()
-        ),
-        (0, 8)
-    );
+    lua.with_vm(|vm| {
+        let seq = vm.get_global("Seq").as_table().unwrap();
+        let map = vm.get_global("Map").as_table().unwrap();
+        assert_eq!(vm.heap.table(seq).array.len(), 5);
+        assert_eq!(
+            (
+                vm.heap.table(map).array.len(),
+                vm.heap.table(map).node.len()
+            ),
+            (0, 8)
+        );
+    });
 }

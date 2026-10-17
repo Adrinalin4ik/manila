@@ -28,7 +28,7 @@ pub enum Cmp {
 
 /// A comparison and the result that jumps, in one byte, so a compare-and-jump fits in an
 /// eight-byte instruction.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CmpJ(u8);
 
 impl CmpJ {
@@ -66,7 +66,7 @@ pub enum Arith {
     Pow,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash)]
 pub enum Op {
     Move(Reg, Reg),
     LoadK(Reg, u32),
@@ -374,6 +374,18 @@ impl Proto {
 }
 
 impl Proto {
+    /// A hash of what this function runs, its code and constants, without its lines or the
+    /// functions nested in it: two compiles of a chunk whose top level is the same agree on the
+    /// main function's, however its functions' bodies changed, when one heap holds both (a string
+    /// constant is its id there).
+    pub(crate) fn code_digest(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.code.hash(&mut h);
+        self.consts.hash(&mut h);
+        h.finish()
+    }
+
     /// Check, once per compiled function, every fact the interpreter's unchecked reads take on
     /// trust: each register an instruction touches is below `maxstack`, each constant, upvalue
     /// and child index exists, each jump lands inside the code, and the code ends in a return,

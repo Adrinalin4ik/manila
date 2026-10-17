@@ -50,6 +50,8 @@ mod debug_panel;
 /// The dev/player seam: the instrument groups and the boundary rule. Always compiled; what it holds
 /// is not.
 mod dev;
+#[cfg(feature = "dev")]
+mod devtools;
 mod doodad_events;
 mod entities;
 mod field_watch;

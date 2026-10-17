@@ -51,7 +51,7 @@ pub struct UserRef(pub u32);
 /// (`Value::Num(1.0)`, `Value::Nil`); read one with [`Value::unpack`] or the `as_*` accessors.
 /// `==` compares bits, which is raw equality for everything but numbers (`0 == -0`, NaN):
 /// use [`Value::raw_eq`] for Lua's.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct Value(u64);
 

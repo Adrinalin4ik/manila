@@ -528,6 +528,9 @@ struct SourceBook {
     /// The order each slot's chunk was first compiled in, which slot order no longer is once a
     /// slot is reused.
     seq: Vec<u64>,
+    /// The chunk that was running when each slot's chunk was compiled, and that chunk's `seq`
+    /// then, so a reused slot is not taken for it: a `loadstring` chunk's parent is its caller's.
+    parent: Vec<(u32, u64)>,
     next_seq: u64,
     /// Moves whenever a chunk takes or leaves a slot.
     epoch: u64,
@@ -578,6 +581,7 @@ impl Default for Heap {
             source_ids: Default::default(),
             src: Box::new(SourceBook {
                 seq: vec![0],
+                parent: vec![(0, 0)],
                 scan_in: 64,
                 ..Default::default()
             }),
@@ -728,15 +732,19 @@ impl Heap {
         let book = &mut *self.src;
         book.next_seq += 1;
         let seq = book.next_seq;
+        let cur = self.cur_source;
+        let parent = (cur, book.seq.get(cur as usize).copied().unwrap_or(0));
         let id = match book.free.pop() {
             Some(id) => {
                 self.sources[id as usize] = Some(name.clone());
                 book.seq[id as usize] = seq;
+                book.parent[id as usize] = parent;
                 id
             }
             None => {
                 self.sources.push(Some(name.clone()));
                 book.seq.push(seq);
+                book.parent.push(parent);
                 self.sources.len() as u32 - 1
             }
         };
@@ -800,6 +808,13 @@ impl Heap {
     /// compile order once a slot is reused.
     pub fn source_seq(&self, id: u32) -> u64 {
         self.src.seq.get(id as usize).copied().unwrap_or(0)
+    }
+
+    /// The chunk that was running when source `id`'s chunk was compiled, while that chunk still
+    /// holds its slot; `None` for one the host compiled.
+    pub fn source_parent(&self, id: u32) -> Option<u32> {
+        let &(p, seq) = self.src.parent.get(id as usize)?;
+        (p != 0 && p != id && self.source_seq(p) == seq).then_some(p)
     }
 
     /// A number that moves whenever a chunk takes or leaves a source slot: a view built from

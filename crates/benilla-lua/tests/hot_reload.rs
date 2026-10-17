@@ -359,3 +359,62 @@ F:SetScript("OnEvent", function() return "event" end)
     assert_eq!(r.removed, ["SetScript:OnShow"]);
     assert_eq!(r.added, ["SetScript:OnEvent"]);
 }
+
+/// An edit of the top level, which ran once, is told apart from an edit inside a function body:
+/// the new value of `SPACING` is not the one the swapped function reads.
+#[test]
+fn a_changed_top_level_is_told_apart() {
+    use benilla_lua::reload::top_level_changed;
+    let old = b"local SPACING = 4 Note('kept') function Gap() return SPACING end";
+    let body = b"local SPACING = 4 Note('kept') function Gap() return SPACING + 0 end";
+    let top = b"local SPACING = 6 Note('kept') function Gap() return SPACING + 0 end";
+    assert!(
+        !top_level_changed(old, body),
+        "a body edit leaves the top level"
+    );
+    assert!(top_level_changed(old, top));
+    assert!(
+        !top_level_changed(old, b"nil +"),
+        "a source that does not compile"
+    );
+
+    let mut vm = benilla_lua::new_state();
+    vm.exec(b"function Note() end", b"=setup").unwrap();
+    vm.exec(old, NAME).unwrap();
+    vm.hot_reload(NAME, top).unwrap();
+    assert_eq!(
+        run(&mut vm, "return Gap()"),
+        "4",
+        "the top level did not run again"
+    );
+}
+
+/// An XML handler is a chunk run as a function. Its body edited, the handlers built from it
+/// (each frame's own chunk, `F1:OnClick`) run the new body; another handler with the same body
+/// under a tag the edit did not name, and a handler with another body, keep theirs.
+#[test]
+fn handler_bodies_are_swapped_into_the_frames_that_run_them() {
+    let mut vm = benilla_lua::new_state();
+    for (name, body) in [
+        ("F1:OnClick", "return 'a'"),
+        ("F2:OnClick", "return 'a'"),
+        ("F3:OnShow", "return 'a'"),
+        ("F4:OnClick", "return 'other'"),
+    ] {
+        let f = vm.load(body.as_bytes(), name.as_bytes()).unwrap();
+        vm.set_global(&name.replace(':', "_"), f);
+    }
+    let n = vm
+        .hot_reload_mains(b"return 'a'", b"return 'b'", |p| {
+            p.source.ends_with(b":OnClick")
+        })
+        .unwrap();
+    assert_eq!(n, 2);
+    assert_eq!(
+        run(
+            &mut vm,
+            "return F1_OnClick() .. F2_OnClick() .. F3_OnShow() .. F4_OnClick()"
+        ),
+        "bbaother"
+    );
+}

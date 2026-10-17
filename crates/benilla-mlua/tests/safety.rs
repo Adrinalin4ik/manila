@@ -315,6 +315,63 @@ fn a_value_handed_over_by_value_survives_a_collecting_newindex() {
     assert_eq!(back.get::<i64>("inner").unwrap(), 5);
 }
 
+/// While the VM is lent, the state's own API panics instead of reaching it a second way; Lua run
+/// through the lent VM reaches its callbacks, which use the API as usual.
+#[test]
+fn a_lent_vm_is_the_only_way_in_until_it_is_back() {
+    let lua = benilla_mlua::Lua::new();
+    let t = lua.create_table().unwrap();
+    let hit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        lua.with_vm(|_| t.set("x", 1).unwrap())
+    }));
+    assert!(hit.is_err(), "a handle used while the VM is lent panics");
+    let hit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        lua.with_vm(|_| lua.globals())
+    }));
+    assert!(
+        hit.is_err(),
+        "the state's API used while the VM is lent panics"
+    );
+
+    let f = lua
+        .create_function(|lua, ()| {
+            lua.globals().set("seen", 7)?;
+            Ok(())
+        })
+        .unwrap();
+    lua.globals().set("cb", f).unwrap();
+    lua.with_vm(|vm| vm.exec(b"cb()", b"=t").map(|_| ()).unwrap());
+    assert_eq!(
+        lua.globals().get::<i64>("seen").unwrap(),
+        7,
+        "back after the lend"
+    );
+}
+
+/// No lend while a callback of the state runs, another state's callback under it included: the
+/// API stays open to the running callback, so a lend then would be a second way in.
+#[test]
+fn no_lend_while_a_callback_of_the_state_runs() {
+    let a = Lua::new();
+    let outer = a
+        .create_function(|a, ()| {
+            let a = a.clone();
+            let b = Lua::new();
+            let inner = b.create_function(move |_, ()| {
+                a.with_vm(|_| ());
+                Ok(())
+            })?;
+            inner.call::<()>(())
+        })
+        .unwrap();
+    let hit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| outer.call::<()>(())));
+    assert!(
+        hit.is_err(),
+        "the lend under another state's callback panics"
+    );
+    a.with_vm(|_| ());
+}
+
 /// An error that carries a Lua value prints, `{:?}` and `Display`, after its state is gone: the
 /// value waits out of the error, which is `Send` and `Sync` as mlua's is.
 #[test]

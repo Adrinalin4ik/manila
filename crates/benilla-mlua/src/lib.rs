@@ -62,7 +62,15 @@ pub(crate) struct Inner {
     /// Shared by a state and its forks: a host closure the fork copied still holds handles made
     /// on the original, and while a callback of the family runs they resolve through its VM.
     family: u64,
+    /// The VM is lent out ([`Lua::with_vm`]): until it is back, this state's API answers only
+    /// inside a callback the lent VM runs.
+    lent: Cell<bool>,
+    /// Callbacks of this state running now, outermost first.
+    depth: Cell<u32>,
 }
+
+const LENT: &str =
+    "the Lua state's VM is lent out (`Lua::with_vm`); reach it through that reference";
 
 /// The host data, by type: callbacks read it on every call.
 type AppMap = HashMap<TypeId, Rc<dyn Any>, std::hash::BuildHasherDefault<TypeIdHasher>>;
@@ -140,8 +148,10 @@ fn in_callback<T>(lua: &Lua, vm: *mut Vm, f: impl FnOnce() -> T) -> T {
         fn drop(&mut self) {
             RUNNING.set(self.prev_running);
             self.lua.0.cur.set(self.prev);
+            self.lua.0.depth.set(self.lua.0.depth.get() - 1);
         }
     }
+    lua.0.depth.set(lua.0.depth.get() + 1);
     let _restore = Restore {
         lua,
         prev: lua.0.cur.replace(vm),
@@ -398,6 +408,8 @@ impl Lua {
             cur: Cell::new(ptr),
             app: RefCell::new(AppMap::default()),
             family,
+            lent: Cell::new(false),
+            depth: Cell::new(0),
         }));
         let host: std::rc::Weak<dyn Any> = Rc::downgrade(&lua.0) as std::rc::Weak<dyn Any>;
         // Host code the VM runs from inside (a freed closure's destructors) runs as a callback
@@ -456,6 +468,7 @@ impl Lua {
         let vm = if family == self.0.family {
             running
         } else {
+            assert!(!self.0.lent.get() || self.0.depth.get() > 0, "{LENT}");
             self.0.cur.get()
         };
         // SAFETY: `vm` is the owned VM or a callback's live `&mut Vm`; the facade never keeps
@@ -463,24 +476,29 @@ impl Lua {
         unsafe { &mut *vm }
     }
 
-    /// The interpreter itself, for code that works below this API. Inside a callback it is the
-    /// VM the callback runs on (a fork's, for a fork).
+    /// The interpreter itself, lent to `f`, for code that works below this API: the heap, the
+    /// profile, hot reload. While `f` runs, any other use of this state's API panics instead of
+    /// reaching the VM a second way; Lua that `f` runs through the reference reaches its
+    /// callbacks as usual, and they use the API as any callback does.
     ///
-    /// # Safety
-    ///
-    /// The reference is an exclusive borrow of the VM, which every other access to this state
-    /// also takes. While it lives, the caller must not:
-    /// - call `raw_vm` again, on this `Lua` or any clone of it or of a fork of it;
-    /// - call any method of `Lua`, `Table`, `Function`, `String` or `Value` of this state's
-    ///   family, nor drop a `Lua` of it (each reaches the VM another way);
-    /// - call anything that runs Lua (`Vm::call_value`, `pcall_value`, `exec`, `hot_reload`,
-    ///   an `index` that reaches a metamethod), unless through this reference itself, which
-    ///   hands itself down to the callbacks it runs.
-    ///
-    /// Use it for one statement or a block of plain `Vm` and `Heap` calls, and let it go.
-    #[allow(clippy::mut_from_ref)]
-    pub unsafe fn raw_vm(&self) -> &mut Vm {
-        self.vm()
+    /// Panics while a callback of this state runs, whose VM the interpreter is using, another
+    /// state's callback under it included: the API stays open to a running callback, so a lend
+    /// then would leave two ways in.
+    pub fn with_vm<R>(&self, f: impl FnOnce(&mut Vm) -> R) -> R {
+        assert!(
+            RUNNING.get().0 != self.0.family && self.0.depth.get() == 0,
+            "`Lua::with_vm` while a callback of the same state runs"
+        );
+        let vm = self.vm();
+        assert!(!self.0.lent.replace(true), "{LENT}");
+        struct Return<'a>(&'a Cell<bool>);
+        impl Drop for Return<'_> {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        let _back = Return(&self.0.lent);
+        f(vm)
     }
 
     // ── values ───────────────────────────────────────────────────────────────────────────────
@@ -985,6 +1003,7 @@ impl RefH {
         }
         let owner = self.owner.upgrade().expect(DESTROYED);
         let inner = owner.downcast_ref::<Inner>().expect("a benilla-mlua state");
+        assert!(!inner.lent.get() || inner.depth.get() > 0, "{LENT}");
         // Another holder keeps the state alive past this temporary one: the upgrade succeeded.
         inner.cur.get()
     }

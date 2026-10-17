@@ -32,6 +32,7 @@ pub(super) struct PointerFeed<'w> {
     synthetic: Res<'w, super::SyntheticPointer>,
     /// A capture owns the pointer ([`super::CapturePointerPinned`]): no OS cursor in the shot.
     capture_pinned: Res<'w, super::CapturePointerPinned>,
+    egui_keyboard: Res<'w, super::EguiKeyboard>,
 }
 
 impl PointerFeed<'_> {
@@ -287,13 +288,19 @@ pub(super) fn feed_ui_input(
     // and before the keys (an Escape that clears focus still counts as captured this frame).
     capture.typing = script.has_keyboard_focus();
     capture.consumed.clear();
+    // egui's keyboard focus is the last pass's: a key in the very frame a click focuses an egui
+    // field still reaches the game.
+    let egui_keyboard = pointer.egui_keyboard.0;
+    if egui_keyboard {
+        capture.typing = true;
+    }
     script.set_alt_down(alt);
     // ── The alt-arrow exemption ────────────────────────────────────────────────────────────────
     // An EditBox in alt-arrow mode (`ignoreArrows`, set on the chat box at `ChatFrame.xml:21`)
     // passes the arrows on unless ALT is held: its handler returns 0 at `0x77b1c4` and the
     // binding runs at `CGWorldFrame`; a focused box swallows any other key (`0x77b35e` returns 1),
     // PRINTSCREEN excepted (`0x77b17f`, see `crate::bindings`).
-    capture.arrows_fall_through = !alt && script.editbox_alt_arrow_mode();
+    capture.arrows_fall_through = !alt && script.editbox_alt_arrow_mode() && !egui_keyboard;
 
     // ── Keyboard → VM ── every press is one key-down walk by name (`0x765f10`), in which a box is
     // a frame like the rest; a box the walk reached then takes the key's editing action through
@@ -311,7 +318,7 @@ pub(super) fn feed_ui_input(
     feed_keys(
         &mut script,
         capture,
-        keyboard.read(),
+        past_egui(keyboard.read(), egui_keyboard),
         keys,
         &mut pressed,
         releases,
@@ -328,6 +335,15 @@ pub(super) fn feed_ui_input(
     for err in script.take_errors() {
         warn!("ui_script(input): {err}");
     }
+}
+
+/// The events the UI gets while a dev overlay's text field may hold the keyboard: none of the
+/// presses, which are egui's, and every release, so a key held into that focus still ends.
+pub(crate) fn past_egui<'a>(
+    events: impl Iterator<Item = &'a KeyboardInput>,
+    egui_keyboard: bool,
+) -> impl Iterator<Item = &'a KeyboardInput> {
+    events.filter(move |ev| !egui_keyboard || ev.state != ButtonState::Pressed)
 }
 
 /// The keyboard half of the frame: each event as the key-down or repeat walk and what a box the
