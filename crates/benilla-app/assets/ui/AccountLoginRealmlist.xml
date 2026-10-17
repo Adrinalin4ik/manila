@@ -1,6 +1,6 @@
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
-    <!-- benilla's realmlist control on the stock login screen: a button over the Cinematics one,
-         the address the next login dials beside it, and the stock GlueDialog with its edit box to
+    <!-- benilla's realmlist control on the stock login screen: a button in the bottom-left corner
+         above the version string, the address the next login dials beside it, and the stock GlueDialog with its edit box to
          change it. The address is the realmList CVar, written through ConsoleExec; the host keeps
          BENILLA_REALMLIST and BENILLA_REALMLIST_PINNED (set while $WOW_HOST fixes the address),
          and reopens the dialog with the typed text when it is not an address. -->
@@ -91,22 +91,25 @@
     </Script>
     <Button name="BenillaRealmlistButton" inherits="GlueButtonSmallTemplate" parent="AccountLoginUI" text="Realmlist">
         <Anchors>
-            <Anchor point="BOTTOM" relativeTo="AccountLoginCinematicsButton" relativePoint="TOP">
+            <!-- Above the version string, clear of the right-hand column: a server's GlueXML may
+                 stack its own buttons over Cinematics (Turtle's AccountLoginTurtleReddit sits
+                 exactly where this button used to). -->
+            <Anchor point="BOTTOMLEFT" relativeTo="AccountLoginVersion" relativePoint="TOPLEFT">
                 <Offset>
-                    <AbsDimension x="0" y="-2"/>
+                    <AbsDimension x="0" y="4"/>
                 </Offset>
             </Anchor>
         </Anchors>
         <Layers>
             <Layer level="BACKGROUND">
-                <FontString name="BenillaRealmlistText" inherits="GlueFontDisableSmall" justifyH="RIGHT">
+                <FontString name="BenillaRealmlistText" inherits="GlueFontDisableSmall" justifyH="LEFT">
                     <Size>
                         <AbsDimension x="256" y="0"/>
                     </Size>
                     <Anchors>
-                        <Anchor point="RIGHT" relativePoint="LEFT">
+                        <Anchor point="LEFT" relativePoint="RIGHT">
                             <Offset>
-                                <AbsDimension x="-4" y="3"/>
+                                <AbsDimension x="4" y="3"/>
                             </Offset>
                         </Anchor>
                     </Anchors>
