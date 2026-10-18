@@ -118,16 +118,18 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // HighlightText([start [, end]]): the defaults (0, -1) select all.
+    // HighlightText([start [, end]]): the defaults (0, -1) select all. Each argument has its own
+    // `lua_isnumber` gate (`0x798907`, `0x79892e`) and is `_ftol`ed; a miss keeps the default.
     m.set(
         "HighlightText",
-        lua.create_function(
-            |lua, (this, start, end): (Table, Option<i64>, Option<i64>)| {
-                let h = frame_handle_of(lua, &this)?;
-                highlight_text(lua, h, start.unwrap_or(0), end.unwrap_or(-1));
-                Ok(())
-            },
-        )?,
+        lua.create_function(|lua, (this, start, end): (Table, Value, Value)| {
+            let h = frame_handle_of(lua, &this)?;
+            let arg = |v, default| {
+                binding_abi::is_number(lua, v).map_or(default, |n| i64::from(binding_abi::ftol(n)))
+            };
+            highlight_text(lua, h, arg(start, 0), arg(end, -1));
+            Ok(())
+        })?,
     )?;
 
     m.set(
@@ -191,16 +193,20 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             })
         })?,
     )?;
+    // SetHistoryLines (`0x799450`), SetBlinkSpeed (`0x798250`) and SetTextInsets (`0x798a60`) gate
+    // their numbers with `lua_isnumber` after the receiver checks, else raise their usage line
+    // (`0x87bf50`, `0x87be90`, `0x87bef0`; `0x799521`, `0x7982ff`, `0x798c11`). SetHistoryLines
+    // also raises for an `_ftol`ed count not above 0 (`jle`, `0x7994f9`).
     m.set(
         "SetHistoryLines",
-        lua.create_function(|lua, (this, n): (Table, i64)| {
-            with_editbox(lua, &this, |eb| {
-                eb.history_max = n.max(0) as usize;
-                let over = eb.history.len().saturating_sub(eb.history_max);
-                if over > 0 {
-                    eb.history.drain(..over);
-                }
-            })
+        lua.create_function(|lua, (this, n): (Table, Value)| {
+            frame_handle_of(lua, &this)?;
+            let n = binding_abi::method_number(lua, &this, n, "SetHistoryLines(numLines)")?;
+            let n = binding_abi::ftol(n);
+            if n <= 0 {
+                return Err(binding_abi::usage(lua, &this, "SetHistoryLines(numLines)"));
+            }
+            super::set_history_lines(lua, &this, n)
         })?,
     )?;
     m.set(
@@ -212,8 +218,11 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // SetBlinkSpeed/GetBlinkSpeed: the caret half-period (XML `blinkSpeed`, 0.5 s by default).
     m.set(
         "SetBlinkSpeed",
-        lua.create_function(|lua, (this, s): (Table, f32)| {
-            with_editbox(lua, &this, |eb| eb.blink_period = s)
+        lua.create_function(|lua, (this, s): (Table, Value)| {
+            let h = frame_handle_of(lua, &this)?;
+            let s = binding_abi::method_number(lua, &this, s, "SetBlinkSpeed(speed)")? as f32;
+            with_eb(lua, h, |eb| eb.blink_period = s)
+                .ok_or_else(|| mlua::Error::runtime("not an EditBox"))
         })?,
     )?;
     m.set(
@@ -223,23 +232,14 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetTextInsets",
         lua.create_function(
-            |lua,
-             (this, l, r, t, b): (
-                Table,
-                Option<f32>,
-                Option<f32>,
-                Option<f32>,
-                Option<f32>,
-            )| {
+            |lua, (this, l, r, t, b): (Table, Value, Value, Value, Value)| {
                 let h = frame_handle_of(lua, &this)?;
-                set_text_insets(
-                    lua,
-                    h,
-                    l.unwrap_or(0.0),
-                    r.unwrap_or(0.0),
-                    t.unwrap_or(0.0),
-                    b.unwrap_or(0.0),
-                );
+                let line = "SetTextInsets(l, r, t, b)";
+                let mut v = [0.0f32; 4];
+                for (slot, arg) in v.iter_mut().zip([l, r, t, b]) {
+                    *slot = binding_abi::method_number(lua, &this, arg, line)? as f32;
+                }
+                set_text_insets(lua, h, v[0], v[1], v[2], v[3]);
                 Ok(())
             },
         )?,

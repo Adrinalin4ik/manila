@@ -1174,13 +1174,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // SelectQuestLogEntry(i) (`0x4dfae0` -> `0x4def30`) sets the selected quest id (`0xbb7480`,
+    // `0x4def5d`) only for an index inside the list (`0x4def40`, `0x4def48`) whose row is a quest
+    // (`0x4def55`); any other call, a header's included, leaves the old selection.
     g.set(
         "SelectQuestLogEntry",
         lua.create_function(|lua, i: Value| {
             // `is-number` else `Usage: SelectQuestLogEntry(index)` (`0x84b540`, `0x4dfb0e`).
             let i = binding_abi::index_arg32(lua, i, "Usage: SelectQuestLogEntry(index)")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.quest_log_selection = i;
+            if model.quest_row(i as usize).is_some_and(|r| !r.is_header) {
+                model.quest_log_selection = i;
+            }
             Ok(())
         })?,
     )?;
@@ -1679,6 +1684,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     fn watch_id_at(model: &Model, index: u32) -> Option<u32> {
         model.quest_row(index as usize).map(|e| e.quest_id)
     }
+    // `AddQuestWatch` (`0x4e1930`) and `RemoveQuestWatch` (`0x4e1970`): a `lua_isnumber` argument
+    // (`0x4e1938`, `0x4e1978`) is a row, `_ftol`ed and looked up by `0x4df150`; a miss takes the
+    // selected quest's id (`0xbb7480`, `0x4e195c`, `0x4e199c`), which `SelectQuestLogEntry` only
+    // ever sets to a quest, never a header, so the selected row is one. Either way an id of 0
+    // does nothing.
+    fn watch_target(lua: &Lua, model: &Model, arg: Value) -> Option<u32> {
+        match crate::script::binding_abi::is_number(lua, arg) {
+            Some(n) => watch_id_at(model, crate::script::binding_abi::ftol(n) as u32),
+            None => model
+                .quest_row(model.quest_log_selection as usize)
+                .filter(|r| !r.is_header)
+                .map(|r| r.quest_id),
+        }
+    }
     // The share button enables on `GetQuestLogPushable() and GetNumPartyMembers() > 0`
     // (`QuestLogFrame.lua:301`) and clicks `QuestLogPushQuest()` (`QuestLogFrame.xml:512`), both
     // about the selection. `GetQuestLogPushable` answers 1 or nil, never false (`0x4e12b0`).
@@ -1735,10 +1754,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "AddQuestWatch",
-        lua.create_function(|lua, i: u32| {
+        lua.create_function(|lua, i: Value| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if let Some(id) = watch_id_at(&model, i) {
-                if !model.quest_log_watched.contains(&id) && model.quest_log_watched.len() < 5 {
+            // `0x4dede0`: the id is appended while the list holds fewer than 5 (`0x4dede5`), with no
+            // test for it already being there; the stock Lua checks `IsQuestWatched` itself.
+            if let Some(id) = watch_target(lua, &model, i) {
+                if model.quest_log_watched.len() < 5 {
                     model.quest_log_watched.push(id);
                 }
             }
@@ -1747,10 +1768,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "RemoveQuestWatch",
-        lua.create_function(|lua, i: u32| {
+        lua.create_function(|lua, i: Value| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if let Some(id) = watch_id_at(&model, i) {
-                model.quest_log_watched.retain(|w| *w != id);
+            // `0x4dee00` removes the first entry equal to the id (`0x4dee10`) and closes the gap.
+            if let Some(id) = watch_target(lua, &model, i) {
+                if let Some(at) = model.quest_log_watched.iter().position(|w| *w == id) {
+                    model.quest_log_watched.remove(at);
+                }
             }
             Ok(())
         })?,
@@ -2889,6 +2913,70 @@ mod tests {
         s.run("AddQuestWatch(2)").unwrap();
         seat(&mut s, &[]);
         assert_eq!(s.eval::<i64>("return GetNumQuestWatches()").unwrap(), 0);
+    }
+
+    /// `AddQuestWatch` and `RemoveQuestWatch` (`0x4e1930`, `0x4e1970`): an argument that fails
+    /// `lua_isnumber` (`0x4e1938`, `0x4e1978`) takes the selected quest's id (`0xbb7480`,
+    /// `0x4e195c`, `0x4e199c`) and raises nothing; a number is a row, and the selection stays out
+    /// of it.
+    #[test]
+    fn a_non_number_watches_the_selected_quest() {
+        for arg in ["", "nil", "'x'", "{}", "true"] {
+            let s = two_quests();
+            s.run("SelectQuestLogEntry(3)").unwrap(); // quest 7
+            s.run(&format!("AddQuestWatch({arg})")).unwrap();
+            assert_eq!(s.quest_log_watched(), vec![7], "AddQuestWatch({arg})");
+            s.run("SelectQuestLogEntry(2)").unwrap(); // quest 783
+            s.run(&format!("RemoveQuestWatch({arg})")).unwrap();
+            assert_eq!(s.quest_log_watched(), vec![7], "other quest, Remove({arg})");
+            s.run("SelectQuestLogEntry(3)").unwrap();
+            s.run(&format!("RemoveQuestWatch({arg})")).unwrap();
+            assert!(s.quest_log_watched().is_empty(), "RemoveQuestWatch({arg})");
+        }
+        // A number is a row whatever is selected; a numeric string counts as one.
+        let s = two_quests();
+        s.run("SelectQuestLogEntry(2)").unwrap();
+        s.run("AddQuestWatch('3')").unwrap();
+        assert_eq!(s.quest_log_watched(), vec![7]);
+    }
+
+    /// `SelectQuestLogEntry` (`0x4def30`) sets the selected quest id only for an in-list index whose
+    /// row is a quest (`0x4def40`, `0x4def48`, `0x4def55`), so a header, 0 or an out-of-range index
+    /// leaves the previous quest selected, which the watch fallback then names.
+    #[test]
+    fn selecting_a_header_or_nothing_keeps_the_previous_quest() {
+        let s = two_quests();
+        s.run("SelectQuestLogEntry(3)").unwrap(); // quest 7
+        for call in [
+            "SelectQuestLogEntry(1)",
+            "SelectQuestLogEntry(0)",
+            "SelectQuestLogEntry(99)",
+        ] {
+            s.run(call).unwrap();
+            assert_eq!(
+                s.eval::<i64>("return GetQuestLogSelection()").unwrap(),
+                3,
+                "{call}"
+            );
+        }
+        s.run("AddQuestWatch()").unwrap();
+        assert_eq!(s.quest_log_watched(), vec![7]);
+    }
+
+    /// `0x4dede0` appends while the list holds fewer than 5, with no test for a duplicate; the stock
+    /// Lua checks `IsQuestWatched`. `0x4dee00` removes the first match only.
+    #[test]
+    fn a_duplicate_watch_is_appended_and_a_remove_takes_one() {
+        let s = two_quests();
+        s.run("AddQuestWatch(3) AddQuestWatch(3) AddQuestWatch(2)")
+            .unwrap();
+        assert_eq!(s.quest_log_watched(), vec![7, 7, 783]);
+        assert_eq!(s.eval::<i64>("return GetNumQuestWatches()").unwrap(), 3);
+        s.run("RemoveQuestWatch(3)").unwrap();
+        assert_eq!(s.quest_log_watched(), vec![7, 783]);
+        s.run("AddQuestWatch(3) AddQuestWatch(3) AddQuestWatch(3)")
+            .unwrap();
+        assert_eq!(s.quest_log_watched().len(), 5, "no sixth (`0x4dede5`)");
     }
 
     /// The prune (`0x4de7a7` to `0x4de80f`) counts folded quests; a collapse never prunes.

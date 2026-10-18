@@ -22,7 +22,7 @@ use crate::widget::{FrameHandle, RegionHandle};
 /// `_ftol` (`0x40a2b0`) as the bindings consume it: the x87 rounding control set to chop, a
 /// `fistp` to a qword, and its low dword. What the qword cannot hold (an infinity, NaN, ±2^63 and
 /// beyond) stores the integer-indefinite pattern `0x8000_0000_0000_0000`, whose low dword is 0.
-pub(crate) fn ftol(n: f64) -> i32 {
+pub fn ftol(n: f64) -> i32 {
     const TWO_63: f64 = 9_223_372_036_854_775_808.0;
     let t = n.trunc();
     if (-TWO_63..TWO_63).contains(&t) {
@@ -48,6 +48,12 @@ pub(crate) fn number_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Resu
 pub(crate) fn float_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Result<f64> {
     lua.coerce_number(v)?
         .ok_or_else(|| mlua::Error::RuntimeError(usage.into()))
+}
+
+/// Shape D's gate: `is-number` (`0x6f34d0`) then `tonumber` (`0x6f3620`), a miss the caller's own
+/// fallback. A numeric string passes; nil, a missing argument and any other type miss.
+pub(crate) fn is_number(lua: &Lua, v: Value) -> Option<f64> {
+    lua.coerce_number(v).ok().flatten()
 }
 
 /// An index argument read as the reference reads one: a number or numeric string (`0x6f34d0`)
