@@ -605,20 +605,6 @@ impl Loader<'_> {
         }
     }
 
-    /// [`Loader::expand`] for a region, only when `inherits=` names a registered element template:
-    /// a FontString's `inherits=` usually names a font object, which passes through unwarned.
-    pub(super) fn expand_region(&mut self, el: &Element) -> Element {
-        // One verbatim name, matched case-insensitively, as `framexml::expand` looks it up.
-        let hit = el.attr("inherits").is_some_and(|name| {
-            !name.is_empty() && self.model().framexml_templates.borrow().contains(name)
-        });
-        if hit {
-            self.expand(el)
-        } else {
-            el.clone()
-        }
-    }
-
     /// A top-level `<Font name=…>`: the named object, made if new and kept with its followers if
     /// re-declared (`0x783870`, `0x7839ab`), loads the node ([`Self::load_font_node`]) and is
     /// published whether or not its own font was refused.
@@ -921,15 +907,14 @@ impl Loader<'_> {
         }
         // 5·b · a text frame's `font=`, then its `<FontString>` children, which load into the same
         //       font (`0x779fcb` before `0x77a220`, `0x78592b` before `0x785af5`, `0x787b3b`
-        //       before `0x787cfe`); any other frame's direct `<FontString>` is a region.
+        //       before `0x787cfe`). Any other frame's direct `<FontString>` builds nothing: the base
+        //       loop (`0x769b27`-`0x769d22`) has no arm for it, and only SimpleHTML's reads one.
         if ["EditBox", "MessageFrame", "ScrollingMessageFrame"]
             .iter()
             .any(|t| el.tag.eq_ignore_ascii_case(t))
         {
             self.apply_frame_font(el, wrapper, dbg_name);
             self.apply_text_font_children(el, wrapper, dbg_name);
-        } else {
-            self.apply_special_fontstrings(el, wrapper, self_name, dbg_name);
         }
         // 5a' · <TitleRegion>: the drag handle, through the API's own CreateTitleRegion.
         self.apply_title_region(el, wrapper, self_name, dbg_name);
