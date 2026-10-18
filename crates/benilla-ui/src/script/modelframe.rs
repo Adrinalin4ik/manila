@@ -39,10 +39,15 @@ impl Model {
     /// [`crate::script::UiScript::set_window_size`] gave it, else the root's own width over height,
     /// else 4/3.
     pub(crate) fn screen_aspect(&self) -> f32 {
-        if let Some(a) = self.aspect {
+        Self::aspect_of(self.screen, self.aspect)
+    }
+
+    /// [`Self::screen_aspect`] for a root `screen` and a window aspect `aspect`.
+    pub(crate) fn aspect_of(screen: crate::layout::Rect, aspect: Option<f32>) -> f32 {
+        if let Some(a) = aspect {
             return a;
         }
-        let (w, h) = (self.screen.width(), self.screen.height());
+        let (w, h) = (screen.width(), screen.height());
         if h > 0.0 && w > 0.0 {
             w / h
         } else {
@@ -125,7 +130,7 @@ impl Model {
                 && self
                     .layout_inputs
                     .get(&h)
-                    .is_some_and(|i| i.width != 0.0 || i.height != 0.0);
+                    .is_some_and(|i| !i.width.is_zero() || !i.height.is_zero());
             if authored {
                 return;
             }
@@ -133,10 +138,10 @@ impl Model {
         };
         let (w, ht) = (extent.0 * unit, extent.1 * unit);
         let input = self.layout_inputs.entry(h).or_default();
-        let changed =
-            input.width.to_bits() != w.to_bits() || input.height.to_bits() != ht.to_bits();
-        input.width = w;
-        input.height = ht;
+        let changed = input.width.bits() != crate::layout::Len::Script(w).bits()
+            || input.height.bits() != crate::layout::Len::Script(ht).bits();
+        input.width = crate::layout::Len::Script(w);
+        input.height = crate::layout::Len::Script(ht);
         // The model-ready size write invalidates the frame (`0x76ce70`).
         self.invalidate_frame(h, changed);
         if let Some(KindState::Model(m)) = self.arena.frame_mut(h).map(|f| &mut f.kind_state) {

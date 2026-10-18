@@ -199,6 +199,7 @@ mod who_sort;
 mod worldmap;
 mod worldstate;
 mod worn_display;
+pub(crate) mod xml_layout;
 mod zone_text;
 
 pub use action::{ActionSlot, ActionState, ActionUse};
@@ -351,7 +352,7 @@ pub(crate) use types::{monochrome_flag, FontMask, MeasuredText, RegionData};
 pub use types::{
     BlendMode, EditAction, EditBoxAdvanceRequest, EditBoxTextUi, EditOutcome, EditUnit,
     ExtractedQuad, FontObject, FontShadow, Gradient, JustifyH, JustifyV, LineMeasureRequest,
-    MeasureRequest, Outline, QuadContent, ScriptValue, TexCoords,
+    MeasureRequest, Outline, QuadContent, ScriptValue, TexCoords, TextShadow,
 };
 pub use unit::by_name::{self, NameCandidate};
 pub use unit::{
@@ -881,7 +882,9 @@ impl UiScript {
     /// take the aspect from `gxResolution` (`0x46ab40`, `0x4901e0`; 4/3 while `widescreen` is
     /// off), never the live window. Here every resize sets the cells from the window, because the
     /// UI is kept live across a resize, and `widescreen` off keeps the window's aspect, as a 4:3
-    /// root over a wider window would take a seam stretched on one axis.
+    /// root over a wider window would take a seam stretched on one axis. A dragged frame with no
+    /// layout-cache row (unnamed, or `SetUserPlaced(false)`) keeps its drag pin in layout units,
+    /// where the rebuild would put it back where its script places it.
     pub fn set_window_size(&mut self, width: f32, height: f32) -> bool {
         let a = if width > 0.0 && height > 0.0 {
             width / height
@@ -892,11 +895,21 @@ impl UiScript {
     }
 
     fn set_root(&mut self, new: Rect, aspect: Option<f32>) -> bool {
-        let mut model = self.model_mut();
-        if model.screen == new && model.aspect.map(f32::to_bits) == aspect.map(f32::to_bits) {
+        let (same, before) = {
+            let model = self.model_ref();
+            let same =
+                model.screen == new && model.aspect.map(f32::to_bits) == aspect.map(f32::to_bits);
+            (same, model.layout_units())
+        };
+        if same {
             return false;
         }
-        let before = model.layout_units();
+        // New cells are a reload, whose teardown writes the layout cache under the cells in force
+        // (`0x490e60`) and whose build seats the user-placed frames from it under the new
+        // (`0x4905e0`): the rows are taken before anything moves.
+        let next = crate::layout::LayoutUnits::from_aspect(Model::aspect_of(new, aspect));
+        let reseat = (next != before).then(|| self.user_placed_layouts());
+        let mut model = self.model_mut();
         model.screen = new;
         model.aspect = aspect;
         let units = crate::layout::LayoutUnits::from_aspect(model.screen_aspect());
@@ -910,11 +923,15 @@ impl UiScript {
                 minimap::seat_engine_children(&mut model, h);
             }
             worldmap_arrow::rescale(&mut model);
+            backdrop::cells_changed(&mut model);
         }
         model.touch_layout();
         drop(model);
         // The implicit rects are in layout units, which follow the aspect.
         self.reapply_implicit_rects();
+        if let Some(rows) = reseat {
+            self.reseat_user_placed(rows);
+        }
         true
     }
 
@@ -950,10 +967,10 @@ impl UiScript {
             })
             .collect();
         for h in arrows {
-            let size = model
-                .layout_inputs
-                .get(&h)
-                .map_or((0.0, 0.0), |i| (i.width, i.height));
+            let size = model.layout_inputs.get(&h).map_or((0.0, 0.0), |i| {
+                let u = model.layout_units();
+                (i.width.script(u), i.height.script(u))
+            });
             let loaded = match model.arena.frame(h).map(|f| &f.kind_state) {
                 Some(KindState::Model(m)) => m
                     .path

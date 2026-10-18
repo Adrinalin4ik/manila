@@ -168,6 +168,19 @@ pub(crate) struct Model {
     pub(crate) arena: WidgetArena,
     /// Per-frame anchors, size and scale; every live frame has one from creation on.
     pub(crate) layout_inputs: HashMap<FrameHandle, LayoutInput>,
+    /// Per dragged frame, its anchors and size as the scripts last set them: as they stood before
+    /// its first drag pin (`0x768430`), then each script `SetPoint`, `SetAllPoints`,
+    /// `ClearAllPoints`, `SetWidth` and `SetHeight` applied to it too, the engine's own writes
+    /// not. What a rebuild re-creates where the layout cache seats nothing
+    /// ([`crate::script::UiScript::reseat_user_placed`]).
+    pub(crate) drag_authored: HashMap<
+        FrameHandle,
+        (
+            crate::layout::Anchors,
+            crate::layout::Len,
+            crate::layout::Len,
+        ),
+    >,
     /// Each resolvable frame's rect from the last resolve, in layout units: the resolver's own,
     /// which its keep test, its getters and its anchors read; everything else reads
     /// [`Self::frame_rect`].
@@ -1394,6 +1407,7 @@ impl Model {
             load_log: Default::default(),
             arena: WidgetArena::new(),
             layout_inputs: HashMap::new(),
+            drag_authored: HashMap::new(),
             solver: LayoutSolver::new(),
             layout_fingerprint: None,
             layout_epoch: 0,
@@ -2566,7 +2580,7 @@ impl Model {
             return;
         };
         if self.region_data.get(&rh).is_some_and(|d| {
-            !d.anchors.is_empty() && d.size.is_none_or(|(w, h)| w == 0.0 || h == 0.0)
+            !d.anchors.is_empty() && d.size.is_none_or(|(w, h)| w.is_zero() || h.is_zero())
         }) {
             self.layout_unsettled.insert(id);
         }

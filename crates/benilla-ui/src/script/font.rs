@@ -22,6 +22,7 @@ use mlua::{Lua, MultiValue, Table, Value};
 use super::binding_abi;
 use super::object::publish_global;
 use crate::justify;
+use crate::layout::Len;
 use crate::widget::{FrameHandle, RegionHandle};
 
 use super::{FontMask, FontObject, FontShadow, Model, RegionData};
@@ -288,8 +289,12 @@ pub(crate) fn held(fo: &FontObject) -> FontMask {
 /// The groups of `groups` in which `a` and `b` differ: a font by name ignoring case, height and
 /// spacing by 2^-22 (`0x770973`, `0x77097c`, `0x770a84`), the rest exactly.
 fn differs(a: &FontObject, b: &FontObject, groups: FontMask) -> FontMask {
-    let close = |x: Option<f32>, y: Option<f32>| match (x, y) {
-        (Some(x), Some(y)) => (x - y).abs() < f32::from_bits(0x3480_0000),
+    // Two heights in one unit within 2⁻²²; a script number and a layout length differ.
+    let close = |x: Option<Len>, y: Option<Len>| match (x, y) {
+        (Some(Len::Script(x)), Some(Len::Script(y)))
+        | (Some(Len::Layout(x)), Some(Len::Layout(y))) => {
+            (x - y).abs() < f32::from_bits(0x3480_0000)
+        }
         (None, None) => true,
         _ => false,
     };
@@ -309,7 +314,10 @@ fn differs(a: &FontObject, b: &FontObject, groups: FontMask) -> FontMask {
         (FontMask::JUSTIFY, a.justify == b.justify),
         (FontMask::COLOR, a.color == b.color),
         (FontMask::SHADOW, a.shadow == b.shadow),
-        (FontMask::SPACING, close(a.spacing, b.spacing)),
+        (
+            FontMask::SPACING,
+            close(a.spacing.map(Len::Script), b.spacing.map(Len::Script)),
+        ),
     ] {
         if groups.has(g) && !eq {
             m.set(g);
@@ -674,7 +682,7 @@ pub(super) fn install_shared(lua: &Lua, m: &Table, resolve: ResolveFont) -> mlua
                 fo.font = Some(path);
                 fo.outline = flags;
                 fo.monochrome = monochrome;
-                fo.height = Some(height);
+                fo.height = Some(Len::Script(height));
             });
             Ok(Value::Number(1.0))
         })?,
@@ -689,9 +697,11 @@ pub(super) fn install_shared(lua: &Lua, m: &Table, resolve: ResolveFont) -> mlua
                 Some(p) => Value::String(lua.create_string(&p)?),
                 None => Value::Nil,
             };
+            // `G` of the stored height (`0x79f3e3`), stored by `S` (`0x79f276`).
+            let u = lua.app_data_ref::<Model>().expect("model").layout_units();
             Ok((
                 path,
-                fo.height.unwrap_or(0.0),
+                fo.height.map_or(0.0, |h| h.get(u)),
                 fo.outline.flags_text(fo.monochrome),
             ))
         })?,
@@ -742,7 +752,9 @@ pub(super) fn install_shared(lua: &Lua, m: &Table, resolve: ResolveFont) -> mlua
                 &arg(&args, 3),
             );
             edit(lua, id, FontMask::SHADOW, |fo| {
-                let offset = fo.shadow.map_or([0.0, 0.0], |s| s.offset);
+                let offset = fo
+                    .shadow
+                    .map_or([crate::layout::Len::Layout(0.0); 2], |s| s.offset);
                 fo.shadow = Some(FontShadow { offset, color });
             });
             Ok(())
@@ -771,7 +783,7 @@ pub(super) fn install_shared(lua: &Lua, m: &Table, resolve: ResolveFont) -> mlua
                     .shadow
                     .map_or(crate::color::Rgba8::TRANSPARENT, |s| s.color);
                 fo.shadow = Some(FontShadow {
-                    offset: [x, y],
+                    offset: [crate::layout::Len::Script(x), crate::layout::Len::Script(y)],
                     color,
                 });
             });
@@ -780,11 +792,14 @@ pub(super) fn install_shared(lua: &Lua, m: &Table, resolve: ResolveFont) -> mlua
     )?;
     m.set(
         "GetShadowOffset",
+        // `G` of each (`0x79faf5`, `0x79fb1c`), `SetShadowOffset` having stored `S` (`0x79fa28`,
+        // `0x79fa42`).
         lua.create_function(move |lua, (this, mut args): (Table, MultiValue)| {
             let o = read(lua, resolve(lua, &this, &mut args)?)
                 .shadow
-                .map_or([0.0, 0.0], |s| s.offset);
-            Ok((o[0], o[1]))
+                .map_or([crate::layout::Len::Layout(0.0); 2], |s| s.offset);
+            let u = lua.app_data_ref::<Model>().expect("model").layout_units();
+            Ok((o[0].get(u), o[1].get(u)))
         })?,
     )?;
 
@@ -802,10 +817,13 @@ pub(super) fn install_shared(lua: &Lua, m: &Table, resolve: ResolveFont) -> mlua
     )?;
     m.set(
         "GetSpacing",
+        // `G` of the stored spacing (`0x79fbfc`), stored by `S` (`0x79fb7e`).
         lua.create_function(move |lua, (this, mut args): (Table, MultiValue)| {
-            Ok(read(lua, resolve(lua, &this, &mut args)?)
+            let sp = read(lua, resolve(lua, &this, &mut args)?)
                 .spacing
-                .unwrap_or(0.0))
+                .unwrap_or(0.0);
+            let u = lua.app_data_ref::<Model>().expect("model").layout_units();
+            Ok(u.round_trip(sp))
         })?,
     )?;
 

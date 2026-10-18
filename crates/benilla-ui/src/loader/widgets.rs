@@ -236,7 +236,9 @@ impl Loader<'_> {
         for el in children_named(el, "PushedTextOffset") {
             let d = self.dimension(el);
             if d.ok {
-                self.call(wrapper, "SetPushedTextOffset", (d.v[0], d.v[1]), dbg);
+                let [x, y] = d.script(self.model().layout_units());
+                self.call(wrapper, "SetPushedTextOffset", (x, y), dbg);
+                crate::script::xml_layout::pushed_text_offset(self.lua, wrapper, d.v);
             }
         }
         // The three embedded fonts and their colours, in document order (`0x7788c0`): each font
@@ -379,8 +381,10 @@ impl Loader<'_> {
         // Each `<TextInsets>` in the child loop (`0x77a2a9`), the last winning, through the inset
         // read (`0x77a2d5`), set when it succeeds (`0x77a2da`).
         for ins in children_named(el, "TextInsets") {
-            if let Some([l, r, t, b]) = self.inset(ins) {
+            if let Some(v) = self.inset(ins) {
+                let [l, r, t, b] = self.script_of(v);
                 self.call(wrapper, "SetTextInsets", (l, r, t, b), dbg);
+                crate::script::xml_layout::text_insets(self.lua, wrapper, v);
             }
         }
         // Each `<HighlightColor>` in turn, the last winning (`0x77a277`): the `<Color>` reader

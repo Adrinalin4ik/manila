@@ -1,5 +1,6 @@
 //! Widget kinds: [`FrameKind`], [`RegionKind`] and the per-kind state, [`KindState`].
 
+use crate::layout::Len;
 use std::collections::{HashSet, VecDeque};
 
 use super::{FrameHandle, RegionHandle};
@@ -195,7 +196,7 @@ impl KindState {
     }
 
     /// The message kinds' text insets ([`ScrollingMessageState::insets`]).
-    pub fn message_insets(&self) -> Option<[f32; 4]> {
+    pub fn message_insets(&self) -> Option<[crate::layout::Len; 4]> {
         match self {
             KindState::ScrollingMessage(smf) => Some(smf.insets),
             KindState::Message(mf) => Some(mf.insets),
@@ -204,7 +205,7 @@ impl KindState {
     }
 
     /// [`Self::message_insets`], mutably, for the XML `<TextInsets>`.
-    pub fn message_insets_mut(&mut self) -> Option<&mut [f32; 4]> {
+    pub fn message_insets_mut(&mut self) -> Option<&mut [crate::layout::Len; 4]> {
         match self {
             KindState::ScrollingMessage(smf) => Some(&mut smf.insets),
             KindState::Message(mf) => Some(&mut mf.insets),
@@ -324,8 +325,8 @@ pub struct TooltipState {
     /// (`[arg+0x18]`, not the compact `[arg+0x14]`), surviving the stock caller's `SetOwner` in
     /// between (`MerchantFrame.xml:67-72`); the reference's route to `0x52b650` is untraced.
     pub equipped_header_armed: bool,
-    /// `SetPadding` (`+0x3bc`): extra plate width past the content (`0x5309f4`), which the clear
-    /// keeps (`ItemRef.xml:40` sets 16 for the close button).
+    /// `SetPadding` (`+0x3bc`), in layout units (`0x530fba`): extra plate width past the content
+    /// (`0x5309f4`), which the clear keeps (`ItemRef.xml:40` sets 16 for the close button).
     pub padding: f32,
     /// Benilla-only: a sizing ran in a VM with no font engine before its lines were measured, so
     /// the next resolve runs it again ([`crate::script::tooltip`]'s headless fallback).
@@ -1079,13 +1080,13 @@ pub struct ButtonState {
     pub(crate) fonts: Option<ButtonFonts>,
     /// `LockHighlight()`: highlighted regardless of hover, both the texture and the label font.
     pub locked_highlight: bool,
-    /// `<PushedTextOffset>`/`SetPushedTextOffset` (`+0x4b0`/`+0x4b4`), x and y in layout units;
-    /// the ctor's (0.001, -0.001) (`0x778740`, `0x77874a`), about 1.28 UI units right and down at
-    /// 4:3. Only [`Self::refresh_label`] puts it on the label.
-    pub pushed_text_offset: [f32; 2],
-    /// The label's text offset (`CSimpleFontString::SetTextOffset` `0x772100`, `+0x110`/`+0x114`)
-    /// in layout units: it moves the drawn text, never the label's rect.
-    label_offset: [f32; 2],
+    /// `<PushedTextOffset>`/`SetPushedTextOffset` (`+0x4b0`/`+0x4b4`), x and y, script numbers
+    /// stored by `S`; the ctor's (0.001, -0.001) layout units (`0x778740`, `0x77874a`), about 1.28
+    /// UI units right and down at 4:3. Only [`Self::refresh_label`] puts it on the label.
+    pub pushed_text_offset: [Len; 2],
+    /// The label's text offset (`CSimpleFontString::SetTextOffset` `0x772100`, `+0x110`/`+0x114`):
+    /// it moves the drawn text, never the label's rect.
+    label_offset: [Len; 2],
     /// A real state change happened since the label last relinked ([`Self::take_relink`]).
     relink_due: bool,
     /// The shown state texture (`+0x4c4`), written only by `set_state` and `set_state_slot`.
@@ -1112,8 +1113,11 @@ impl Default for ButtonState {
             registered_clicks: HashSet::from(["LeftButtonUp".to_string()]),
             fonts: None,
             locked_highlight: false,
-            pushed_text_offset: [f32::from_bits(0x3a83_126f), f32::from_bits(0xba83_126f)],
-            label_offset: [0.0, 0.0],
+            pushed_text_offset: [
+                Len::Layout(f32::from_bits(0x3a83_126f)),
+                Len::Layout(f32::from_bits(0xba83_126f)),
+            ],
+            label_offset: [Len::Layout(0.0); 2],
             relink_due: false,
             shown: None,
             state: ButtonVisualState::Normal,
@@ -1169,13 +1173,14 @@ impl ButtonState {
         self.label_offset = if self.state == ButtonVisualState::Pushed {
             self.pushed_text_offset
         } else {
-            [0.0, 0.0]
+            [Len::Layout(0.0); 2]
         };
     }
 
-    /// The offset the label's text draws at, in layout units ([`Self::refresh_label`]).
-    pub fn label_offset(&self) -> [f32; 2] {
-        self.label_offset
+    /// The offset the label's text draws at, in layout units under `units`
+    /// ([`Self::refresh_label`]).
+    pub fn label_offset(&self, units: crate::layout::LayoutUnits) -> [f32; 2] {
+        self.label_offset.map(|l| l.layout(units))
     }
 
     /// `SetButtonState(state, locked)` (`0x779790`), the one writer: the lock is stored before the

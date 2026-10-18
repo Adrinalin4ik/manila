@@ -164,7 +164,7 @@ impl UiScript {
                         let tsize = model
                             .region_data
                             .get(&rh)
-                            .and_then(|d| d.size)
+                            .and_then(|d| d.size_script(model.layout_units()))
                             .map(|(w, h)| (w * scale, h * scale));
                         if cs.wheel_thumb == Some(rh) {
                             rect = cs
@@ -205,7 +205,7 @@ impl UiScript {
                             continue;
                         }
                         if bs.text == Some(rh) {
-                            label_offset = bs.label_offset();
+                            label_offset = bs.label_offset(model.layout_units());
                         }
                     }
                     // A title region never draws: `CreateTitleRegion 0x773910` builds a plain
@@ -279,7 +279,8 @@ impl UiScript {
                         art
                     } else if is_text {
                         let spacing = data.line_gap();
-                        let text_height = data.text_height();
+                        let text_height = data.text_height(model.layout_units());
+                        let font_height = data.font_height_script(model.layout_units());
                         let text_color = data.vertex_color_or_white();
                         QuadContent::Text {
                             text: data.text,
@@ -291,9 +292,9 @@ impl UiScript {
                             justify_h: data.justify.paint_h(),
                             justify_v: data.justify.paint_v(),
                             font: data.font_path,
-                            font_height: data.font_height,
+                            font_height,
                             text_height,
-                            shadow: data.font_shadow,
+                            shadow: data.font_shadow.map(|s| s.drawn(model.layout_units())),
                             outline: data.outline,
                             monochrome: data.monochrome,
                             spacing,

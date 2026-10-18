@@ -19,6 +19,7 @@ use mlua::{Lua, Table, Value};
 use super::binding_abi;
 use super::font::FontId;
 use super::{FontShadow, Model, Outline};
+use crate::layout::Len;
 use crate::widget::{FrameHandle, KindState, RegionHandle};
 
 /// The own font of an EditBox, a MessageFrame or a ScrollingMessageFrame (`+0x300`, `+0x320`,
@@ -330,7 +331,7 @@ pub(super) fn install(
                     d.outline = Outline::None;
                     d.monochrome = false;
                 }
-                d.font_height = Some(height);
+                d.font_height = Some(Len::Script(height));
                 d.font_mask.clear(super::FontMask::FONT);
                 let after = (d.font_path.clone(), d.font_height, d.outline, d.monochrome);
                 model.touch_measure(rh);
@@ -370,7 +371,11 @@ pub(super) fn install(
                 Some(p) => Value::String(lua.create_string(&p)?),
                 None => Value::Nil,
             };
-            let height = d.and_then(|d| d.font_height).unwrap_or(0.0);
+            // `G` of the stored height (`0x79d4a2`..`0x79d4b7`), which `SetFont` stored by `S`
+            // (`0x79d5d3`; the shared `0x79f276`).
+            let height = d
+                .and_then(|d| d.font_height)
+                .map_or(0.0, |h| h.get(model.layout_units()));
             let flags = d.map_or("", |d| d.outline.flags_text(d.monochrome));
             Ok((path, height, flags))
         })?,
@@ -431,7 +436,9 @@ pub(super) fn install(
                 let rh = resolve(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let d = model.region_data.entry(rh).or_default();
-                let offset = d.font_shadow.map_or([0.0, 0.0], |s| s.offset);
+                let offset = d
+                    .font_shadow
+                    .map_or([crate::layout::Len::Layout(0.0); 2], |s| s.offset);
                 d.font_shadow = Some(FontShadow { offset, color });
                 d.font_mask.clear(super::FontMask::SHADOW);
                 Ok(())
@@ -460,7 +467,7 @@ pub(super) fn install(
             let d = model.region_data.entry(rh).or_default();
             let color = d.font_shadow.map_or(kind.unset_shadow(), |s| s.color);
             d.font_shadow = Some(FontShadow {
-                offset: [x, y],
+                offset: [crate::layout::Len::Script(x), crate::layout::Len::Script(y)],
                 color,
             });
             d.font_mask.clear(super::FontMask::SHADOW);
@@ -478,8 +485,10 @@ pub(super) fn install(
                 .region_data
                 .get(&rh)
                 .and_then(|d| d.font_shadow)
-                .map_or([0.0, 0.0], |s| s.offset);
-            Ok((o[0], o[1]))
+                .map_or([crate::layout::Len::Layout(0.0); 2], |s| s.offset);
+            // `G` of each (`0x79e029`, `0x79e04d`; the Font object's `0x79faf5`, `0x79fb1c`).
+            let u = model.layout_units();
+            Ok((o[0].get(u), o[1].get(u)))
         })?,
     )?;
 
@@ -515,17 +524,20 @@ pub(super) fn install(
             Ok(())
         })?,
     )?;
-    // GetSpacing() → one number (`0x79fbe0`, FontString `0x79e1d0`).
+    // GetSpacing() → one number (`0x79fbe0`, FontString `0x79e1d0`): `G` of the stored spacing
+    // (`0x79fbfc`, `0x79e28e`), which `SetSpacing` stored by `S` (`0x79fb7e`, `0x79e36b`), a
+    // FontString's clamped at 0 after (`0x79e376` → `0x772240`), and `S` keeps the clamp.
     m.set(
         "GetSpacing",
         lua.create_function(move |lua, this: Table| {
             let rh = resolve(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
             let d = model.region_data.get(&rh);
-            Ok(match kind {
+            let spacing = match kind {
                 FontKind::FontString => d.map_or(0.0, super::RegionData::line_gap),
                 FontKind::Instance => d.map_or(0.0, |d| d.spacing),
-            })
+            };
+            Ok(model.layout_units().round_trip(spacing))
         })?,
     )?;
 

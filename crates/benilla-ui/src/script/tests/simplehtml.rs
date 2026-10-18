@@ -54,15 +54,15 @@ fn blocks(s: &UiScript, name: &str) -> Vec<Blk> {
                         .position(|id| *id == Some(a.relative_to))
                         .map_or(Rel::Other, Rel::Block)
                 };
-                (a.point, a.relative_point, a.x_off, a.y_off, rel)
+                (a.point, a.relative_point, a.x_off.raw(), a.y_off.raw(), rel)
             });
             Blk {
                 text: d.text.clone(),
                 texture: d.tex.path().clone(),
                 justify_h: d.justify.name_h(),
                 font: d.font_path.clone(),
-                font_height: d.font_height,
-                size: d.size,
+                font_height: d.font_height.map(crate::layout::Len::raw),
+                size: d.size.map(|(w, h)| (w.raw(), h.raw())),
                 anchor,
             }
             .tap_kind(kind)
