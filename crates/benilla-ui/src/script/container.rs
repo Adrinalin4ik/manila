@@ -5,7 +5,7 @@
 
 use mlua::{Lua, MultiValue, Table, Value};
 
-use super::binding_abi::{flag, number_arg};
+use super::binding_abi::{self, flag, number_arg};
 use super::cursor::{self, CursorItem, CursorPayload};
 use super::protected::{self, Tag};
 use super::Model;
@@ -374,6 +374,12 @@ impl super::UiScript {
         self.model_ref().ui_cursor
     }
 
+    /// The path [`UiCursorMode::Custom`] shows: the name `SetCursor` loaded it by, as the script
+    /// gave it (`0xbe2c70`).
+    pub fn custom_cursor_name(&self) -> String {
+        self.model_ref().custom_cursor_name.clone()
+    }
+
     /// Drain the pending cursor write: `Some(mode)` a set, `Some(None)` a reset, `None` no call,
     /// which must leave the cursor as it was, so an armed spell keeps its cast cursor over a
     /// spellbook button.
@@ -419,6 +425,40 @@ pub enum UiCursorMode {
     UnablePoint,
     /// UnableAttack (24), `SetCursor("ATTACK_ERROR_CURSOR")`.
     UnableAttack,
+    /// Custom (41): the texture `SetCursor` loaded by any other name (`0x523c40`), its image
+    /// [`super::UiScript::custom_cursor_name`].
+    Custom,
+}
+
+/// `CursorSetCustom` (`0x523c40`): the name as it stands is a texture path (`0x449610`, `.blp` put
+/// on, `0x523c86`) that must be 32×32 (`0x523cb9`, `0x523cbd`); it becomes mode 41 (`0x523cc9`),
+/// its image the slot-41 picture (`0xc0bd80`), and its name is kept (`0x523cf5`, 259 bytes and a
+/// NUL), answering true. A load failure or another size answers false and changes nothing. The
+/// same name, ignoring case, while mode 41 shows answers true at once (`0x523c46`-`0x523c6d`);
+/// here it also re-asserts the mode, since the world classifier, the other writer of the shown
+/// mode, lives in the host.
+fn custom_cursor(model: &mut super::Model, name: &str) -> bool {
+    if model.ui_cursor == Some(UiCursorMode::Custom)
+        && model.custom_cursor_name.eq_ignore_ascii_case(name)
+    {
+        model.ui_cursor_dirty = true;
+        return true;
+    }
+    let size = model
+        .texture_size_probe
+        .as_ref()
+        .and_then(|probe| probe(name));
+    if size != Some((32, 32)) {
+        return false;
+    }
+    model.ui_cursor = Some(UiCursorMode::Custom);
+    model.ui_cursor_dirty = true;
+    let mut end = name.len().min(0x103);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    model.custom_cursor_name = name[..end].to_string();
+    true
 }
 
 /// `UseContainerItem` past its clear. An empty slot or a locked item ends it, repair mode
@@ -755,7 +795,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // up raise. The reference also needs the bank open for 5-10, which is not checked here.
     lua.globals().set(
         "SetBagPortaitTexture",
-        lua.create_function(|lua, (region, container): (Table, i64)| {
+        lua.create_function(|lua, (region, container): (Table, Value)| {
+            // `is-number` else `Usage: SetBagPortaitTexture(texture, slot)` (`0x84d9c4`,
+            // `0x4fa58e`).
+            let container = i64::from(binding_abi::number_arg(
+                lua,
+                container,
+                "Usage: SetBagPortaitTexture(texture, slot)",
+            )?);
             if container >= 11 {
                 return Err(mlua::Error::runtime("Invalid slot in SetBagPortaitTexture"));
             }
@@ -792,7 +839,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     lua.globals().set(
         "GetContainerNumSlots",
-        lua.create_function(|lua, bag: i64| {
+        lua.create_function(|lua, bag: Value| {
+            // `is-number` else `Usage: GetContainerNumSlots(index)` (`0x84d83c`, `0x4f9577`).
+            let bag = i64::from(binding_abi::number_arg(
+                lua,
+                bag,
+                "Usage: GetContainerNumSlots(index)",
+            )?);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(model.containers.get(&bag).map_or(0, |c| c.num_slots))
         })?,
@@ -800,7 +853,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     lua.globals().set(
         "GetBagName",
-        lua.create_function(|lua, bag: i64| {
+        lua.create_function(|lua, bag: Value| {
+            // `is-number` else `Usage: GetBagName(index)` (`0x84da04`, `0x4fa69a`).
+            let bag = i64::from(binding_abi::number_arg(
+                lua,
+                bag,
+                "Usage: GetBagName(index)",
+            )?);
             let name = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 model.containers.get(&bag).and_then(|c| c.name.clone())
@@ -924,7 +983,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     lua.globals().set(
         "UseContainerItem",
-        lua.create_function(|lua, (bag, slot, rest): (i64, u32, mlua::MultiValue)| {
+        lua.create_function(|lua, (bag, slot, rest): (Value, Value, mlua::MultiValue)| {
+            // `is-number` on args 1 and 2 else `Usage: UseContainerItem(index, slot[, onSelf])`
+            // (`0x84d940`, `0x4fa440`).
+            let bag = i64::from(binding_abi::number_arg(
+                lua,
+                bag,
+                "Usage: UseContainerItem(index, slot[, onSelf])",
+            )?);
+            let slot = binding_abi::index_arg32(
+                lua,
+                slot,
+                "Usage: UseContainerItem(index, slot[, onSelf])",
+            )?;
             // `onSelf` through the client's flag coercion (`0x4fa17d`, `0x6f1c10`, default 0).
             let on_self = super::binding_abi::bool_or_default(rest.front(), false);
             // Every right-click clears the cursor before it reads the slot (`0x4fa198`): a held
@@ -946,7 +1017,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // any path.
     lua.globals().set(
         "PickupContainerItem",
-        lua.create_function(|lua, (bag, slot): (i64, u32)| {
+        lua.create_function(|lua, (bag, slot): (Value, Value)| {
+            // `is-number` on args 1 and 2 else `Usage: PickupContainerItem(index, slot)`
+            // (`0x84d8e8`, `0x4f9f56`).
+            let bag = i64::from(binding_abi::number_arg(
+                lua,
+                bag,
+                "Usage: PickupContainerItem(index, slot)",
+            )?);
+            let slot =
+                binding_abi::index_arg32(lua, slot, "Usage: PickupContainerItem(index, slot)")?;
             // An armed item-targeting spell binds the item through `BindSpellTargetObject`, behind
             // the gate's tag 2.
             let may_cast = protected::gate(lua, Tag::CAST);
@@ -964,7 +1044,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // the cursor alone.
     lua.globals().set(
         "ShowContainerSellCursor",
-        lua.create_function(|lua, (bag, slot): (i64, u32)| {
+        lua.create_function(|lua, (bag, slot): (Value, Value)| {
+            // `is-number` on args 1 and 2 else `Usage: ShowContainerSellCursor(index, slot)`
+            // (`0x84d970`, `0x4fa4d9`).
+            let bag = i64::from(binding_abi::number_arg(
+                lua,
+                bag,
+                "Usage: ShowContainerSellCursor(index, slot)",
+            )?);
+            let slot =
+                binding_abi::index_arg32(lua, slot, "Usage: ShowContainerSellCursor(index, slot)")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let occupied = model
                 .containers
@@ -1008,8 +1097,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // line (`0x489537`). A number converts to its text. The name matches one of eight pairs
     // ignoring case (`0x48955b`), POINT, CAST, BUY and ATTACK as modes 1-4 and each `*_ERROR` 20
     // higher, and answers 1 (`0x48958f` → `0x489575`). Any other name is a custom cursor
-    // (`0x48956c`), which is not built: it answers as one that fails to load, nil with the cursor
-    // unchanged (`0x48959c`).
+    // (`0x48956c`, [`custom_cursor`]): 1 when it loads, else nil with the cursor unchanged
+    // (`0x48959c`).
     lua.globals().set(
         "SetCursor",
         lua.create_function(|lua, args: MultiValue| {
@@ -1035,7 +1124,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 ("ATTACK_ERROR_CURSOR", UiCursorMode::UnableAttack),
             ];
             let Some(&(_, mode)) = NAMED.iter().find(|(n, _)| n.eq_ignore_ascii_case(&name)) else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let loaded = custom_cursor(&mut model, &name);
+                return Ok(MultiValue::from_vec(vec![if loaded {
+                    Value::Integer(1)
+                } else {
+                    Value::Nil
+                }]));
             };
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             model.ui_cursor = Some(mode);
@@ -1104,6 +1199,42 @@ mod tests {
             );
         }
         assert_eq!(s.ui_cursor(), None, "a raise changes nothing");
+    }
+
+    /// Any other name is a texture path (`0x523c40` → `0x449610`, no folder put on): a 32×32 one
+    /// becomes mode 41 under its name and answers 1; a missing one or another size answers nil and
+    /// leaves the cursor and the name as they were; the shown name again answers 1 at once.
+    #[test]
+    fn set_cursor_loads_any_other_name_as_a_32_by_32_texture() {
+        let mut s = UiScript::new().unwrap();
+        s.set_texture_size_probe(Box::new(|path| match path {
+            "Interface\\AddOns\\Mine\\Sword" | "5" => Some((32, 32)),
+            "Interface\\Icons\\Big" => Some((64, 64)),
+            _ => None,
+        }));
+        let set = |s: &UiScript, name: &str| {
+            s.eval::<Option<i64>>(&format!("return SetCursor({name})"))
+                .unwrap()
+        };
+        assert_eq!(set(&s, r#""Interface\\AddOns\\Mine\\Sword""#), Some(1));
+        assert_eq!(s.ui_cursor(), Some(UiCursorMode::Custom));
+        assert_eq!(s.custom_cursor_name(), "Interface\\AddOns\\Mine\\Sword");
+        assert_eq!(s.take_cursor_write(), Some(Some(UiCursorMode::Custom)));
+        // The shown name, ignoring case, answers 1 without a load.
+        assert_eq!(set(&s, r#""INTERFACE\\ADDONS\\MINE\\SWORD""#), Some(1));
+        assert_eq!(s.custom_cursor_name(), "Interface\\AddOns\\Mine\\Sword");
+        s.run("SetCursor(\"ATTACK_CURSOR\")").unwrap();
+        for bad in [
+            r#""Interface\\Icons\\Big""#,
+            r#""Interface\\Cursor\\Nothing""#,
+        ] {
+            assert_eq!(set(&s, bad), None, "{bad}");
+            assert_eq!(s.ui_cursor(), Some(UiCursorMode::Attack), "{bad}");
+            assert_eq!(s.custom_cursor_name(), "Interface\\AddOns\\Mine\\Sword");
+        }
+        // A number is its text (`0x6f36b4`), a path like any other.
+        assert_eq!(set(&s, "5"), Some(1));
+        assert_eq!(s.custom_cursor_name(), "5");
     }
 
     fn backpack() -> ContainerState {

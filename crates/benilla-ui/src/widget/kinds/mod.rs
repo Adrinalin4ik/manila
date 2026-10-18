@@ -68,6 +68,8 @@ pub enum KindUpdate {
     MessageFrame,
     /// `CSimpleMessageScrollFrame`'s `0x788460` (slot `0x81ce50`): the line fades.
     ScrollingMessageFrame,
+    /// `CSimpleStatusBar`'s `0x7833c0`: the bar texture's coordinates, when the fill is marked.
+    StatusBar,
     /// `CSimpleScrollFrame`'s `0x787140` (slot `0x81cd78`): a marked range's recompute.
     ScrollFrame,
 }
@@ -93,6 +95,7 @@ impl FrameKind {
             FrameKind::MessageFrame => Some(KindUpdate::MessageFrame),
             FrameKind::ScrollingMessageFrame => Some(KindUpdate::ScrollingMessageFrame),
             FrameKind::ScrollFrame => Some(KindUpdate::ScrollFrame),
+            FrameKind::StatusBar => Some(KindUpdate::StatusBar),
             k if k.is_model() => Some(KindUpdate::Model),
             _ => None,
         }
@@ -314,6 +317,9 @@ pub struct TooltipState {
     /// health watcher (`0x467e70`, registered at `0x52a0a8`) drives the bar; a `set_unit` push of
     /// that unit, under any token, re-drives it.
     pub unit_guid: Option<u64>,
+    /// The unit's health as the bar was last driven with it: the watcher's copy of the field
+    /// (`0x4667a0`), which a values update compares before calling it (`0x4655bb`).
+    pub unit_health: u32,
     /// Armed for a compare render: the next `SetInventoryItem` prepends "Currently Equipped"
     /// (`[arg+0x18]`, not the compact `[arg+0x14]`), surviving the stock caller's `SetOwner` in
     /// between (`MerchantFrame.xml:67-72`); the reference's route to `0x52b650` is untraced.
@@ -1331,29 +1337,125 @@ impl ButtonState {
     }
 }
 
-/// A StatusBar's value and fill texture, zero-initialized like the client's members.
+/// A StatusBar's value and fill texture (`CSimpleStatusBar`, ctor `0x782d80`). The value fields
+/// are private: every write goes through [`Self::set_min_max`] or [`Self::set_value`], which keep
+/// the flag bits the client keeps at `+0x314`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StatusBarState {
-    /// `SetMinMaxValues` low bound (XML `minValue`); the loader swaps a reversed pair (`0x782ef0`).
-    pub min: f32,
-    /// `SetMinMaxValues` high bound (XML `maxValue`).
-    pub max: f32,
-    /// The current value (`SetValue`/XML `defaultValue`), clamped into `[min, max]`.
-    pub value: f32,
-    /// VERTICAL fills bottom-up; HORIZONTAL, the default, left to right (enum `0x811b00`).
-    pub vertical: bool,
-    /// The fill texture (`<BarTexture>`), cropped to [`Self::fraction`] along the orientation axis.
+    /// The low bound (`+0x318`).
+    min: f32,
+    /// The high bound (`+0x31c`).
+    max: f32,
+    /// The held value (`+0x320`), clamped into `[min, max]`.
+    value: f32,
+    /// `+0x314 & 2`, set by `SetMinMaxValues` (`0x78329a`); until then `SetValue` is a no-op.
+    range_valid: bool,
+    /// `+0x314 & 4`, set by the first stored value (`0x783347`).
+    has_value: bool,
+    /// `+0x314 & 1`, the fill to redo: set by the range (`0x78329a`), a stored value (`0x783347`),
+    /// the orientation (`0x78325c`) and a bar texture installed (`0x783230`); cleared by the
+    /// update that writes the coordinates ([`Self::take_fill`], `0x78344e`).
+    fill_dirty: bool,
+    /// `+0x328`: VERTICAL fills bottom-up; HORIZONTAL, the default, left to right (enum
+    /// `0x811b00`).
+    vertical: bool,
+    /// The fill texture (`<BarTexture>`, `+0x324`), whose coordinates the update writes.
     pub bar: Option<RegionHandle>,
 }
 
 impl StatusBarState {
-    /// The fill fraction `(value − min) / (max − min)` in `[0, 1]`; `0.0` when `max <= min`.
+    /// The range, `(min, max)`, as `GetMinMaxValues` answers it.
+    pub fn min_max(&self) -> (f32, f32) {
+        (self.min, self.max)
+    }
+
+    /// The held value, as `GetValue` answers it.
+    pub fn value(&self) -> f32 {
+        self.value
+    }
+
+    /// `CSimpleStatusBar::SetMinMaxValues` (`0x783270`), the one setter the Lua binding, the XML
+    /// loader and the engine's health watchers all call: the low bound is `max` when `min > max`
+    /// (`fcom; test ah,0x41`, so NaN keeps `min`), never a swap. With a value held it clears `& 4`
+    /// and re-sets the value (`0x7832af`, `0x7832bc`), so `OnValueChanged` fires on every call
+    /// once the bar has a value; the returned value is that fire.
+    pub fn set_min_max(&mut self, min: f32, max: f32) -> Option<f32> {
+        self.min = if min > max { max } else { min };
+        self.max = max;
+        self.range_valid = true;
+        self.fill_dirty = true;
+        if !self.has_value {
+            return None;
+        }
+        self.has_value = false;
+        self.set_value(self.value)
+    }
+
+    /// `CSimpleStatusBar::SetValue` (`0x7832d0`), op for op: nothing without a range
+    /// (`0x7832dc`); the value raised to `min` (`0x7832e8`), then lowered to `max` when `max` is
+    /// below that (`0x783303`); with a value held, an equal one returns (`0x783342`; NaN is never
+    /// equal). Otherwise it is stored and returned, the caller firing `OnValueChanged`.
+    pub fn set_value(&mut self, v: f32) -> Option<f32> {
+        if !self.range_valid {
+            return None;
+        }
+        let lo = if self.min > v { self.min } else { v };
+        let v = if self.max < lo { self.max } else { lo };
+        if self.has_value && v == self.value {
+            return None;
+        }
+        self.value = v;
+        self.has_value = true;
+        self.fill_dirty = true;
+        Some(v)
+    }
+
+    /// VERTICAL, as `GetOrientation` answers it.
+    pub fn vertical(&self) -> bool {
+        self.vertical
+    }
+
+    /// `CSimpleStatusBar::SetOrientation` (`0x783250`): stores it and marks the fill.
+    pub fn set_orientation(&mut self, vertical: bool) {
+        self.vertical = vertical;
+        self.fill_dirty = true;
+    }
+
+    /// `InstallBarTexture` (`0x7831f0`) past its same-texture return (`0x783202`): the slot takes
+    /// `bar` and the fill is marked (`0x783230`).
+    pub fn install_bar(&mut self, bar: Option<RegionHandle>) {
+        self.bar = bar;
+        self.fill_dirty = true;
+    }
+
+    /// The fill fraction `(value − min) / (max − min)` (`0x783380`), `0.0` when `max − min` is not
+    /// above 0.
     pub fn fraction(&self) -> f32 {
-        if self.max > self.min {
+        if self.max - self.min > 0.0 {
             ((self.value - self.min) / (self.max - self.min)).clamp(0.0, 1.0)
         } else {
             0.0
         }
+    }
+
+    /// The update `CSimpleStatusBar::OnFrameUpdate` (`0x7833c0`) runs after the frame's
+    /// `OnUpdate`: with the fill marked, a bar texture, a range and a value (`0x7833d8`-`0x7833ea`)
+    /// it clears the mark (`0x78344e`) and answers the coordinates it builds from scratch for
+    /// `SetTexCoordRect` (`0x770410`), `[left, right, top, bottom]`: 0 to the fill across and 0 to
+    /// 1 down when HORIZONTAL (`0x78340e`-`0x78341e`), 0 to 1 across and 0 to the fill down when
+    /// VERTICAL (`0x78342f`-`0x783436`), so a vertical bar shows the top of its art. Otherwise it
+    /// answers `None` and the texture keeps whatever coordinates it holds.
+    pub fn take_fill(&mut self) -> Option<[f32; 4]> {
+        if !(self.fill_dirty && self.bar.is_some() && self.range_valid && self.has_value) {
+            return None;
+        }
+        self.fill_dirty = false;
+        let f = self.fraction();
+        Some(if self.vertical {
+            [0.0, 1.0, 0.0, f]
+        } else {
+            [0.0, f, 0.0, 1.0]
+        })
     }
 }
 
