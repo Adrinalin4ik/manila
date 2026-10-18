@@ -297,18 +297,23 @@ pub(crate) fn apply_font_parts(
     let rh = region_handle_of(lua, this)?;
     let mut model = lua.app_data_mut::<Model>().expect("model");
     let d = model.region_data.entry(rh).or_default();
+    let mut any = false;
     if let Some(p) = path.filter(|p| !p.is_empty()) {
         d.font_path = Some(p);
-        d.font_explicit.face = true;
+        any = true;
     }
     if let Some(h) = height {
         d.font_height = Some(h);
-        d.font_explicit.height = true;
+        any = true;
     }
     if let Some((outline, monochrome)) = flags {
         d.outline = outline;
         d.monochrome = monochrome;
-        d.font_explicit.outline = true;
+        any = true;
+    }
+    // A loaded file clears the font bit (`0x77121d`), the face, height and flags being one group.
+    if any {
+        d.font_mask.clear(super::FontMask::FONT);
     }
     model.touch_measure(rh);
     Ok(())
@@ -729,6 +734,10 @@ pub(crate) fn free_regions(model: &mut Model, dying: &[RegionHandle]) {
     for &rh in dying {
         if let Some(data) = model.region_data.remove(&rh) {
             model.texels.release(data.tex);
+            // A dying FontString leaves its font's list (`0x773490` → `0x770c60(0)`).
+            if let Some(font) = data.font_object {
+                model.fonts.drop_region(font, rh);
+            }
         }
         model.region_resolved.remove(&rh);
         model.region_kept.remove(&rh);
