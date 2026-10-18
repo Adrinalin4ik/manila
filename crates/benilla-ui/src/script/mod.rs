@@ -43,6 +43,7 @@ mod chat_types;
 mod chat_window;
 mod clip;
 mod colorselect;
+mod console_exec;
 mod container;
 mod craft;
 mod cursor;
@@ -210,6 +211,7 @@ pub use battlefield_positions::{BattlefieldFlagView, BattlefieldPositionView};
 pub use battlefield_queue::{BattlefieldListView, BattlefieldMapInfo, BattlefieldQueueSlot};
 pub use battlefield_score::{BattlefieldScoreRow, BattlefieldScores, BattlefieldStatColumn};
 pub use bind_confirm::PendingEquipAnswer;
+pub use binding_abi::{s_str_to_float, s_str_to_int};
 pub use calls::{NearestMode, QueuedCall, ScriptCall};
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
 pub use channel::{ChannelCommand, RecruitmentPlan, RecruitmentRun, ZoneChannelRow};
@@ -221,6 +223,7 @@ pub use chat_misc::EmoteRequest;
 pub use chat_send::{ChatGroup, ChatSend, SEND_CHAT_TOKENS};
 pub use chat_types::ChatTypeColor;
 pub use chat_window::{message_group_index, ChatWindowLook, MESSAGE_GROUPS};
+pub use console_exec::{console_word, cvar_name_arg, no_such_cvar, set_args};
 pub use container::{
     BagAutoStore, ContainerMove, ContainerSlot, ContainerState, ContainerUse, EnchantView,
     PendingWrap, PetitionSlotView, RandomPropertyView, UiCursorMode, UseArm, UseFork,
@@ -239,7 +242,7 @@ pub use cvar_checks::{
     check_camera_yaw, check_farclip, check_frill_density, check_refresh, check_shadow_level,
     check_small_cull, check_tex_lod_bias, check_triple_buffer, CvarCheck, CvarVerdict,
 };
-pub use cvars::{small_cull_text, sstr_to_int};
+pub use cvars::small_cull_text;
 pub use cvars::{
     MultisampleFormat, ScreenResolution, SeededCvar, VideoCaps, CVAR_FRILL_DENSITY, CVAR_GAMMA,
     CVAR_SMALL_CULL, CVAR_WORLD_DETAIL, IN_WORLD_READ_ONLY_CVARS, LUA_CVAR_LIMIT,
@@ -600,7 +603,7 @@ fn install_framescript(vm: VmKind) -> mlua::Result<Lua> {
     // `0x51bb20` (table `0x8503f4`): `GetTime`, `GetGameTime` and `ConsoleExec`. `ReadFile`,
     // `DeleteFile` and `AppendToFile` are not built.
     clock::install(&lua)?;
-    chat_misc::install_console_exec(&lua)?;
+    console_exec::install(&lua)?;
 
     // `0x706350`: `CreateFrame`, `CreateFont`, `GetNumFrames`, `EnumerateFrames` (table
     // `0x872e74`), then the widget method tables `0x7a2e70`..`0x78dc60`.
