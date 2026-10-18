@@ -226,6 +226,20 @@ impl Loader<'_> {
                 self.call(wrapper, "SetText", text, dbg);
             }
         }
+        // `<PushedTextOffset>` (`0x778aec`): the dimension read (`0x6f1eb0`) zeroes both axes, takes
+        // the element's own non-empty `x`/`y`, then its `<AbsDimension>`'s, and stores them as
+        // `SetPushedTextOffset` does (`0x778b24`).
+        for el in children_named(el, "PushedTextOffset") {
+            let mut xy = [0.0f32; 2];
+            for src in std::iter::once(el).chain(children_named(el, "AbsDimension").take(1)) {
+                for (i, k) in ["x", "y"].into_iter().enumerate() {
+                    if let Some(v) = src.attr(k).filter(|v| !v.is_empty()) {
+                        xy[i] = framexml::atof(v);
+                    }
+                }
+            }
+            self.call(wrapper, "SetPushedTextOffset", (xy[0], xy[1]), dbg);
+        }
         // The per-state fonts, two spellings each; every occurrence applies, in document order.
         for (children, method, which) in [
             (
@@ -247,9 +261,17 @@ impl Loader<'_> {
             for f in children_named_any(el, &children) {
                 // `<Font>`-typed elements (`0x778bf4` → `0x783c30`): `inherits=` and `font=` land
                 // in one slot and `font=` wins (`0x783d22`). `style=` is not 1.12 and is not read.
+                // A name no font holds is a load warning (`0x87a51c`, `0x783d38`), where the Lua
+                // setter raises.
                 for attr in ["inherits", "font"] {
                     if let Some(name) = f.attr(attr) {
-                        self.call(wrapper, method, name.to_string(), dbg);
+                        // Once per name, as a FontString's miss (`apply_fontstring_font`).
+                        if let Err(e) = wrapper.call_method::<()>(method, name.to_string()) {
+                            self.warn_once(
+                                &format!("fontobj:{name}"),
+                                format!("{dbg}: <{} {attr}=\"{name}\">: {e}", f.tag),
+                            );
+                        }
                     }
                 }
                 // A `justifyH` here is a local write on that state's font, never the label
