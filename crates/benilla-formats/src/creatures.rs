@@ -54,6 +54,19 @@ pub struct NpcAppearance {
     pub bake_name: Option<String>,
 }
 
+/// The archive path of a baked NPC atlas: `Textures\BakedNpcTextures\<bake>`, with `.blp` appended
+/// when the bake name lacks it, as the reference's texture create appends the extension a name has
+/// not (`CImageManager::CreateTexture`). The atlas ships with the extension, and custom chains
+/// (TurtleWoW) store the bare name.
+pub fn baked_atlas_path(bake_name: &str) -> String {
+    let path = format!("Textures\\BakedNpcTextures\\{bake_name}");
+    if bake_name.to_ascii_lowercase().ends_with(".blp") {
+        path
+    } else {
+        format!("{path}.blp")
+    }
+}
+
 /// One CreatureDisplayInfo row (the parts we use).
 #[derive(Debug, Clone)]
 struct DisplayRow {

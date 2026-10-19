@@ -94,12 +94,34 @@ pub(super) fn resolve_char_look(
     None
 }
 
-/// The `mpq://` URL of a baked NPC atlas under `Textures\BakedNpcTextures\`.
+/// The `mpq://` URL of a baked NPC atlas: [`benilla_formats::baked_atlas_path`], as a lowercase
+/// forward-slash URL (the reference appends `.blp` to a bake name that lacks it).
 fn baked_npc_url(bake_name: &str) -> String {
     format!(
-        "mpq://textures/bakednpctextures/{}",
-        bake_name.replace('\\', "/").to_ascii_lowercase()
+        "mpq://{}",
+        benilla_formats::baked_atlas_path(bake_name)
+            .replace('\\', "/")
+            .to_ascii_lowercase()
     )
+}
+
+#[cfg(test)]
+mod baked_url_tests {
+    use super::*;
+
+    #[test]
+    fn baked_npc_url_appends_the_extension_a_bare_bake_name_lacks() {
+        // A shipped bake name already carries `.blp`.
+        assert_eq!(
+            baked_npc_url("Northwindbailiff.blp"),
+            "mpq://textures/bakednpctextures/northwindbailiff.blp"
+        );
+        // A bare bake name (TurtleWoW stores these) resolves once `.blp` is appended.
+        assert_eq!(
+            baked_npc_url("Northwindbutcher"),
+            "mpq://textures/bakednpctextures/northwindbutcher.blp"
+        );
+    }
 }
 
 /// The worn display ids behind a character body's geoset selection and, for a player, its region
