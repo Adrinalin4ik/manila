@@ -637,10 +637,28 @@ impl<'a> UnitNames<'a> {
     }
 }
 
+/// The race -> PvP team digit table read from the chain at load (`chr_classes::load_chr_races`);
+/// unset before it, or in a data-less build, where the frozen copies below answer.
+static RACE_TEAMS: std::sync::OnceLock<std::collections::HashMap<u8, i8>> =
+    std::sync::OnceLock::new();
+
+/// Set [`RACE_TEAMS`] once, from the loaded chain.
+pub(crate) fn set_race_teams(teams: std::collections::HashMap<u8, i8>) {
+    let _ = RACE_TEAMS.set(teams);
+}
+
 /// A playable race's fixed side, for where no faction template is at hand, as at world entry,
 /// where addons concatenate `UnitFactionGroup("player")` at file scope; [`faction_group`] reads
 /// the live template.
 pub(crate) fn race_faction_group(race: u8) -> Option<&'static str> {
+    // wenilla carry: the chain's own side where it loaded (see `race_pvp_team`).
+    if let Some(teams) = RACE_TEAMS.get() {
+        return match teams.get(&race) {
+            Some(1) => Some("Alliance"),
+            Some(0) => Some("Horde"),
+            _ => None,
+        };
+    }
     if !(1..=10).contains(&race) {
         return None;
     }
@@ -659,6 +677,13 @@ pub(crate) fn race_faction_group(race: u8) -> Option<&'static str> {
 /// (`0x4aa200`). A frozen copy of TurtleWoW's ten rows; race 9 (Goblin, template 1609, mask 5)
 /// answers Horde and race 10 (Blood Elf, 1610, mask 3) Alliance.
 pub(crate) fn race_pvp_team(race: u8) -> i8 {
+    // wenilla carry: the chain's own `ChrRaces` -> `FactionTemplate` answer where it loaded, the
+    // reference's own read; a custom chain's added races (TurtleWoW's Goblin, its High Elf) then
+    // take the side its data gives them, where this frozen copy knows stock 1.12's nine rows only
+    // (ported in spirit from benilla-octo d6fe1180, which hard-coded the Turtle sides).
+    if let Some(teams) = RACE_TEAMS.get() {
+        return teams.get(&race).copied().unwrap_or(-1);
+    }
     match race {
         // Group mask 3, Player|Alliance: `& 4` clear, `& 2` set.
         1 | 3 | 4 | 7 | 10 => 1,

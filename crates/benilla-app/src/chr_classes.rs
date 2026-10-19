@@ -47,10 +47,20 @@ fn load_chr_classes(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
 
 fn load_chr_races(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
     let Some(assets) = assets else { return };
-    let loaded = {
+    let (loaded, teams) = {
         let mut chain = assets.chain.lock_recover();
-        benilla_formats::load_chr_races(&mut chain)
+        (
+            benilla_formats::load_chr_races(&mut chain),
+            benilla_formats::load_race_pvp_teams(&mut chain),
+        )
     };
+    // wenilla carry: each race's side from the chain's own `ChrRaces` -> `FactionTemplate`, so a
+    // custom chain's added races (TurtleWoW's Goblin and High Elf) take the side its data gives
+    // them; see `ui_unit::race_pvp_team`.
+    match teams {
+        Ok(teams) => crate::ui_unit::set_race_teams(teams),
+        Err(e) => warn!("chr_races: race sides from ChrRaces/FactionTemplate: {e:#}"),
+    }
     match loaded {
         Ok(table) => commands.insert_resource(ChrRaceTable(table)),
         Err(e) => warn!(
