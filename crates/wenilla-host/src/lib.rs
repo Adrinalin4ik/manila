@@ -8,10 +8,13 @@ pub mod data;
 pub mod static_site;
 pub mod ws;
 
-/// The only two ports the `/ws/{port}` proxy will ever dial — mangos realmd (login) and worldd
-/// (world). Fixed here, not a CLI flag: this host can bind `0.0.0.0` on a Tailscale box, so the
-/// allowlist is a security boundary, not a convenience default. Public so a wrapper binary that
-/// mounts these routers behind its own auth (wenilla-realm) uses the same set.
+/// The ports the `/ws/{port}` proxy has a configured upstream for — mangos realmd (login) and
+/// worldd (world). Fixed here, not a CLI flag: this host can bind `0.0.0.0` on a Tailscale box, so
+/// the allowlist is a security boundary, not a convenience default. A pinned router
+/// (`ws::router_map`) dials these and nothing else; the following one also dials a session's own
+/// host on any port from `ws::MIN_FOLLOWED_PORT` up, because a realm list chooses its world port.
+/// Public so a wrapper binary that mounts these routers behind its own auth (wenilla-realm) uses
+/// the same set.
 pub const ALLOWED_PORTS: [u16; 2] = [3724, 8085];
 
 /// The world (worldd) port out of [`ALLOWED_PORTS`] — named because it is the one a deploy may have

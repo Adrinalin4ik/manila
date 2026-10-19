@@ -155,3 +155,47 @@ async fn following_dials_the_asked_for_host_and_the_pinned_router_does_not() {
         "the pinned router followed ?host= and reached the echo server: {end:?}"
     );
 }
+
+/// A realm list publishes its world server's port, and it need not be 8085 — play.octowow.st's
+/// N'Zoth publishes 8091. The following router must dial a session's own host on that port even
+/// though the map has no entry for it; the pinned router must still refuse it.
+///
+/// The map's only key is the echo port **plus one**, so the echo port is unlisted in both arms: a
+/// byte coming back can only mean the port came from the path.
+#[tokio::test]
+async fn following_dials_an_unlisted_world_port_and_the_pinned_router_refuses_it() {
+    let echo_port = spawn_echo_server().await;
+    assert!(echo_port >= wenilla_host::ws::MIN_FOLLOWED_PORT);
+    let map = || [(echo_port.wrapping_add(1), std::sync::Arc::<str>::from("127.0.0.1"))];
+
+    async fn serve(app: axum::Router) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind proxy");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    let addr = serve(wenilla_host::ws::router_map_following(map())).await;
+    let (ws, _) = tokio_tungstenite::connect_async(&format!(
+        "ws://{addr}/ws/{echo_port}?host=127.0.0.1"
+    ))
+    .await
+    .expect("the following router refused a world port the realm list chose");
+    let (mut tx, mut rx) = ws.split();
+    tx.send(Message::Binary(vec![0xCDu8; 8].into()))
+        .await
+        .expect("send frame");
+    let echoed = rx.next().await.expect("frame").expect("ws frame ok");
+    assert_eq!(echoed.into_data().as_ref(), [0xCDu8; 8].as_slice());
+    tx.close().await.expect("close ws");
+
+    let addr = serve(wenilla_host::ws::router_map(map())).await;
+    let err = tokio_tungstenite::connect_async(&format!(
+        "ws://{addr}/ws/{echo_port}?host=127.0.0.1"
+    ))
+    .await
+    .expect_err("the pinned router must refuse an unlisted port");
+    assert!(err.to_string().contains("403"), "unexpected error: {err}");
+}

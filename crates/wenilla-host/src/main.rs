@@ -63,12 +63,13 @@ struct Cli {
     /// control. A session that names no host still falls back to the configured upstream, so the
     /// flags keep working exactly as they did for anyone who never touches the box.
     ///
-    /// Following makes this host an outbound TCP relay to ports 3724 and 8085 on any address a
-    /// page names. That is a proportionate default for a **local development tool** — on the
-    /// default loopback bind it reaches nothing the operator could not reach anyway, and on a
-    /// shared bind this host is already serving the whole game install with no login, which the
-    /// startup warning says. The port allowlist holds either way: this widens where a session may
-    /// go, never what it may reach there.
+    /// Following makes this host an outbound TCP relay, on any address a page names, to ports 3724
+    /// and 8085 and to any port from 1024 up (`ws::MIN_FOLLOWED_PORT`) — a realm list may publish
+    /// its world server on any port, as play.octowow.st's N'Zoth does on 8091. That is a
+    /// proportionate default for a **local development tool** — on the default loopback bind it
+    /// reaches nothing the operator could not reach anyway, and on a shared bind this host is
+    /// already serving the whole game install with no login, which the startup warning says. The
+    /// privileged ports below 1024 stay closed either way.
     ///
     /// `wenilla-realm` is unaffected and has no such default: it mounts `ws::router_map`, the door
     /// that never follows, because there the same behaviour would be an SSRF any visitor could aim.
@@ -154,7 +155,8 @@ async fn main() -> Result<()> {
         if !cli.pin_upstream {
             tracing::warn!(
                 "…and /ws/{{port}} dials the realmlist the page asks for, so this address is also \
-                 a TCP relay to ports 3724 and 8085 anywhere. --pin-upstream turns that off."
+                 a TCP relay to ports 3724, 8085 and 1024 and up, anywhere. --pin-upstream turns \
+                 that off."
             );
         }
     }
