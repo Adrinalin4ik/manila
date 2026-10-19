@@ -339,7 +339,7 @@ pub(super) fn release_far_visuals(
     if healed > 0 {
         warn!("release fade: {healed} parts left at alpha 0 on a live unit, faded back in");
     }
-    let mut ramp = |root: Entity, fade: benilla_world::model_fade::RenderFade, commands: &mut Commands| {
+    let ramp = |root: Entity, fade: benilla_world::model_fade::RenderFade, commands: &mut Commands| {
         for e in children.iter_descendants(root) {
             if parts.contains(e) {
                 commands.entity(e).try_insert(fade.clone());
