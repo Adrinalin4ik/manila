@@ -48,6 +48,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             .is_some_and(|input| input.anchors.clear());
         if cleared {
             model.touch_layout_frame(h);
+            #[cfg(target_arch = "wasm32")]
+            script_placed_cue(&mut model, h);
         }
         Ok(())
     })?;
@@ -115,6 +117,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let changed = !input.anchors.bits_eq(&pair);
             input.anchors = pair;
             model.invalidate_frame(h, changed);
+            #[cfg(target_arch = "wasm32")]
+            if changed {
+                script_placed_cue(&mut model, h);
+            }
             Ok(())
         },
     )?;
@@ -313,8 +319,25 @@ fn set_point(lua: &Lua, this: &Table, args: &MultiValue) -> mlua::Result<()> {
         .set(Anchor::new(point, rel_to_id, rel_point, x, y), units)
     {
         model.invalidate_frame(h, true);
+        #[cfg(target_arch = "wasm32")]
+        script_placed_cue(&mut model, h);
     }
     Ok(())
+}
+
+/// wenilla carry: an anchor write that moved a user-placed frame raises the layout cache's save
+/// cue, as a drag does. The reference raises none here: its file is written whole at logout, quit
+/// and `/reload` (`0x490c79`), which is what saves a frame an addon's mover places with
+/// `ClearAllPoints` + `SetPoint` (ShaguTweaks' unit frame mover, never `StartMoving`). A page
+/// reload or a closed tab runs no shutdown tail, so on the page that frame was never saved; the
+/// cue hands it to the app's debounced autosave instead. Only a real change reaches here, so a
+/// caller re-setting the same anchor every frame raises nothing; the restore writes the inputs
+/// directly and raises nothing either.
+#[cfg(target_arch = "wasm32")]
+fn script_placed_cue(model: &mut Model, h: FrameHandle) {
+    if model.arena.frame(h).is_some_and(|f| f.user_placed) {
+        model.user_placed_changed = true;
+    }
 }
 
 /// The default `relativeTo`: the parent, or [`SCREEN`] for a top-level frame (`0x76c6e0`).
