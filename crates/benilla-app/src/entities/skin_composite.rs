@@ -73,7 +73,21 @@ pub(super) struct SkinComposites {
     running: HashMap<SkinKey, Running>,
     /// The Worker's request ids (wasm32 only; the pool needs none).
     next_id: u32,
+    /// wenilla carry: looks whose composite failed, with the attempts so far and when the next may
+    /// start. A failure used to be cached as "no atlas" for good, so one dropped texture fetch left
+    /// a body white for the session (the owner's screenshots, 2026-10-18); now the body waits and
+    /// the look is composited again, [`COMPOSITE_ATTEMPTS`] times in all.
+    failed: HashMap<SkinKey, (u8, bevy::platform::time::Instant)>,
 }
+
+/// How many times a look is composited before a failure is taken as its answer: with the pause
+/// doubling each time, about two minutes of a crowd's network pressure.
+const COMPOSITE_ATTEMPTS: u8 = 8;
+
+/// The pause before a failed look is composited again, doubled per attempt up to
+/// [`COMPOSITE_RETRY_MAX`].
+const COMPOSITE_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+const COMPOSITE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// **`/console skinComposite 0`** - composite at the request, on this thread, as the client did
 /// before this lane existed.
@@ -109,7 +123,13 @@ enum Running {
     /// starts and then gives up must not leave a body with no face - it answers with an empty
     /// buffer and this finishes the job here, which is what happened before the Worker existed.
     #[cfg(target_arch = "wasm32")]
-    Worker { id: u32, fallback: Work },
+    Worker {
+        id: u32,
+        fallback: Work,
+        /// wenilla carry: the same plan, for the async re-run when the Worker gives up (see
+        /// [`composite_async`]); `fallback` stays for the forced lane, which must answer now.
+        plan: CompositePlan,
+    },
 }
 
 impl SkinComposites {
@@ -127,7 +147,19 @@ impl SkinComposites {
         if self.running.contains_key(&key) {
             return BodyAtlas::Pending;
         }
+        // A failed look waits out its pause before its next attempt; the body keeps waiting too.
+        if self
+            .failed
+            .get(&key)
+            .is_some_and(|&(_, at)| bevy::platform::time::Instant::now() < at)
+        {
+            return BodyAtlas::Pending;
+        }
         let Some(plan) = plan() else {
+            warn!(
+                "body skin composite: no plan for race {} sex {} skin {} - no atlas",
+                key.race, key.sex, key.skin
+            );
             self.done.insert(key, None);
             return BodyAtlas::Ready(None);
         };
@@ -175,10 +207,15 @@ impl SkinComposites {
                 self.next_id = self.next_id.wrapping_add(1);
                 return Running::Worker {
                     id,
-                    fallback: work(plan, chain),
+                    fallback: work(plan.clone(), chain),
+                    plan,
                 };
             }
+            // No Worker to take it: composite here, but read asynchronously (`composite_async`).
+            drop(chain);
+            Running::Pool(AsyncComputeTaskPool::get().spawn(composite_async(plan)))
         }
+        #[cfg(not(target_arch = "wasm32"))]
         Running::Pool(AsyncComputeTaskPool::get().spawn({
             let work = work(plan, chain);
             async move { work() }
@@ -269,14 +306,18 @@ impl SkinComposites {
                 None => true,
             },
             #[cfg(target_arch = "wasm32")]
-            Running::Worker { id, fallback } => {
+            Running::Worker { id, plan, .. } => {
                 match crate::entities::attach::skin_worker::collect(*id) {
                     None => true,
-                    // Empty: the Worker gave up. Finish it here rather than leave a faceless body.
+                    // Empty: the Worker gave up. Finish it here rather than leave a faceless body -
+                    // but with async reads (`composite_async`): the synchronous fallback blocked the
+                    // frame on every texture's round trip.
                     Some(bytes) if bytes.is_empty() => {
-                        let run = std::mem::replace(fallback, Box::new(|| None));
-                        finished.push((*key, run()));
-                        false
+                        let plan = plan.clone();
+                        *running = Running::Pool(
+                            AsyncComputeTaskPool::get().spawn(composite_async(plan)),
+                        );
+                        true
                     }
                     Some(bytes) => {
                         finished.push((*key, benilla_formats::decode_atlas(&bytes)));
@@ -290,6 +331,25 @@ impl SkinComposites {
             return 0;
         }
         for (key, atlas) in finished {
+            if atlas.is_none() {
+                let entry = self
+                    .failed
+                    .entry(key)
+                    .or_insert((0, bevy::platform::time::Instant::now()));
+                entry.0 += 1;
+                if entry.0 < COMPOSITE_ATTEMPTS {
+                    // Not cached: the next request after the pause starts a fresh composite.
+                    let pause = (COMPOSITE_RETRY * (1u32 << (entry.0 - 1).min(4)))
+                        .min(COMPOSITE_RETRY_MAX);
+                    entry.1 = bevy::platform::time::Instant::now() + pause;
+                    warn!("body skin composite failed (attempt {}), retrying", entry.0);
+                    continue;
+                }
+                warn!(
+                    "body skin composite failed {COMPOSITE_ATTEMPTS} times - this look stays white"
+                );
+            }
+            self.failed.remove(&key);
             self.install(key, atlas, images);
         }
         crate::perf::journal::note_skin_composite(started.elapsed().as_micros() as u64);
@@ -359,6 +419,58 @@ fn read_texture(chain: &Mutex<Chain>, path: &str) -> anyhow::Result<BlpMipChain>
         .read(&name)
         .with_context(|| format!("reading texture '{name}'"))?;
     blp_bytes_to_mip_chain(&bytes).with_context(|| format!("decoding texture '{name}'"))
+}
+
+/// wenilla carry: **a composite on this thread that never blocks it on the network.** With no Worker
+/// to take it (one that would not start, or one that gave up on a look) the composite used to run
+/// [`work`], whose reads are the chain's synchronous `XMLHttpRequest`: the owner's trace
+/// (2026-10-18T095041) held 338 of them on the drawing thread, 6.1 s of 30, a 0.4-1.2 s freeze per
+/// arriving body. The reads are now `fetch`es in plan order - each layer stops at its first
+/// candidate that reads, as `CompositePlan::run` consumes them and as `manila-skin` does - and only
+/// the decode and the blit run here, once everything has arrived. Same URLs as every other read
+/// (`benilla_formats::web::data_url`), so the browser cache is shared.
+#[cfg(target_arch = "wasm32")]
+async fn composite_async(plan: CompositePlan) -> Option<BlpMipChain> {
+    async fn fetch_texture(path: &str) -> Option<Arc<BlpMipChain>> {
+        use wasm_bindgen::JsCast;
+        let url = benilla_formats::web::data_url(&path.replace('/', "\\"));
+        let window = web_sys::window()?;
+        let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(&url))
+            .await
+            .ok()?
+            .dyn_into()
+            .ok()?;
+        if !resp.ok() {
+            return None;
+        }
+        let buf = wasm_bindgen_futures::JsFuture::from(resp.array_buffer().ok()?)
+            .await
+            .ok()?;
+        let bytes = js_sys::Uint8Array::new(&buf).to_vec();
+        blp_bytes_to_mip_chain(&bytes).ok().map(Arc::new)
+    }
+    let mut seen: HashMap<String, Option<Arc<BlpMipChain>>> = HashMap::new();
+    let base = fetch_texture(&plan.base).await;
+    seen.insert(plan.base.clone(), base);
+    for (candidates, _tile) in &plan.layers {
+        for path in candidates {
+            if let Some(hit) = seen.get(path) {
+                if hit.is_some() {
+                    break;
+                }
+                continue;
+            }
+            let got = fetch_texture(path).await;
+            let ok = got.is_some();
+            seen.insert(path.clone(), got);
+            if ok {
+                break;
+            }
+        }
+    }
+    plan.run(|path| seen.get(path).cloned().flatten())
+        .inspect_err(|e| warn!("body skin composite failed: {e:#}"))
+        .ok()
 }
 
 /// Land every finished composite before this frame's bodies ask for theirs.

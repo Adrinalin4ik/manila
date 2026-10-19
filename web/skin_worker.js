@@ -15,12 +15,18 @@
 // failure for every id, and the client composites on the main thread exactly as it did before.
 
 let worker = null;
-let broken = false;
+// When the worker last failed to start or died; it is tried again `RETRY_MS` later. A permanent
+// `broken` flag meant one failed start - a page loaded while `web/dist` was being rewritten - sent
+// every composite of the session to the main thread, each one a run of synchronous texture reads
+// (trace 2026-10-18T095041: 338 sync reads, 6.1 s of 30, freezes of 0.4-1.2 s).
+let brokenAt = -Infinity;
+const RETRY_MS = 10000;
 const done = new Map();   // id -> Uint8Array
 const failed = new Set(); // ids the worker could not render
 
 function ensure() {
-  if (worker || broken) return worker;
+  if (worker) return worker;
+  if (performance.now() - brokenAt < RETRY_MS) return null;
   try {
     worker = new Worker(new URL('./skin_worker_entry.js', import.meta.url), { type: 'module' });
     // Said once, because "the worker is running" and "the worker silently never started" looked
@@ -33,13 +39,13 @@ function ensure() {
       else failed.add(id);
     };
     worker.onerror = (e) => {
-      console.warn('skin worker: died, composites fall back to the main thread', e.message || e);
-      broken = true;
+      console.warn('skin worker: died, composites fall back to the main thread until a restart', e.message || e);
+      brokenAt = performance.now();
       worker = null;
     };
   } catch (e) {
-    console.warn('skin worker: would not start, composites stay on the main thread', e);
-    broken = true;
+    console.warn('skin worker: would not start, retrying in 10 s', e);
+    brokenAt = performance.now();
   }
   return worker;
 }
