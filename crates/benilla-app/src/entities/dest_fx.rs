@@ -129,6 +129,9 @@ pub(super) fn arm_ground_effects(
     asset_server: Res<AssetServer>,
     mut sounds: MessageWriter<SpellKitSound>,
     spell_effect_level: Option<Res<crate::video::SpellEffectLevel>>,
+    // wenilla carry: the caster's release marker, through the guid index.
+    index: Res<crate::net::GuidIndex>,
+    released: Query<(), With<crate::player_distance::BeyondPlayerDistance>>,
 ) {
     let (Some(visuals), Some(spells), Some(mut fx)) = (visuals, spells, fx) else {
         return;
@@ -136,6 +139,17 @@ pub(super) fn arm_ground_effects(
     let level_scale = shard_rate_scale(spell_effect_level.map(|l| l.0));
     for (anchor, net, store) in &created {
         if net.kind != EntityKind::DynamicObject {
+            continue;
+        }
+        // wenilla carry: a caster past `playerDistance` or in another shard - his Blizzard or
+        // Consecration is not drawn or heard either (the owner, 2026-10-19). One cast later past
+        // the arm is `player_distance`'s: the dynamic object inherits its caster's marker there.
+        if store
+            .0
+            .dynamicobject_caster()
+            .and_then(|g| index.0.get(&g))
+            .is_some_and(|&e| released.contains(e))
+        {
             continue;
         }
         let Some(spell_id) = store.0.dynamicobject_spell_id() else {

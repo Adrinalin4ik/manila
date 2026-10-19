@@ -293,7 +293,8 @@ fn fire_shakes(
 fn fire_kit_shakes(
     mut events: MessageReader<SpellKitShake>,
     time: Res<Time>,
-    transforms: Query<&GlobalTransform>,
+    // wenilla carry: a unit past `playerDistance` or in another shard shakes no camera.
+    transforms: Query<&GlobalTransform, Without<crate::player_distance::BeyondPlayerDistance>>,
     shakes: Option<Res<Shakes>>,
     mut live: ResMut<CameraShakes>,
 ) {

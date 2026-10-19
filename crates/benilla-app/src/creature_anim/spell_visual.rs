@@ -567,10 +567,14 @@ pub(super) fn route_cast_visuals(
     visuals: Option<Res<SpellVisuals>>,
     spells: Option<Res<crate::ui_action::Spells>>,
     mut weapon_src: WeaponVisualSrc,
-    units: Query<(Entity, &ObjectStore), Without<ItemObject>>,
+    // wenilla carry: with the release marker, so a hidden caster's spell shows nothing here.
+    units: Query<(Entity, &ObjectStore, Has<crate::player_distance::BeyondPlayerDistance>), Without<ItemObject>>,
     holds: Query<&CastHold>,
     mut channel_cache: Local<EntityHashMap<u32>>,
 ) {
+    // wenilla carry: a caster past `playerDistance` or in another shard - no body, so neither
+    // its impacts on others nor its ground bursts are shown (the owner, 2026-10-19).
+    let hidden = |e: Entity| units.get(e).is_ok_and(|(_, _, h)| h);
     let (Some(visuals), Some(spells)) = (visuals.as_deref(), spells.as_deref()) else {
         return; // no client data
     };
@@ -776,6 +780,10 @@ pub(super) fn route_cast_visuals(
                 );
             }
             CastEventKind::GroundImpact { pos } => {
+                // wenilla carry: a hidden caster's missile lands unheard.
+                if hidden(ev.entity) {
+                    continue;
+                }
                 // A missile arrived at a point (`0x61e1d0` → `0x61d870`): `SpellVisual` field 13,
                 // the area kit, plays at the landing point. Every shipped row that reaches here
                 // carries only a sound, so the anim and slot legs are not built.
@@ -807,6 +815,9 @@ pub(super) fn route_cast_visuals(
     // Speed 0 plays every impact now (`0x6e8bf0`), Speed > 0 flies one projectile per target.
     // Misses fly too; the reference deflects them off the target, which is not built.
     for go in go_targets.read() {
+        if hidden(go.caster) {
+            continue;
+        }
         let Some(display) = spells.catalog.get(go.spell_id) else {
             continue;
         };
@@ -893,7 +904,7 @@ pub(super) fn route_cast_visuals(
 
     // The channel poll: `UNIT_CHANNEL_SPELL` edges drive an observed unit's channel (the self-only
     // `MSG_CHANNEL_*` do not); a cleared field drops the hold even with no other wire trace.
-    for (entity, store) in &units {
+    for (entity, store, _) in &units {
         let cur = store.0.unit_channel_spell();
         let prev = channel_cache.get(&entity).copied().unwrap_or(0);
         if cur == prev {

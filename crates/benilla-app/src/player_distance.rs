@@ -776,6 +776,14 @@ pub(crate) fn apply(
         store.and_then(|s| s.0.unit_summoned_by().or_else(|| s.0.unit_created_by()))
     }
     let (mut players, mut hidden, mut inserted) = (0u32, 0u32, 0u32);
+    // The players and pets hidden as of last frame's verdict, for the objects they made.
+    let hidden_makers: std::collections::HashSet<u64> = units
+        .iter()
+        .filter(|(_, net, guid, _, _, beyond, ..)| {
+            *beyond && (net.kind == EntityKind::Player || benilla_protocol::guid::is_pet(guid.0))
+        })
+        .map(|(_, _, guid, ..)| guid.0)
+        .collect();
     if let Some(eye) = eye {
         // The rebuild line, `REBUILD_BAND` inside the wall; never negative.
         // Proportional, so a smart wall pulled in to 15 yd does not leave a 10 yd band of unbuilt
@@ -798,6 +806,33 @@ pub(crate) fn apply(
             // unowned guardian - carries `HIGHGUID_UNIT` and is indistinguishable here from a
             // world mob, so it stays. Catching those needs the unit's summoned-by field, which
             // this pass does not read.
+            // **An object a hidden player made goes with him** (the owner, 2026-10-19: another
+            // shard's abilities were still seen) - a portal, a bobber, a trap, a ground AoE. It
+            // takes his marker, so the attach never builds it and a built one fades and is torn
+            // down like a body; it comes back with him.
+            if matches!(net.kind, EntityKind::GameObject | EntityKind::DynamicObject) {
+                let maker = store.and_then(|s| match net.kind {
+                    EntityKind::GameObject => s.0.gameobject_created_by(),
+                    _ => s.0.dynamicobject_caster(),
+                });
+                let want = maker.is_some_and(|m| hidden_makers.contains(&m));
+                if want && !beyond {
+                    commands.entity(entity).try_insert(BeyondPlayerDistance);
+                } else if !want && beyond {
+                    commands.entity(entity).try_remove::<BeyondPlayerDistance>();
+                    commands
+                        .entity(entity)
+                        .try_insert(crate::entities::Arrival(time.elapsed_secs()));
+                }
+                if want && !built {
+                    if let Some(mut vis) = vis {
+                        if *vis != Visibility::Hidden {
+                            *vis = Visibility::Hidden;
+                        }
+                    }
+                }
+                continue;
+            }
             let controlled = net.kind == EntityKind::Player || benilla_protocol::guid::is_pet(guid.0);
             // A creature is walled only by the smart wall, and never sharded.
             let npc = !controlled && net.kind == EntityKind::Unit;
