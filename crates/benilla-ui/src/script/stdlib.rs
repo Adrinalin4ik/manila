@@ -1,13 +1,10 @@
 //! The sandbox and the 1.12 stdlib layer on top of stock Lua 5.1.
 //!
 //! - [`sandbox`]: no filesystem, OS or native reach (`io`, `os`, `package`, `require`, `dofile`,
-//!   `loadfile`, `load`, `module`, `newproxy` and `debug` removed), the reference's `debugstack`,
-//!   and a text-only `loadstring`.
+//!   `loadfile`, `load`, `module`, `newproxy` and `debug` removed) and the reference's
+//!   `debugstack`.
 //! - [`install`]: the 1.12 bare globals (string, table and math aliases, the `debug*` family, the
-//!   error-handler pair), `time` and `date`, and a `string.format` that accepts positional `%N$`
-//!   specs as the 1.12 client's does, rewriting them into a sequential format. Mixing positional
-//!   and sequential specs raises, as in the reference, whose single argument cursor a positional
-//!   spec desyncs.
+//!   error-handler pair), `time` and `date`.
 
 use mlua::{Lua, Value, Variadic};
 
@@ -18,7 +15,7 @@ use mlua::{Lua, Value, Variadic};
 pub fn lua_message(e: &mlua::Error) -> String {
     match e {
         mlua::Error::SyntaxError { message, .. } => message.clone(),
-        mlua::Error::RuntimeError(m) => m
+        mlua::Error::RuntimeError(m) | mlua::Error::LuaValue { message: m, .. } => m
             .rfind("\nstack traceback:\n")
             .map_or(m.as_str(), |at| &m[..at])
             .to_string(),
@@ -29,18 +26,12 @@ pub fn lua_message(e: &mlua::Error) -> String {
     }
 }
 
-/// Sandbox the VM: no filesystem, OS or native reach, the reference's `debugstack`, and text-only
-/// chunk loading.
+/// Sandbox the VM: no filesystem, OS or native reach, and the reference's `debugstack`.
 pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
-    // Set to nil explicitly, whatever mlua's safe stdlib already leaves out.
-    for name in [
-        "io", "os", "package", "require", "dofile", "loadfile", "load", "module", "newproxy",
-        "debug",
-    ] {
-        g.set(name, Value::Nil)?;
-    }
+    // The state opens without `io`, `os`, `package`, `require`, `dofile`, `loadfile`, `load`,
+    // `module`, `newproxy` or `debug`, and none is set to nil here: that would make the key.
 
     // debugstack([start [, count1 [, count2]]]): the reference's traceback, frames only, in Lua
     // 5.0's wording. There is no `stack traceback:` header and line 1 is the caller's frame:
@@ -63,41 +54,10 @@ pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // Text-only `loadstring`: a binary chunk is rejected. The BOM strip and `#`-line skip apply,
-    // as in the reference they live inside `luaL_loadbuffer`/`luaX_setinput`.
-    let loadstring = lua.create_function(
-        |lua, (src, chunkname): (mlua::String, Option<mlua::String>)| {
-            let raw = src.as_bytes();
-            let bytes = crate::source::chunk(&raw).to_vec();
-            // The chunk name is the caller's string verbatim, defaulting to the source itself
-            // (`luaB_loadstring` `0x703280`, `0x70329a`), which `luaO_chunkid` `0x6f5c40` renders
-            // as `[string "…"]`. It comes from the raw bytes: `luaL_loadbuffer` `0x6f5690` strips
-            // a BOM only after `0x703296` took the name.
-            let name = match &chunkname {
-                Some(n) => String::from_utf8_lossy(&n.as_bytes()).into_owned(),
-                None => String::from_utf8_lossy(&raw).into_owned(),
-            };
-            let chunk = lua
-                .load(bytes)
-                .set_name(name)
-                .set_mode(mlua::ChunkMode::Text);
-            match chunk.into_function() {
-                Ok(f) => Ok((Value::Function(f), Value::Nil)),
-                // The failure leg returns nil and Lua's own message, unprefixed (`0x7032c6`,
-                // `0x7032d2`).
-                Err(e) => Ok((
-                    Value::Nil,
-                    Value::String(lua.create_string(lua_message(&e))?),
-                )),
-            }
-        },
-    )?;
-    g.set("loadstring", loadstring)?;
-
     Ok(())
 }
 
-/// Install the stdlib layer: the bare globals, `time`/`date` and the positional `format`.
+/// Install the stdlib layer: the bare globals and `time`/`date`.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     install_error_handler(lua)?;
     install_time(lua)?;
@@ -109,27 +69,35 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// `debugprofilestart`/`debugprofilestop` (`0x702840`/`0x702860`), the two real `debug*` verbs (RDTSC
-/// via `0x4293d0`): start latches, stop answers the milliseconds since. Ours read the `GetTime()`
-/// clock ([`super::clock::now`]), the monotonic session seconds the tick advances, as benilla has
-/// no cycle counter; read in Rust, so an addon that replaces the `GetTime` global cannot bend it.
+/// `debugprofilestart`/`debugprofilestop` (`0x702840`/`0x702860`), the two real `debug*` verbs:
+/// start latches the processor's time-stamp counter (`rdtsc`, `0x4293d0`), and stop answers the
+/// counter's delta over `trunc(1000 / scale) / 1000` (`0x7028a6`-`0x7028c4`), `scale` being the
+/// millisecond clock's (`0x8332c8`). That is milliseconds only once the clock has moved onto the
+/// counter; on a multi-core processor it never does (`0x42b8be`), the scale stays 1.0, and the
+/// answer is a raw cycle count. Deviation: ours answers milliseconds, since a cycle count of unknown
+/// rate is no use to an addon timing its code. Both read a live monotonic clock at the call, as the
+/// counter is read, not the per-frame `GetTime()` clock, so a span inside one frame measures.
 fn install_profile(lua: &Lua) -> mlua::Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
-    let start = std::sync::Arc::new(AtomicU64::new(0f64.to_bits()));
+    // The latch as nanoseconds past this VM's origin; 0 until a start, as `[0xceeb58]` is.
+    // `web_time`, not std: std's clock panics on wasm32, and this runs at every VM's install.
+    let origin = web_time::Instant::now();
+    let start = std::sync::Arc::new(AtomicU64::new(0));
     let g = lua.globals();
     let latch = start.clone();
+    let since_origin = move || u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
     g.set(
         "debugprofilestart",
-        lua.create_function(move |lua, ()| {
-            latch.store(super::clock::now(lua).to_bits(), Ordering::Relaxed);
+        lua.create_function(move |_, ()| {
+            latch.store(since_origin(), Ordering::Relaxed);
             Ok(())
         })?,
     )?;
     g.set(
         "debugprofilestop",
-        lua.create_function(move |lua, ()| {
-            let since = f64::from_bits(start.load(Ordering::Relaxed));
-            Ok((super::clock::now(lua) - since) * 1000.0)
+        lua.create_function(move |_, ()| {
+            let delta = since_origin().saturating_sub(start.load(Ordering::Relaxed));
+            Ok(delta as f64 / 1e6)
         })?,
     )?;
     Ok(())
@@ -259,9 +227,6 @@ do
     debugtimestamp = noop
 end
 
--- ── _G accessors (getglobal/setglobal: _G[name] get/set) ───────────────────────────────
-function getglobal(name) return _G[name] end
-function setglobal(name, value) _G[name] = value end
 
 -- ── NOT here: wipe / tostringall / strsplit / strjoin / strconcat / strtrim ────────────────────
 -- Six 2.0+ names benilla used to define. 1.12 has none of them (absent from
@@ -272,115 +237,60 @@ function setglobal(name, value) _G[name] = value end
 -- An addon reaching for one of these is reaching for a later client's API, and it should find
 -- what it would find there: nothing.
 
--- ── Blizzard's positional string.format (%N$) ──────────────────────────────────────────────────
-do
-    -- `_find`/`_sub` are captured for the same reason `_format` is: this wrapper runs on every
-    -- `format` call in the UI and must not follow an addon's later replacement of `string.*`.
-    -- They are CALLS and not method syntax because 1.12 installs no string metatable, so
-    -- `fmt:find(...)` raises there, and here too (`lua50::install` removes the metatable). No
-    -- chunk of ours may use what the reference's VM cannot resolve; the parser enforces that
-    -- for the grammar, and this is its runtime twin.
-    local _format, _find, _sub, _len = string.format, string.find, string.sub, string.len
-    local CONV = "diouxXeEfgGqscp"  -- Lua 5.1 conversion letters
-
-    local function reformat(fmt, ...)
-        if type(fmt) ~= "string" then
-            return _format(fmt, unpack(arg, 1, arg.n))
-        end
-        -- fast path: no "%<digit>" at all ⇒ definitely no positional spec.
-        if not _find(fmt, "%%%d") then
-            return _format(fmt, unpack(arg, 1, arg.n))
-        end
-
-        local args = arg
-        local pieces = {}      -- rebuilt (sequential) format fragments
-        local order = {}       -- for each real conversion: the source arg index, or false=sequential
-        local seen_pos, seen_seq = false, false
-        local npieces, norder = 0, 0
-        local i, len = 1, _len(fmt)
-
-        while i <= len do
-            local c = _sub(fmt, i, i)
-            if c ~= "%" then
-                npieces = npieces + 1; pieces[npieces] = c
-                i = i + 1
-            elseif _sub(fmt, i + 1, i + 1) == "%" then
-                npieces = npieces + 1; pieces[npieces] = "%%"
-                i = i + 2
-            else
-                local j = i + 1
-                local ds, de = _find(fmt, "^%d+%$", j)  -- optional N$
-                if ds then
-                    seen_pos = true
-                    norder = norder + 1; order[norder] = tonumber(_sub(fmt, ds, de - 1))
-                    j = de + 1
-                else
-                    seen_seq = true
-                    norder = norder + 1; order[norder] = false
-                end
-                -- copy flags/width/precision + the conversion letter
-                local ce = _find(fmt, "[" .. CONV .. "]", j)
-                if not ce then
-                    error("invalid conversion in format string", 2)
-                end
-                npieces = npieces + 1; pieces[npieces] = "%" .. _sub(fmt, j, ce)
-                i = ce + 1
-            end
-        end
-
-        if seen_pos and seen_seq then
-            error("cannot mix positional and sequential arguments in format string", 2)
-        end
-
-        local out, seq = {}, 0
-        for k = 1, norder do
-            local idx = order[k]
-            if idx == false then
-                seq = seq + 1
-                out[k] = args[seq]
-            else
-                out[k] = args[idx]
-            end
-        end
-        return _format(table.concat(pieces, "", 1, npieces), unpack(out, 1, norder))
-    end
-
-    string.format = reformat
-    format = reformat
-end
+-- `format`, the bare `string.format`.
+format = string.format
 "#;
 
-/// `time()` and `date([format [, when]])`: 1.12 engine globals (`0x7035a0`, `0x7033a0`), Lua 5.0's
-/// `os.time`/`os.date` hoisted. `time` is wall-clock epoch seconds, as addons persist it across
-/// sessions.
+/// `time([t])` and `date([format [, when]])`: 1.12 engine globals (`0x7035a0`, `0x7033a0`), Lua
+/// 5.0's `os.time`/`os.date` hoisted, over the client's statically linked MSVC runtime. `time` is
+/// wall-clock epoch seconds, as addons persist it across sessions.
 ///
-/// Deviation: `date` formats UTC where the reference uses local time, because the tree has no
-/// timezone database.
+/// Deviation: both read and format time as UTC where the reference uses local time, because the
+/// tree has no timezone database: the reference as it runs in a zone with no offset and no
+/// daylight saving.
 fn install_time(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
     g.set(
         "time",
-        lua.create_function(|_, ()| Ok(crate::civil::unix_seconds()))?,
+        lua.create_function(|lua, t: Option<mlua::Table>| {
+            // Any argument but nil takes the table path (`0x7035b5`), `luaL_checktype` first.
+            let Some(t) = t else {
+                return Ok(mlua::Value::Number(crate::civil::unix_seconds() as f64));
+            };
+            Ok(match mktime(&date_fields(lua, &t)?) {
+                Some(secs) => mlua::Value::Number(f64::from(secs)),
+                None => mlua::Value::Nil,
+            })
+        })?,
     )?;
     g.set(
         "date",
-        lua.create_function(|lua, (fmt, when): (Option<String>, Option<i64>)| {
-            // Bare `date()` is `%c`, as in Lua.
-            let fmt = fmt.unwrap_or_else(|| "%c".to_string());
-            let secs = when.unwrap_or_else(crate::civil::unix_seconds);
-            // A leading `!` selects UTC, which every time here already is, so it is only consumed.
-            let body = fmt.strip_prefix('!').unwrap_or(&fmt);
-            // `*t` answers a table, as in Lua: an addon that loops until its `wday` matches
-            // (`Accountant_WeekStart`) spins forever on anything else.
-            if body == "*t" {
-                let c = crate::civil::from_unix(secs);
+        lua.create_function(|lua, (fmt, when): (Option<mlua::String>, Option<f64>)| {
+            // `luaL_optlstring(1, "%c")` read as a C string, `luaL_optnumber(2, -1)` through
+            // `__ftol` to the 32-bit `time_t`, and -1 is now (`0x7033db`).
+            let fmt = fmt.map_or_else(|| b"%c".to_vec(), |s| s.as_bytes().to_vec());
+            let fmt = fmt.split(|&b| b == 0).next().unwrap_or_default();
+            let secs = match when.map_or(-1, super::binding_abi::ftol) {
+                -1 => crate::civil::unix_seconds(),
+                s => i64::from(s),
+            };
+            // A leading `!` is `gmtime` (`0x7033f0`), else `localtime`: both UTC here.
+            let body = fmt.strip_prefix(b"!").unwrap_or(fmt);
+            // Either refuses a negative time (`0x7421ee`), and `date` answers nil (`0x70341d`).
+            if secs < 0 {
+                return Ok(mlua::Value::Nil);
+            }
+            let c = crate::civil::from_unix(secs);
+            // `*t` exactly, its NUL compared too (`0x70343c`), answers a table.
+            if body == b"*t" {
                 let t = lua.create_table()?;
-                t.set("year", c.year)?;
-                t.set("month", c.month)?;
-                t.set("day", c.day)?;
-                t.set("hour", c.hour)?;
-                t.set("min", c.min)?;
+                // The client's `date` (`0x7033a0`) sets them in this order (`0x703452`..`0x7034e2`).
                 t.set("sec", c.sec)?;
+                t.set("min", c.min)?;
+                t.set("hour", c.hour)?;
+                t.set("day", c.day)?;
+                t.set("month", c.month)?;
+                t.set("year", c.year)?;
                 // Lua counts weekdays 1..7 from Sunday; ours is the 0-based index into `DAYS`.
                 t.set("wday", c.weekday + 1)?;
                 // Already 1-based, as in Lua.
@@ -389,12 +299,91 @@ fn install_time(lua: &Lua) -> mlua::Result<()> {
                 t.set("isdst", false)?;
                 return Ok(mlua::Value::Table(t));
             }
-            Ok(mlua::Value::String(
-                lua.create_string(format_epoch(secs, body))?,
-            ))
+            // An empty or 256-byte answer is `strftime`'s 0 (`0x70350d`).
+            match strftime(&c, body) {
+                Some(text) => Ok(mlua::Value::String(lua.create_string(text)?)),
+                None => Err(mlua::Error::RuntimeError("`date' format too long".into())),
+            }
         })?,
     )?;
     Ok(())
+}
+
+/// The `struct tm` fields `time` reads from its table (`0x7035f3`..`0x703666`), in its order:
+/// `sec`, `min`, `hour`, `day`, `month` less 1 and `year` less 1900, as `int`s.
+struct TmFields {
+    sec: i32,
+    min: i32,
+    hour: i32,
+    mday: i32,
+    mon: i32,
+    year: i32,
+}
+
+/// 5.0's `getfield` (`0x7036f0`) for each field: `lua_gettable`, so `__index` answers; a number
+/// or numeric string through `__ftol`, else the default, and `day`, `month` and `year` have none.
+/// `isdst` (`getboolfield`, `0x7036b0`) is read last and moves nothing in a zone without daylight
+/// saving (`_dstbias` 0, `0x41465d`).
+fn date_fields(lua: &Lua, t: &mlua::Table) -> mlua::Result<TmFields> {
+    let field = |key: &str, default: Option<i32>| -> mlua::Result<i32> {
+        let v: mlua::Value = t.get(key)?;
+        match (lua.coerce_number(v)?, default) {
+            (Some(n), _) => Ok(super::binding_abi::ftol(n)),
+            (None, Some(d)) => Ok(d),
+            (None, None) => Err(mlua::Error::RuntimeError(format!(
+                "field `{key}' missing in date table"
+            ))),
+        }
+    };
+    let f = TmFields {
+        sec: field("sec", Some(0))?,
+        min: field("min", Some(0))?,
+        hour: field("hour", Some(12))?,
+        mday: field("day", None)?,
+        mon: field("month", None)?.wrapping_sub(1),
+        year: field("year", None)?.wrapping_sub(1900),
+    };
+    let _isdst: mlua::Value = t.get("isdst")?;
+    Ok(f)
+}
+
+/// The runtime's `_mktime` (`0x74066b`, through `0x740687`) at a zero `_timezone`: `tm_year` in
+/// 69..=139, the month folded into the year, then days, hours, minutes and seconds, each step
+/// refused on a 32-bit overflow; `localtime` then refuses a negative time. `None` is its -1.
+fn mktime(f: &TmFields) -> Option<i32> {
+    // `_days` (`0x832834`): the days before each month, less one.
+    const DAYS: [i32; 13] = [-1, 30, 58, 89, 119, 150, 180, 211, 242, 272, 303, 333, 364];
+    let years = 69..=139;
+    let (mut year, mut mon) = (f.year, f.mon);
+    if !years.contains(&year) {
+        return None;
+    }
+    if !(0..=11).contains(&mon) {
+        year += mon / 12;
+        mon %= 12;
+        if mon < 0 {
+            mon += 12;
+            year -= 1;
+        }
+        if !years.contains(&year) {
+            return None;
+        }
+    }
+    let mut before = DAYS[mon as usize];
+    if year & 3 == 0 && mon > 1 {
+        before += 1;
+    }
+    // Days since 1970 less one: `(y - 70) * 365 + ((y - 1) >> 2) - 17` (`0x740701`-`0x74070c`).
+    let days = year * 365 + ((year - 1) >> 2) + before - 25_567;
+    let secs = days
+        .checked_add(f.mday)?
+        .checked_mul(24)?
+        .checked_add(f.hour)?
+        .checked_mul(60)?
+        .checked_add(f.min)?
+        .checked_mul(60)?
+        .checked_add(f.sec)?;
+    (secs >= 0).then_some(secs)
 }
 
 const DAYS: [&str; 7] = [
@@ -421,70 +410,211 @@ const MONTHS: [&str; 12] = [
     "December",
 ];
 
-/// The `strftime` subset addons use; an unknown specifier is emitted verbatim.
-fn format_epoch(secs: i64, fmt: &str) -> String {
-    let crate::civil::Civil {
-        year,
-        month,
-        day,
-        hour,
-        min,
-        sec,
-        weekday: wday,
-        yearday: yday,
-    } = crate::civil::from_unix(secs);
-    let mut out = String::with_capacity(fmt.len() + 16);
-    let mut chars = fmt.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '%' {
-            out.push(c);
+/// The C locale's date and time patterns in the runtime's time record (`0x8323a0`): `%x`
+/// (`0x800aa0`), `%#x` (`0x800a8c`) and `%X` (`0x800a84`). `_setlocale` has no caller.
+const SHORT_DATE: &[u8] = b"M/d/yy";
+const LONG_DATE: &[u8] = b"dddd, MMMM dd, yyyy";
+const TIME_OF_DAY: &[u8] = b"H:mm:ss";
+
+/// `%z` and `%Z` (`0x413916`): `_tzname[isdst]`, which `__tzset` (`0x4145a5`) takes from the
+/// Windows zone's standard name; the UTC zone's.
+const ZONE_NAME: &[u8] = b"Coordinated Universal Time";
+
+/// The runtime's `strftime` (`0x4134e3`) into the 256-byte buffer `date` gives it (`0x7034fd`):
+/// `None` when it answers 0, its output empty or filling the buffer.
+fn strftime(c: &crate::civil::Civil, fmt: &[u8]) -> Option<Vec<u8>> {
+    let mut w = TimeWriter {
+        c,
+        out: Vec::with_capacity(64),
+        left: 256,
+        alternate: false,
+    };
+    let mut i = 0;
+    // Deviation: a format that ends in `%` reads past its terminator in the client (`0x4135c3`),
+    // into whatever memory follows the string; here the output ends there.
+    while w.left > 0 && i < fmt.len() {
+        if fmt[i] != b'%' {
+            w.byte(fmt[i]);
+            i += 1;
             continue;
         }
-        let Some(spec) = chars.next() else {
-            out.push('%');
-            break;
-        };
-        let hour12 = match hour % 12 {
-            0 => 12,
-            h => h,
-        };
+        // Each `%` clears `#` (`0x413592`), which marks the conversion after it.
+        w.alternate = false;
+        i += 1;
+        if fmt.get(i) == Some(&b'#') {
+            w.alternate = true;
+            i += 1;
+        }
+        w.expand(fmt.get(i).copied().unwrap_or(0));
+        i += 1;
+    }
+    (w.left > 0 && !w.out.is_empty()).then_some(w.out)
+}
+
+/// `strftime`'s state: the output, the room left in the buffer, and `__alternate_form`
+/// (`0xcf7284`), the `#` mark.
+struct TimeWriter<'a> {
+    c: &'a crate::civil::Civil,
+    out: Vec<u8>,
+    left: usize,
+    alternate: bool,
+}
+
+impl TimeWriter<'_> {
+    fn byte(&mut self, b: u8) {
+        self.out.push(b);
+        self.left -= 1;
+    }
+
+    /// `_store_str` (`0x4139e7`): while there is room.
+    fn text(&mut self, s: &[u8]) {
+        for &b in s {
+            if self.left == 0 {
+                break;
+            }
+            self.byte(b);
+        }
+    }
+
+    /// `_store_num` (`0x413a0e`) after its case copied `#` into `_no_lead_zeros` (`0xcf7288`):
+    /// the number's last `digits` digits, zero-padded, or with `#` its digits alone
+    /// (`0x413a7d`). Too little room ends the output.
+    fn num(&mut self, mut n: i32, digits: usize) {
+        if self.alternate {
+            let start = self.out.len();
+            while self.left > 1 {
+                self.byte(b'0' + (n % 10) as u8);
+                n /= 10;
+                if n <= 0 {
+                    break;
+                }
+            }
+            self.out[start..].reverse();
+        } else if digits < self.left {
+            let mut d = vec![0u8; digits];
+            for slot in d.iter_mut().rev() {
+                *slot = b'0' + (n % 10) as u8;
+                n /= 10;
+            }
+            for b in d {
+                self.byte(b);
+            }
+        } else {
+            self.left = 0;
+        }
+    }
+
+    /// `_expandtime` (`0x4135f8`): one conversion; an unknown one writes nothing.
+    fn expand(&mut self, spec: u8) {
+        let c = self.c;
+        let (wday, yday) = (c.weekday as usize, c.yearday as i32 - 1);
+        let tm_year = (c.year - 1900) as i32;
         match spec {
-            'a' => out.push_str(&DAYS[wday as usize][..3]),
-            'A' => out.push_str(DAYS[wday as usize]),
-            'b' | 'h' => out.push_str(&MONTHS[(month - 1) as usize][..3]),
-            'B' => out.push_str(MONTHS[(month - 1) as usize]),
-            'c' => out.push_str(&format!(
-                "{} {} {:2} {:02}:{:02}:{:02} {}",
-                &DAYS[wday as usize][..3],
-                &MONTHS[(month - 1) as usize][..3],
-                day,
-                hour,
-                min,
-                sec,
-                year
-            )),
-            'd' => out.push_str(&format!("{day:02}")),
-            'H' => out.push_str(&format!("{hour:02}")),
-            'I' => out.push_str(&format!("{hour12:02}")),
-            'j' => out.push_str(&format!("{yday:03}")),
-            'm' => out.push_str(&format!("{month:02}")),
-            'M' => out.push_str(&format!("{min:02}")),
-            'p' => out.push_str(if hour < 12 { "AM" } else { "PM" }),
-            'S' => out.push_str(&format!("{sec:02}")),
-            'w' => out.push_str(&format!("{wday}")),
-            'x' => out.push_str(&format!("{month:02}/{day:02}/{:02}", year.rem_euclid(100))),
-            'X' => out.push_str(&format!("{hour:02}:{min:02}:{sec:02}")),
-            'y' => out.push_str(&format!("{:02}", year.rem_euclid(100))),
-            'Y' => out.push_str(&format!("{year}")),
-            '%' => out.push('%'),
-            other => {
-                out.push('%');
-                out.push(other);
+            b'a' => self.text(&DAYS[wday].as_bytes()[..3]),
+            b'A' => self.text(DAYS[wday].as_bytes()),
+            b'b' => self.text(&MONTHS[c.month as usize - 1].as_bytes()[..3]),
+            b'B' => self.text(MONTHS[c.month as usize - 1].as_bytes()),
+            // The short date, a space and the time; with `#` the long date (`0x413844`).
+            b'c' => {
+                let date = if std::mem::take(&mut self.alternate) {
+                    LONG_DATE
+                } else {
+                    SHORT_DATE
+                };
+                self.pattern(date);
+                if self.left == 0 {
+                    return;
+                }
+                self.byte(b' ');
+                self.pattern(TIME_OF_DAY);
+            }
+            b'd' => self.num(c.day as i32, 2),
+            b'H' => self.num(c.hour as i32, 2),
+            b'I' => self.num(
+                match c.hour % 12 {
+                    0 => 12,
+                    h => h as i32,
+                },
+                2,
+            ),
+            b'j' => self.num(yday + 1, 3),
+            b'm' => self.num(c.month as i32, 2),
+            b'M' => self.num(c.min as i32, 2),
+            b'p' => self.text(if c.hour > 11 { b"PM" } else { b"AM" }),
+            b'S' => self.num(c.sec as i32, 2),
+            // Weeks begun by a Sunday (`0x41377e`) or a Monday (`0x413760`), week 0 before it.
+            b'U' | b'W' => {
+                let first = match (spec, wday) {
+                    (b'U', d) => d as i32,
+                    (_, 0) => 6,
+                    (_, d) => d as i32 - 1,
+                };
+                let week = if yday < first {
+                    0
+                } else {
+                    yday / 7 + i32::from(yday % 7 >= first)
+                };
+                self.num(week, 2);
+            }
+            b'w' => self.num(wday as i32, 1),
+            b'x' => {
+                let date = if std::mem::take(&mut self.alternate) {
+                    LONG_DATE
+                } else {
+                    SHORT_DATE
+                };
+                self.pattern(date);
+            }
+            b'X' => {
+                self.alternate = false;
+                self.pattern(TIME_OF_DAY);
+            }
+            b'y' => self.num(tm_year % 100, 2),
+            b'Y' => self.num((tm_year / 100 + 19) * 100 + tm_year % 100, 4),
+            b'z' | b'Z' => self.text(ZONE_NAME),
+            b'%' => self.byte(b'%'),
+            _ => {}
+        }
+    }
+
+    /// `_store_winword` (`0x413ac6`) over a C-locale pattern: each run of one letter is a
+    /// conversion by its length (`M` `m`, `MMMM` `B`, `dddd` `A`, `yy` `y`, ...), anything else a
+    /// literal. The single letters' no-leading-zero mark (`0x413b9c`) is overwritten by the
+    /// conversion's own read of `#` (`0x4138e2`), so `M/d/yy` pads as `MM/dd/yy` does.
+    fn pattern(&mut self, p: &[u8]) {
+        let mut i = 0;
+        while i < p.len() && self.left > 0 {
+            let ch = p[i];
+            let run = p[i..].iter().take_while(|&&b| b == ch).count();
+            let spec = match (ch, run) {
+                (b'M', 1 | 2) => Some(b'm'),
+                (b'M', 3) => Some(b'b'),
+                (b'M', 4) => Some(b'B'),
+                (b'd', 1 | 2) => Some(b'd'),
+                (b'd', 3) => Some(b'a'),
+                (b'd', 4) => Some(b'A'),
+                (b'y', 2) => Some(b'y'),
+                (b'y', 4) => Some(b'Y'),
+                (b'h', 1 | 2) => Some(b'I'),
+                (b'H', 1 | 2) => Some(b'H'),
+                (b'm', 1 | 2) => Some(b'M'),
+                (b's', 1 | 2) => Some(b'S'),
+                _ => None,
+            };
+            match spec {
+                Some(s) => {
+                    self.expand(s);
+                    i += run;
+                }
+                None => {
+                    self.byte(ch);
+                    i += 1;
+                }
             }
         }
     }
-    out
 }
+
 /// `luaO_chunkid` (`0x6f5c40`), for `debugstack`'s `short_src`. An `@` name longer than
 /// [`CHUNKID_KEEP`] keeps only its tail behind `"..."`, so a long addon path loses the `\AddOns\`
 /// that corpus libraries search for.
@@ -541,11 +671,12 @@ fn traceback_frame(d: &mlua::Debug) -> String {
         line.push_str(&n.to_string());
         line.push(':');
     }
-    // A tail call has nothing to name it from and takes the `" ?"` arm, known by its `what` or as
-    // the `(tail call)` pseudo-frame.
+    // A name wins over `what` (the switch on `namewhat`, `0x7038fa`); a tail call has none
+    // (`0x6fbd20`) and takes the `" ?"` arm, known by its `what` or as the `(tail call)`
+    // pseudo-frame.
     let tail_call = src.what == "t" || short == "(tail call)";
     match names.name.as_deref() {
-        Some(name) if !name.is_empty() && !tail_call => {
+        Some(name) if !name.is_empty() => {
             line.push_str(" in function `");
             line.push_str(name);
             line.push('\'');

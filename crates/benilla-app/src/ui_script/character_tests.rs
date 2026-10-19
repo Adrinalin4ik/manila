@@ -118,7 +118,7 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
         },
     );
     benilla_ui::script::ContainerState {
-        name: Some("Backpack".into()),
+        name: None,
         num_slots: 16,
         slots,
     }
@@ -474,7 +474,7 @@ fn clicking_an_occupied_doll_slot_picks_it_up_and_locks_it() {
     s.resolve();
     let head_icon_dim = s.extract().iter().any(|q| {
         matches!(&q.content, QuadContent::Texture { path: Some(p), color: Some(c), desaturated, .. }
-            if p.contains("INV_Helmet_01") && *desaturated && c[0] == 0.5 && c[1] == 0.5 && c[2] == 0.5)
+            if p.contains("INV_Helmet_01") && *desaturated && c[..3] == benilla_ui::color::quant::drawn([0.5, 0.5, 0.5, 1.0])[..3])
     });
     assert!(head_icon_dim, "the picked slot's icon dims");
 
@@ -627,7 +627,7 @@ fn broken_equipped_item_tints_its_doll_slot_red() {
             _ => None,
         })
     }
-    let red = [0.9, 0.0, 0.0, 1.0];
+    let red = benilla_ui::color::quant::drawn([0.9, 0.0, 0.0, 1.0]);
     let white = [1.0, 1.0, 1.0, 1.0];
     assert_eq!(
         slot_color(&mut s, "CharacterHeadSlot", "Quickslot2"),
@@ -1072,7 +1072,7 @@ fn the_five_tabs_fit_their_labels_on_the_first_show() {
     for i in [0, 2, 3, 4] {
         let (label, width) = first[i];
         assert!(label > 0.0, "tab {} measured its label", i + 1);
-        assert_eq!(
+        benilla_ui::assert_near!(
             width,
             fitted(label),
             "tab {} is its text plus the two end slices, from OnShow alone",
@@ -1085,8 +1085,9 @@ fn the_five_tabs_fit_their_labels_on_the_first_show() {
             i + 1
         );
     }
-    assert_eq!(
-        first[1].1, 115.0,
+    benilla_ui::assert_near!(
+        first[1].1,
+        115.0,
         "…and the hidden pet tab is not yet fitted"
     );
 
@@ -1094,7 +1095,7 @@ fn the_five_tabs_fit_their_labels_on_the_first_show() {
     s.run("CharacterFrameTab2:Show()").unwrap();
     s.resolve();
     let (pet_label, pet_width) = widths(&mut s)[1];
-    assert_eq!(
+    benilla_ui::assert_near!(
         pet_width,
         fitted(pet_label),
         "the pet tab fits when it is first shown"
@@ -1105,11 +1106,12 @@ fn the_five_tabs_fit_their_labels_on_the_first_show() {
     }
     s.resolve();
     let settled = widths(&mut s);
-    assert_eq!(
-        settled[0], first[0],
+    benilla_ui::assert_near!(
+        settled[0],
+        first[0],
         "the fit is once, in OnShow — nothing re-fits per frame"
     );
-    assert_eq!(&settled[2..], &first[2..], "…for the whole row");
+    benilla_ui::assert_near!(&settled[2..], &first[2..], "…for the whole row");
     assert!(s.errors().is_empty(), "no handler errors: {:?}", s.errors());
 }
 

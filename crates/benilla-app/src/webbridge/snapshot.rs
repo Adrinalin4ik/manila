@@ -251,7 +251,7 @@ impl BridgeReadout<'_, '_> {
     fn peek_name(&self, guid: u64) -> Option<String> {
         self.names
             .as_ref()
-            .and_then(|n| n.peek(guid).map(str::to_string))
+            .and_then(|n| n.resolve_unit(guid, None, crate::query_cache::Ask::Read).map(str::to_string))
     }
 
     #[allow(clippy::too_many_arguments)]

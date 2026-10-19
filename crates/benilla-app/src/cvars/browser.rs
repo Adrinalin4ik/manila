@@ -3,7 +3,10 @@ use super::{CvarChanged, Cvars};
 
 pub(super) fn apply_override(cvars: &mut Cvars, name: &str, value: &str) {
     let Some(row) = cvars.row(name) else { return };
-    if row.numeric() && value.trim().parse::<f32>().is_err() {
+    // A numeric row (its default parses) drops URL text that does not; the set path itself now
+    // stores any text, as 1.12.1's InternalSet does, so this filter is the URL's own.
+    let numeric = row.default.trim().parse::<f32>().is_ok();
+    if numeric && value.trim().parse::<f32>().is_err() {
         return;
     }
     let name = row.name.clone();

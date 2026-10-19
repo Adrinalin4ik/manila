@@ -1240,7 +1240,7 @@
             SetCVar(row.partner.cvar, v)
         end
 
-        -- A uvar's default is captured at OnLoad, before the saved-variables chunk runs.
+        -- A uvar's default is captured at OnLoad, before the saved-variables file is read.
         function BenillaOptionsRow_Default(row)
             if row.uvar then return row.udefault end
             if row.getFunc then return row.fdefault end
@@ -1634,7 +1634,8 @@
             end
             getglobal(control:GetName() .. "Value"):SetText(BenillaOptionsRow_FormatValue(row, value))
             if BenillaOptionsRow_HasStore(row) and not row.refreshing then
-                -- Trailing zeros stripped, so a value at its default stays out of the config file.
+                -- Two decimals, trailing zeros stripped: a whole value writes "1", not "1.00",
+                -- which still differs from a default registered as "1.0" and so is saved.
                 local str = string.gsub(string.format("%.2f", value), "%.?0+$", "")
                 if row.deferred then
                     -- Stored on Apply; a pending equal to the committed value is dropped.
@@ -4764,13 +4765,14 @@
                         <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor></Anchors>
                         <Layers>
                             <Layer level="ARTWORK">
-                                <Texture name="$parentIcon" file="Interface\Buttons\UI-Panel-MinimizeButton-Up" alpha="0.5">
+                                <Texture name="$parentIcon" file="Interface\Buttons\UI-Panel-MinimizeButton-Up">
                                     <Size><AbsDimension x="17" y="17"/></Size>
                                     <Anchors><Anchor point="CENTER"/></Anchors>
                                 </Texture>
                             </Layer>
                         </Layers>
                         <Scripts>
+                            <OnLoad>getglobal(this:GetName() .. "Icon"):SetAlpha(0.5)</OnLoad>
                             <OnClick>
                                 BenillaOptionsFrameSearchBox:SetText("")
                                 BenillaOptionsFrameSearchBox:ClearFocus()

@@ -146,3 +146,18 @@ fn work_after_a_call_through_a_native_lands_on_the_caller() {
         assert!(census[ib].tables < 5, "{name}: {:?}", census[ib]);
     }
 }
+
+/// A chunk Lua compiles from a string names the chunk that compiled it, while that one lives.
+#[test]
+fn a_loadstring_chunk_knows_the_chunk_that_compiled_it() {
+    let mut vm = benilla_lua::new_state();
+    vm.exec(
+        b"F = loadstring('return 1')",
+        b"@Interface\\AddOns\\A\\A.lua",
+    )
+    .unwrap();
+    let a = source_id(&vm, b"@Interface\\AddOns\\A\\A.lua") as u32;
+    let f = source_id(&vm, b"return 1") as u32;
+    assert_eq!(vm.heap.source_parent(f), Some(a));
+    assert_eq!(vm.heap.source_parent(a), None, "the host compiled A");
+}

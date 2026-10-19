@@ -381,6 +381,7 @@ fn on_reputation_delta(
     factions: Option<Res<crate::target::ring::Factions>>,
     mut chat_log: ResMut<crate::ui_chat::ChatLog>,
     mut quest: ResMut<QuestGiver>,
+    quest_log: Option<ResMut<crate::ui_quest_log::QuestLog>>,
 ) {
     if let SessionEvent::ReputationDelta { standings } = ev {
         crate::combat_log::chat::faction_standing(
@@ -390,6 +391,16 @@ fn on_reputation_delta(
             &mut chat_log,
         );
         if let (Some(f), Some(me)) = (factions.as_deref(), self_facts(&b)) {
+            let moved = crate::ui_reputation::rank_moved(
+                &standings,
+                &b.reputations,
+                f.catalog(),
+                me.race,
+                me.class,
+            );
+            if let (true, Some(mut quest_log)) = (moved, quest_log) {
+                quest_log.note_faction_rank_move();
+            }
             let lines = crate::ui_reputation::delta_lines(
                 &standings,
                 &b.reputations,
@@ -721,17 +732,18 @@ fn time_speed(
 /// `SMSG_QUERY_TIME_RESPONSE`: the server wall clock that absolute descriptor stamps (the
 /// timed-quest timer) are dated in; its skew against ours is logged once per session.
 fn server_unix_time(unix_time: u32, clock: &mut ServerWallClock) {
+    // `time(NULL)` at the sync (`0x4deef3`), whose difference is the reference's offset.
+    let local = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     if clock.0.is_none() {
-        let local = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
         info!(
             "net: server wall clock {unix_time} (local clock differs by {}s)",
             local - i64::from(unix_time)
         );
     }
-    clock.sample(unix_time);
+    clock.sample(unix_time, local);
 }
 
 /// `SMSG_INITIALIZE_FACTIONS`: the login reputation store.

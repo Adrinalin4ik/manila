@@ -12,8 +12,8 @@
 //!
 //! The reference loads every glyph unhinted: both its load-flag words (`0x208a`/`0x20c2`, at
 //! `0x5d1324`) carry FreeType's `FT_LOAD_NO_HINTING` (`0x2`), as `FT_Load_Glyph` (`0x7cdb40`) reads
-//! it. The measure reads the unhinted outline (`engine::glyph_ink`); the cells are rasterized
-//! under `cosmic-text`'s default cache key, which hints.
+//! it. The measure and the cells both read the unhinted outline: the face's own tables as FreeType
+//! scales them (`engine::sfnt`), rasterized 1-bit or smooth as the font's flags say.
 
 mod engine;
 mod layout;
@@ -33,6 +33,14 @@ pub(crate) use layout::{
     line_origin, line_rows, measure_text, measure_wrapped_rows, string_width, unwrapped_height,
     FontSpec, Justify, TextSeat, UI_SEAT_NUDGE,
 };
+
+/// A glyph quad's cell in the glyph sheet's texels: the `ImageNode::rect` that draws it from a
+/// `bevy_ui` node one to one.
+pub(crate) fn glyph_texels(uv: &crate::ui_pass::UvRect) -> bevy::math::Rect {
+    let side = pack::SHEET_SIZE as f32;
+    let [tl, _, br, _] = uv.corners;
+    bevy::math::Rect::new(tl[0] * side, tl[1] * side, br[0] * side, br[1] * side)
+}
 
 /// The text size in logical px of a FontString with no font object: `GameFontNormal`'s 12.
 const DEFAULT_FONT_SIZE: f32 = 12.0;
@@ -193,6 +201,7 @@ mod ellipsis_memo_tests {
             path,
             height,
             outline,
+            monochrome: false,
             spacing: 0.0,
             shadow_x: 0.0,
             alpha_gradient: None,
@@ -387,6 +396,7 @@ mod ellipsis_gate_tests {
             path: Some("Fonts\\FRIZQT__.TTF"),
             height: Some(12.0),
             outline: Outline::None,
+            monochrome: false,
             spacing: 0.0,
             shadow_x: 0.0,
             alpha_gradient: None,

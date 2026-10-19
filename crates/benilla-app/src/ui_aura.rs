@@ -5,7 +5,6 @@
 //! 0x4e4170`); any other unit's reads its descriptor by ascending slot, or, for a group member or
 //! pet with no live object, its roster record.
 
-mod clock;
 mod units;
 
 use std::collections::HashMap;
@@ -104,6 +103,7 @@ impl Plugin for UiAuraPlugin {
         app.init_resource::<AuraDurations>()
             .init_resource::<PlayerAuraCache>()
             .init_resource::<AuraFeedMemory>()
+            .init_resource::<benilla_world::frame_pace::FrameStep>()
             // Feed before the VM dispatch, drain after it.
             // After this frame's world publish, so the gain names the unit in the same frame.
             .add_systems(
@@ -458,7 +458,9 @@ fn feed_auras(
     mut durations: ResMut<AuraDurations>,
     mut cache: ResMut<PlayerAuraCache>,
     time: Res<Time<Real>>,
-    clock: Option<Res<crate::ui_script::UiClock>>,
+    // The stamps' clock where `GetTime` stands: this feed runs in `UiFeed`, before the tick, so
+    // the VM's clock is still the previous tick's.
+    step: Res<benilla_world::frame_pace::FrameStep>,
     mut mem: ResMut<AuraFeedMemory>,
 ) {
     let Some(mut script) = script else {
@@ -503,7 +505,10 @@ fn feed_auras(
 
     // No stamp is pruned for an empty slot: the packet arrives before its slot fills.
 
-    let script_now = clock::script_now(&time, clock.as_deref(), script.now());
+    // Where `GetTime` stands: the previous tick's, as this feed runs before the tick. The expiry
+    // maps from the stamps' clock at that same instant (`step.before_step()` below), which holds
+    // it still across uneven frames.
+    let script_now = script.now();
 
     let list: Vec<AuraState> = cache
         .auras
@@ -513,7 +518,7 @@ fn feed_auras(
             let (duration, expiration_time) = join_duration(
                 durations.by_slot.get(&c.slot),
                 c.appeared_at,
-                bevy_now,
+                step.before_step().1,
                 script_now,
             );
             AuraState {
@@ -674,10 +679,13 @@ fn feed_auras(
 /// Age was never the signal. A stamp is an earlier occupant's exactly when the slot HAS an earlier
 /// occupant that left, and [`reconcile`] is the one place that knows: it drops the stamps of the
 /// slots it vacates, so nothing stale can reach here and a stamp of any age is this aura's.
+///
+/// `stamp_now` is the stamps' clock at the instant `script_now` stands at, so the expiry holds
+/// still frame to frame.
 fn join_duration(
     stamp: Option<&DurationStamp>,
     appeared_at: f64,
-    bevy_now: f64,
+    stamp_now: f64,
     script_now: f64,
 ) -> (f64, f64) {
     // The trace names the one rejection, because a dropped stamp and a stamp that never arrived
@@ -690,13 +698,13 @@ fn join_duration(
             Some(d) => info!(
                 "aura trace: join ok - {:.1}s total, {:.1}s left (stamp @ {:.2})",
                 d.total,
-                d.expires_at - bevy_now,
+                d.expires_at - stamp_now,
                 d.received_at
             ),
         }
     }
     stamp
-        .map(|d| (d.total, script_now + (d.expires_at - bevy_now)))
+        .map(|d| (d.total, script_now + (d.expires_at - stamp_now)))
         .unwrap_or((0.0, 0.0))
 }
 
@@ -776,6 +784,51 @@ mod tests {
                 level: 60,
                 stacks: 1,
             });
+    }
+
+    /// The feed runs in `UiFeed`, ahead of the tick, so the VM's `GetTime` is still the previous
+    /// tick's, and an expiry maps from the frame step's clock before this frame's step.
+    #[test]
+    fn an_expiry_maps_onto_gettime_from_where_the_vm_clock_stands_before_the_tick() {
+        use std::time::{Duration, Instant};
+        // `UNIT_FIELD_AURA` and `UNIT_FIELD_AURAFLAGS`; slot 32's nibble is word 4's low one.
+        const AURA: u16 = 47;
+        const AURAFLAGS: u16 = 95;
+        const ME: u64 = 0x10;
+        let mut app = aura_app();
+        let mut script = UiScript::new().unwrap();
+        // The VM clock after the last tick.
+        script.set_now(100.0);
+        app.insert_non_send_resource(script);
+        let fields = benilla_protocol::messages::ObjectFields::from_pairs(&[
+            (AURA + 32, 11976),
+            (AURAFLAGS + 4, 0x8),
+        ]);
+        let me = app
+            .world_mut()
+            .spawn((ObjectStore(fields), Guid(ME), SelfPlayer))
+            .id();
+        app.world_mut().resource_mut::<GuidIndex>().0.insert(ME, me);
+        // Stamped at 90 s on the stamps' clock, five minutes left: it expires at 390 s.
+        app.world_mut()
+            .resource_mut::<AuraDurations>()
+            .set(32, 300_000, 90.0);
+        // This frame's step takes the clock from 100 s, where the VM stands, to 100.016 s.
+        app.insert_resource(benilla_world::frame_pace::FrameStep {
+            delta: Duration::from_millis(16),
+            at: Instant::now(),
+            elapsed: Duration::from_millis(100_016),
+        });
+        app.update();
+        let left: f64 = app
+            .world()
+            .non_send_resource::<UiScript>()
+            .eval("return GetPlayerBuffTimeLeft(GetPlayerBuff(0, \"HARMFUL\"))")
+            .unwrap();
+        assert!(
+            (left - 290.0).abs() < 1.0e-9,
+            "290 s left at GetTime 100 for an expiry at 390 s on the stamps' clock, not {left}"
+        );
     }
 
     /// A worldport's avatar-less frames keep every aura live, and no duration is re-sent then.

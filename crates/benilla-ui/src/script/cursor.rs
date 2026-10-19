@@ -5,9 +5,9 @@
 //! ([`set_cursor`] from a Lua verb, one segment each, so the clear's `CURSOR_UPDATE` reads the
 //! emptied cursor before the set), and every verb that drops a payload clears through [`clear`].
 
-use mlua::Lua;
+use mlua::{Lua, Value};
 
-use super::binding_abi::flag;
+use super::binding_abi::{self, flag};
 use super::tick::verb;
 use super::{Model, ScriptValue};
 
@@ -83,6 +83,7 @@ impl CursorPayload {
                 texture: None,
                 count: 0,
                 consumable: false,
+                state: None,
             }),
             CursorPayload::Macro(_) => CursorPayload::Macro(CursorMacro {
                 index: 0,
@@ -228,6 +229,10 @@ pub struct CursorAction {
     /// so the slot's `ACTIONBAR_SLOT_CHANGED` handler reads them before the app's re-feed.
     pub count: u32,
     pub consumable: bool,
+    /// The source slot's per-frame state, which a place writes back with the slot for the same
+    /// handler: the reference answers `IsEquippedAction` and kin for the slot's action at call
+    /// time (`0x4e74e0`), so the moved item's green border goes with it.
+    pub(crate) state: Option<super::action::StoredActionState>,
 }
 
 /// A pet-bar payload, mode 4, from `PickupPetAction` or the pet spellbook: the packed action word
@@ -918,7 +923,24 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "SplitContainerItem",
-        lua.create_function(|lua, (bag, slot, count): (i64, u32, i64)| {
+        lua.create_function(|lua, (bag, slot, count): (Value, Value, Value)| {
+            // `is-number` on args 1, 2 and 3 else `Usage: SplitContainerItem(index, slot, amount)`
+            // (`0x84d910`, `0x4fa0bf`).
+            let bag = i64::from(binding_abi::number_arg(
+                lua,
+                bag,
+                "Usage: SplitContainerItem(index, slot, amount)",
+            )?);
+            let slot = binding_abi::index_arg32(
+                lua,
+                slot,
+                "Usage: SplitContainerItem(index, slot, amount)",
+            )?;
+            let count = i64::from(binding_abi::number_arg(
+                lua,
+                count,
+                "Usage: SplitContainerItem(index, slot, amount)",
+            )?);
             split_container_item(lua, bag, slot, count);
             Ok(())
         })?,
@@ -979,7 +1001,7 @@ pub(crate) fn two_item_bag() -> super::container::ContainerState {
         ..Default::default()
     };
     super::container::ContainerState {
-        name: Some("Backpack".into()),
+        name: None,
         num_slots: 16,
         slots: [
             (1, item(117, "Tough Jerky")),
@@ -1039,7 +1061,7 @@ mod tests {
             },
         );
         crate::script::container::ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots,
         }
@@ -1147,6 +1169,7 @@ mod tests {
             texture: None,
             count: 0,
             consumable: false,
+            state: None,
         }));
         assert_eq!(ask(&mut s, "CursorHasItem"), NO);
         assert_eq!(ask(&mut s, "CursorHasSpell"), NO);
@@ -1438,6 +1461,7 @@ mod tests {
             texture: None,
             count: 0,
             consumable: false,
+            state: None,
         }));
         s.run("DeleteCursorItem()").unwrap();
         assert!(

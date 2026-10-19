@@ -40,7 +40,8 @@ use benilla_assets::materials::WowModelMaterial;
 
 mod framing;
 pub(crate) use framing::{
-    attachment_point, head_anchor, pane_projection, PortraitAnchors, WowPortraitProjection,
+    attachment_point, head_anchor, pane_projection, PaneUnits, PortraitAnchors,
+    WowPortraitProjection,
 };
 use framing::{body_frame, frame, PORTRAIT_FOV};
 mod booth;
@@ -56,8 +57,9 @@ mod glue_booth;
 /// A model file's own authored lights, folded as the reference's gather does (`0x718960`).
 pub(crate) use glue_booth::{scene_rig, SceneRig};
 pub(crate) use glue_booth::{
-    CreateLook, GhostKit, GlueLook, GluePetBake, GluePreview, GluePreviewBake, GlueScene, PetLook,
-    PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider, SceneFog, SelectLook, GLUE_SLOT,
+    CreateLook, GhostKit, GlueLook, GluePetBake, GluePreview, GluePreviewBake, GlueSceneFile,
+    PetLook, PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider, SceneFog, SceneRoot,
+    SelectLook, GLUE_SLOT,
 };
 mod light;
 pub(crate) use light::{material_variant, VariantLane};
@@ -431,7 +433,7 @@ fn booth_anchors(
     let Some(display_id) = display_id else {
         return Some(PortraitAnchors {
             camera: None,
-            pane_camera: None,
+            cameras: std::sync::Arc::new([]),
             bbox_center: Vec3::ZERO,
             head: None,
             pivot_height: 0.0,

@@ -7,10 +7,9 @@
 
 use mlua::{Lua, MultiValue, Value};
 
-use super::binding_abi::flag;
+use super::binding_abi::{self, flag};
 use super::cursor;
 use super::Model;
-use crate::script::binding_abi::{Idx, Idx32};
 
 /// The three list types, in the order the app pushes them.
 pub const LIST: usize = 0;
@@ -49,6 +48,7 @@ pub struct AuctionItemRow {
     pub name: Option<String>,
     pub texture: Option<String>,
     pub count: u32,
+    /// `None` while the item template query is in flight.
     pub quality: Option<u32>,
     /// `RequiredLevel`, printed red above the player's level.
     pub level: u32,
@@ -348,9 +348,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 row_at(&model, &kind, index)
             };
-            let Some(r) = row else {
-                // A miss (unknown type, out of range, not cached) still answers twelve values, with
-                // `count = 1` and `quality = -1` (one shared exit, `0x4cf1ec`), read unguarded.
+            // A miss (unknown type, out of range, or an item template not cached: `quality` is
+            // `None` until it lands) answers twelve values, `count = 1` and `quality = -1`, through
+            // the one exit `0x4cf1ec`; the item-cache lookup `0x55ba30` returning 0 reaches it at
+            // `0x4cefa0`.
+            let Some(r) = row.filter(|r| r.quality.is_some()) else {
                 return Ok(MultiValue::from_vec(vec![
                     Value::Nil,         // name
                     Value::Nil,         // texture
@@ -405,7 +407,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // live countdown: it moves only when a new list lands.
     g.set(
         "GetAuctionItemTimeLeft",
-        lua.create_function(|lua, (kind, Idx(index)): (String, Idx)| {
+        lua.create_function(|lua, (kind, index): (Value, Value)| {
+            // `is-number-or-string` and `is-number` else `Usage: GetAuctionItemTimeLeft("type",
+            // index)` (`0x8494a0`, `0x4cf5f8`).
+            let kind = binding_abi::string_arg(
+                lua,
+                kind,
+                r#"Usage: GetAuctionItemTimeLeft("type", index)"#,
+            )?;
+            let index = binding_abi::index_arg(
+                lua,
+                index,
+                r#"Usage: GetAuctionItemTimeLeft("type", index)"#,
+            )?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(row_at(&model, &kind, index).map_or(0, |r| i64::from(r.time_left)))
         })?,
@@ -457,7 +471,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // SetSelectedAuctionItem(type, index): remembers the auction at that row; out of range clears.
     g.set(
         "SetSelectedAuctionItem",
-        lua.create_function(|lua, (kind, Idx(index)): (String, Idx)| {
+        lua.create_function(|lua, (kind, index): (Value, Value)| {
+            // `is-number-or-string` and `is-number` else `Usage: SetSelectedAuctionItem("type",
+            // index)` (`0x8495b4`, `0x4cfeab`).
+            let kind = binding_abi::string_arg(
+                lua,
+                kind,
+                r#"Usage: SetSelectedAuctionItem("type", index)"#,
+            )?;
+            let index = binding_abi::index_arg(
+                lua,
+                index,
+                r#"Usage: SetSelectedAuctionItem("type", index)"#,
+            )?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let Some(i) = list_index(&kind) else {
                 return Ok(());
@@ -541,7 +567,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // whose `0x807060` flag is 0 returns nothing, without an error (`0x4cfa00`, `0x4cfa0e`).
     g.set(
         "GetAuctionItemSubClasses",
-        lua.create_function(|lua, class_index: usize| {
+        lua.create_function(|lua, class_index: Value| {
+            // `is-number` else `Usage: GetAuctionItemSubClasses(index)` (`0x8494fc`, `0x4cf9d8`).
+            let class_index =
+                binding_abi::index_arg(lua, class_index, "Usage: GetAuctionItemSubClasses(index)")?;
             let names: Vec<String> = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 class_index
@@ -566,7 +595,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // exhaust edge at `0x4cfb61` lands past the test at `0x4cfb63`).
     g.set(
         "GetAuctionInvTypes",
-        lua.create_function(|lua, (class_index, sub_index): (usize, usize)| {
+        lua.create_function(|lua, (class_index, sub_index): (Value, Value)| {
+            // `is-number` on args 1 and 2 else
+            // `Usage: GetAuctionInvTypes(classIndex, subClassIndex)` (`0x849524`, `0x4cfb99`).
+            let class_index = binding_abi::index_arg(
+                lua,
+                class_index,
+                "Usage: GetAuctionInvTypes(classIndex, subClassIndex)",
+            )?;
+            let sub_index = binding_abi::index_arg(
+                lua,
+                sub_index,
+                "Usage: GetAuctionInvTypes(classIndex, subClassIndex)",
+            )?;
             let offers = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 class_index
@@ -679,7 +720,24 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // PlaceAuctionBid(type, index, bidAmount); a buyout is a bid of exactly the buyout price.
     g.set(
         "PlaceAuctionBid",
-        lua.create_function(|lua, (kind, index, amount): (String, u32, u32)| {
+        lua.create_function(|lua, (kind, index, amount): (Value, Value, Value)| {
+            // `is-number` on args 2 and 3, `is-number-or-string` on arg 1 else
+            // `Usage: PlaceAuctionBid("type", index, bid)` (`0x8494d0`, `0x4cf94d`).
+            let kind = binding_abi::string_arg(
+                lua,
+                kind,
+                r#"Usage: PlaceAuctionBid("type", index, bid)"#,
+            )?;
+            let index = binding_abi::index_arg32(
+                lua,
+                index,
+                r#"Usage: PlaceAuctionBid("type", index, bid)"#,
+            )?;
+            let amount = binding_abi::index_arg32(
+                lua,
+                amount,
+                r#"Usage: PlaceAuctionBid("type", index, bid)"#,
+            )?;
             let Some(list) = list_index(&kind) else {
                 return Ok(());
             };
@@ -751,7 +809,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // CancelAuction(index), always an "owner" row.
     g.set(
         "CancelAuction",
-        lua.create_function(|lua, Idx32(index): Idx32| {
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: SetSelectedAuctionItem(index)` (`0x84963c`, `0x4d0279`), the
+            // client's own text naming `SetSelectedAuctionItem`.
+            let index =
+                binding_abi::index_arg32(lua, index, "Usage: SetSelectedAuctionItem(index)")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             model.auction_cancels.push(index);
             Ok(())
@@ -772,7 +834,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // CalculateAuctionDeposit(runTime) → copper, by the client's arithmetic (`deposit_for`).
     g.set(
         "CalculateAuctionDeposit",
-        lua.create_function(|lua, minutes: u32| {
+        lua.create_function(|lua, minutes: Value| {
+            // `is-number` else `Usage: CalculateAuctionDeposit(runTime)` (`0x8493b0`,
+            // `0x4ce1d9`); the run time is `_ftol`'s 32 bits (`0x4ce28d`).
+            let minutes =
+                binding_abi::index_arg32(lua, minutes, "Usage: CalculateAuctionDeposit(runTime)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let rate = model.auction.as_ref().map_or(0, |a| a.deposit_percent);
             let stack_value = sell_item_info(&model).map_or(0, |(_, _, _, _, _, v)| v);
@@ -899,6 +965,9 @@ mod tests {
             .map(|&auction_id| AuctionItemRow {
                 auction_id,
                 item_id: 1000 + auction_id,
+                // A cached template: a `None` quality is a row still in the item cache's miss.
+                name: Some(format!("Item {auction_id}")),
+                quality: Some(1),
                 count: 1,
                 ..Default::default()
             })
@@ -1015,6 +1084,58 @@ mod tests {
         // The link answers no values on a miss, not a nil.
         let n = s.arity(r#"GetAuctionItemLink("list", 99)"#).unwrap();
         assert_eq!(n, 0, "zero values, not one nil");
+    }
+
+    /// A row whose item template has not landed answers the client's miss shape, not a half-filled
+    /// row: `0x55ba30` returns 0, `je 0x4cefa0` -> `0x4cf1ec`, nil,nil,1,-1,nil,0,0,0,0,0,nil,nil.
+    #[test]
+    fn an_uncached_row_answers_the_miss_shape() {
+        let mut s = UiScript::new().unwrap();
+        let mut state = page(&[7]);
+        // The template query is still in flight: no name, icon or quality, a count and prices.
+        state.lists[LIST].rows[0] = AuctionItemRow {
+            auction_id: 7,
+            item_id: 1007,
+            count: 20,
+            min_bid: 100,
+            buyout_price: 200,
+            high_bidder: AuctionHighBidder::Player,
+            owner: Some("Seller".into()),
+            ..Default::default()
+        };
+        s.set_auction(Some(state));
+        let shape: String = s
+            .eval(
+                r#"local t = {GetAuctionItemInfo("list", 1)}
+                   local out = {}
+                   for i = 1, 12 do out[i] = tostring(t[i]) end
+                   return table.concat(out, ",")"#,
+            )
+            .unwrap();
+        assert_eq!(shape, "nil,nil,1,-1,nil,0,0,0,0,0,nil,nil");
+        assert_eq!(s.arity(r#"GetAuctionItemInfo("list", 1)"#).unwrap(), 12);
+
+        // The stock lines index the colour table with the quality, unguarded.
+        let r: f64 = s
+            .eval(
+                r#"ITEM_QUALITY_COLORS = { [-1] = { r = 0.5 }, [1] = { r = 1 } }
+                   local name, texture, count, quality = GetAuctionItemInfo("list", 1)
+                   local color = ITEM_QUALITY_COLORS[quality]
+                   return color.r"#,
+            )
+            .expect("the colour lookup must not throw on a miss row");
+        assert_eq!(r, 0.5);
+    }
+
+    /// The same row once its template lands answers its real values.
+    #[test]
+    fn a_cached_row_answers_its_quality() {
+        let mut s = UiScript::new().unwrap();
+        s.set_auction(Some(page(&[7])));
+        let (name, quality): (String, i64) = s
+            .eval(r#"local n, _, _, q = GetAuctionItemInfo("list", 1) return n, q"#)
+            .unwrap();
+        assert_eq!((name.as_str(), quality), ("Item 7", 1));
     }
 
     /// The eleventh value is the name, `1` or nil as the app picked it (`0x4cf12a`–`0x4cf1a0`).

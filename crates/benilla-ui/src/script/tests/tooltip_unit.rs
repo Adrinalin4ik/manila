@@ -634,6 +634,8 @@ fn world_hover_drive_and_health_watcher() {
         end)
         local bar = CreateFrame("StatusBar", "GameTooltipStatusBar", tt)
         bar:SetPoint("TOPLEFT", tt, "BOTTOMLEFT", 2, -1); bar:SetWidth(100); bar:SetHeight(8)
+        BarFires = {}
+        bar:SetScript("OnValueChanged", function() table.insert(BarFires, arg1) end)
     "#,
     )
     .unwrap();
@@ -650,10 +652,11 @@ fn world_hover_drive_and_health_watcher() {
         assert(GameTooltipTextLeft1:GetText() == "Timber Wolf")
         local _, mx = GameTooltipStatusBar:GetMinMaxValues()
         assert(mx == 50 and GameTooltipStatusBar:GetValue() == 30, "bar seeded from the snapshot")
+        assert(table.getn(BarFires) == 1 and BarFires[1] == 30, "a fresh bar: the value fires")
     "#,
     )
     .unwrap();
-    // The auto-size needs the line measures before the plate has a rect.
+    // With no font engine the sizer waits on the line measures before the plate has a rect.
     let answers: Vec<(u32, f32, f32, u64)> = s
         .fontstrings_needing_measure()
         .iter()
@@ -662,7 +665,8 @@ fn world_hover_drive_and_health_watcher() {
     s.set_measured_text_unwrapped(&answers);
     s.resolve();
     s.run(
-        r#"assert(GameTooltip:GetRight() == 787 and GameTooltip:GetBottom() == 70,
+        r#"assert(math.abs(GameTooltip:GetRight() - 787) < 1e-3
+                  and math.abs(GameTooltip:GetBottom() - 70) < 1e-3,
                   "plate at the default corner, got " .. tostring(GameTooltip:GetRight()) .. "," .. tostring(GameTooltip:GetBottom()))"#,
     )
     .unwrap();
@@ -672,6 +676,18 @@ fn world_hover_drive_and_health_watcher() {
     s.set_unit("mouseover", Some(hurt));
     s.run(
         r#"assert(GameTooltipStatusBar:GetValue() == 12, "the health watcher tracked the push")"#,
+    )
+    .unwrap();
+    // The watcher (`0x529560`) sets the range, re-firing the held 30, then the moved value; an
+    // unchanged push runs no watcher, and a maximum alone is not the watched field.
+    let mut same = wolf();
+    same.health = 12;
+    s.set_unit("mouseover", Some(same.clone()));
+    same.max_health = 60;
+    s.set_unit("mouseover", Some(same));
+    s.run(
+        r#"assert(table.getn(BarFires) == 3 and BarFires[2] == 30 and BarFires[3] == 12,
+                  "fired " .. table.getn(BarFires))"#,
     )
     .unwrap();
     // Hover lost: the fade arms and `"mouseover"` names nobody (`0x492890` zeroes the pair), yet
@@ -747,7 +763,7 @@ fn minimap_blip_tooltip_shows_follows_and_hides() {
     s.run(
         r#"
         assert(GameTooltipTextLeft1:GetText() == "Stormwind", "content survives a move")
-        assert(GameTooltip:GetBottom() == 300, "the plate follows the cursor")
+        assert(math.abs(GameTooltip:GetBottom() - 300) < 1e-3, "the plate follows the cursor")
         "#,
     )
     .unwrap();
@@ -1006,5 +1022,58 @@ fn a_unit_with_guid_zero_is_no_unit() {
         "#,
     )
     .unwrap();
+    assert!(s.take_errors().is_empty());
+}
+
+/// A unit with a maximum of 0 seeds the bar's range as `(0, 0)` (`0x52a0eb`, no floor), whose fill
+/// is 0 (`0x783394`): after the bar's update (`0x7833c0`) its texture is cut to nothing across.
+#[test]
+fn a_unit_with_no_maximum_health_draws_an_empty_tooltip_bar() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_unit("target", Some(wolf()));
+    s.run(
+        r#"
+        EmptyHost = CreateFrame("Frame", "EmptyHost")
+        EmptyTip = CreateFrame("GameTooltip", "EmptyTip", nil, "TestTooltipTemplate")
+        local bar = CreateFrame("StatusBar", "EmptyTipStatusBar", EmptyTip)
+        bar:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 10, 10)
+        bar:SetWidth(100); bar:SetHeight(8)
+        bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+        EmptyTip:SetOwner(EmptyHost, "ANCHOR_RIGHT")
+        assert(EmptyTip:SetUnit("target") == 1)
+    "#,
+    )
+    .unwrap();
+    let fill = |s: &UiScript| -> Option<([f32; 4], f32)> {
+        s.extract().iter().find_map(|q| match &q.content {
+            QuadContent::Texture {
+                path: Some(p),
+                tex_coords,
+                ..
+            } if p.contains("UI-StatusBar") => Some((
+                tex_coords.map_or([0.0, 1.0, 0.0, 1.0], |tc| tc.edges()),
+                (q.rect.expect("bar rect resolved").width() * 100.0).round() / 100.0,
+            )),
+            _ => None,
+        })
+    };
+    s.tick(0.0);
+    assert_eq!(fill(&s), Some(([0.0, 0.6, 0.0, 1.0], 60.0)), "30 of 50");
+    let mut spent = wolf();
+    spent.guid += 1;
+    spent.health = 0;
+    spent.max_health = 0;
+    s.set_unit("target", Some(spent));
+    s.run(
+        r#"
+        assert(EmptyTip:SetUnit("target") == 1)
+        local mn, mx = EmptyTipStatusBar:GetMinMaxValues()
+        assert(mn == 0 and mx == 0, "the raw maximum: " .. mn .. "," .. mx)
+    "#,
+    )
+    .unwrap();
+    s.tick(0.0);
+    assert_eq!(fill(&s), Some(([0.0, 0.0, 0.0, 1.0], 0.0)), "empty across");
     assert!(s.take_errors().is_empty());
 }

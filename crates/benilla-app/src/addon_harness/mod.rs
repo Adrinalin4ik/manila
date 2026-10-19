@@ -143,6 +143,8 @@ fn stock_vm(root: &Path, registry: &[benilla_ui::script::AddOnInfo]) -> Result<U
     // A time bound, so one non-terminating addon cannot stall the survey: about 50x the heaviest
     // corpus addon (Enchantrix, 4M instructions), so a runaway reports in about a second.
     script.set_instruction_budget(ADDON_INSTRUCTION_BUDGET);
+    // A fixed `rand` seed, so two survey runs of an addon that draws at load agree.
+    script.lua().srand(1);
     script.set_screen_size(1024.0, 768.0);
     // The saved-variable roots are `None`, so a survey never reads or writes a player's; the
     // AddOns root is passed, so `LoadAddOn("<folder addon>")` does not answer `MISSING`.
@@ -605,17 +607,50 @@ fn drive_session_start(
             script.load_addon_row(&mut host, dependent, false, false);
         }
     }
-    for event in ["VARIABLES_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD"] {
-        script.fire_event(event, Vec::new());
-    }
-    for _ in 0..10 {
-        script.tick(0.1);
-    }
+    enter_world(script);
     let raised = script.errors().split_off(before);
     raised
         .into_iter()
         .filter(|e| !raised_inside_another_addons_own_file(e, name, installed))
         .collect()
+}
+
+/// The session start after the addons' own `ADDON_LOADED`: the load's tail, `VARIABLES_LOADED` and
+/// the `PLAYER_LOGIN` arm (`finish_ui_load_with`'s order, with no saved file), then the live
+/// client's world-enter cascade ([`UiScript::fire_world_enter`]: `PLAYER_LOGIN`,
+/// `PLAYER_ENTERING_WORLD`, the minimap and quest-log steps and their events, in its sound
+/// bracket), a target, then ten ticks of 0.1 s ([`drive_session_start`] says why). `"player"`
+/// already names guid 1 ([`seat_a_session`]), as the live feed seats it before the cascade.
+///
+/// The target comes after `PLAYER_ENTERING_WORLD`, with the argless `PLAYER_TARGET_CHANGED` that
+/// selecting one signals (`0x493540`): the interface is built (`0x48fbf0`) before the enter cascade
+/// (`0x4908c0`), and a selection needs its object in the world, so no load sees a target. Seated
+/// earlier, `TargetFrame_OnLoad`'s `TargetFrame_Update()` (`TargetFrame.lua:20`) indexes
+/// `TargetofTargetFrame`, which `TargetFrame.xml` declares later, before its `RegisterEvent` calls.
+fn enter_world(script: &mut UiScript) {
+    script.fire_event("VARIABLES_LOADED", Vec::new());
+    script.arm_player_login();
+    script.fire_world_enter();
+    script.set_unit(
+        "target",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Target Dummy".into()),
+            health: 80,
+            max_health: 100,
+            level: 60,
+            power_type: 0,
+            power: 50,
+            max_power: 100,
+            class: Some("Warrior".into()),
+            class_file: Some("WARRIOR".into()),
+            ..Default::default()
+        }),
+    );
+    script.fire_event("PLAYER_TARGET_CHANGED", Vec::new());
+    for _ in 0..10 {
+        script.tick(0.1);
+    }
 }
 
 /// Does this raise belong to another installed addon's file? A library that fails is its own row;
@@ -1017,7 +1052,7 @@ pub fn surface() -> Vec<(String, String)> {
         .eval(
             r#"
             local out = {}
-            for k, v in pairs(_G) do
+            for k, v in pairs(getfenv(0)) do
               if type(k) == "string" then
                 out[table.getn(out) + 1] = k .. "\t" .. type(v)
               end
@@ -1129,7 +1164,7 @@ fn seat_a_session(script: &mut UiScript) {
     //
     // One buff, one target and one action with a running cooldown, so an addon that only draws when
     // there is content (a buff bar, a target frame, cooldown text) is separated from one that
-    // failed.
+    // failed. The target is seated at world entry ([`enter_world`]).
     // The player's guid, which a token resolves to before its aura list is read.
     script.set_unit_guids(&benilla_ui::script::UnitGuids {
         player: 1,
@@ -1144,22 +1179,6 @@ fn seat_a_session(script: &mut UiScript) {
         cancelable: true,
         ..Default::default()
     }]);
-    script.set_unit(
-        "target",
-        Some(benilla_ui::script::UnitState {
-            exists: true,
-            name: Some("Target Dummy".into()),
-            health: 80,
-            max_health: 100,
-            level: 60,
-            power_type: 0,
-            power: 50,
-            max_power: 100,
-            class: Some("Warrior".into()),
-            class_file: Some("WARRIOR".into()),
-            ..Default::default()
-        }),
-    );
     script.set_action(
         1,
         Some(benilla_ui::script::ActionSlot {
@@ -1184,45 +1203,47 @@ fn seat_a_session(script: &mut UiScript) {
     // A spellbook (seated below) and a quest log. An empty book fails `TheoryCraftEngine.lua:306`
     // (`for i=1, numSpells` off `GetSpellTabInfo(1)`); two tabs, four spells, `Attack` in slot 1.
     // The quest log is a zone header row (`isHeader`), an in-progress quest with one objective done
-    // and one not, and a complete one (`complete = 1`); failed (-1) and timed quests are not
-    // seated.
+    // and one not, and a complete one (`complete = 1`) with its one objective met, rows by level
+    // (`0x4decd9`); failed (-1) and timed quests are not seated.
     {
-        use benilla_ui::script::{QuestLogEntryView, QuestLogObjectiveView, QuestLogState};
-        let objective = |text: &str, cur: u32, req: u32| QuestLogObjectiveView {
-            text: text.into(),
-            kind: "monster".into(),
-            finished: cur >= req,
-            cur,
-            req,
-        };
-        let header = QuestLogEntryView {
-            quest_id: 0,
-            title: "Elwynn Forest".into(),
-            is_header: true,
+        use benilla_ui::script::{QuestObjectiveView, QuestRecordView, QuestSlotView};
+        let kill = |entry: u32, need: u32| QuestObjectiveView {
+            creature_or_go: entry,
+            required_count: need,
             ..Default::default()
         };
-        let in_progress = QuestLogEntryView {
+        let record = |title: &str, level: u32| QuestRecordView {
+            title: title.into(),
+            level,
+            zone_or_sort: 12,
+            header: "Elwynn Forest".into(),
+            ..Default::default()
+        };
+        let mut in_progress = record("The Fargodeep Mine", 7);
+        in_progress.objectives[0] = kill(40, 12);
+        in_progress.objectives[1] = kill(475, 6);
+        script.seed_quest_record(62, in_progress);
+        let mut complete = record("Kobold Candles", 8);
+        complete.objectives[0] = kill(476, 8);
+        script.seed_quest_record(176, complete);
+        script.set_quest_creature_name(40, "Kobold Miner".into());
+        script.set_quest_creature_name(475, "Kobold Vermin".into());
+        script.set_quest_creature_name(476, "Kobold Laborer".into());
+        let mut slots = [QuestSlotView::default(); benilla_ui::script::QUEST_LOG_SLOTS];
+        slots[0] = QuestSlotView {
             quest_id: 62,
-            title: "The Fargodeep Mine".into(),
-            level: 10,
-            objectives: vec![
-                objective("Kobold Miner slain: 8/12", 8, 12),
-                objective("Kobold Vermin slain: 6/6", 6, 6),
-            ],
+            counters: [8, 6, 0, 0],
             ..Default::default()
         };
-        let done = QuestLogEntryView {
+        slots[1] = QuestSlotView {
             quest_id: 176,
-            title: "Kobold Candles".into(),
-            level: 8,
-            complete: 1,
+            counters: [8, 0, 0, 0],
+            state: 0x01,
             ..Default::default()
         };
-        script.set_quest_log(QuestLogState {
-            entries: vec![header, in_progress, done],
-            num_quests: 2,
-            hidden_quest_ids: Vec::new(),
-        });
+        script.set_quest_log_player(true);
+        script.quest_log_changed(slots);
+        script.flush_quest_log_refires();
     }
 
     // The purse: 12_345_678 copper (1234g 56s 78c), every denomination non-zero, so a coin
@@ -1247,7 +1268,7 @@ fn seat_a_session(script: &mut UiScript) {
         script.set_container(
             0,
             Some(benilla_ui::script::ContainerState {
-                name: Some("Backpack".into()),
+                name: None,
                 num_slots: 16,
                 slots,
             }),
@@ -1402,7 +1423,7 @@ fn globals_of(script: &UiScript) -> BTreeSet<String> {
     script
         .eval::<Vec<String>>(
             "local out = {} \
-             for k in pairs(_G) do if type(k) == 'string' then table.insert(out, k) end end \
+             for k in pairs(getfenv(0)) do if type(k) == 'string' then table.insert(out, k) end end \
              return out",
         )
         .unwrap_or_default()
@@ -3676,6 +3697,80 @@ mod dependency_tests {
         script
     }
 
+    /// The stock interface loads clean with no target, as 1.12 loads it before world entry, and
+    /// the target frame shows the target seated at world entry.
+    #[test]
+    fn the_target_is_seated_after_the_interface_loads() {
+        benilla_formats::wow_data_or_skip!();
+        let mut s = seated_vm_reporting_failures();
+        assert!(
+            s.eval::<bool>("return UnitExists('target') == nil")
+                .unwrap(),
+            "1.12 loads the interface before world entry, with no target"
+        );
+        assert!(!s.frame_visible("TargetFrame"));
+
+        enter_world(&mut s);
+        assert!(s.errors().is_empty(), "{:#?}", s.errors());
+        assert_eq!(
+            s.eval::<String>("return UnitName('target')").unwrap(),
+            "Target Dummy"
+        );
+        assert!(
+            s.frame_visible("TargetFrame"),
+            "the target frame registered its events at load, so world entry shows the target"
+        );
+    }
+
+    /// The harness enters the world through the client's cascade (`0x4908c0`), not a list of its
+    /// own: `PLAYER_LOGIN` once, then `PLAYER_ENTERING_WORLD`, then the quest log's rebuild and its
+    /// `QUEST_LOG_UPDATE` (`0x4909a1`), every handler inside the sound bracket (`0x4908d5`).
+    #[test]
+    fn the_world_entry_is_the_clients_cascade() {
+        let mut s = UiScript::new().unwrap();
+        seat_a_session(&mut s);
+        s.run(
+            r#"
+            Seen = {}
+            local f = CreateFrame("Frame")
+            for _, e in ipairs({ "VARIABLES_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD",
+                                 "QUEST_LOG_UPDATE" }) do
+                f:RegisterEvent(e)
+            end
+            f:SetScript("OnEvent", function()
+                table.insert(Seen, event)
+                if event == "PLAYER_ENTERING_WORLD" then PlaySound("igMainMenuOpen") end
+            end)
+            "#,
+        )
+        .unwrap();
+        s.take_sounds();
+        enter_world(&mut s);
+        assert!(s.errors().is_empty(), "{:#?}", s.errors());
+        let seen = s.eval::<String>("return table.concat(Seen, ' ')").unwrap();
+        assert!(
+            seen.starts_with(
+                "VARIABLES_LOADED PLAYER_LOGIN PLAYER_ENTERING_WORLD QUEST_LOG_UPDATE"
+            ),
+            "{seen}"
+        );
+        assert_eq!(seen.matches("PLAYER_LOGIN").count(), 1, "{seen}");
+        assert!(
+            s.take_sounds().is_empty(),
+            "the cascade's handlers are silent"
+        );
+    }
+
+    /// [`seated_vm`], failing on any load failure of the stock interface.
+    fn seated_vm_reporting_failures() -> UiScript {
+        let mut script = UiScript::new().unwrap();
+        script.set_screen_size(1024.0, 768.0);
+        seat_a_session(&mut script);
+        let failures = crate::ui_script::load_default_ui(&script);
+        assert!(failures.is_empty(), "{failures:#?}");
+        script
+    }
+
     /// The seated session is visible through the Lua surface an addon sees, so a seat that silently
     /// fails to take is caught.
     #[test]
@@ -3684,10 +3779,10 @@ mod dependency_tests {
 
         // The backpack: 16 slots, two filled.
         assert_eq!(s.eval::<i64>("return GetContainerNumSlots(0)").unwrap(), 16);
-        assert_eq!(
-            s.eval::<String>("return GetBagName(0)").unwrap(),
-            "Backpack"
-        );
+        // Named by the stock global, empty where no interface defines it (`0x703bf0`).
+        assert!(s
+            .eval::<bool>("return GetBagName(0) == (BACKPACK_TOOLTIP or '')")
+            .unwrap());
         assert_eq!(
             s.eval::<i64>("local _, c = GetContainerItemInfo(0, 5) return c")
                 .unwrap(),

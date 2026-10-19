@@ -15,7 +15,8 @@ use benilla_protocol::EntityKind;
 use crate::aura_visual::AuraProc;
 use crate::entities::ItemDisplays;
 use crate::items::{ItemObject, Items};
-use crate::net::{FieldChanged, NetCommands, NetEntity, ObjectStore};
+use crate::net::{FieldChanged, NetEntity, ObjectStore};
+use crate::query_cache::Ask;
 use benilla_assets::{LockRecover, WorldAssets};
 
 use super::{
@@ -225,7 +226,6 @@ pub(super) fn load_spell_visuals(mut commands: Commands, assets: Option<Res<Worl
 pub(super) struct WeaponVisualSrc<'w, 's> {
     displays: Option<Res<'w, ItemDisplays>>,
     items: Option<Res<'w, Items>>,
-    net: Option<Res<'w, NetCommands>>,
     // `Without<ItemObject>`: an item's store overlaps the unit indices, so a unit read of it
     // answers item fields.
     units: Query<'w, 's, (Option<&'static NetEntity>, &'static ObjectStore), Without<ItemObject>>,
@@ -242,7 +242,8 @@ impl WeaponVisualSrc<'_, '_> {
             EntityKind::Player => s
                 .player_visible_item_entry(17)
                 .filter(|e| *e != 0)
-                .and_then(|entry| self.items.as_deref()?.held(entry, self.net.as_deref()?))
+                // The visible item's change looked it up (`0x5ed764`); this only reads.
+                .and_then(|entry| self.items.as_deref()?.held(entry, Ask::Read))
                 .map(|t| t.display_info_id),
             _ => None,
         }
@@ -1039,6 +1040,12 @@ pub(crate) fn arm_aura_state_fx(
         // Occupied slots in ascending order, deduped by first slot: one state instance per spell
         // however many casters hold it. `0x604d00` removes first, then adds by slot ascending
         // (`0x604e7b`-`0x604e85`), so the highest new slot's effect ends at the head.
+        //
+        // Deviation: a spell's state kit and body procs are reaped only once no slot holds the
+        // spell. The reference's removal of one slot (`0x612320` → `0x5ff290`) stops every
+        // effect of that spell on the unit (`0x614150(spell, 1)` at `0x5ff2d2`, and its procs
+        // through `0x60d150` and `0x5ff320`), even while another slot holds the same spell: it
+        // drops a visual the server says still holds.
         let mut cur: Vec<u32> = Vec::new();
         for a in store.0.unit_auras() {
             if !cur.contains(&a.spell_id) {

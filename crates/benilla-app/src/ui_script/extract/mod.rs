@@ -434,9 +434,10 @@ pub(crate) fn seat_text_measurer(script: &mut UiScript, atlas: &UiFontAtlas, sea
 pub(crate) fn tick_script(
     script: Option<NonSendMut<UiScript>>,
     window: Query<&Window, With<PrimaryWindow>>,
-    // Real time: the reference's `GetTime` is the OS tick count, and virtual time clamps each
-    // delta to 250 ms, so a stall would leave every GetTime-anchored timer running long.
-    time: Res<Time<Real>>,
+    // The paced frame step, unclamped, as 1.12.1 hands `OnUpdate` its frame time (`0x76b2c0`):
+    // not `Time<Real>`, which pipelined rendering mis-splits, nor `Time<Virtual>`, which clamps a
+    // stall to 250 ms and which the capture harness pauses.
+    step: Res<benilla_world::frame_pace::FrameStep>,
     mut ui_clock: ResMut<super::UiClock>,
     mut font_atlas: Option<ResMut<UiFontAtlas>>,
     // The booth seam's DPI, and the pane map cleared when the VM or the window is gone.
@@ -536,7 +537,7 @@ pub(crate) fn tick_script(
     };
     {
         let _span = bevy::log::info_span!("ui_script: tick").entered();
-        let resized = script.set_screen_size(w / s, if h > 0.0 { h / s } else { 768.0 });
+        let resized = script.set_window_size(w, h);
         // The UI scale is `UIParent`'s, which only the in-game state has; the glue lays out on
         // the root alone (`0x46dd30`).
         if script.vm_kind() == benilla_ui::script::VmKind::InGame {
@@ -559,19 +560,15 @@ pub(crate) fn tick_script(
             if resized || rescaled {
                 super::manifest::on_screen_resized(&script);
             }
+        } else if resized && script.vm_kind() == benilla_ui::script::VmKind::Glue {
+            super::glue::on_glue_screen_resized(&script);
         }
-        script.tick(time.delta_secs());
+        script.tick(step.delta.as_secs_f32());
     }
-    // The VM's clock anchored at `Time<Real>`'s last update, whose deltas it accumulates; every
-    // `Instant` to `GetTime` conversion goes through this pair, never `Instant::now()`.
+    // The VM's clock anchored at the instant the paced clock stands at, which moves by the same
+    // steps; every `Instant` to `GetTime` conversion goes through this pair, never `Instant::now()`.
     *ui_clock = super::UiClock {
-        // `Time<Real>::last_update()` returns `bevy_platform::time::Instant`, which on wasm32 is
-        // `web_time::Instant` (the `web` Bevy feature default_platform pulls in) — a distinct
-        // type from `bevy::platform::time::Instant` there, unlike on native where they're the same type by
-        // alias. Fall back with Bevy's own `Instant::now` so this compiles on both.
-        anchor: time
-            .last_update()
-            .unwrap_or_else(bevy::platform::time::Instant::now),
+        anchor: step.at,
         ui_now: script.now(),
     };
     let us_tick = lap();
@@ -614,7 +611,8 @@ pub(crate) fn tick_script(
                             path: r.font.as_deref(),
                             height: crate::ui_text::drawn_px(r.height, None, s * r.scale),
                             outline: r.outline, // the outline biases the stepped width
-                            spacing: 0.0,       // the gap moves rows, never counts them
+                            monochrome: false,
+                            spacing: 0.0, // the gap moves rows, never counts them
                             // The drawn shadow seeds each row, as the draw's does.
                             shadow_x: r.shadow_x * s * r.scale,
                             alpha_gradient: None,
@@ -777,7 +775,8 @@ pub(super) fn paint_script(
     let mut out = Vec::new();
     let mut assets = world_assets;
     let mut minimap_slot = None;
-    // Message lines' link spans for the click hit-test; region FontStrings' are not collected.
+    // The link spans of text with a link owner, scrolling message lines and SimpleHTML blocks,
+    // for the click hit-test; other text's are not collected.
     let mut link_spans: Vec<(
         benilla_ui::widget::FrameHandle,
         benilla_ui::layout::Rect,
@@ -1288,12 +1287,32 @@ fn convert_entry(
                 });
                 return;
             }
+            // The model-unit ladder `0x76d1a0` derives, shared by a file's tile and a copy's
+            // booth.
+            let dpi = booths.tiles.dpi.max(0.01);
+            let aspect = if h > 0.0 { w / h } else { 4.0 / 3.0 };
+            let diag = (aspect * aspect + 1.0).sqrt();
+            let layout = eq.scale;
+            let units = crate::portrait::PaneUnits {
+                // 1 model unit is `1280 · modelScale · layoutScale` FrameXML units (`0x76d1a0`).
+                px_per_unit: 1280.0 * model_scale * layout * s * dpi,
+                // `SetPosition` is in layout units: `768 · √(a²+1)` FrameXML per unit.
+                pos_px_per_unit: 768.0 * diag * layout * s * dpi,
+                // A particle's half-extent: eye space, neither scale (`0x7b2a50`).
+                star_px_per_unit: 768.0 * diag * s * dpi,
+                position: Vec3::new(position.0, position.1, position.2),
+                // The perspective root, in model units: translate `pos · layoutScale`, rotate
+                // `facing`, scale `G48 · (5/3) · modelScale · layoutScale`, where `G48 · (5/3)` is
+                // the 4:3 renormalizer `√((4/3)²+1)/√(a²+1)` (`0x80655c`); the near and far planes
+                // do not scale with it.
+                root_scale: (5.0 / 3.0) / diag * model_scale * layout,
+                root_pos: Vec3::new(position.0, position.1, position.2) * layout,
+            };
             // A character pane publishes an idempotent request; `portrait::panes` builds the
             // pane's booth and draws its quad each frame the engine lists the pane with a copy.
             // Published with a file too: a `SetUnit` pending over it builds the copy that
             // replaces the file.
             if character && rect.width() > 0.0 && rect.height() > 0.0 {
-                let dpi = booths.tiles.dpi.max(0.01);
                 booths.character.insert(
                     handle,
                     crate::portrait::PaneRequest {
@@ -1306,6 +1325,7 @@ fn convert_entry(
                             (rect.width() * dpi).round().max(1.0) as u32,
                             (rect.height() * dpi).round().max(1.0) as u32,
                         ),
+                        units,
                     },
                 );
             }
@@ -1313,10 +1333,6 @@ fn convert_entry(
             // its quad each frame, so a cell packed later needs no re-conversion.
             if let Some(path) = model.as_deref() {
                 let tiles = &mut booths.tiles;
-                let dpi = tiles.dpi.max(0.01);
-                let aspect = if h > 0.0 { w / h } else { 4.0 / 3.0 };
-                let diag = (aspect * aspect + 1.0).sqrt();
-                let layout = eq.scale;
                 let size_px = UVec2::new(
                     (rect.width() * dpi).round().max(1.0) as u32,
                     (rect.height() * dpi).round().max(1.0) as u32,
@@ -1326,21 +1342,13 @@ fn convert_entry(
                     crate::ui_models::TileRequest {
                         path: path.to_string(),
                         size_px,
-                        // 1 model unit is `1280 · modelScale · layoutScale` FrameXML units
-                        // (`0x76d1a0`).
-                        px_per_unit: 1280.0 * model_scale * layout * s * dpi,
-                        // `SetPosition` is in layout units: `768 · √(a²+1)` FrameXML per unit.
-                        pos_px_per_unit: 768.0 * diag * layout * s * dpi,
-                        // A particle's half-extent: eye space, neither scale (`0x7b2a50`).
-                        star_px_per_unit: 768.0 * diag * s * dpi,
+                        px_per_unit: units.px_per_unit,
+                        pos_px_per_unit: units.pos_px_per_unit,
+                        star_px_per_unit: units.star_px_per_unit,
                         facing,
-                        position: Vec3::new(position.0, position.1, position.2),
-                        // The perspective root, in model units: translate `pos · layoutScale`,
-                        // rotate `facing`, scale `G48 · (5/3) · modelScale · layoutScale`, where
-                        // `G48 · (5/3)` is the 4:3 renormalizer `√((4/3)²+1)/√(a²+1)`
-                        // (`0x80655c`); the near and far planes do not scale with it.
-                        root_scale: (5.0 / 3.0) / diag * model_scale * layout,
-                        root_pos: Vec3::new(position.0, position.1, position.2) * layout,
+                        position: units.position,
+                        root_scale: units.root_scale,
+                        root_pos: units.root_pos,
                         camera,
                         light,
                         fog,
@@ -1373,7 +1381,7 @@ fn convert_entry(
             path,
             color,
             gradient,
-            additive,
+            blend,
             tex_coords,
             wrap,
             circular,
@@ -1504,7 +1512,7 @@ fn convert_entry(
                 uv_clamp,
                 color,
                 corner_colors,
-                additive,
+                blend,
                 clip,
                 // `SetRotation` is counter-clockwise-positive, `UiQuad::rotation` clockwise.
                 rotation: -rotation,
@@ -1556,12 +1564,14 @@ fn convert_entry(
             text_height,
             shadow,
             outline,
+            monochrome,
             spacing,
             alpha_gradient,
             world_seat,
             edit_line,
             non_space_wrap,
             max_lines,
+            link_owner,
         } => {
             // No atlas (no client data, or an unreadable font) draws no text.
             let (Some(atlas), Some(text)) = (font_atlas.as_deref_mut(), text) else {
@@ -1579,12 +1589,14 @@ fn convert_entry(
                     text_height,
                     shadow,
                     outline,
+                    monochrome,
                     spacing,
                     alpha_gradient,
                     world_seat,
                     edit_line,
                     non_space_wrap,
                     max_lines,
+                    link_owner,
                 },
                 text::TextHost {
                     z: eq.z,
@@ -1721,7 +1733,7 @@ mod cursor_quad_tests {
         assert_eq!(q.rect.height(), 32.0);
         assert_eq!(q.z_key, u128::MAX);
         assert!(q.texture.is_some());
-        assert!(!q.additive);
+        assert_eq!(q.blend, benilla_ui::script::BlendMode::Blend);
     }
 }
 
@@ -1771,6 +1783,7 @@ mod clip_plumb_tests {
         app.init_resource::<Time>();
         app.init_resource::<Time<Real>>();
         app.init_resource::<crate::ui_script::UiClock>();
+        app.init_resource::<benilla_world::frame_pace::FrameStep>();
         // The uiScale dial at 1.0, the identity.
         app.init_resource::<crate::ui_script::UiScaleCvar>();
         app.world_mut().spawn((
@@ -1798,10 +1811,13 @@ mod clip_plumb_tests {
 
         // WoW space: bottom 468, left 0, top 668, right 300; y-down through the 768 window, the
         // top is 100 and the bottom 300.
-        assert_eq!(
-            marker.clip,
-            Some(Rect::new(0.0, 100.0, 300.0, 300.0)),
-            "the engine's ScrollFrame clip survives the y-up→y-down flip into UiQuad::clip"
+        // Within the getters' sub-unit drift (`benilla_ui::test_support::TOL`).
+        let clip = marker.clip.expect("clipped");
+        let want = Rect::new(0.0, 100.0, 300.0, 300.0);
+        assert!(
+            (clip.min - want.min).abs().max_element() < 1e-3
+                && (clip.max - want.max).abs().max_element() < 1e-3,
+            "the engine's ScrollFrame clip survives the y-up→y-down flip into UiQuad::clip: {clip:?}"
         );
     }
 
@@ -1819,10 +1835,12 @@ mod clip_plumb_tests {
             .find(|q| q.color[0] == 1.0 && q.color[1] == 0.0 && q.color[2] == 0.0)
             .expect("the colored marker quad extracted");
 
-        assert_eq!(
-            marker.clip,
-            Some(Rect::new(0.0, 100.0, 300.0, 300.0)),
-            "dial 0.5 moves nothing outside UIParent"
+        let clip = marker.clip.expect("clipped");
+        let want = Rect::new(0.0, 100.0, 300.0, 300.0);
+        assert!(
+            (clip.min - want.min).abs().max_element() < 1e-3
+                && (clip.max - want.max).abs().max_element() < 1e-3,
+            "dial 0.5 moves nothing outside UIParent: {clip:?}"
         );
     }
 
@@ -1857,6 +1875,7 @@ mod clip_plumb_tests {
         app.init_resource::<Time>();
         app.init_resource::<Time<Real>>();
         app.init_resource::<crate::ui_script::UiClock>();
+        app.init_resource::<benilla_world::frame_pace::FrameStep>();
         app.init_resource::<crate::ui_script::UiScaleCvar>();
         app.world_mut().spawn((
             Window {
@@ -2067,7 +2086,8 @@ mod extract_gate_tests {
             .iter()
             .find(|q| q.texture.is_none() && q.corner_colors.is_some())
             .expect("the fade draws, with its corners");
-        let (top, bottom) = ([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.5]);
+        let half = benilla_ui::color::alpha_f32(benilla_ui::color::frame_alpha_byte(0.5));
+        let (top, bottom) = ([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, half]);
         assert_eq!(fade.corner_colors, Some([top, top, bottom, bottom]));
     }
 
@@ -2088,6 +2108,7 @@ mod extract_gate_tests {
         app.init_resource::<Time>();
         app.init_resource::<Time<Real>>();
         app.init_resource::<crate::ui_script::UiClock>();
+        app.init_resource::<benilla_world::frame_pace::FrameStep>();
         app.init_resource::<crate::ui_script::UiScaleCvar>();
         app.world_mut().spawn((
             Window {

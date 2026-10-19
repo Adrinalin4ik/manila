@@ -43,7 +43,7 @@ fn shipped_action_bar_drives_end_to_end() {
             frames += built;
         }
     }
-    assert_eq!(
+    benilla_ui::assert_near!(
         frames, 80,
         "what the three stock files declare: MainMenuBar.xml's 8 — the bar, the XP StatusBar, \
          the overlay frame, the max-level rail, the art frame, the performance bar and its button, \
@@ -97,9 +97,9 @@ fn shipped_action_bar_drives_end_to_end() {
             .and_then(|q| q.rect)
     };
     let r = icon("Interface\\Icons\\Ability_SteelMelee").expect("bonus button 1 icon");
-    assert_eq!((r.left, r.bottom, r.right, r.top), (9.0, 4.0, 45.0, 40.0));
+    benilla_ui::assert_near!((r.left, r.bottom, r.right, r.top), (9.0, 4.0, 45.0, 40.0));
     let r2 = icon("Interface\\Icons\\Ability_Rogue_Ambush").expect("bonus button 2 icon");
-    assert_eq!(r2.left, 9.0 + 42.0); // bonus button 2 left = 51
+    benilla_ui::assert_near!(r2.left, 9.0 + 42.0); // bonus button 2 left = 51
     let rings = quads
         .iter()
         .filter(|q| {
@@ -107,8 +107,9 @@ fn shipped_action_bar_drives_end_to_end() {
                     if p.contains("UI-Quickslot2"))
         })
         .count();
-    assert_eq!(
-        rings, 2,
+    benilla_ui::assert_near!(
+        rings,
+        2,
         "the two occupied bonus buttons; every empty main and bonus slot is hidden"
     );
     let icons = quads
@@ -118,12 +119,12 @@ fn shipped_action_bar_drives_end_to_end() {
                     if p.contains("Icons"))
         })
         .count();
-    assert_eq!(icons, 2, "empty slots draw no icon quad");
+    benilla_ui::assert_near!(icons, 2, "empty slots draw no icon quad");
 
     // A click at (26, 22) lands on `BonusActionButton1` and queues its paged id, 73.
     s.mouse_button(26.0, 22.0, "LeftButton", true);
     s.mouse_button(26.0, 22.0, "LeftButton", false);
-    assert_eq!(action_ids(&mut s), vec![73]);
+    benilla_ui::assert_near!(action_ids(&mut s), vec![73]);
 
     // `ACTIONBUTTONn` runs `ActionButtonDown/Up(n)` on the key's two edges (Bindings.xml:121-127).
     s.run("ActionButtonUp(2)").unwrap();
@@ -141,7 +142,7 @@ fn shipped_action_bar_drives_end_to_end() {
             .count()
     };
     s.run("ActionButtonDown(2)").unwrap();
-    assert_eq!(depressed(&s), 1, "key DOWN shows the pushed texture");
+    benilla_ui::assert_near!(depressed(&s), 1, "key DOWN shows the pushed texture");
     assert_eq!(
         s.eval::<String>("return BonusActionButton2:GetButtonState()")
             .unwrap(),
@@ -149,8 +150,8 @@ fn shipped_action_bar_drives_end_to_end() {
         "with the overlay up a key drives the BONUS button (ActionButton.lua:15-22)"
     );
     s.run("ActionButtonUp(2)").unwrap();
-    assert_eq!(action_ids(&mut s), vec![74], "key '2' fires action 74");
-    assert_eq!(depressed(&s), 0, "key UP restores the normal state");
+    benilla_ui::assert_near!(action_ids(&mut s), vec![74], "key '2' fires action 74");
+    benilla_ui::assert_near!(depressed(&s), 0, "key UP restores the normal state");
 
     s.set_bonus_bar_offset(0);
     s.fire_event("UPDATE_BONUS_ACTIONBAR", vec![]);
@@ -166,7 +167,7 @@ fn shipped_action_bar_drives_end_to_end() {
                     if p.contains("Icons"))
         })
         .count();
-    assert_eq!(icons_after, 0, "re-page to an empty page clears the icons");
+    benilla_ui::assert_near!(icons_after, 0, "re-page to an empty page clears the icons");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -283,8 +284,8 @@ fn state_feedback_drives_cooldown_checked_and_usable_through_the_xml() {
     });
     let c = icon_color.expect("icon quad").expect("vertex color set");
     assert_eq!(
-        (c[0], c[1], c[2]),
-        (0.5, 0.5, 1.0),
+        [c[0], c[1], c[2], 1.0],
+        benilla_ui::color::quant::drawn([0.5, 0.5, 1.0, 1.0]),
         "the ref's out-of-power blue-grey"
     );
 
@@ -1240,7 +1241,7 @@ fn shipped_bag_frame_drives_end_to_end() {
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots,
         }),
@@ -1390,7 +1391,7 @@ fn state_events_leave_empty_wells_untinted() {
     }
     assert_eq!(
         oom_icon,
-        Some([0.5, 0.5, 1.0, 1.0]),
+        Some(benilla_ui::color::quant::drawn([0.5, 0.5, 1.0, 1.0])),
         "the occupied button still tints OOM blue"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());

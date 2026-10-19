@@ -30,6 +30,9 @@ pub type TextureSizeFn = dyn Fn(&str) -> Option<(u32, u32)>;
 /// The host's answer to whether a font path loads.
 pub type FontProbe = std::rc::Rc<dyn Fn(&str) -> bool>;
 
+/// The host's lister of the macro icon chooser's paths, `0x4f0090`'s three sources.
+pub type MacroIconSource = std::rc::Rc<dyn Fn() -> Vec<String>>;
+
 /// Minted id to handle, indexed directly: ids are dense and every scripted call looks one up.
 #[derive(Debug, Clone)]
 pub(crate) struct IdMap<T>(Vec<Option<T>>);
@@ -84,6 +87,27 @@ pub(crate) fn node_deferred(
     }
 }
 
+/// What the Lua error handler is called with for one caught error: the value an error carries,
+/// its bytes as Lua wrote them, or a host's own text.
+#[derive(Clone, Debug)]
+pub(crate) enum HandlerArg {
+    Text(String),
+    Error(mlua::Error),
+}
+
+impl HandlerArg {
+    /// The one argument, in `lua`.
+    pub(crate) fn value(self, lua: &mlua::Lua) -> mlua::Result<mlua::Value> {
+        Ok(match self {
+            HandlerArg::Text(t) => mlua::Value::String(lua.create_string(t)?),
+            HandlerArg::Error(e) => match e.lua_value(lua) {
+                Some(v) => v,
+                None => mlua::Value::String(lua.create_string(e.lua_bytes(lua))?),
+            },
+        })
+    }
+}
+
 /// The Rust-side model behind the Lua VM, in `lua.app_data`. It holds no Lua handles, each of
 /// which is a collector root.
 #[derive(Clone)]
@@ -111,6 +135,10 @@ pub(crate) struct Model {
     pub(crate) addons_saved_reader: Option<super::addon::SharedSavedReader>,
     /// The host's font engine, so a metric answers inside the asking call, not a frame later.
     pub(crate) measurer: Option<super::measure::SharedMeasurer>,
+    /// The tooltip sizer's measures by key ([`super::tooltip`]): the clear's width reset and the
+    /// sizer's probes key a wrapped line three ways a frame, so the hover loops' per-frame rebuild
+    /// asks the font engine nothing after the first. Emptied with the engine's metrics.
+    pub(crate) tooltip_measures: HashMap<(u64, bool), super::MeasuredText>,
     /// Whether a texture path resolves (patch chain or loose addon file), so the path form of
     /// `SetTexture` returns the reference's 1 or nil inline (`0x79bb40`). `None` answers nil.
     pub(crate) texture_probe: Option<TextureProbe>,
@@ -139,14 +167,26 @@ pub(crate) struct Model {
     pub(crate) framexml_debug: std::cell::Cell<i32>,
     /// The loads' records for `Logs\FrameXML.log` and the drains the host has yet to write.
     pub(crate) load_log: crate::status::LoadLog,
-    /// The FrameXML font registry, a namespace apart from templates (a font inherits only a font).
-    pub(crate) framexml_fonts:
-        std::cell::RefCell<std::collections::HashMap<String, crate::framexml::Element>>,
     pub(crate) arena: WidgetArena,
     /// Per-frame anchors, size and scale; every live frame has one from creation on.
     pub(crate) layout_inputs: HashMap<FrameHandle, LayoutInput>,
-    /// Each resolvable frame's rect from the last resolve.
-    pub(crate) resolved: HashMap<FrameHandle, Rect>,
+    /// Per dragged frame, its anchors and size as the scripts last set them: as they stood before
+    /// its first drag pin (`0x768430`), then each script `SetPoint`, `SetAllPoints`,
+    /// `ClearAllPoints`, `SetWidth` and `SetHeight` applied to it too, the engine's own writes
+    /// not. What a rebuild re-creates where the layout cache seats nothing
+    /// ([`crate::script::UiScript::reseat_user_placed`]).
+    pub(crate) drag_authored: HashMap<
+        FrameHandle,
+        (
+            crate::layout::Anchors,
+            crate::layout::Len,
+            crate::layout::Len,
+        ),
+    >,
+    /// Each resolvable frame's rect from the last resolve, in layout units: the resolver's own,
+    /// which its keep test, its getters and its anchors read; everything else reads
+    /// [`Self::frame_rect`].
+    pub(crate) frame_rects: HashMap<FrameHandle, Rect>,
     /// The anchor solver, kept across resolves so a steady round allocates nothing; scratch only.
     pub(crate) solver: LayoutSolver,
     /// Tier 2 of the resolve gate, the last converged inputs' fingerprint; `None` forces a resolve.
@@ -236,22 +276,22 @@ pub(crate) struct Model {
     /// Each frame's backdrop plate (`<Backdrop>` or `SetBackdrop`, the client's `frame+0x1ac`):
     /// its spec and the nine Texture regions it built.
     pub(crate) backdrops: HashMap<FrameHandle, backdrop::Installed>,
+    /// The own font of each EditBox, MessageFrame and ScrollingMessageFrame whose XML made one
+    /// (`+0x300`, `+0x320`, `+0x338`; [`super::font_block::own_font`]).
+    pub(crate) own_fonts: HashMap<FrameHandle, super::font::FontId>,
     /// `CSimpleHTML`'s state: element fonts `+0x350`, link format `+0x360`, content nodes `+0x340`.
     pub(crate) simple_html: simplehtml::SimpleHtmlStates,
-    /// Named `<Font>` objects by lowercased name, as 1.12 matches them with `SStrCmpI` (`0x783870`,
-    /// `0x7838c7`); read them only through `font_object`, where the fold lives.
-    pub(crate) font_objects_by_lower: HashMap<String, FontObject>,
-    /// A declared font's `inherits=` parent and what it sets itself, by lowercased name: the
-    /// live link a parent's setter walks ([`super::font::cascade`]).
-    pub(crate) font_links: HashMap<String, super::font::FontLink>,
+    /// Every font object, named or a widget's own, with its links ([`super::font::Fonts`]).
+    pub(crate) fonts: super::font::Fonts,
     /// Each region's rect while its valid bit is set: what its getters and a FontString's draw
     /// read (`GetRect 0x768320`, `0x7730b7`). A cleared region keeps its rect until its own next
-    /// invalidate, as `ClearAllPoints` queues no resolve (`0x767620`).
-    pub(crate) region_resolved: HashMap<RegionHandle, Rect>,
+    /// invalidate, as `ClearAllPoints` queues no resolve (`0x767620`). In layout units, as
+    /// [`Self::frame_rects`]; [`Self::region_rect`] reads it in the root's.
+    pub(crate) region_rects: HashMap<RegionHandle, Rect>,
     /// A Texture whose resolve failed: the rect its last good resolve placed it at, which it keeps
     /// drawing, as the failed resolve (`0x768d55`) leaves the quad `0x770670` wrote and its emit
-    /// checks only its texture (`0x7706e0`). Dropped when it resolves again.
-    pub(crate) region_kept: HashMap<RegionHandle, Rect>,
+    /// checks only its texture (`0x7706e0`). Dropped when it resolves again. In layout units.
+    pub(crate) region_kept_rects: HashMap<RegionHandle, Rect>,
 
     /// The next object id to mint; ids start at 1, since 0 is `SCREEN`.
     pub(crate) next_id: u32,
@@ -277,19 +317,15 @@ pub(crate) struct Model {
     pub(crate) on_update_model_frames: Vec<FrameHandle>,
     /// Per model file, a pane clock's sequences and bounds, read by the host off the `MD20`.
     pub(crate) model_facts: HashMap<String, std::sync::Arc<crate::widget::ModelFileFacts>>,
-    /// Model files still waiting for their facts, for the host to load; deduplicated.
-    pub(crate) model_facts_wanted: Vec<String>,
+    /// Model files still waiting for their facts, for the host to load; one per key.
+    pub(crate) model_facts_wanted: Vec<super::ModelWanted>,
     /// The model instances `SetModel` has made in this state, the last one's number.
     pub(crate) model_instances: u64,
     /// Event name to its frames in registration order, never a set: `SignalEvent` (`0x703e50`)
-    /// dispatches in that order across frames. Re-registering keeps a frame's position.
+    /// dispatches in that order across frames. Re-registering keeps a frame's position, and
+    /// `RegisterAllEvents` (`0x7023e0`) appends a frame to every event's list like a named one.
     pub(crate) event_to_frames: HashMap<String, Vec<FrameHandle>>,
     pub(crate) frame_events: HashMap<FrameHandle, HashSet<String>>,
-    /// `RegisterAllEvents` frames in registration order, dispatched after an event's own list and
-    /// cleared only by `UnregisterAllEvents`. Deviation: a flag, not the reference's append to
-    /// every event's list (`0x7023e0`, which orders by registration time and lets `UnregisterEvent`
-    /// drop one event), because events register here by name and no list of every name exists.
-    pub(crate) all_event_frames: Vec<FrameHandle>,
 
     /// The focused edit box (`0xcf4dc8`), taking all keys while visible; `None` admits `autoFocus`.
     pub(crate) focused_editbox: Option<FrameHandle>,
@@ -327,17 +363,19 @@ pub(crate) struct Model {
     /// when a double fires, and nothing else clears it, not hide, disable or the cursor leaving.
     pub(crate) last_click: HashMap<FrameHandle, f64>,
 
-    /// Frames the last resolve resized, `(id, width, height)`, owed `OnSizeChanged` outside it.
+    /// Frames the last resolve resized, `(id, width, height)` in layout units, owed `OnSizeChanged`
+    /// outside it.
     pub(crate) pending_size_changed: Vec<(u32, f32, f32)>,
-    /// Regions whose text emptied or filled since the last resolve, which names each one whose
-    /// node hash moved ([`Model::touch_layout_text`]).
-    pub(crate) text_flips: Vec<RegionHandle>,
+    /// Regions whose text emptied or filled ([`Model::touch_layout_text`]), or whose tooltip line
+    /// width the clear or the sizer wrote ([`Model::note_line_width`]), since the last resolve,
+    /// which names each one whose node hash moved.
+    pub(crate) content_writes: Vec<RegionHandle>,
 
     /// Script errors caught from `pcall`'d handlers, drained by the host each frame.
     pub(crate) errors: Vec<String>,
     /// Errors owed to `geterrorhandler()`, which the reference calls on each caught error; one the
     /// handler itself raises skips this queue, which stops the recursion.
-    pub(crate) pending_error_dispatch: Vec<String>,
+    pub(crate) pending_error_dispatch: Vec<HandlerArg>,
     /// The session's retained diagnostic log, deduplicated and bounded; `errors` drains each frame.
     pub(crate) diagnostics: super::diagnostics::DiagnosticLog,
     /// Non-fatal warnings for the host, such as a dropped `inherits=` template.
@@ -345,6 +383,11 @@ pub(crate) struct Model {
     /// The screen-root rect (`[bottom, left, top, right]`), the anchor base for top-level frames:
     /// 768 tall at scale 1, whatever the UI scale ([`super::ui_scale`]).
     pub(crate) screen: Rect,
+    /// The window aspect the screen-scale cells were set from ([`super::UiScript::set_window_size`]),
+    /// or `None` for a root the host gave in its own units, whose ratio sets them.
+    pub(crate) aspect: Option<f32>,
+    /// The layout space of `screen` under the cells `aspect` sets, kept with them.
+    pub(crate) space: crate::layout::LayoutSpace,
     /// The host's `uiScale`, which [`super::UiScript::apply_ui_scale`] makes `UIParent`'s scale.
     pub(crate) ui_scale_request: Option<f32>,
 
@@ -529,8 +572,8 @@ pub(crate) struct Model {
     /// Saved CVar values, set before any registration so a CVar starts at its saved value: the
     /// reference's table outlives `ReloadUI`, while ours is per VM.
     pub(crate) cvars_saved_base: HashMap<String, String>,
-    /// `(registered name, new value)` per Lua `SetCVar`, the app's sync and save cue.
-    pub(crate) cvar_changes: Vec<(String, String)>,
+    /// The mirror's writes in order, the app's sync and save cue.
+    pub(crate) cvar_changes: Vec<super::cvars::CvarWrite>,
     /// `(name, default)` per addon `RegisterCVar` that created a slot.
     pub(crate) cvar_registrations: Vec<(String, String)>,
     /// How many CVars Lua's `RegisterCVar` has created this process (`[0xb4e3c8]`), which nothing
@@ -558,10 +601,13 @@ pub(crate) struct Model {
     /// `RestartGx()` calls, the video window's apply button.
     pub(crate) restart_gx_asks: u32,
 
-    /// Globals `RegisterForSave` declared, in order: written at logout and re-run at load.
+    /// Globals `RegisterForSave` declared, in order: written at logout and read back at load.
     pub(crate) saved_names: Vec<String>,
     /// Saved-variables files that failed to load; the shutdown write leaves them untouched.
     pub(crate) held_saved_files: Vec<std::path::PathBuf>,
+    /// Addon saved-variables files that ran cleanly this session: the only ones the shutdown
+    /// renames for a scope that declares no names.
+    pub(crate) loaded_saved_files: Vec<std::path::PathBuf>,
 
     /// The key-binding table the Key Bindings window edits, with its account and character sets.
     pub(crate) keybinds: super::keybind::KeybindState,
@@ -589,8 +635,11 @@ pub(crate) struct Model {
     pub(crate) macros_generation: u64,
     /// Each macro's cached cast by 1-based index, from the app; an absent macro reads unbound.
     pub(crate) macro_bindings: HashMap<u32, macros::MacroBinding>,
-    /// The macro icon paths from `SpellIcon.dbc`, behind `GetMacroIconInfo`.
+    /// The macro icon chooser's paths, behind `GetMacroIconInfo`: `0x4f0090`'s listing of
+    /// `Interface\Icons\`, not `SpellIcon.dbc`.
     pub(crate) macro_icons: Vec<String>,
+    /// What builds `macro_icons` while it is empty; `None` builds nothing.
+    pub(crate) macro_icon_source: Option<MacroIconSource>,
     /// `ToggleSpellAutocast` ids for `CMSG_PET_SPELL_AUTOCAST` (`0x2F3`), which names a spell.
     pub(crate) pet_spell_autocasts: Vec<u32>,
     /// An auto-repeat or cast that `SpellStopCasting()` can stop, not a channel (`0x6e6e80`). Its
@@ -651,6 +700,9 @@ pub(crate) struct Model {
     pub(crate) battlefield_positions: Vec<super::battlefield_positions::BattlefieldPositionView>,
     pub(crate) battlefield_flag: Option<super::battlefield_positions::BattlefieldFlagView>,
     pub(crate) battlefield_icon_scale: f32,
+    /// The 0-based rows `GetBattlefieldPosition` read with no name: each call's name lookup passes
+    /// the callback `0x4ac190` (`0x4ac118`), which the app makes.
+    pub(crate) battlefield_position_lookups: Vec<usize>,
     pub(crate) battlefield_position_requests: u32,
     /// `CancelMeetingStoneRequest()` calls; the app gates on leadership.
     pub(crate) meeting_stone_cancels: u32,
@@ -661,6 +713,8 @@ pub(crate) struct Model {
     pub(crate) tutorial_bank: Option<Vec<u8>>,
     /// `FlagTutorial(n)` calls, 0-based and in range.
     pub(crate) tutorial_flag_requests: Vec<u32>,
+    /// `TriggerTutorial(id, 0)` asks the engine made (the quest log's turn-in test), 0-based.
+    pub(crate) tutorial_triggers: Vec<u32>,
     pub(crate) tutorial_clears: u32,
     pub(crate) tutorial_resets: u32,
 
@@ -729,6 +783,9 @@ pub(crate) struct Model {
     /// A FrameXML cursor call ran. The mode is a write, not a level: `0xbe2c2c` keeps its value
     /// until the world or a hover handler writes it, so a handler-less frame leaves it be.
     pub(crate) ui_cursor_dirty: bool,
+    /// The name the last custom cursor loaded under (`0xbe2c70`, copied at `0x523cf5`), which
+    /// [`container::UiCursorMode::Custom`] shows; kept across every other mode.
+    pub(crate) custom_cursor_name: String,
     /// `AutoEquipCursorItem`'s `(bag, slot)` sources, sent as `CMSG_AUTOEQUIP_ITEM`.
     pub(crate) container_autoequips: Vec<(i64, u32)>,
     /// `AutoEquipCursorItem`'s bind-on-equip questions, `(bag, slot, guid)`: the item stays held.
@@ -981,18 +1038,30 @@ pub(crate) struct Model {
     pub(crate) quest_log: quest_log::QuestLogState,
     pub(crate) quest_log_selection: u32,
     pub(crate) quest_log_abandon_mark: u32,
-    pub(crate) quest_log_abandons: Vec<u32>,
+    /// The log slots of the confirmed abandons, for the app to send.
+    pub(crate) quest_log_abandons: Vec<u8>,
     /// `QuestLogPushQuest()` quest ids, resolved at the click so a log change cannot retarget one.
     pub(crate) quest_log_pushes: Vec<u32>,
     /// `ConfirmAcceptQuest()` calls, the escort confirm; the app holds the pending quest.
     pub(crate) quest_confirms: u32,
     /// Item id to its tooltip view.
     pub(crate) item_templates: HashMap<u32, ItemTemplateView>,
-    /// Item ids asked for and missing, for the app to answer.
+    /// Item ids asked for and missing, for the app to answer: a lookup with a callback, which
+    /// asks the server.
     pub(crate) item_stat_asks: HashSet<u32>,
+    /// Item ids `GetItemInfo` read and missing: its lookup passes no callback (`0x48e185`), so
+    /// the app answers from its cache only.
+    pub(crate) item_stat_reads: HashSet<u32>,
     /// Set id to its tooltip set block (`0x854b1c`), and the misses asked for.
     pub(crate) item_sets: HashMap<u32, super::ItemSetView>,
     pub(crate) item_set_asks: HashSet<u32>,
+    /// Guids an item build looked up in the name cache and missed, for the app to ask: the
+    /// creator's and the giver's lookups pass a callback (`0x52e204`, `0x52e29d`) at every build,
+    /// and a hovered bag or paper-doll slot's `OnUpdate` builds again each frame.
+    pub(crate) item_name_asks: HashSet<u64>,
+    /// Charter item guids whose build missed the petition record or its owner's name, for the
+    /// app to ask: both lookups pass a callback (`0x52b93b`, `0x52b9d2`) at every build.
+    pub(crate) petition_asks: HashSet<u64>,
     /// `ItemRandomProperties` id to its view, pushed whole at startup: a clicked tooltip cannot
     /// repaint on a late answer. The reference reads its loaded store `0xc0dbd4` (`0x52c991`).
     pub(crate) random_properties: HashMap<u32, super::RandomPropertyView>,
@@ -1022,9 +1091,11 @@ pub(crate) struct Model {
     pub(crate) item_cache_waits: HashMap<FrameHandle, Vec<super::tooltip_item::build::CacheWait>>,
     /// The misses of the item build under way, handed to its tooltip as it ends.
     pub(crate) item_cache_misses: Vec<super::tooltip_item::build::CacheWait>,
-    /// Every quest-log row as the app pushed it, each header followed by all its quests, which
+    /// Every quest-log row as the rebuild made it, each header followed by all its quests, which
     /// [`quest_log::fold`] folds into the visible [`Self::quest_log`].
-    pub(crate) quest_log_rows: Vec<quest_log::QuestLogEntryView>,
+    pub(crate) quest_log_rows: Vec<quest_log::QuestLogRow>,
+    /// The slots, the quest records and the lookups in flight the quest-log verbs read.
+    pub(crate) quest_store: quest_log::QuestLogStore,
     /// The collapsed headers by title, the reference's fold mask `0xbb748c`.
     pub(crate) quest_log_collapsed: HashSet<String>,
     /// A selected quest a previous VM left, placed at the first push.
@@ -1034,6 +1105,15 @@ pub(crate) struct Model {
     /// The server's clock in Unix seconds, `None` before `SMSG_QUERY_TIME_RESPONSE`. A quest
     /// deadline is a stamp in it, and `GetQuestTimers` subtracts per call, as the reference does.
     pub(crate) server_unix_time: Option<f64>,
+    /// The local clock in Unix seconds, the reference's `time(NULL)` (`0x429580`): before the
+    /// sync its `G` is 0 (`0x4de3d3`), and the countdowns read this instead.
+    pub(crate) local_unix_time: Option<f64>,
+    /// The last sync found the clocks equal to the second, and the reference's `G` is 1, not 0
+    /// (`0x4def02`).
+    pub(crate) clock_sync_zero: bool,
+    /// Catalog chat lines a verb fired as `CHAT_MSG_SYSTEM`, by key, for the app's log files and
+    /// sound.
+    pub(crate) shown_chat_lines: Vec<(&'static str, String)>,
     /// `GetMoney()` in copper, from `PLAYER_FIELD_COINAGE`.
     pub(crate) money: u64,
 
@@ -1101,6 +1181,9 @@ pub(crate) struct Model {
     pub(crate) tabard_intents: Vec<super::tabard::TabardIntent>,
     /// The `WorldFrame` type's one-shot record: true once the first is made.
     pub(crate) world_frame_made: bool,
+    /// Set while the XML loader's `CreateFrame` call builds a frame: the creation half only, so
+    /// `create_frame` leaves the builder's post-load hook (`0x6ee4ea`) to the loader's own steps.
+    pub(crate) xml_creating: bool,
     /// Per live-unit guid, reach for `CanInspect`/`CheckInteractDistance`; absent: nil.
     pub(crate) unit_reach: HashMap<u64, super::UnitReach>,
 
@@ -1133,6 +1216,10 @@ pub(crate) struct Model {
     pub(crate) reputation_selected: Option<u32>,
     /// Reputation calls queued, applied locally first because none of the three sends is acked.
     pub(crate) reputation_sends: Vec<reputation::ReputationSend>,
+    /// Every faction with a reputation index under 64, by `Faction.dbc` id: the base for the
+    /// player's race and class plus the wire standing (`0x4d6370`). Unlike the pane's rows, a
+    /// faction no race/class column fits is here at base 0 (`0x4d5426`, `0x4d553c`).
+    pub(crate) faction_standings: HashMap<u32, i32>,
 
     /// Lines for the app's slash-command parser: a probe's, or a host `SlashCmdList` row's.
     pub(crate) chat_input: Vec<String>,
@@ -1172,13 +1259,12 @@ pub(crate) struct Model {
     /// `GetCursorPosition()`; the reference world map polls it every OnUpdate for hover/click math.
     pub(crate) cursor_pos: (f32, f32),
 
-    /// A `Minimap:PingLocation(x, y)`, drained the same frame: centre-relative offsets in the screen
-    /// root's units, `GetCursorPosition`'s space, not the window pixels of the app's minimap
-    /// geometry.
-    pub(crate) minimap_ping_request: Option<(f32, f32)>,
-    /// The ping's offsets as fractions of the minimap's side, updated by the app every frame.
-    /// `GetPingPosition()` always answers both, from statics never cleared (`0x4eefd0`).
-    pub(crate) minimap_ping: (f32, f32),
+    /// The minimap's process-wide statics (zoom cells, indoor byte, mask), shared by every
+    /// Minimap frame of this VM.
+    pub(crate) minimap: crate::widget::MinimapStatics,
+    /// The world points our own `Minimap:PingLocation` calls pinged, for the host's wire send
+    /// (`0x1d5`, `0x4eef72`) and its process-wide copy of the ping.
+    pub(crate) minimap_pings_sent: Vec<(f32, f32)>,
     /// `SendChatMessage` lines, apart from chat-box input, whose drain runs the slash grammar.
     pub(crate) chat_sends: Vec<super::chat_send::ChatSend>,
     /// `SendAddonMessage` broadcasts: `LANG_ADDON`, four distributions, `prefix` TAB `message`.
@@ -1211,18 +1297,13 @@ pub(crate) struct Model {
     pub(crate) summon_confirm: super::summon::SummonConfirmUiState,
     /// `ConfirmSummon()` calls, one `CMSG_SUMMON_RESPONSE` each; the app holds the summoner.
     pub(crate) summon_confirms: u32,
-    /// `GetFramerate()`, pushed each tick.
+    /// `GetSummonConfirmSummoner()` calls that answered no name: each call's lookup passes the
+    /// callback `0x48b710` (`0x48b6e1`), which the app makes.
+    pub(crate) summon_summoner_lookups: u32,
+    /// `GetFramerate()`, pushed after each world frame; the empty ring's 1000 until then.
     pub(crate) framerate: f64,
     /// `(shift, ctrl, alt)` for `Is*KeyDown`, pushed before the frame's mouse events.
     pub(crate) modifiers: (bool, bool, bool),
-}
-
-impl Model {
-    /// The selected quest-log row's detail, resolved per call as the reference's bindings do.
-    pub(crate) fn selected_quest_detail(&self) -> Option<&quest_log::QuestLogDetail> {
-        let index = usize::try_from(self.quest_log_selection.checked_sub(1)?).ok()?;
-        self.quest_log.entries.get(index)?.detail.as_ref()
-    }
 }
 
 impl Model {
@@ -1243,11 +1324,7 @@ impl Model {
 
     /// A named font object, matched case-insensitively (ASCII) as the client's `SStrCmpI` does.
     pub(crate) fn font_object(&self, name: &str) -> Option<&FontObject> {
-        if name.bytes().any(|b| b.is_ascii_uppercase()) {
-            self.font_objects_by_lower.get(&name.to_ascii_lowercase())
-        } else {
-            self.font_objects_by_lower.get(name)
-        }
+        self.fonts.block_of(name)
     }
 
     /// Records a caught script error for the host, the retained log and the Lua error handler: `log`
@@ -1255,6 +1332,11 @@ impl Model {
     /// handler is called with. An error raised by the handler itself goes to `errors` directly,
     /// which stops the recursion.
     pub(crate) fn record_script_error(&mut self, log: String, handler: String) {
+        self.record_error(log, HandlerArg::Text(handler));
+    }
+
+    /// A script error whose log row is `log` and whose handler hears `handler`.
+    pub(crate) fn record_error(&mut self, log: String, handler: HandlerArg) {
         self.diagnostics
             .record(super::diagnostics::DiagnosticKind::Error, &log);
         self.pending_error_dispatch.push(handler);
@@ -1262,9 +1344,10 @@ impl Model {
     }
 
     /// [`Self::record_script_error`] for an error mlua caught: the log keeps mlua's `Display` (its
-    /// word and traceback), the handler gets the bare Lua message `lua_pcall` leaves (`0x703b40`).
+    /// word and traceback), the handler gets the error value itself, as `lua_pcall` hands its
+    /// error function the value raised (`0x703b40`).
     pub(crate) fn record_lua_error(&mut self, e: &mlua::Error) {
-        self.record_script_error(e.to_string(), super::stdlib::lua_message(e));
+        self.record_error(e.to_string(), HandlerArg::Error(e.clone()));
     }
 
     /// **Record one non-fatal warning — the channel's one door** (decision 2135). Both halves:
@@ -1334,56 +1417,32 @@ impl Model {
         }
     }
 
-    /// The font a FontString's text is drawn in, which is what its measure must use. A button's
-    /// label takes `Button:SetFont`'s face, height and outline on each axis it did not set itself,
-    /// exactly as the draw folds them ([`super::extract`]); every other region its own. Measured
-    /// in its own font instead, a label came out a pixel narrower or wider than its text, and the
-    /// draw cut it short with an ellipsis.
+    /// The font a FontString's text is drawn in, which is what its measure must use, height in
+    /// script units. Measured in another font than the draw's, a label came out a pixel narrower
+    /// or wider than its text, and the draw cut it short with an ellipsis (a pfUI-skinned
+    /// "Cancel" read "Can..." at 2880x1800). A button's label used to take `Button:SetFont`'s
+    /// font by a fold at draw time, which this mirrored; the button's embedded fonts now push
+    /// to the label's own data ([`super::button::refresh_label`]), so the region's own font is
+    /// the drawn one for every region, a label included.
     pub(crate) fn label_font<'a>(
         &'a self,
-        rh: crate::widget::RegionHandle,
+        _rh: crate::widget::RegionHandle,
         d: &'a RegionData,
+        units: crate::layout::LayoutUnits,
     ) -> (Option<&'a str>, Option<f32>, super::Outline) {
-        let own = (d.font_path.as_deref(), d.font_height, d.outline);
-        let Some(region) = self.arena.region(rh) else {
-            return own;
-        };
-        let Some(crate::widget::KindState::Button(bs)) =
-            self.arena.frame(region.owner).map(|f| &f.kind_state)
-        else {
-            return own;
-        };
-        let (true, Some(bf)) = (bs.text == Some(rh), bs.font.as_ref()) else {
-            return own;
-        };
-        (
-            if d.font_explicit.face {
-                own.0
-            } else {
-                Some(bf.path.as_str())
-            },
-            if d.font_explicit.height {
-                own.1
-            } else {
-                Some(bf.height)
-            },
-            if d.font_explicit.outline {
-                own.2
-            } else {
-                super::Outline::flags(&bf.flags)
-            },
-        )
+        (d.font_path.as_deref(), d.font_height_script(units), d.outline)
     }
 
-    /// [`RegionData::measure_key`] under [`Self::label_font`].
+    /// [`RegionData::measure_key`] under [`Self::label_font`], which is the region's own font, so
+    /// the two keys are one.
     pub(crate) fn measure_key(
         &self,
-        rh: crate::widget::RegionHandle,
+        _rh: crate::widget::RegionHandle,
         d: &RegionData,
         scale: f32,
+        units: crate::layout::LayoutUnits,
     ) -> u64 {
-        let (font, height, outline) = self.label_font(rh, d);
-        d.measure_key_as(d.text.as_deref().unwrap_or(""), scale, font, height, outline)
+        d.measure_key(scale, units)
     }
 
     pub(crate) fn new() -> Model {
@@ -1398,6 +1457,7 @@ impl Model {
             addons_chain_reader: None,
             addons_saved_reader: None,
             measurer: None,
+            tooltip_measures: HashMap::new(),
             texture_probe: None,
             world_loc_projector: None,
             texture_size_probe: None,
@@ -1408,9 +1468,9 @@ impl Model {
             exec_context: Default::default(),
             framexml_debug: Default::default(),
             load_log: Default::default(),
-            framexml_fonts: Default::default(),
             arena: WidgetArena::new(),
             layout_inputs: HashMap::new(),
+            drag_authored: HashMap::new(),
             solver: LayoutSolver::new(),
             layout_fingerprint: None,
             layout_epoch: 0,
@@ -1426,16 +1486,16 @@ impl Model {
             layout_solves: 0,
             layout_gate_walks: 0,
             layout_rounds: 0,
-            resolved: HashMap::new(),
+            frame_rects: HashMap::new(),
             link_buttons: HashMap::new(),
             region_data: HashMap::new(),
             texels: super::texel::Texels::default(),
             backdrops: HashMap::new(),
+            own_fonts: HashMap::new(),
             simple_html: simplehtml::SimpleHtmlStates::new(),
-            font_objects_by_lower: HashMap::new(),
-            font_links: HashMap::new(),
-            region_resolved: HashMap::new(),
-            region_kept: HashMap::new(),
+            fonts: super::font::Fonts::default(),
+            region_rects: HashMap::new(),
+            region_kept_rects: HashMap::new(),
             next_id: 1,
             id_to_frame: IdMap::default(),
             frame_to_id: HashMap::new(),
@@ -1452,7 +1512,6 @@ impl Model {
             model_instances: 0,
             event_to_frames: HashMap::new(),
             frame_events: HashMap::new(),
-            all_event_frames: Vec::new(),
             focused_editbox: None,
             alt_down: false,
             key_consumers: HashMap::new(),
@@ -1464,7 +1523,7 @@ impl Model {
             mouse_capture: None,
             last_click: HashMap::new(),
             pending_size_changed: Vec::new(),
-            text_flips: Vec::new(),
+            content_writes: Vec::new(),
             layout_force: Vec::new(),
             layout_pending: Vec::new(),
             layout_unsettled: HashSet::new(),
@@ -1479,6 +1538,12 @@ impl Model {
             warnings: Vec::new(),
             // 1024x768 until the host calls `set_screen_size`; y-up `[bottom, left, top, right]`.
             screen: Rect::new(0.0, 0.0, 768.0, 1024.0),
+            aspect: None,
+            space: crate::layout::LayoutSpace::new(
+                crate::layout::LayoutUnits::from_aspect(1024.0 / 768.0),
+                1024.0,
+                768.0,
+            ),
             ui_scale_request: None,
             units_by_lower: HashMap::new(),
             units_by_guid: HashMap::new(),
@@ -1573,6 +1638,7 @@ impl Model {
             restart_gx_asks: 0,
             saved_names: Vec::new(),
             held_saved_files: Vec::new(),
+            loaded_saved_files: Vec::new(),
             keybinds: super::keybind::KeybindState::default(),
             actions: HashMap::new(),
             action_states: HashMap::new(),
@@ -1586,6 +1652,7 @@ impl Model {
             macros_generation: 0,
             macro_bindings: HashMap::new(),
             macro_icons: Vec::new(),
+            macro_icon_source: None,
             pet_spell_autocasts: Vec::new(),
             casting: false,
             spell_targeting: false,
@@ -1612,6 +1679,7 @@ impl Model {
             battlefield_join_requests: Vec::new(),
             battlefield_list_requests: Vec::new(),
             battlefield_positions: Vec::new(),
+            battlefield_position_lookups: Vec::new(),
             battlefield_flag: None,
             battlefield_icon_scale: 1.0,
             battlefield_position_requests: 0,
@@ -1620,6 +1688,7 @@ impl Model {
             meeting_stone_status_text: None,
             tutorial_bank: None,
             tutorial_flag_requests: Vec::new(),
+            tutorial_triggers: Vec::new(),
             tutorial_clears: 0,
             tutorial_resets: 0,
             shapeshift_forms: Vec::new(),
@@ -1649,6 +1718,7 @@ impl Model {
             container_wraps: Vec::new(),
             ui_cursor: None,
             ui_cursor_dirty: false,
+            custom_cursor_name: String::new(),
             container_autoequips: Vec::new(),
             container_equip_asks: Vec::new(),
             bag_autostores: Vec::new(),
@@ -1782,8 +1852,11 @@ impl Model {
             item_templates: HashMap::new(),
             item_sets: HashMap::new(),
             item_set_asks: HashSet::new(),
+            item_name_asks: HashSet::new(),
+            petition_asks: HashSet::new(),
             random_properties: HashMap::new(),
             item_stat_asks: HashSet::new(),
+            item_stat_reads: HashSet::new(),
             player_req: PlayerReqState::default(),
             lock_rows: HashMap::new(),
             lock_openers: None,
@@ -1797,10 +1870,14 @@ impl Model {
             item_cache_waits: HashMap::new(),
             item_cache_misses: Vec::new(),
             quest_log_rows: Vec::new(),
+            quest_store: Default::default(),
             quest_log_collapsed: HashSet::new(),
             quest_log_selection_seed: None,
             quest_log_watched: Vec::new(),
             server_unix_time: None,
+            local_unix_time: None,
+            clock_sync_zero: false,
+            shown_chat_lines: Vec::new(),
             worldmap: super::worldmap::WorldMapState::default(),
             nameplates: super::nameplate::NamePlates::default(),
             chat_bubbles: super::chat_bubble::ChatBubbles::default(),
@@ -1810,8 +1887,8 @@ impl Model {
             verb_events: None,
             item_locks: std::collections::HashSet::new(),
             cursor_pos: (0.0, 0.0),
-            minimap_ping_request: None,
-            minimap_ping: (0.0, 0.0),
+            minimap: crate::widget::MinimapStatics::default(),
+            minimap_pings_sent: Vec::new(),
             chat_sends: Vec::new(),
             addon_sends: Vec::new(),
             played_time_asks: 0,
@@ -1827,7 +1904,8 @@ impl Model {
             binder_pending: false,
             summon_confirm: super::summon::SummonConfirmUiState::default(),
             summon_confirms: 0,
-            framerate: 0.0,
+            summon_summoner_lookups: 0,
+            framerate: 1000.0,
             modifiers: (false, false, false),
             money: 0,
             net_latency_ms: 0,
@@ -1867,6 +1945,7 @@ impl Model {
             tabard_host: Default::default(),
             tabard_intents: Vec::new(),
             world_frame_made: false,
+            xml_creating: false,
             unit_reach: HashMap::new(),
             chat_input: Vec::new(),
             skills: skills::SkillsState::default(),
@@ -1883,6 +1962,7 @@ impl Model {
             reputation_collapsed: HashSet::new(),
             reputation_selected: None,
             reputation_sends: Vec::new(),
+            faction_standings: HashMap::new(),
         }
     }
 
@@ -1931,8 +2011,17 @@ impl Model {
     /// `CSimpleFrame::SetScale` (`0x76ac10`): store `h`'s own scale, cascade the effective scale
     /// down its subtree, and re-lay out and re-measure on a change, since the owner's effective
     /// scale is in every descendant FontString's measure key. Lua `SetScale` and the UI scale
-    /// ([`super::ui_scale`]) both come here, as both reach `0x76ac10` in the reference.
-    pub(crate) fn set_frame_scale(&mut self, h: FrameHandle, scale: f32) {
+    /// ([`super::ui_scale`]) both come here, as both reach `0x76ac10` in the reference. Unless
+    /// `force` (the UI scale's sink `0x494577` passes it, Lua's `0x7751f9` does not), a change of
+    /// less than 2^-22 is dropped whole (`0x76ac1a`-`0x76ac35`).
+    pub(crate) fn set_frame_scale(&mut self, h: FrameHandle, scale: f32, force: bool) {
+        if !force
+            && self.arena.frame(h).is_some_and(|f| {
+                (f64::from(scale) - f64::from(f.scale)).abs() < crate::layout::SIZE_EPS
+            })
+        {
+            return;
+        }
         let changed = self.arena.frame(h).is_some_and(|f| f.scale != scale);
         self.arena.set_scale(h, scale);
         if changed {
@@ -1982,8 +2071,15 @@ impl Model {
             .get(&rh)
             .is_some_and(|d| d.text.as_deref().is_some_and(|t| !t.is_empty()));
         if shown != was_shown {
-            self.text_flips.push(rh);
+            self.content_writes.push(rh);
         }
+    }
+
+    /// A tooltip line's width written by the clear (`0x5301f0`) or the sizer (`0x5308ef`), each a
+    /// `SetWidth` that invalidates (`0x7683d0`): noted as a text flip is, as the hover loops reset
+    /// and restore it every frame, so the next resolve names it only if it moved the node's hash.
+    pub(crate) fn note_line_width(&mut self, rh: RegionHandle) {
+        self.content_writes.push(rh);
     }
 
     /// Text that emptied or filled on anchored region `rh`, which moves the measure its resolve
@@ -2079,6 +2175,22 @@ impl Model {
         } else {
             self.layout_force.push(id);
             self.hold_set(id, HOLD_QUEUED_FORCE);
+        }
+    }
+
+    /// Clear every node's resolved bit: new screen-scale cells are a new interface build, the only
+    /// place `0x41ad10` runs (`0x46a828`, `0x48fe2b`), so each node resolves afresh under them, a
+    /// deferred one when its deferral ends.
+    pub(crate) fn force_every_layout_node(&mut self) {
+        let mut ids: Vec<u32> = self
+            .frame_to_id
+            .values()
+            .chain(self.region_to_id.values())
+            .copied()
+            .collect();
+        ids.sort_unstable();
+        for id in ids {
+            self.queue_force(id);
         }
     }
 
@@ -2532,10 +2644,37 @@ impl Model {
             return;
         };
         if self.region_data.get(&rh).is_some_and(|d| {
-            !d.anchors.is_empty() && d.size.is_none_or(|(w, h)| w == 0.0 || h == 0.0)
+            !d.anchors.is_empty() && d.size.is_none_or(|(w, h)| w.is_zero() || h.is_zero())
         }) {
             self.layout_unsettled.insert(id);
         }
+    }
+
+    /// Frame `h`'s rect in the screen root's units, y up, as the renderer, the hit tests and every
+    /// other reader outside the resolver take it: its layout rect through
+    /// [`crate::layout::LayoutSpace::rect_to_root`].
+    #[inline]
+    pub(crate) fn frame_rect(&self, h: FrameHandle) -> Option<Rect> {
+        self.frame_rects
+            .get(&h)
+            .map(|&r| self.space.rect_to_root(r))
+    }
+
+    /// [`Self::frame_rect`] for region `rh`.
+    #[inline]
+    pub(crate) fn region_rect(&self, rh: RegionHandle) -> Option<Rect> {
+        self.region_rects
+            .get(&rh)
+            .map(|&r| self.space.rect_to_root(r))
+    }
+
+    /// The rect a Texture whose resolve failed keeps drawing at ([`Self::region_kept_rects`]), in
+    /// the root's units.
+    #[inline]
+    pub(crate) fn region_kept_rect(&self, rh: RegionHandle) -> Option<Rect> {
+        self.region_kept_rects
+            .get(&rh)
+            .map(|&r| self.space.rect_to_root(r))
     }
 
     /// Whether frame `h` holds a state its inputs would not resolve to now: a write moved them
@@ -2549,7 +2688,7 @@ impl Model {
         {
             return true;
         }
-        if !self.resolved.contains_key(&h) {
+        if !self.frame_rects.contains_key(&h) {
             return false;
         }
         self.layout_inputs
@@ -2566,7 +2705,7 @@ impl Model {
         {
             return true;
         }
-        if !self.region_resolved.contains_key(&rh) {
+        if !self.region_rects.contains_key(&rh) {
             return false;
         }
         self.region_data
@@ -2583,8 +2722,8 @@ impl Model {
                     return region;
                 }
                 match (self.id_to_frame.get(&t), self.id_to_region.get(&t)) {
-                    (Some(f), _) => !self.resolved.contains_key(f),
-                    (_, Some(r)) => !self.region_resolved.contains_key(r),
+                    (Some(f), _) => !self.frame_rects.contains_key(f),
+                    (_, Some(r)) => !self.region_rects.contains_key(r),
                     _ => true,
                 }
             })
@@ -2634,37 +2773,6 @@ impl Model {
     /// A measure-key write that names no region, such as a font object: the next sweep walks all.
     pub(crate) fn touch_measure_all(&mut self) {
         self.measure_dirty = None;
-    }
-
-    /// Names a frame without bumping the epoch, for the resolve's own tooltip pre-pass: a bump
-    /// inside a resolve would hold the gate open for good, yet an unnamed write could go stale.
-    pub(crate) fn note_layout_frame_write(&mut self, h: FrameHandle) {
-        if self.layout_touched.is_some() {
-            match self.frame_to_id.get(&h) {
-                Some(&id) => {
-                    self.layout_touched
-                        .as_mut()
-                        .expect("checked above")
-                        .push(id);
-                }
-                _ => self.give_up_naming(),
-            }
-        }
-    }
-
-    /// `note_layout_frame_write` for a region.
-    pub(crate) fn note_layout_region_write(&mut self, rh: RegionHandle) {
-        if self.layout_touched.is_some() {
-            match self.region_to_id.get(&rh) {
-                Some(&id) => {
-                    self.layout_touched
-                        .as_mut()
-                        .expect("checked above")
-                        .push(id);
-                }
-                _ => self.give_up_naming(),
-            }
-        }
     }
 
     /// Names layout id `id` as what this write moved, while naming is still on, whether or not

@@ -117,28 +117,29 @@ pub(crate) fn boot_window_mode() -> WindowMode {
 }
 
 /// [`boot_window_mode`] on a client whose locale index `locale` answers, asked only when a row is
-/// not stored, with `stored` answering for `config.toml`: a row the file does not hold, or holds
-/// unparseable (the load ignores it), boots at its registered default there, which zhCN's
-/// differs from the other locales' (`0x63a738`).
+/// not stored, with `stored` answering for `config.toml`: a row the file does not hold boots at its
+/// registered default there, which zhCN's differs from the other locales' (`0x63a738`). A stored
+/// row reads as the load then applies it, through the record's float and integer
+/// ([`crate::cvars::CvarChanged::num`], [`crate::cvars::CvarChanged::flag`]), so text that is no
+/// number reads 0 on both.
 fn boot_window_mode_for(
     locale: impl Fn() -> usize,
     stored: impl Fn(&str) -> Option<String>,
     windowed_env: bool,
 ) -> WindowMode {
-    let flag = |name: &str| {
+    let text = |name: &str| {
         stored(name)
-            .and_then(|v| v.parse::<f32>().ok())
-            .or_else(|| {
-                crate::cvars::registered_default(name, locale()).and_then(|v| v.parse::<f32>().ok())
-            })
+            .or_else(|| crate::cvars::registered_default(name, locale()).map(str::to_string))
     };
     // A run that sizes its own window owns both rows for the session.
     let (display, maximize) = if windowed_env {
         (DisplayMode::Windowed, false)
     } else {
         (
-            flag("gxWindow").map_or_else(DisplayMode::default, display_from_flag),
-            flag("gxMaximize").is_some_and(|v| v != 0.0),
+            text("gxWindow").map_or_else(DisplayMode::default, |v| {
+                display_from_flag(crate::cvars::record_float(&v))
+            }),
+            text("gxMaximize").is_some_and(|v| benilla_ui::script::s_str_to_int(&v) != 0),
         )
     };
     window_mode(display, maximize, MonitorSelection::Primary)
@@ -508,7 +509,6 @@ pub(crate) fn on_cvar(
     mut particles: Option<ResMut<benilla_world::particles::ParticleTuning>>,
     mut spell_effect_level: ResMut<SpellEffectLevel>,
     mut ffx: ResMut<benilla_world::ffx_glow::FfxSwitches>,
-    mut console: Option<ResMut<crate::console::ConsoleEcho>>,
     mut cvars: ResMut<crate::cvars::Cvars>,
 ) {
     use benilla_world::view::{FARCLIP_RANGE, MSAA_RANGE};
@@ -778,7 +778,7 @@ pub(crate) fn on_cvar(
         // (`0x688de0`); the callback hands on `SStrToInt`'s integer (`0x688dfa`), so "48.9" is 48.
         // The loaded tiles re-scatter off the change.
         "frilldensity" => {
-            clutter.set_frill_density(benilla_ui::script::sstr_to_int(&ev.new) as f32);
+            clutter.set_frill_density(benilla_ui::script::s_str_to_int(&ev.new) as f32);
             cvars.mirror(
                 benilla_ui::script::CVAR_WORLD_DETAIL,
                 &(clutter.density - 1.0).to_string(),
@@ -793,11 +793,9 @@ pub(crate) fn on_cvar(
         // `particleDensity`. The reference runs it on every write, an unchanged one included; an
         // observer fires only on a change.
         "spelleffectlevel" => {
-            spell_effect_level.0 = benilla_ui::script::sstr_to_int(&ev.new);
+            spell_effect_level.0 = benilla_ui::script::s_str_to_int(&ev.new);
             let level = spell_effect_level.0.clamp(0, 2);
-            if let Some(console) = console.as_mut() {
-                console.print(format!("Spell effect level set to {level}."));
-            }
+            cvars.print(format!("Spell effect level set to {level}."));
             if let Some(mut particles) = particles {
                 particles.set_density(spell_effect_scale(level));
             }
@@ -830,30 +828,23 @@ pub(crate) fn spell_effect_scale(level: i32) -> f32 {
     }
 }
 
-/// `/console detailDoodadAlpha [0..255]`, the reference's console command (`0x6739a0`, registered
-/// by `0x63f9e0` as a command, not a CVar, so it never persists): the ground-clutter cutout that
-/// `texel.a x distance_ramp` is tested against, so at the default 128 grass ends ~61 yd out of
-/// the 70 yd horizon. Out of range is rejected (`0x6739b9`) with a readout. A bare command also
-/// prints the readout, where the reference reads an uninitialised stack slot.
+/// `/console detailDoodadAlpha <n>`, the reference's console command (`0x6739a0`, registered by
+/// `0x63f9e0` as a command, not a CVar, so it never persists): the ground-clutter cutout that
+/// `texel.a x distance_ramp` is tested against (`[0xc7b2fc]`, 128 at `0x66f861`), so at the
+/// default grass ends ~61 yd out of the 70 yd horizon. `sscanf(args, "%d")` (`0x835154`), then an
+/// unsigned compare with 255 (`0x6739b9`): in range it is set without a word, above it (a
+/// negative too) only "Alpha ref range 0 - 255." (`0x867f6c`) is printed. With no number the
+/// slot keeps what `push ecx` left in it, the parse buffer's address `0xc4ee08`, which is above
+/// 255.
 fn detail_doodad_alpha(world: &mut World, args: &str) -> Vec<String> {
-    let Some(mut clutter) = world.get_resource_mut::<benilla_world::clutter::ClutterConfig>()
-    else {
-        return vec!["detailDoodadAlpha: this run has no ground clutter".to_string()];
-    };
-    match args
-        .split_whitespace()
-        .next()
-        .and_then(|v| v.parse::<u8>().ok())
-    {
-        Some(v) => {
-            clutter.alpha_ref = f32::from(v) / 255.0;
-            vec![format!("detailDoodadAlpha set to {v}")]
-        }
-        None => vec![format!(
-            "detailDoodadAlpha is {} (usage: /console detailDoodadAlpha 0-255)",
-            (clutter.alpha_ref * 255.0).round() as u32
-        )],
+    let alpha = benilla_ui::script::scanf_d(args).map_or(0x00c4_ee08, |v| v as u32);
+    if alpha > 0xff {
+        return vec!["Alpha ref range 0 - 255.".to_string()];
     }
+    if let Some(mut clutter) = world.get_resource_mut::<benilla_world::clutter::ClutterConfig>() {
+        clutter.alpha_ref = alpha as f32 / 255.0;
+    }
+    Vec::new()
 }
 
 impl Plugin for VideoPlugin {
@@ -861,9 +852,11 @@ impl Plugin for VideoPlugin {
         use crate::console::ConsoleCommandApp;
         app.init_resource::<SpellEffectLevel>();
         app.add_observer(on_cvar);
+        // Category 1 with no help (`0x66fae8`-`0x66faf5`).
         app.console_command(
             "detailDoodadAlpha",
-            "The ground-clutter cutout reference, 0-255 (128 = the default).",
+            crate::console::GRAPHICS,
+            None,
             detail_doodad_alpha,
         );
         app.init_resource::<VideoConfig>()
@@ -1183,6 +1176,36 @@ pub(crate) fn apply_window_mode(
 mod tests {
     use super::*;
 
+    /// `0x6739a0`: `sscanf %d` and an unsigned compare with 255. In range it sets the cutout and
+    /// says nothing; above it, a negative and text with no number print only the range line.
+    #[test]
+    fn detail_doodad_alpha_reads_like_the_references_command() {
+        let mut world = World::new();
+        world.insert_resource(benilla_world::clutter::ClutterConfig::default());
+        let at = |w: &World| {
+            (w.resource::<benilla_world::clutter::ClutterConfig>()
+                .alpha_ref
+                * 255.0)
+                .round() as u32
+        };
+        for (args, said, now) in [
+            ("12abc", None, 12),
+            (" +12", None, 12),
+            ("200", None, 200),
+            ("300", Some("Alpha ref range 0 - 255."), 200),
+            ("-1", Some("Alpha ref range 0 - 255."), 200),
+            ("", Some("Alpha ref range 0 - 255."), 200),
+            ("abc", Some("Alpha ref range 0 - 255."), 200),
+        ] {
+            let lines = detail_doodad_alpha(&mut world, args);
+            assert_eq!(
+                lines,
+                said.map(String::from).into_iter().collect::<Vec<_>>(),
+                "{args:?}"
+            );
+            assert_eq!(at(&world), now, "{args:?}");
+        }
+    }
     /// Synced is `Fifo`, not `AutoVsync` (`FifoRelaxed`, which tears on a late frame).
     #[test]
     fn the_default_is_synced_like_the_window_literal() {
@@ -1249,25 +1272,32 @@ mod tests {
         assert_eq!(boot_window_mode_for(|| 4, none, true), WindowMode::Windowed);
     }
 
-    /// A stored value the load would ignore (not a number) does not stand over the registered
-    /// default: zhCN with `gxWindow = "x"` boots as it would with none, which the load then agrees
-    /// with, instead of flipping after the window is born.
+    /// A stored value that is no number loads as it is and reads 0 (`InternalSet` `0x63e0b0` has
+    /// no parse check), so the window is born as the load then applies it, instead of flipping
+    /// after: zhCN with `gxWindow = "x"` is fullscreen, as enUS is; and `gxMaximize = "0.5"` reads
+    /// the record's integer, 0.
     #[test]
-    fn an_unparseable_stored_row_boots_at_the_registered_default() {
+    fn a_stored_row_that_is_no_number_boots_as_the_load_applies_it() {
         let junk = |name: &str| match name {
             "gxWindow" => Some("x".to_string()),
             "gxMaximize" => Some("0".to_string()),
             _ => None,
         };
-        // zhCN registers gxWindow "1": windowed, unmaximized by the stored "0".
+        for locale in [4, 0] {
+            assert_eq!(
+                boot_window_mode_for(|| locale, junk, false),
+                WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+                "locale {locale}"
+            );
+        }
+        let half = |name: &str| match name {
+            "gxWindow" => Some("1".to_string()),
+            "gxMaximize" => Some("0.5".to_string()),
+            _ => None,
+        };
         assert_eq!(
-            boot_window_mode_for(|| 4, junk, false),
+            boot_window_mode_for(|| 0, half, false),
             WindowMode::Windowed
-        );
-        // enUS registers "0": fullscreen.
-        assert_eq!(
-            boot_window_mode_for(|| 0, junk, false),
-            WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
         );
     }
 

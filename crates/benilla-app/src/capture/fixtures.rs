@@ -670,6 +670,8 @@ pub(super) fn seed_ui_fixture(
                 quest_type: 1,
                 rep_objective_faction: 0,
                 rep_objective_value: 0,
+                opposite_rep_faction: 0,
+                opposite_rep_value: 0,
                 next_quest_in_chain: 0,
                 money: 150, // 1s 50c
                 money_max_level: 0,
@@ -719,6 +721,8 @@ pub(super) fn seed_ui_fixture(
                 quest_type: 0,
                 rep_objective_faction: 0,
                 rep_objective_value: 0,
+                opposite_rep_faction: 0,
+                opposite_rep_value: 0,
                 next_quest_in_chain: 0,
                 money: 25,
                 money_max_level: 0,
@@ -1680,7 +1684,7 @@ fn seed_cooldown_filmstrip(
     script.set_container(
         0,
         Some(benilla_ui::script::ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots,
         }),
@@ -1752,7 +1756,7 @@ fn seed_bag_window(
     script.set_container(
         0,
         Some(benilla_ui::script::ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots,
         }),

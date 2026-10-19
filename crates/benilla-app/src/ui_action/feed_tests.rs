@@ -392,6 +392,7 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
         .init_resource::<crate::sound::MessageSounds>()
         .insert_resource(NetCommands(tx));
     let mut script = UiScript::new().unwrap();
+    script.set_macro_icons(vec!["Interface\\Icons\\Spell_Fire_FlameBolt".into()]);
     script.set_macros(MacroState {
         account: vec![MacroView {
             name: "Ambush".into(),
@@ -420,7 +421,7 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
 
     app.world_mut()
         .non_send_resource_mut::<UiScript>()
-        .run(r#"EditMacro(1, nil, "Interface\\Icons\\Spell_Fire_FlameBolt")"#)
+        .run("EditMacro(1, nil, 1)")
         .unwrap();
     assert!(
         !app.world().resource::<PlayerActions>().dirty,
@@ -539,6 +540,53 @@ fn pre_resolved_lines_land_on_the_errors_frame_in_the_arms_colour() {
         ],
         "red UI_ERROR_MESSAGE for the notice, yellow UI_INFO_MESSAGE for the area trigger"
     );
+}
+
+/// A login notice queued while the loading cover is up waits for the reveal: the reference's
+/// cover drops at the player's create (`0x5debbd`), ahead of the notice, so its `UIErrorsFrame`
+/// hold is never spent under the cover.
+#[test]
+fn a_notice_under_the_loading_cover_fires_at_the_reveal() {
+    let (mut app, _rx) = app_with_food_on_the_bar();
+    app.insert_resource(crate::loading_screen::LoadingScreen::test_covering());
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run(
+            r#"
+            BENILLA_TEST_ERRORS = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("UI_ERROR_MESSAGE")
+            f:SetScript("OnEvent", function() table.insert(BENILLA_TEST_ERRORS, arg1) end)
+            "#,
+        )
+        .unwrap();
+    let fired = |app: &mut App| {
+        app.world_mut()
+            .non_send_resource::<UiScript>()
+            .eval::<Vec<String>>("return BENILLA_TEST_ERRORS")
+            .unwrap()
+    };
+
+    app.world_mut()
+        .resource_mut::<UiErrorTexts>()
+        .error("GM mode is ON".to_string());
+    app.update();
+    app.update();
+    assert!(fired(&mut app).is_empty(), "nothing fires under the cover");
+    assert_eq!(
+        app.world().resource::<UiErrorTexts>().0.len(),
+        1,
+        "the notice stays queued"
+    );
+
+    app.insert_resource(crate::loading_screen::LoadingScreen::default());
+    app.update();
+    assert_eq!(
+        fired(&mut app),
+        ["GM mode is ON"],
+        "the reveal fires it once"
+    );
+    assert!(app.world().resource::<UiErrorTexts>().0.is_empty());
 }
 
 /// `HandleCastFailed 0x6e1a00` logs through `0x62c360`; `HandlePetCastFailed 0x6e8eb0` calls only
@@ -688,7 +736,7 @@ fn a_refusal_of_the_armed_craft_disarms_the_batch() {
                 icon: None,
                 min_made: 1,
                 max_made: 1,
-                cooldown_secs: None,
+                cooldown: None,
                 product_item: 2996,
                 product_inv_type: 0,
                 product_item_level: 0,

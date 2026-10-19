@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::heap::{FuncObj, LuaFunc};
-use crate::proto::{Key, Proto};
+use crate::proto::{Bytes, Key, Proto};
 use crate::vm::Vm;
 use crate::SyntaxError;
 
@@ -27,6 +27,22 @@ pub struct Report {
     pub added: Vec<String>,
     /// Functions only the old source had, with live closures still on the old code.
     pub removed: Vec<String>,
+}
+
+/// Whether `new` changes the top level of the chunk `old` is, its code outside every function:
+/// that code ran once, so what it set up (a constant, a table, a registration) stays as `old`
+/// left it after a reload. Both compile side by side in a scratch heap, so a string constant
+/// reads the same in each; `false` when either does not compile.
+pub fn top_level_changed(old: &[u8], new: &[u8]) -> bool {
+    const NAME: &[u8] = b"=[top level]";
+    let mut heap = crate::heap::Heap::default();
+    let Ok(a) = crate::compile::compile(old, NAME, &mut heap) else {
+        return false;
+    };
+    let Ok(b) = crate::compile::compile(new, NAME, &mut heap) else {
+        return false;
+    };
+    a.code_digest() != b.code_digest()
 }
 
 // A key's sibling count is a `Cell`, and no part of its hash or equality.
@@ -52,7 +68,7 @@ impl Vm {
         if self.heap.take_oom() {
             return Err(SyntaxError(b"not enough memory".to_vec()));
         }
-        self.heap.charge(root.tree_bytes());
+        self.heap.charge_proto(&root);
         let mut fresh = HashMap::new();
         walk(&root, &mut fresh);
         let mut report = Report::default();
@@ -137,5 +153,74 @@ impl Vm {
         report.added.sort();
         report.removed.sort();
         Ok(report)
+    }
+}
+
+impl Vm {
+    /// New code for chunks run as functions, as an XML handler's body is: every live closure of
+    /// a main function running the code `old` compiles to, whose prototype `select` accepts,
+    /// runs `new` from its next call, compiled under that closure's own chunk name. A main
+    /// function captures nothing, so nothing carries over or can mismatch. Answers the closures
+    /// swapped; a syntax error in either source changes nothing.
+    pub fn hot_reload_mains(
+        &mut self,
+        old: &[u8],
+        new: &[u8],
+        select: impl Fn(&Proto) -> bool,
+    ) -> Result<usize, SyntaxError> {
+        const PROBE: &[u8] = b"=[hot reload]";
+        let want = crate::compile::compile(old, PROBE, &mut self.heap)?;
+        crate::compile::compile(new, PROBE, &mut self.heap)?;
+        let digest = want.code_digest();
+        let mut names: Vec<Bytes> = Vec::new();
+        for f in self.heap.funcs_mut() {
+            if let FuncObj::Lua(LuaFunc { proto, .. }) = f {
+                if proto.key.is_root()
+                    && proto.code.len() == want.code.len()
+                    && select(proto)
+                    && proto.code_digest() == digest
+                    && !names.contains(&proto.source)
+                {
+                    names.push(proto.source.clone());
+                }
+            }
+        }
+        let mut fresh: HashMap<Bytes, Rc<Proto>> = HashMap::new();
+        for name in names {
+            let p = crate::compile::compile(new, &name, &mut self.heap)?;
+            fresh.insert(name, p);
+        }
+        if self.frames_empty() {
+            self.retired.clear();
+        }
+        let mut retired = Vec::new();
+        for f in self.heap.funcs_mut() {
+            let FuncObj::Lua(LuaFunc {
+                proto,
+                upvals,
+                shape,
+                ..
+            }) = f
+            else {
+                continue;
+            };
+            let Some(new) = fresh.get(&proto.source) else {
+                continue;
+            };
+            if !proto.key.is_root() || proto.code_digest() != digest {
+                continue;
+            }
+            debug_assert!(
+                upvals.is_empty() && new.upvals.is_empty(),
+                "a main function"
+            );
+            *shape = crate::heap::Shape::of(new);
+            let old_proto = std::mem::replace(proto, new.clone());
+            let old_ups = std::mem::replace(upvals, crate::heap::Upvals::new(Vec::new()));
+            retired.push((old_proto, old_ups));
+        }
+        let n = retired.len();
+        self.retired.extend(retired);
+        Ok(n)
     }
 }

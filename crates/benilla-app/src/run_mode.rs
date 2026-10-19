@@ -237,6 +237,7 @@ mod tests {
             "debug_panel/",
             "asset_churn.rs",
             "dev.rs",
+            "devtools/",
             "hover_log.rs",
             "perf/",
             "preflight.rs",

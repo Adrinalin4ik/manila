@@ -216,12 +216,12 @@ fn the_selected_row_wears_the_gold_wash_and_hover_runs_blue() {
     s.run("BENILLA_ERA_WINDOW_SCALE = 1").unwrap();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return BenillaOptionsFrameCategoryListRowControlsBg:GetWidth()")
             .unwrap(),
         187.0
     );
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return BenillaOptionsFrameCategoryListRowControlsBg:GetHeight()")
             .unwrap(),
         21.0
@@ -235,11 +235,15 @@ fn the_selected_row_wears_the_gold_wash_and_hover_runs_blue() {
                 QuadContent::Texture {
                     path: Some(p),
                     color,
-                    additive,
+                    blend,
                     ..
-                } if p.contains("UI-QuestLogTitleHighlight") => {
-                    q.rect.map(|r| (r, color.unwrap_or([1.0; 4]), *additive))
-                }
+                } if p.contains("UI-QuestLogTitleHighlight") => q.rect.map(|r| {
+                    (
+                        r,
+                        color.unwrap_or([1.0; 4]),
+                        *blend == benilla_ui::script::BlendMode::Add,
+                    )
+                }),
                 _ => None,
             })
             .collect()
@@ -251,7 +255,7 @@ fn the_selected_row_wears_the_gold_wash_and_hover_runs_blue() {
     };
 
     let before = washes(&mut s);
-    assert_eq!(
+    benilla_ui::assert_near!(
         before.len(),
         1,
         "exactly one wash shows: the locked selection"
@@ -262,7 +266,7 @@ fn the_selected_row_wears_the_gold_wash_and_hover_runs_blue() {
     s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
         .unwrap();
     let after = washes(&mut s);
-    assert_eq!(after.len(), 1, "the wash moved, not multiplied");
+    benilla_ui::assert_near!(after.len(), 1, "the wash moved, not multiplied");
     assert!(gold(&after[0].1), "still the gold tint: {:?}", after[0].1);
     assert!(
         after[0].0.top < before[0].0.top,
@@ -288,13 +292,13 @@ fn the_selected_row_wears_the_gold_wash_and_hover_runs_blue() {
     };
     s.mouse_move(cx, cy);
     let hovered = washes(&mut s);
-    assert_eq!(
+    benilla_ui::assert_near!(
         hovered.len(),
         2,
         "hover adds its wash beside the locked gold"
     );
-    assert_eq!(hovered.iter().filter(|w| gold(&w.1)).count(), 1);
-    assert_eq!(
+    benilla_ui::assert_near!(hovered.iter().filter(|w| gold(&w.1)).count(), 1);
+    benilla_ui::assert_near!(
         hovered.iter().filter(|w| blue(&w.1)).count(),
         1,
         "the hover tint is 1.14's steel-blue: {:?}",
@@ -303,7 +307,7 @@ fn the_selected_row_wears_the_gold_wash_and_hover_runs_blue() {
 
     s.mouse_move(5.0, 5.0);
     let left = washes(&mut s);
-    assert_eq!(left.len(), 1);
+    benilla_ui::assert_near!(left.len(), 1);
     assert!(gold(&left[0].1));
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -387,6 +391,11 @@ fn search_reflows_live_rows_and_restores_the_page() {
     let authored_top: f32 = s
         .eval("return BenillaOptionsFrameContainerBodyAudioRowMaster:GetTop()")
         .unwrap();
+    // The clear button's icon rests at half alpha, set by its `OnLoad`: no region reads `alpha=`.
+    let icon: f32 = s
+        .eval("return BenillaOptionsFrameSearchBoxClearButtonIcon:GetAlpha()")
+        .unwrap();
+    assert!((icon - 0.5).abs() < 0.01, "the clear icon at rest: {icon}");
 
     s.run("BenillaOptionsFrameSearchBox:SetText(\"music\")")
         .unwrap();
@@ -2388,7 +2397,13 @@ fn defaults_resets_the_controls_page_to_registered_defaults() {
         changes.contains(&("autoLootDefault".to_string(), "0".to_string())),
         "{changes:?}"
     );
-    assert_eq!(changes.len(), 2, "only the moved values queue: {changes:?}");
+    // The Mouse Look Speed row's pitch twin is written as the stock save writes it,
+    // `sliderValue/2` as a number (`UIOptionsFrame.lua:355-356`): "90" over the registered "90.0".
+    assert!(
+        changes.contains(&("cameraPitchMoveSpeed".to_string(), "90".to_string())),
+        "{changes:?}"
+    );
+    assert_eq!(changes.len(), 3, "only the moved values queue: {changes:?}");
     assert!(
         !s.eval::<bool>(
             "return BenillaOptionsFrameContainerBodyControlsRowStickyTargetCheck:GetChecked()"
@@ -4207,6 +4222,9 @@ fn a_saved_hover_delay_is_applied_when_the_variables_land() {
 fn the_status_bar_text_row_pins_the_numerals_the_moment_it_is_clicked() {
     benilla_formats::wow_data_or_skip!();
     let mut s = interface_harness();
+    // The login's `UPDATE_FACTION` shows the strip the load hid while `UnitXPMax` was 0
+    // (`ReputationWatchBar_Update`); a hidden strip's `OnValueChanged` returns at once.
+    s.fire_event("UPDATE_FACTION", vec![]);
     // A real span first: the bar's update hides the numerals while `valueMax` is 0.
     s.set_player_xp(1000, 10000);
     s.run("this = MainMenuExpBar; MainMenuExpBar_Update()")
@@ -4355,7 +4373,7 @@ fn the_max_camera_distance_slider_stores_a_factor_and_reads_out_yards() {
     assert_eq!(
         s.eval::<String>("return GetCVar(\"cameraDistanceMaxFactor\")")
             .unwrap(),
-        "1"
+        "1.0"
     );
     assert_eq!(
         s.eval::<String>(

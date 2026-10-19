@@ -25,7 +25,7 @@ mod battlefield_queue;
 mod battlefield_score;
 mod bind_confirm;
 mod binder;
-mod binding_abi;
+pub(crate) mod binding_abi;
 mod dialog_verbs;
 mod tutorial;
 mod worldmap_arrow;
@@ -43,6 +43,7 @@ mod chat_types;
 mod chat_window;
 mod clip;
 mod colorselect;
+mod console_exec;
 mod container;
 mod craft;
 mod cursor;
@@ -50,13 +51,18 @@ mod death;
 pub mod diagnostics;
 mod editbox;
 pub mod instance;
-pub(crate) use editbox::{adopt_text_region, apply_xml_bytes, editbox_text_region_wrapper};
+pub(crate) use editbox::{
+    adopt_text_region, apply_xml_bytes, editbox_text_region_wrapper, set_history_lines,
+    set_selection_color,
+};
+pub(crate) use messageframe::set_xml_insets as set_message_xml_insets;
 pub(crate) use tooltip::post_load as tooltip_post_load;
 pub(crate) mod addon;
 mod addon_enable;
 pub mod addon_gate;
 mod char_name;
 mod client;
+pub use client::FrameTimeRing;
 mod clock;
 mod cvar_checks;
 mod cvars;
@@ -76,6 +82,7 @@ mod glue_create;
 mod glue_realm;
 mod glue_select;
 pub use glue::{glue_events, VmKind};
+pub use glue_core::scanf_d;
 pub use glue_core::{
     glue_status_key, launch_addon_url, launch_addon_url_allowed, launch_url_allowed, GlueCall,
     GlueCredentials, GlueHost, GlueNotice, GlueRequest, GlueSignal, GlueText, NoticeState,
@@ -174,6 +181,7 @@ mod summon;
 mod talent;
 mod taxi;
 mod tick;
+pub use tick::system_chat_args;
 mod tooltip;
 mod tooltip_item;
 mod tooltip_spell;
@@ -194,6 +202,7 @@ mod who_sort;
 mod worldmap;
 mod worldstate;
 mod worn_display;
+pub(crate) mod xml_layout;
 mod zone_text;
 
 pub use action::{ActionSlot, ActionState, ActionUse};
@@ -211,6 +220,7 @@ pub use battlefield_positions::{BattlefieldFlagView, BattlefieldPositionView};
 pub use battlefield_queue::{BattlefieldListView, BattlefieldMapInfo, BattlefieldQueueSlot};
 pub use battlefield_score::{BattlefieldScoreRow, BattlefieldScores, BattlefieldStatColumn};
 pub use bind_confirm::PendingEquipAnswer;
+pub use binding_abi::{ftol, s_str_to_float, s_str_to_int};
 pub use calls::{NearestMode, QueuedCall, ScriptCall};
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
 pub use channel::{ChannelCommand, RecruitmentPlan, RecruitmentRun, ZoneChannelRow};
@@ -222,6 +232,7 @@ pub use chat_misc::EmoteRequest;
 pub use chat_send::{ChatGroup, ChatSend, SEND_CHAT_TOKENS};
 pub use chat_types::ChatTypeColor;
 pub use chat_window::{message_group_index, ChatWindowLook, MESSAGE_GROUPS};
+pub use console_exec::{console_word, cvar_name_arg, no_such_cvar, set_args};
 pub use container::{
     BagAutoStore, ContainerMove, ContainerSlot, ContainerState, ContainerUse, EnchantView,
     PendingWrap, PetitionSlotView, RandomPropertyView, UiCursorMode, UseArm, UseFork,
@@ -238,12 +249,18 @@ pub use cvar_checks::{
     check_base_mip, check_camera_decay, check_camera_distance_max, check_camera_pitch,
     check_camera_rate, check_camera_smooth_style, check_camera_time, check_camera_view,
     check_camera_yaw, check_farclip, check_frill_density, check_refresh, check_shadow_level,
-    check_small_cull, check_tex_lod_bias, check_triple_buffer, CvarCheck, CvarVerdict,
+    check_small_cull, check_tex_lod_bias, check_triple_buffer, CvarCheck, CvarRows, CvarVerdict,
 };
-pub use cvars::{small_cull_text, sstr_to_int};
+pub use cvar_checks::{
+    check_dist_cull, check_error_filter, check_footstep_bias, check_horizon_farclip,
+    check_lod_dist, check_map_obj_light_lod, check_max_lights, check_particle_density,
+    check_shadow_bias, check_target_nearest_distance, check_texture_lod_dist, check_unit_draw_dist,
+    check_water_lod,
+};
+pub use cvars::small_cull_text;
 pub use cvars::{
-    MultisampleFormat, ScreenResolution, SeededCvar, VideoCaps, CVAR_FRILL_DENSITY, CVAR_GAMMA,
-    CVAR_SMALL_CULL, CVAR_WORLD_DETAIL, IN_WORLD_READ_ONLY_CVARS, LUA_CVAR_LIMIT,
+    CvarWrite, MultisampleFormat, ScreenResolution, SeededCvar, VideoCaps, CVAR_FRILL_DENSITY,
+    CVAR_GAMMA, CVAR_SMALL_CULL, CVAR_WORLD_DETAIL, IN_WORLD_READ_ONLY_CVARS, LUA_CVAR_LIMIT,
     VIDEO_DEFAULT_CVARS, WORLD_DETAIL_STOPS,
 };
 pub use death::{DeathAction, DeathUiState};
@@ -260,7 +277,7 @@ pub use guild::{
 pub use input_verbs::{BindingInput, FiredInput, HeldInput};
 pub use lfg::LfgDungeon;
 pub use lottery::UnservedSend;
-pub use modelframe::{CharacterPaneFrame, ModelPaneFrame};
+pub use modelframe::{CharacterPaneFrame, ModelPaneFrame, ModelWanted};
 pub use petition::{
     validate_guild_name, PetitionRecordView, PetitionRequest, PetitionState, PETITION_TYPE_CHARTER,
     PETITION_TYPE_PETITION,
@@ -273,7 +290,8 @@ pub use tabard::{
 pub use video_pairs::VIDEO_PAIR_CVARS;
 pub use worldmap_arrow::ARROW_MODEL;
 
-pub(crate) use button::{set_label_font_justify_h_lua, LabelFont};
+pub(crate) use button::{refresh_label_lua, state_font_lua, LabelFont};
+pub(crate) use font_block::{face_loads, own_font_lua, SAME_FONT_HEIGHT};
 pub use inspect::{InspectView, UnitReach};
 pub use item_stats::{item_usable, ItemSetView, ItemTemplateView, PlayerReqState};
 pub use item_text::ItemTextState;
@@ -288,9 +306,14 @@ pub use mail::{
 pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState, RepairCosts};
 pub(crate) use minimap::apply_model_attrs as apply_minimap_model_attrs;
+pub use minimap::{
+    MinimapRimArrow, CORPSE_ARROW as MINIMAP_CORPSE_ARROW, GROUP_ARROW as MINIMAP_GROUP_ARROW,
+    GUIDE_ARROW as MINIMAP_GUIDE_ARROW, LANDMARK_ARROW as MINIMAP_LANDMARK_ARROW,
+};
 pub(crate) use model::Model;
 pub use model::{
-    FontProbe, TextureProbe, TextureSizeFn, TextureSizeProbe, WorldLocFn, WorldLocProjector,
+    FontProbe, MacroIconSource, TextureProbe, TextureSizeFn, TextureSizeProbe, WorldLocFn,
+    WorldLocProjector,
 };
 pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo};
 pub use pet::{PetActionView, PetStats};
@@ -298,16 +321,17 @@ pub use pvp::{decorated_name, pvp_name_global_keys, HonorState, InspectHonorData
 pub use quest::{
     QuestAction, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect, QuestState,
 };
-pub use quest_log::{QuestLogDetail, QuestLogEntryView, QuestLogObjectiveView, QuestLogState};
+pub use quest_log::{QuestObjectiveView, QuestRecordView, QuestSlotView, QUEST_LOG_SLOTS};
 pub(crate) use region::{
-    apply_font_parts, apply_wrap_attrs, implicit_creation_anchor_lua, install_loaded_texture,
-    load_texture_file,
+    apply_texture_name, apply_wrap_attrs, implicit_creation_anchor_lua, install_loaded_texture,
+    load_blend_mode, load_texture_file, load_texture_name, load_xml_font_file,
+    texture_name_verdict, FileLoad,
 };
 pub use reputation::{FactionEntry, ReputationSend, ReputationState};
 pub use session::SessionRequest;
 pub use shapeshift::ShapeshiftFormView;
 pub(crate) use simplehtml::{
-    apply_element_font_parts as apply_simplehtml_font_parts,
+    element_fonts_lua as simplehtml_element_fonts_lua,
     element_of_xml_tag as simplehtml_element_of_xml_tag,
 };
 pub use skills::{SkillEntry, SkillsState};
@@ -327,12 +351,12 @@ pub use trainer::{
     TrainerAbilityReq, TrainerGroup, TrainerService, TrainerServiceCategory, TrainerSkillReq,
     TrainerState, TrainerTooltip, TRAINER_GROUP_KNOWN,
 };
+pub(crate) use types::{monochrome_flag, FontMask, MeasuredText, RegionData};
 pub use types::{
     BlendMode, EditAction, EditBoxAdvanceRequest, EditBoxTextUi, EditOutcome, EditUnit,
     ExtractedQuad, FontObject, FontShadow, Gradient, JustifyH, JustifyV, LineMeasureRequest,
-    MeasureRequest, Outline, QuadContent, ScriptValue, TexCoords,
+    MeasureRequest, Outline, QuadContent, ScriptValue, TexCoords, TextShadow,
 };
-pub(crate) use types::{FontExplicit, MeasuredText, RegionData};
 pub use unit::by_name::{self, NameCandidate};
 pub use unit::{
     grey_band, level_reads_unknown, parse_unit_token, power_token, unit_is_grey, PlayerRecord,
@@ -391,7 +415,7 @@ pub(crate) const REGION_LEAF_SHARED: [&str; 9] = [
 /// Texture-only, each in the client's Texture map (`0x87c128`): `GetVertexColor` though
 /// `SetVertexColor` is shared, and `SetGradientAlpha`, not FontString's `SetAlphaGradient`. 1.12
 /// has no Texture `SetSize` or `SetRotation` (PlayerModel's, `0x84f1fc`/`0x505f00`).
-pub(crate) const TEXTURE_ONLY_METHODS: [&str; 12] = [
+pub(crate) const TEXTURE_ONLY_METHODS: [&str; 13] = [
     "SetGradient",
     "SetGradientAlpha",
     "GetTexture",
@@ -403,6 +427,7 @@ pub(crate) const TEXTURE_ONLY_METHODS: [&str; 12] = [
     "SetTexCoordModifiesRect",
     "GetTexCoordModifiesRect",
     "SetDesaturated",
+    "IsDesaturated",
     "GetVertexColor",
 ];
 
@@ -459,6 +484,15 @@ pub(crate) const REGION_MAP_METHODS: [&str; 19] = [
 const REG_WRAPPERS: &str = "__benilla_wrappers";
 const REG_SCRIPTS: &str = "__benilla_scripts";
 
+/// `MINIMAP_PING`'s arguments, `%s%f%f` (`0x4ee48d`): the unit token and the two fractions.
+pub(crate) fn ping_args(token: &str, a: f64, b: f64) -> Vec<ScriptValue> {
+    vec![
+        ScriptValue::Str(token.to_string()),
+        ScriptValue::Number(a),
+        ScriptValue::Number(b),
+    ]
+}
+
 /// The layout handle of the screen root (the client's `CSimpleTop`, not the `UIParent` frame),
 /// which a top-level `SetPoint` without `relativeTo` anchors to; frame ids, from 1, are the rest.
 pub const SCREEN: crate::layout::Handle = 0;
@@ -475,8 +509,8 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// names the reference has that we do NOT fire stay OUT, with the reason recorded at
 /// [`crate::script::object::events_regions::set_script`].
 ///
-/// One measured exception (decision 2192), the one row below that nothing fires:
-/// `OnInputLanguageChanged`, the reference's own accept-and-never-fire slot on a no-IME
+/// Measured exceptions: the movie frame's three, which only its absent player fires, and
+/// (decision 2192) `OnInputLanguageChanged`, the reference's own accept-and-never-fire slot on a no-IME
 /// client. The shipped TWoW ChatFrameEditBoxTemplate declares it and its handler still
 /// runs — TWoW calls the function directly from `ChatEdit_OnShow` — so raising was the
 /// divergence from the reference, not the silence; the row's own comment carries the case.
@@ -494,7 +528,12 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// corpus call sites across 91 addons); it removes working behaviour from the 23 sites that remain,
 /// so it is still a change to make deliberately rather than as a side effect of widening this list
 /// — but the FrameXML half of "with FrameXML fixed first" is most of the way there now.
-const SCRIPT_KINDS: [&str; 45] = [
+///
+/// `OnValueChanged` is the StatusBar's (`+0x32c`) and the Slider's (`+0x330`) own slot; the
+/// ScrollFrame's three scroll kinds are `+0x32c`/`+0x334`/`+0x33c` (script-name map `0x786c40`).
+/// The EditBox's vtable (`0x81c910`) replaces the key and char slots: an EditBox never fires
+/// `OnKeyDown`, and fires `OnChar` only from `Insert`, with the inserted text (`0x77c13c`).
+const SCRIPT_KINDS: [&str; 46] = [
     "OnLoad",
     "OnEvent",
     "OnUpdate",
@@ -524,17 +563,12 @@ const SCRIPT_KINDS: [&str; 45] = [
     "OnCursorChanged",
     "OnEditFocusGained",
     "OnEditFocusLost",
-    // The EditBox's IME slot (RF-0082 §2's family): the one row in this list nothing fires, and
-    // the const's law above is the record of why that is measured acceptance and not a gap. The
-    // reference ACCEPTS the handler on every client and fires it only on one with an
-    // input-method switch — never on a single-layout system, which is exactly this host's
-    // posture (`GetInputLanguage` answers "ROMAN" forever and `ToggleInputLanguage` moves
-    // nothing; the editbox methods' own comments). The shipped TWoW ChatFrameEditBoxTemplate
-    // declares it — the 2026-09-14 TWoW run's only `SetScript` refusal — and the handler is not
-    // the silently-dead trap this list's rule guards against, because TWoW's `ChatEdit_OnShow`
-    // calls `ChatEdit_OnInputLanguageChanged()` directly at every box open (ChatFrame.lua
-    // l.1890), a path the reference itself takes for the same language-label refresh. The
-    // engine fires nothing for it and never will: there is no input-method switch to fire.
+    // The EditBox's input-method slot (script map `0x77a310`, `0x77a40d`, `+0x430`), fired only
+    // when an input-method event changes the box's language (`0x77abb0`, stored at `0x77abf2`).
+    // benilla has no input method, so it is stored and never runs, as on a western layout.
+    // The shipped TWoW ChatFrameEditBoxTemplate declares it (the 2026-09-14 TWoW run's only
+    // `SetScript` refusal while it raised), and its handler still runs: TWoW's `ChatEdit_OnShow`
+    // calls `ChatEdit_OnInputLanguageChanged()` directly at every box open (ChatFrame.lua l.1890).
     "OnInputLanguageChanged",
     "OnHorizontalScroll",
     "OnVerticalScroll",
@@ -548,6 +582,9 @@ const SCRIPT_KINDS: [&str; 45] = [
     "OnHyperlinkClick",
     "OnHyperlinkEnter",
     "OnHyperlinkLeave",
+    // The ScrollingMessageFrame's own (script map `0x787d90`, `+0x3bc`), fired by a relayout that
+    // moved its anchor (`0x788a9a`).
+    "OnMessageScrollChanged",
     // The GameTooltip's engine-fired scripts: money render, money clear and world-hover default
     // placement, all three wired by the stock template (`GameTooltipTemplate.xml:617-625`).
     "OnTooltipAddMoney",
@@ -601,13 +638,10 @@ pub fn addon_chunk_name(folder: &str, file: &str) -> String {
     format!("@Interface\\AddOns\\{folder}\\{}", file.replace('/', "\\"))
 }
 
-/// What both FrameScript states hold: FrameScript's Lua init (`0x7039e0`), the bare state the glue
-/// builder starts from (left by startup `0x402aee` on its first build, re-run by its reset
-/// `0x703b80` on a later one) and `UI_Init` rebuilds through its own, and the three registrars
-/// the glue registrar `0x46abb0` shares with `UI_Init`: `0x51bb20` (the clock, `ConsoleExec` and
-/// the file trio), `0x706350` (the frame factory globals and the 17 widget method tables) and
-/// `0x4587f0` (sound).
-fn install_framescript(vm: VmKind) -> mlua::Result<Lua> {
+/// The state as `0x7039e0` leaves it: benilla-lua's client-shaped opening with the host's base
+/// functions, the dialect and the stdlib layer set over it, which replace values and add no key.
+fn open_state(vm: VmKind) -> mlua::Result<Lua> {
+    // `Lua::new` sets `InitLua`'s 256 KB threshold first (`0x7039f2`), then opens the state.
     let lua = Lua::new();
     let mut model = Model::new();
     model.vm = vm;
@@ -623,10 +657,22 @@ fn install_framescript(vm: VmKind) -> mlua::Result<Lua> {
     taint::install(&lua)?;
     stdlib::install(&lua)?;
 
+    Ok(lua)
+}
+
+/// What both FrameScript states hold: FrameScript's Lua init (`0x7039e0`), the bare state the glue
+/// builder starts from (left by startup `0x402aee` on its first build, re-run by its reset
+/// `0x703b80` on a later one) and `UI_Init` rebuilds through its own, and the three registrars
+/// the glue registrar `0x46abb0` shares with `UI_Init`: `0x51bb20` (the clock, `ConsoleExec` and
+/// the file trio), `0x706350` (the frame factory globals and the 17 widget method tables) and
+/// `0x4587f0` (sound).
+fn install_framescript(vm: VmKind) -> mlua::Result<Lua> {
+    let lua = open_state(vm)?;
+
     // `0x51bb20` (table `0x8503f4`): `GetTime`, `GetGameTime` and `ConsoleExec`. `ReadFile`,
     // `DeleteFile` and `AppendToFile` are not built.
     clock::install(&lua)?;
-    chat_misc::install_console_exec(&lua)?;
+    console_exec::install(&lua)?;
 
     // `0x706350`: `CreateFrame`, `CreateFont`, `GetNumFrames`, `EnumerateFrames` (table
     // `0x872e74`), then the widget method tables `0x7a2e70`..`0x78dc60`.
@@ -807,10 +853,14 @@ impl UiScript {
         }
     }
 
-    /// Bound how long a chunk may run: past `budget` VM instructions the hook raises a Lua error,
-    /// so a loop that never ends fails its addon and the rest still runs. The app arms it only for
-    /// the world-entry load, so a hung load reports instead of freezing the loading screen, and
-    /// disarms it ([`Self::clear_instruction_budget`]) before the session's first frame.
+    /// Bound how long a chunk may run: past `budget` VM instructions the hook aborts the chunk to
+    /// the host, past every `pcall` and `xpcall` and running no error handler
+    /// (`benilla_lua::Vm::abort`), so a loop that never ends fails its addon and the rest still
+    /// runs. The app arms it only for the world-entry load, so a hung load reports instead of
+    /// freezing the loading screen, and disarms it ([`Self::clear_instruction_budget`]) before the
+    /// session's first frame. Deviation: the client's Lua has no such bound, as nothing sets a
+    /// hook (`lua_sethook`, `0x6fba40`, has no caller and no pointer to it), so a load that
+    /// never ends hangs it.
     pub fn set_instruction_budget(&self, budget: u64) {
         let used = self.instructions.clone();
         used.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -851,16 +901,72 @@ impl UiScript {
     /// re-runs `UIParent_ManageFramePositions()`: the window resizes freely, and a seat computed
     /// from `GetScreenHeight()`, like the open-bag stack's column wrap, does not follow anchors.
     pub fn set_screen_size(&mut self, width: f32, height: f32) -> bool {
-        let new = Rect::new(0.0, 0.0, height, width);
-        let mut model = self.model_mut();
-        if model.screen == new {
+        self.set_root(Rect::new(0.0, 0.0, height, width), None)
+    }
+
+    /// Set the screen root for a window of `width` by `height` pixels: the screen-scale cells from
+    /// its aspect `a = RN24(width / height)`, as `0x41ad10` takes it, and the root `768·a` by 768
+    /// script units, whose layout extent is exactly the cells' `K1` by `K2` (`0x764284`). A window
+    /// with no area reads as 4/3. Returns whether anything moved, as [`Self::set_screen_size`].
+    ///
+    /// Deviation: the reference sets the cells only when glue or the interface is built, `0x41ad10`
+    /// from `0x46a828` (`0x46a7b0`) and `0x48fe2b` (`0x48fbf0`), and a resize reaches them only
+    /// through the rebuild it asks for. In glue `0x46abe0` sets the rebuild flag `0xb41d8c` when
+    /// the aspect moves by 0.01 or more (`fcomp` at `0x46ac66`); in game `0x492e90` reloads the
+    /// interface (`0x491380`) past 0.001 (`0x492f26`, `0x492f31`). The gate and the rebuild both
+    /// take the aspect from `gxResolution` (`0x46ab40`, `0x4901e0`; 4/3 while `widescreen` is
+    /// off), never the live window. Here every resize sets the cells from the window, because the
+    /// UI is kept live across a resize, and `widescreen` off keeps the window's aspect, as a 4:3
+    /// root over a wider window would take a seam stretched on one axis. A dragged frame with no
+    /// layout-cache row (unnamed, or `SetUserPlaced(false)`) keeps its drag pin in layout units,
+    /// where the rebuild would put it back where its script places it.
+    pub fn set_window_size(&mut self, width: f32, height: f32) -> bool {
+        let a = if width > 0.0 && height > 0.0 {
+            width / height
+        } else {
+            4.0 / 3.0
+        };
+        self.set_root(Rect::new(0.0, 0.0, 768.0, 768.0 * a), Some(a))
+    }
+
+    fn set_root(&mut self, new: Rect, aspect: Option<f32>) -> bool {
+        let (same, before) = {
+            let model = self.model_ref();
+            let same =
+                model.screen == new && model.aspect.map(f32::to_bits) == aspect.map(f32::to_bits);
+            (same, model.layout_units())
+        };
+        if same {
             return false;
         }
+        // New cells are a reload, whose teardown writes the layout cache under the cells in force
+        // (`0x490e60`) and whose build seats the user-placed frames from it under the new
+        // (`0x4905e0`): the rows are taken before anything moves.
+        let next = crate::layout::LayoutUnits::from_aspect(Model::aspect_of(new, aspect));
+        let reseat = (next != before).then(|| self.user_placed_layouts());
+        let mut model = self.model_mut();
         model.screen = new;
+        model.aspect = aspect;
+        let units = crate::layout::LayoutUnits::from_aspect(model.screen_aspect());
+        model.space = crate::layout::LayoutSpace::new(units, new.width(), new.height());
+        if units != before {
+            // New cells are a new interface build (`0x41ad10`): every node resolves afresh, and
+            // what the build's constructors took from the cells is taken again.
+            model.force_every_layout_node();
+            let minimaps = model.arena.minimap_kinds().to_vec();
+            for h in minimaps {
+                minimap::seat_engine_children(&mut model, h);
+            }
+            worldmap_arrow::rescale(&mut model);
+            backdrop::cells_changed(&mut model);
+        }
         model.touch_layout();
         drop(model);
         // The implicit rects are in layout units, which follow the aspect.
         self.reapply_implicit_rects();
+        if let Some(rows) = reseat {
+            self.reseat_user_placed(rows);
+        }
         true
     }
 
@@ -871,29 +977,21 @@ impl UiScript {
         model.modifiers = (shift, ctrl, alt);
     }
 
-    /// Push the player's WMO-containment state (the client's `0xceaa60`) onto every Minimap: it
-    /// picks which persisted zoom index `GetZoom`/`SetZoom` act on. Call it before the script
-    /// tick, on each inside/outside edge and whenever [`Self::minimap_widgets_created`] moves.
+    /// Push the player's WMO-containment state, the indoor byte `0xceaa60` that picks which zoom
+    /// index `GetZoom`/`SetZoom` act on. Call it before the script tick, on each inside/outside
+    /// edge and for each new VM.
     pub fn set_minimap_inside(&mut self, inside: bool) {
-        self.for_each_minimap(|m| m.inside = inside);
+        self.model_mut().minimap.inside = inside;
     }
 
-    fn for_each_minimap(&mut self, mut f: impl FnMut(&mut crate::widget::MinimapState)) {
-        let mut model = self.model_mut();
-        for h in model.arena.minimap_kinds().to_vec() {
-            if let Some(frame) = model.arena.frame_mut(h) {
-                if let KindState::Minimap(m) = &mut frame.kind_state {
-                    f(m);
-                }
-            }
-        }
-    }
-
-    /// Push the player's facing (radians) onto every Minimap's player-arrow `Model`, every frame,
-    /// raw: `CMinimap::SetPlayerFacing` (`0x4eb8e0`, fed at `0x4eb0a4`–`0x4eb0b1`) copies it into
-    /// the field `Model:SetFacing` (`0x76dce0`) writes, so the arrow's `GetFacing()` reads it.
+    /// The Minimap's per-frame update (`0x4eb040`) on every Minimap's player arrow: once its model
+    /// is loaded (`0x7103d0`), `0x4ee100` centres it on its own size, half its width and height
+    /// (slots 0x1c and 0x20) in layout units; then `CMinimap::SetPlayerFacing` (`0x4eb8e0`, fed at
+    /// `0x4eb0a4`–`0x4eb0b1`) copies the player's facing (radians) raw into the field
+    /// `Model:SetFacing` (`0x76dce0`) writes, so the arrow's `GetFacing()` reads it.
     pub fn set_minimap_player_facing(&mut self, facing: f32) {
         let mut model = self.model_mut();
+        let unit = model.layout_unit();
         let arrows: Vec<crate::widget::FrameHandle> = model
             .arena
             .minimap_kinds()
@@ -904,54 +1002,94 @@ impl UiScript {
             })
             .collect();
         for h in arrows {
-            if let Some(frame) = model.arena.frame_mut(h) {
-                if let KindState::Model(state) = &mut frame.kind_state {
-                    state.facing = facing;
+            let size = model.layout_inputs.get(&h).map_or((0.0, 0.0), |i| {
+                let u = model.layout_units();
+                (i.width.script(u), i.height.script(u))
+            });
+            let loaded = match model.arena.frame(h).map(|f| &f.kind_state) {
+                Some(KindState::Model(m)) => m
+                    .path
+                    .as_deref()
+                    .is_some_and(|p| model.model_facts.contains_key(&crate::widget::model_key(p))),
+                _ => false,
+            };
+            if let Some(KindState::Model(state)) =
+                model.arena.frame_mut(h).map(|f| &mut f.kind_state)
+            {
+                if loaded {
+                    state.position = (size.0 / unit * 0.5, size.1 / unit * 0.5, 0.0);
                 }
+                state.facing = facing;
             }
         }
     }
 
-    /// Publish `Minimap:GetPingPosition()`'s offsets from the widget centre, as fractions of its
-    /// side (x right, y up); the app recomputes them from the ping's world point each frame.
-    pub fn set_minimap_ping(&mut self, ping: (f32, f32)) {
-        self.model_mut().minimap_ping = ping;
+    /// The minimap's view radius in yards at the live zoom (`0x6da9b0`).
+    pub fn minimap_radius_yd(&self) -> f32 {
+        self.model_ref().minimap.radius_yd()
     }
 
-    /// Drain a `Minimap:PingLocation(x, y)`: centre-relative offsets in the screen root's units,
-    /// x right, y up.
-    pub fn take_minimap_ping_request(&mut self) -> Option<(f32, f32)> {
-        self.model_mut().minimap_ping_request.take()
+    /// Push the active player's WoW world `(x, y)`, `None` with no player object, before the
+    /// script tick: the ping methods read it at the call (`0x4eecdf`, `0x4ef021`).
+    pub fn set_minimap_player(&mut self, pos: Option<(f32, f32)>) {
+        self.model_mut().minimap.player = pos;
     }
 
-    /// `Minimap:SetMaskTexture`'s value from the first Minimap (the app draws one map), `None`
-    /// until one is set, while the app keeps [`crate::widget::MINIMAP_DEFAULT_MASK`].
-    pub fn minimap_mask_texture(&self) -> Option<String> {
-        let model = self.model_ref();
-        model.arena.minimap_kinds().iter().find_map(|&h| {
-            match model.arena.frame(h).map(|f| &f.kind_state) {
-                Some(KindState::Minimap(m)) => m.mask_texture.clone(),
-                _ => None,
+    /// Seat the stored ping a new VM inherits, the reference's statics living across the reload
+    /// (`0xbc787c`, `0xbc7880`); no event.
+    pub fn set_minimap_ping_point(&mut self, world: (f32, f32)) {
+        self.model_mut().minimap.ping = world;
+    }
+
+    /// A group member's ping (`0x5e41bd` → `0x4ee330`): stored at once and `MINIMAP_PING` signalled
+    /// with the pinger's unit token, all before this returns. Nothing without a player object.
+    pub fn apply_minimap_ping(&mut self, world: (f32, f32), token: &str) {
+        let fractions = self.model_mut().minimap.apply_ping(world);
+        if let Some((a, b)) = fractions {
+            self.fire_event("MINIMAP_PING", ping_args(token, a, b));
+        }
+    }
+
+    /// Drain the world points our own `Minimap:PingLocation` pinged since the last call.
+    pub fn take_minimap_pings_sent(&mut self) -> Vec<(f32, f32)> {
+        std::mem::take(&mut self.model_mut().minimap_pings_sent)
+    }
+
+    /// What this VM's texture setter for `slot` last stored, with the call's stamp; `None` while
+    /// this VM has not set it, when the process's texture stands.
+    pub fn minimap_art(
+        &self,
+        slot: crate::widget::MinimapArtSlot,
+    ) -> Option<(u64, crate::widget::MinimapArt)> {
+        self.model_ref().minimap.art[slot as usize].clone()
+    }
+
+    /// Seed the two zoom cells from the persisted CVars before the world entry reseeds them, so a
+    /// new VM's file scope reads the live level.
+    pub fn set_minimap_zoom(&mut self, zoom: u32, inside_zoom: u32) {
+        let mut model = self.model_mut();
+        model.minimap.zoom = zoom;
+        model.minimap.inside_zoom = inside_zoom;
+    }
+
+    /// The minimap initializer every world entry runs (`0x4ed9d0`, from `0x49096f`): its blip
+    /// set-up (`0x6d8e10`) copies each zoom CVar's integer into its cell, `minimapZoom` into
+    /// `0x86f698` and `minimapInsideZoom` into `0x86f69c` (`0x6d9008`-`0x6d901f`), and signals
+    /// `MINIMAP_UPDATE_ZOOM` (`0x6d902a`), on which the stock buttons re-sync. The copy is raw, so a
+    /// negative or out-of-range level stands in the cell for `GetZoom` to answer.
+    pub(crate) fn minimap_enter_world(&mut self) {
+        let outdoor = self.cvar_int("minimapZoom");
+        let indoor = self.cvar_int("minimapInsideZoom");
+        {
+            let mut model = self.model_mut();
+            if let Some(v) = outdoor {
+                model.minimap.zoom = v as u32;
             }
-        })
-    }
-
-    /// Minimap widgets ever created in this VM: a move means a new one needs the containment state.
-    pub fn minimap_widgets_created(&self) -> u64 {
-        self.model_ref().arena.minimap_created()
-    }
-
-    /// Seed every Minimap's two zoom indices from the persisted CVars, as the client's reset path
-    /// does (`[0x86f698] ← [[0xb4b410]+0x28]`, `[0x86f69c] ← [[0xb4d90c]+0x28]`). Call it once,
-    /// when the UI and the widget exist: from then on `Minimap:SetZoom` keeps the CVar following
-    /// the widget, and a repeated seed would fight the +/- buttons.
-    pub fn set_minimap_zoom(&mut self, zoom: u8, inside_zoom: u8) {
-        let top = crate::widget::MINIMAP_ZOOM_LEVELS - 1;
-        let (zoom, inside_zoom) = (zoom.min(top), inside_zoom.min(top));
-        self.for_each_minimap(|m| {
-            m.zoom = zoom;
-            m.inside_zoom = inside_zoom;
-        });
+            if let Some(v) = indoor {
+                model.minimap.inside_zoom = v as u32;
+            }
+        }
+        self.fire_event("MINIMAP_UPDATE_ZOOM", Vec::new());
     }
 
     /// Load and run a text chunk; handler errors during events go to [`UiScript::errors`] instead.
@@ -1005,9 +1143,12 @@ impl UiScript {
         let Some(h) = model.arena.lookup(frame) else {
             return false;
         };
+        let rows = Self::message_viewport(&model, h);
         match model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
             Some(crate::widget::KindState::ScrollingMessage(smf)) => {
-                smf.add(text.to_string(), r, g, b);
+                smf.add_with_id(text.to_string(), r, g, b, 0, rows);
+                drop(model);
+                messageframe::fire_scroll_changes(&self.lua, h);
                 true
             }
             _ => false,
@@ -1056,14 +1197,15 @@ impl UiScript {
             .any(|(_, f)| f.name.as_deref() == Some(name) && f.effective_visible)
     }
 
-    /// The named frame's effective alpha while it is effectively visible: the app's minimap ping
-    /// sprite follows the stock `MiniMapPing` `<Model>` this way.
-    pub fn frame_effective_alpha(&self, name: &str) -> Option<f32> {
+    /// The named frame's alpha byte as a fraction (`+0xc8`, which the walk `0x76a690` hands down
+    /// as the effective alpha) while it is effectively visible: the app's minimap ping sprite
+    /// follows the stock `MiniMapPing` `<Model>` this way.
+    pub fn frame_alpha(&self, name: &str) -> Option<f32> {
         self.model_ref()
             .arena
             .iter_frames()
             .find(|(_, f)| f.name.as_deref() == Some(name) && f.effective_visible)
-            .map(|(_, f)| f.effective_alpha)
+            .map(|(_, f)| crate::color::alpha_f32(f.alpha))
     }
 
     /// The layout drain (`0x768ed0`), which [`Self::tick`] runs before and after its walk: resolve
@@ -1149,6 +1291,7 @@ impl UiScript {
     /// measure can fail the ellipsis fit and truncate text that fits.
     pub fn invalidate_text_measures(&mut self) {
         let mut model = self.model_mut();
+        model.tooltip_measures.clear();
         for d in model.region_data.values_mut() {
             d.measured = None;
         }
@@ -1382,7 +1525,8 @@ impl UiScript {
     }
 
     /// Whether `name` is a registered font object, the other namespace an `inherits=` may name
-    /// (`loader::expand_region` forks on it), so a census counts no font as a missing template.
+    /// (a FontString's `inherits=` links it, `0x770f69`), so a census counts no font as a missing
+    /// template.
     pub fn has_font_object(&self, name: &str) -> bool {
         self.model_ref().font_object(name).is_some()
     }
@@ -1470,7 +1614,7 @@ impl UiScript {
         diagnostics::record_load_failure(&self.lua, log);
         self.model_mut()
             .pending_error_dispatch
-            .push(handler.to_string());
+            .push(model::HandlerArg::Text(handler.to_string()));
     }
 
     /// Hand each queued script error to the Lua error handler, as the reference's catch closure
@@ -1487,8 +1631,8 @@ impl UiScript {
         let Some(handler) = stdlib::error_handler(&self.lua) else {
             return;
         };
-        for msg in pending {
-            if let Err(e) = handler.call::<()>(msg) {
+        for arg in pending {
+            if let Err(e) = arg.value(&self.lua).and_then(|v| handler.call::<()>(v)) {
                 self.model_mut()
                     .errors
                     .push(format!("error handler itself failed: {e}"));
@@ -1497,14 +1641,17 @@ impl UiScript {
         }
     }
 
-    /// Register a named [`FontObject`] (a resolved `<Font>`), replacing any of that name, and
-    /// publish it as the Lua global `name`, the same pair `Loader::do_font` performs.
+    /// Register a named [`FontObject`] (a resolved `<Font>`), its block replaced by `font` and the
+    /// change pushed to what follows it, and publish it as the Lua global `name`.
     pub fn register_font_object(&self, name: &str, font: FontObject) {
-        self.model_mut()
-            .font_objects_by_lower
-            .insert(name.to_ascii_lowercase(), font);
+        let id = {
+            let mut model = self.model_mut();
+            let id = model.fonts.named(name);
+            font::replace_block(&mut model, id, font);
+            id
+        };
         // Publishing a fresh table under a string key cannot fail; the record is in place anyway.
-        let _ = font::publish(&self.lua, name);
+        let _ = font::publish(&self.lua, id, name);
     }
 
     /// A registered [`FontObject`] by name: its resolved paint.

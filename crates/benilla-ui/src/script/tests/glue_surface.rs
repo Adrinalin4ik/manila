@@ -217,9 +217,8 @@ fn the_glue_vm_answers_the_glue_surface() {
     );
 }
 
-/// Past its functions the glue `_G` holds the four library tables, the frame metatable
-/// `0x7039e0` publishes, and the compat chunk's `PI`; `_G` itself is benilla's, as in-game
-/// (`reference_surface::BEYOND_1_12`).
+/// Past its functions the glue globals hold the four library tables, the frame metatable
+/// `0x7039e0` publishes, and the compat chunk's `PI`.
 #[test]
 fn the_glue_vm_holds_no_other_global() {
     let others: BTreeMap<String, String> = glue_globals()
@@ -229,7 +228,6 @@ fn the_glue_vm_holds_no_other_global() {
     let want: BTreeMap<String, String> = [
         ("PI", "number"),
         ("__framescript_meta", "table"),
-        ("_G", "table"),
         ("bit", "table"),
         ("math", "table"),
         ("string", "table"),
@@ -411,7 +409,7 @@ fn the_glue_vm_makes_the_startup_frame_types_only() {
             .run(&format!(r#"CreateFrame("{t}")"#))
             .expect_err(t)
             .to_string();
-        assert!(e.contains(&format!("unknown frame type '{t}'")), "{t}: {e}");
+        assert!(e.contains(&format!("Unknown frame type '{t}'")), "{t}: {e}");
         world.run(&format!(r#"CreateFrame("{t}")"#)).unwrap();
     }
 }

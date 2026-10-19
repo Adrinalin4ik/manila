@@ -3,7 +3,9 @@
 //! where the C library decides it (`PLATFORM_CASES`), with mlua's `runtime error: ` and
 //! `stack traceback:` wrapper taken out. A new case's answer comes from the reference, written in
 //! by hand, and so does the answer of a case where benilla-lua follows 1.12.1's Lua 5.0 against
-//! 5.1: a comment at the case names the client's address.
+//! 5.1: a comment at the case names the client's address. One such rule spans many cases: a
+//! function the calling instruction does not name takes the name of a global holding it
+//! (`travglobals`, `0x6fbe11`), so `bad argument #1 to `strfind'' where 5.1 printed `?`.
 //!
 //! The cases that list every global answer with each binding the script host has, not with the
 //! VM, so they live in `vm_parity_surface.golden`, which `BENILLA_BLESS=1` rewrites when a
@@ -97,7 +99,7 @@ const CASES: &[(&str, &str)] = &[
     ("quantifiers", r#"return S(strfind("aaab", "a-b"), strfind("aaab", "a*"), strfind("b", "a?b"), strfind("<a><b>", "<(.-)>"), strfind("<a><b>", "<(.*)>"))"#),
     ("balance", r#"return S(strfind("f(a(b)c)d", "%b()"), strfind("THE (quick) fox", "%f[%a]%a+", 5))"#),
     ("backref", r#"return S(strfind('say "hi" now', "([\"'])(.-)%1"))"#),
-    ("gsub", r#"return S(string.gsub("hello world", "o", "0"), gsub("abc", "%w", "%0%0"), gsub("hello", "l+", function(s) return "[" .. s .. "]" end), gsub("abc", "", "-"), gsub("a b c", " ", "", 1))"#),
+    ("gsub", r#"return S(string.gsub("hello world", "o", "0"), E(gsub, "abc", "%w", "%0%0"), gsub("hello", "l+", function(s) return "[" .. s .. "]" end), gsub("abc", "", "-"), gsub("a b c", " ", "", 1))"#),
     ("gsub_basic", r#"return S(string.gsub("hello world", "o", "0"), gsub("hello", "l+", function(s) return "[" .. s .. "]" end), gsub("abc", "", "-"), gsub("a b c", " ", "", 1), gsub("$1.50", "%$", "USD"))"#),
     ("gsub_caps", r#"return S(gsub("John Smith", "(%w+) (%w+)", "%2, %1"), gsub("x=1, y=2", "(%w+)=(%w+)", "%2=%1"), gsub("abc", "(b)", "%%"))"#),
     ("gsub_nil_fn", r#"return S(gsub("a1b2", "%d", function(d) if d == "1" then return "one" end end))"#),
@@ -116,12 +118,15 @@ const CASES: &[(&str, &str)] = &[
     ("setn", "local t = {} table.setn(t, 5) local u = {n = 1} table.setn(u, 3) return S(getn(t), u.n, t.n)"),
     ("insert_remove", "local t = {} tinsert(t, 'a') tinsert(t, 'c') tinsert(t, 2, 'b') local r = tremove(t, 1) return S(r, t[1], t[2], t[3], getn(t), tremove({}))"),
     ("concat_tbl", "return S(table.concat({1, 2, 3}, ', '), table.concat({'a', 'b'}), table.concat({1, 2, 3}, '-', 2, 3))"),
+    // The client's `str_concat` fails argument 1's check (`0x7fb8d1`, text `0x8821f0`) through
+    // `luaL_error`, at the caller's line.
     ("concat_err_2", "return E(function() return table.concat({1, {}, 3}) end)"),
     ("sort", "local t = {5, 2, 8, 1, 9, 3} table.sort(t) local u = {'b', 'a', 'c'} sort(u, function(a, b) return a > b end) return table.concat(t, ',') .. '|' .. table.concat(u, ',')"),
     ("sort_many", "local t = {} for i = 1, 100 do t[i] = math.mod(i * 37, 101) end table.sort(t) local ok = true for i = 2, 100 do if t[i-1] > t[i] then ok = false end end return S(ok, t[1], t[100])"),
     ("foreach", "local o = {} foreachi({'a', 'b', 'c'}, function(i, v) table.insert(o, i .. v) end) local r = foreachi({1, 2, 3}, function(i, v) if v == 2 then return 'stop' end end) return table.concat(o, ',') .. S(r)"),
     ("unpack", "return S(unpack({1, 2, 3})) .. '|' .. S(unpack({n = 2, 'a', 'b', 'c'}))"),
     ("next", "local t = {} t.x = 1 local k, v = next(t) return S(k, v, next({}), next(t, 'x'))"),
+    // `luaH_next` raises the client's text (`0x6fa467`, `0x871aac`): "for", not 5.1's "to".
     ("next_err", "return E(function() return next({}, 'nope') end)"),
     ("ipairs", "local o = {} for i, v in ipairs({'a', 'b', nil, 'd'}) do table.insert(o, i .. v) end return table.concat(o, ',')"),
     ("pairs_array", "local o = {} for k, v in pairs({10, 20, 30}) do table.insert(o, k .. '=' .. v) end return table.concat(o, ',')"),
@@ -173,29 +178,34 @@ const CASES: &[(&str, &str)] = &[
     ("err_index_global", "return E(function() return undefined_thing.x end)"),
     ("err_index_local", "return E(function() local t return t.x end)"),
     ("err_index_field", "return E(function() local t = {} return t.a.b end)"),
+    // `getobjname` names no upvalue (`0x6fc5e0`).
     ("err_index_upvalue", "local up return E(function() return up.x end)"),
     ("err_call", "return E(function() undefined_fn() end) .. E(function() local t = {} t.m() end) .. E(function() local t = {} t:m() end)"),
     ("err_arith", "return E(function() local x return x + 1 end) .. E(function() return {} * 2 end)"),
     ("error_fn", "return E(function() error('boom') end) .. E(function() error('noloc', 0) end) .. string.sub(E(function() error({}) end), 1, 11) .. E(function() error(42) end)"),
     ("error_level2", "local function f() error('deep', 2) end return E(function() f() end)"),
+    // `luaB_assert` raises through `luaL_error` (`0x7031d6`), at the caller's line.
     ("assert", "return E(function() assert(false) end) .. E(function() assert(nil, 'msg') end) .. S(assert(1, 2, 3))"),
     ("bad_arg", "return E(function() string.sub() end) .. E(function() strfind(nil, 'x') end) .. E(function() setmetatable(1, {}) end) .. E(function() math.floor('x') end)"),
     ("bad_self", "local t = {f = string.len} return E(function() return t:f() end)"),
     ("xpcall", "local ok, msg = xpcall(function() error('x') end, function(e) return 'handled: ' .. e end) return S(ok, msg) .. '|' .. S(xpcall(function() return 1, 2 end, print))"),
     ("pcall_args", "return S(pcall(function(a, b) return a + b end, 1, 2))"),
     ("nested_pcall", "return E(function() local ok, e = pcall(error, 'inner') error('outer:' .. e, 0) end)"),
-    ("fenv", "local env = {x = 'env'} local function f() return x end setfenv(f, env) return S(f(), getfenv(f) == env, getfenv(0) == _G, getfenv() == _G)"),
+    ("fenv", "local env = {x = 'env'} local function f() return x end setfenv(f, env) return S(f(), getfenv(f) == env, getfenv(0) == getfenv(), getfenv(1) == getfenv())"),
     ("fenv_level", "x = 'global' local function f() setfenv(1, {x = 'set'}) return x end return S(f())"),
     ("loadstring", "local f = loadstring('return 1 + 1') local g, e = loadstring('return +') return S(f(), g, e)"),
     ("loadstring_name", "local f = loadstring('error(\"x\")', '=named') return E(f)"),
+    // 1.12's base array (`0x811e28`) has no `_G`: an addon reaches the globals by `getfenv(0)`.
     ("globals", "return S(type(_G), type(print), type(select), type(coroutine), type(string.gmatch), type(math.fmod), type(gcinfo), type(bit), type(getn), type(strfind), type(sin))"),
     ("type", "return S(type(nil), type(1), type('s'), type({}), type(print), type(type), type(true))"),
     ("tostring", "return S(tostring(nil), tostring(true), tostring(12), tostring('x'), string.sub(tostring({}), 1, 7), string.sub(tostring(print), 1, 10))"),
+    // The client's `bit` answers unsigned but for `arshift` and `mod` (`0x7faa6d`, `0x7fad06`).
     ("bit", "return S(bit.band(12, 10), bit.bor(12, 10), bit.bxor(12, 10), bit.bnot(0), bit.lshift(1, 4), bit.rshift(256, 4), bit.arshift(-16, 2), bit.lshift(1, 32), bit.mod(7, 3))"),
     ("math", "return S(math.abs(-3), math.max(1, 5, 3), math.min(4, 2), math.sqrt(16), math.floor(2.7), math.pi > 3.14, math.frexp(8), math.ldexp(0.5, 4), math.deg(math.pi))"),
     ("random", "math.randomseed(42) local a = math.random(100) math.randomseed(42) return S(a == math.random(100), math.random() < 1, math.random(5, 5))"),
     // ── What the current VM's 5.1 accepts, which 5.0 does not ──
     ("hex_literals", "return S(0x10, 0xff + 1, 0XA)"),
+    // The client's lexer has no long-bracket levels: `[=` is the token `[` (`0x6ff793`).
     ("long_brackets", "return S([=[a]]b]=], [==[x]=]y]==], [[plain]])"),
     ("string_dump", "return S(type(string.dump), E(function() return type(string.dump(function() end)) end))"),
     // A numeric `for`'s variable is its counter, one for the loop: the client's `fornum`
@@ -211,6 +221,7 @@ const CASES: &[(&str, &str)] = &[
     ("for_var_assigned", "local s = 0 for i = 1, 5 do s = s + i i = i + 10 end return S(s)"),
     ("until_sees_body_locals", "local n = 0 repeat local stop = n >= 2 n = n + 1 until stop or n > 5 return S(n)"),
     ("pow_metamethod", "local t = setmetatable({}, {__pow = function(a, b) return 'mm' end}) return S(E(function() return t ^ 2 end), E(function() return 2 ^ t end))"),
+    // `getobjname` names no upvalue (`0x6fc5e0`).
     ("upvalue_error_name", "local u return S(E(function() return u + 1 end), E(function() return u.x end), E(function() u() end))"),
     ("vararg_expr", "return S(E(loadstring, 'return function(...) return ... end'))"),
     // ── Numbers as the C library reads and writes them ──
@@ -219,7 +230,8 @@ const CASES: &[(&str, &str)] = &[
     ("tonumber_edges", r#"return S(tonumber("inf"), tonumber("-inf"), tonumber("nan") ~= nil, tonumber("1e"), tonumber("0x"), tonumber(" 0x1A "), tonumber("0x1p4"), tonumber("1e+"), tonumber(".5"), tonumber("5."), tonumber("- 1"), tonumber("1 2"), tonumber(""), tonumber("  "), tonumber("0x10", 10), tonumber("10", 36), tonumber("z", 36))"#),
     ("tonumber_base_edges", r#"return S(tonumber("-1", 16), tonumber("0x10", 16), tonumber(" ff ", 16), tonumber("ffffffffffffffffffff", 16), tonumber("1z", 36), tonumber("8", 8), tonumber("", 16), tonumber("-ff", 16), tonumber("+7", 8))"#),
     ("numeral_lexing", "return S(1e10, .5, 5., 3e-2, 1E2, 2^53 + 1, 1.5e+3, .5E-1, 2., 5.e2)"),
-    // Input past the chunk's end is the client's bare `<eof> expected` (`0x6fca1a`).
+    // Input past the chunk's end is the client's bare `<eof> expected` (`0x6fca1a`). A NUL after
+    // a `.` is no `.` (`0x6ff98a`, `0x6ff9b3`).
     ("numeral_reader", r#"local o = {}
         for _, src in ipairs({"return 0x10", "return 0xA0", "a = 0x10()", "a=1b=2 return a, b",
             "return 1..2", "return 1.2.3", "return 3e", "return 3e+", "return .5.3", "return 1d2",
@@ -239,7 +251,10 @@ const CASES: &[(&str, &str)] = &[
     ("coerce_d_and_hex", r#"return S("1d2" + 0, "2" + 1, E(function() return "0x2" + 1 end), E(function() return "nan" * 1 end), " 5.D1 " * 2, E(string.rep, "x", "0x2"), string.rep("x", "2d0"))"#),
     ("coerce_edges", r#"return S(E(function() return "0x10" * 1 end), " 2 " * " 3 ", E(function() return "1e" + 1 end), E(function() return "inf" + 0 end), 10 .. "", 1e100 .. "", -0.0 .. "", 2^63 .. "")"#),
     // ── Syntax errors and the lexer's edges, through `loadstring` ──
-    // Input past the chunk's end is the client's bare `<eof> expected` (`0x6fca1a`).
+    // Input past the chunk's end is the client's bare `<eof> expected` (`0x6fca1a`). A control
+    // byte is the lexer's `invalid control char` (`0x6ffabb`). `\n` alone ends a line
+    // (`0x6ffb94`): a `\r` is a blank, and a byte in a string (`0x700326`). `[=` is the token
+    // `[` (`0x6ff793`) and `--[==[` a line comment (`0x6ff6c9`).
     ("syntax_errors", r#"local o = {}
         for _, src in ipairs({"x = 1 +", "local function", "x = #t", "x = a % b",
             "return function(...) return ... end", "for x do end", "x = 1..2", "x = \"a\nb\"",
@@ -251,11 +266,16 @@ const CASES: &[(&str, &str)] = &[
           table.insert(o, (f and "ok" or e))
         end
         return table.concat(o, " | ")"#),
-    ("long_strings", r#"return S([[a [[b]] c]], [==[a ]] [[ ]=] b]==], [[
-first newline skipped]], [=[
-also]=], [[a
+    // `read_long_string` (`0x700010`) reads `=` as text.
+    ("long_strings", r#"return S([[a [[b]] c]], [[a [[ ]] ]=] b]], [[
+first newline skipped]], [[=[
+also]=]], [[a
 b]])"#),
     // ── Table layout, which `pairs` order shows ──
+    // The orders of `pairs_constructors`, `pairs_mixed`, `fix-front_setlist_order` and
+    // `fix-vm dead_keys` are the client's, run in its own `ltable.c` (`0x6fa1a0`..`0x6fad80`):
+    // `n` keys sit in `2^(log2(n)+1)` nodes, the constructor's `luaO_log2(nh) + 1` (`0x6fd563`)
+    // and `rehash`'s (`0x6fa9e5`), so an eight-key constructor walks otherwise than 5.1's.
     ("pairs_constructors", r#"local o = {}
         for n = 1, 20 do
           local parts = {}
@@ -265,8 +285,7 @@ b]])"#),
           table.insert(o, table.concat(ks, " "))
         end
         return table.concat(o, " | ")"#),
-    // Number keys hash as the client's `hashnum` (`0x6fa260`) does, the key plus 1.0; the hash
-    // part is still sized as 5.1 sizes it (#1487), so this order is not yet the client's.
+    // Number keys hash as the client's `hashnum` (`0x6fa260`) does, the key plus 1.0.
     ("pairs_mixed", r#"local function keys(t) local ks = {} for k, v in pairs(t) do table.insert(ks, tostring(k) .. "=" .. tostring(v)) end return table.concat(ks, " ") end
         local a = {1, 2, 3, x = 1, y = 2, [10] = 5, [1.5] = 6, [-1] = 7, z = 3}
         local b = {} for i = 1, 10 do b[i] = i end b[5] = nil b[20] = 20 b.k = 1
@@ -308,14 +327,16 @@ b]])"#),
         return S(E(function() return a <= b end), E(function() return b >= a end), a < b)"#),
     ("varargs_arg", r#"local function f(...) return arg.n, arg[1], arg[3] end
         return S(E(f, 1, nil, 3), E(function(a, ...) return a, arg.n end, 9))"#),
+    // The client's order, run in its code: `luaL_openlib` (`0x6f4dc0`) fills each table from empty
+    // in its array's order.
     ("pairs_libraries", r#"local o = {}
         for _, lib in ipairs({"string", "table", "math", "bit"}) do
-          local ks = {} for k in pairs(_G[lib]) do table.insert(ks, k) end
+          local ks = {} for k in pairs(getfenv(0)[lib]) do table.insert(ks, k) end
           table.insert(o, lib .. ": " .. table.concat(ks, " "))
         end
         return table.concat(o, " | ")"#),
     ("pairs_globals", r#"local ks, n = {}, 0
-        for k in pairs(_G) do n = n + 1 if n <= 400 then table.insert(ks, tostring(k)) end end
+        for k in pairs(getfenv(0)) do n = n + 1 if n <= 400 then table.insert(ks, tostring(k)) end end
         return n .. ": " .. table.concat(ks, " ")"#),
     ("getn_holes", r#"local function g(t) return table.getn(t) end
         local a = {1, 2, nil, 4}
@@ -328,10 +349,10 @@ b]])"#),
         return S(g(a), g(b), g(c), g(d), g(e), g(f), g(h), g({}), g({nil}), g({1, nil, 3, nil, 5, 6, 7, 8}))"#),
     ("string_metatable", r#"return S(E(function() return ("abc"):upper() end), getmetatable("x") ~= nil, E(function() local s = "x" return s.len end))"#),
     // ── The whole library surface: every global and every library member, with its type ──
-    ("global_surface", r#"local o = {} for k, v in pairs(_G) do if type(k) == "string" then table.insert(o, k .. ":" .. type(v)) end end table.sort(o) return table.concat(o, " ")"#),
+    ("global_surface", r#"local o = {} for k, v in pairs(getfenv(0)) do if type(k) == "string" then table.insert(o, k .. ":" .. type(v)) end end table.sort(o) return table.concat(o, " ")"#),
     ("libraries", r#"local o = {}
         for _, lib in ipairs({"string", "table", "math", "bit", "os", "coroutine", "debug", "io"}) do
-          local t = _G[lib]
+          local t = getfenv(0)[lib]
           if type(t) == "table" then
             local ks = {} for k, v in pairs(t) do table.insert(ks, k .. ":" .. type(v)) end table.sort(ks)
             table.insert(o, lib .. "={" .. table.concat(ks, " ") .. "}")
@@ -339,8 +360,9 @@ b]])"#),
         end
         return table.concat(o, " ")"#),
     // ── fix-front: the single-pass front end, 5.1.5's `lparser.c` and `lcode.c` ──
-    // Number keys hash as the client's `hashnum` (`0x6fa260`) does, the key plus 1.0; the hash
-    // part is still sized as 5.1 sizes it (#1487), so this order is not yet the client's.
+    // 5.0's parser flushes a constructor's items every 32 (`closelistfield`, `0x6fd6d0`), and
+    // `OP_SETLIST` stores each by `luaH_setnum` (`0x6f95b1`) into the array part `OP_NEWTABLE`
+    // sized; a trailing call counts as one item toward that size (`0x6fd72b`).
     ("fix-front_setlist_order", r#"local function K(t) local o = {} for k in pairs(t) do table.insert(o, tostring(k)) end return table.concat(o, " ") end
         local function list(n) local o = {} for i = 1, n do o[i] = i end return table.concat(o, ",") end
         local function f() return 1, 2, 3 end
@@ -433,9 +455,11 @@ b]])"#),
     // `OP_CALL` or `OP_TAILCALL` called (`0x6fc499`..`0x6fc4a1`).
     ("fix-front_for_names", r#"return S(E(function() for k, v in pairs({1}), 5 do end end), E(function() for i in string.rep do end end),
         E(function() for i in next, 5 do end end), E(function() local t = {} for k in t.f do end end))"#),
+    // A NUL byte outside a string is a control byte, the lexer's `invalid control char`
+    // (`0x6ffabb`) near `char(0)`.
     ("fix-front_nul_in_messages", r#"local function L(src, name) local f, e = loadstring(src, name or "=t") return e end
         return S(L('x = "a\0b\n'), L("x = \0"), L("\0"), L("x = 1 \0 y"), L('x = "a\0b" +'),
-          E(function() local t = {} t["a\0b"]() end), E(function() local t = {} t:m(1) end), E(function() return _G["g\0h"].x end))"#),
+          E(function() local t = {} t["a\0b"]() end), E(function() local t = {} t:m(1) end), E(function() return getfenv(0)["g\0h"].x end))"#),
     ("fix-front_constants_and_folding", r#"local function R(src) return S(loadstring(src)()) end
         return table.concat({R("return 1 + 2 * 3 - 4 / 2, 2^10, -(-3), - - 2, 10 / 0 > 1, 3 .. 4"),
           R("local a = 5 return a + 1 * 2, 2 * a, a / 2, 1 - a, a ^ 2, -a"),
@@ -443,12 +467,17 @@ b]])"#),
           R("local t = {} t[1], t[2] = 1, 2 local a, b = t[1], t[2] a, b = b, a return a, b"),
           R("local a, b, c = (function() return 1, 2, 3 end)() return a, b, c")}, " | ")"#),
     // ── fix-libs: the library fixes, each blessed on the C build ──
+    // `bit.lshift` answers unsigned (`0x7fac40`); `bit.mod(-2^31, -1)` and `bit.mod(2^31, -1)`,
+    // whose dividend's low word is `INT32_MIN` too, fault in the client's `idiv` (`0x7fad9b`), and
+    // their 0 here is benilla's own.
     ("fix-libs bit_mod_overflow", "return S(E(bit.mod, -2^31, -1), E(bit.mod, 2^31, -1), E(bit.mod, 7, -1), E(bit.mod, -7, 2), E(bit.mod, 0/0, -1), E(bit.mod, 1/0, -1), E(bit.lshift, 1, 31), E(bit.arshift, -2^31, 31))"),
-    ("fix-libs rep_format_sizes", r#"return S(string.rep("ab", 3), string.rep("", 1000000), string.rep("x", -1), string.rep("x", 0/0), E(string.format, "%123d", 1), E(string.format, "%1.123f", 1), string.format("%99d", 1) == string.rep(" ", 98) .. "1", string.len(string.format("%.99f", 1)), string.format("%-5c|%5s|%.1q", 65, "ab", "x"), table.concat({"a", 1, "b"}, string.rep("-", 3)), (gsub("abc", "%w", "%0%0%0")))"#),
+    ("fix-libs rep_format_sizes", r#"return S(string.rep("ab", 3), string.rep("", 1000000), string.rep("x", -1), string.rep("x", 0/0), E(string.format, "%123d", 1), E(string.format, "%1.123f", 1), string.format("%99d", 1) == string.rep(" ", 98) .. "1", string.len(string.format("%.99f", 1)), string.format("%-5c|%5s|%.1q", 65, "ab", "x"), table.concat({"a", 1, "b"}, string.rep("-", 3)), E(gsub, "abc", "%w", "%0%0%0"))"#),
     ("fix-libs deep_match", r#"local n = 3000 local s, p = string.rep("a", n), string.rep("a?", n) local t = {} for w in string.gfind(s, string.rep("(a)?", 30)) do table.insert(t, w) end return S(E(string.find, s, p), E(string.gsub, s, p, "x"), table.getn(t), E(string.find, s, string.rep("a-", 500) .. "$"))"#),
     ("fix-libs deg_rad", r#"local bad = 0 for i = -720, 720 do if math.deg(math.rad(i)) ~= i then bad = bad + 1 end end
         local o = {} for _, x in {0.1, 1, 3, 0.7, 1e-300, 1e300, -2.5, 1/3} do table.insert(o, string.format("%.17g %.17g", math.deg(x), math.rad(x))) end
         return S(bad, math.deg(math.rad(3)) == 3, string.format("%.17g %.17g %.17g %.17g", asin(0.5), acos(0.3), atan(1), atan2(1, 2))) .. "|" .. table.concat(o, "|")"#),
+    // MSVC's `rand` (`0x7400e5`) on every platform, scaled as `math_random` (`0x7fb310`) does:
+    // the full range's width wraps to 0, so it answers its low end.
     ("fix-libs random_ranges", r#"math.randomseed(7) local o = {}
         for _ = 1, 4 do table.insert(o, math.random(-2^31, 2^31 - 1)) table.insert(o, math.random(2^31 - 2, 2^31 - 1)) table.insert(o, math.random(2^31 - 1)) table.insert(o, math.random(-5, 5)) end
         return table.concat(o, " ")"#),
@@ -457,6 +486,8 @@ b]])"#),
     ("fix-libs hex_float", r#"local f = function(x) return string.format("%.17g", x or -1) end
         return S(f(tonumber("0x1p-1074")), f(tonumber("0x1000000000000p-1070")), f(tonumber("0x1p1023")), f(tonumber("0x1p1024")), f(tonumber("0x.1p-1070")), f(tonumber("0x1p-1075")), f(tonumber("0x3p-1075")), f(tonumber("0x1.8p-1074")), f(tonumber("0x1fffffffffffffp-1126")), f(tonumber("0x123456789abcdef0123p-1100")), f(tonumber("0x1p-1080")), E(function() return f("0x1p-1074" + 0) end))"#),
     ("fix-libs str_nul", r#"return S(tonumber("1\0"), tonumber("12\0 "), tonumber("1\0x"), E(function() return "1\0" + 1 end), E(function() return "0x10\0" + 0 end), tonumber("\0"), tonumber(" 5\0abc"), tonumber("ff\0", 16), tonumber("0x1\0"), tonumber("\0 1"), tonumber("1e\0"), tonumber("1 \0 x"))"#),
+    // The client's `sort` (`0x7fb920`) sorts `1..getn`: `f`'s `arg.n` of 3 takes in its nil,
+    // which `lua_lessthan` cannot compare.
     ("fix-libs sort_objlen", r#"local function f(...) table.sort(arg) return arg[1], arg[2], arg[3] end
         local t = {3, 1, 2, n = 5} local ok = pcall(table.sort, t)
         local a = {3, 1, nil, 2} local oka = pcall(table.sort, a)
@@ -465,6 +496,9 @@ b]])"#),
         local d = {} table.setn(d, 2) d[1] = 9 d[2] = 8 d[3] = 7 sort(d)
         local e = {4, 3, 2, 1} e[3] = nil local oke = pcall(table.sort, e)
         return S(E(f, 3, 1, nil), ok, t[1], t[2], t[3], oka, a[1], a[2], a[3], a[4]) .. "|" .. S(b[1], b[2], b[3], b[4], b[5], okc, c[1], c[2], c[4], d[1], d[2], d[3], oke, e[1], e[2], e[4])"#),
+    // 5.0's `setfenv` (`0x702be0`) answers nothing, takes its level as optional as `getfenv` does
+    // (`0x702b22`), and refuses a native as "given function" (`0x702c72`); `getfenv` answers an
+    // environment's raw `__fenv` (`0x702ba0`).
     ("fix-libs fenv", r#"local function f() end
         local t = {}
         local o = {S(setfenv(f, t) == f, getfenv(f) == t)}
@@ -473,7 +507,7 @@ b]])"#),
         table.insert(o, E(function() setfenv(f, e) return getfenv(f) == e end))
         table.insert(o, E(setfenv, tostring, t))
         table.insert(o, E(setfenv, 1, t))
-        table.insert(o, E(function() return getfenv(0) == _G, getfenv(tostring) == _G, getfenv() == getfenv(1) end))
+        table.insert(o, E(function() return getfenv(0) == getfenv(1), getfenv(tostring) == getfenv(0), getfenv() == getfenv(1) end))
         table.insert(o, E(setfenv, 100, t))
         table.insert(o, E(getfenv, 100))
         table.insert(o, E(getfenv, -1))
@@ -483,7 +517,7 @@ b]])"#),
         table.insert(o, E(getfenv, {}))
         local function g() local env = {S = S} setfenv(1, env) x = 5 return env.x end
         table.insert(o, E(g))
-        local function h() return getfenv(2) == _G end
+        local function h() return getfenv(2) == getfenv(0) end
         table.insert(o, E(h))
         table.insert(o, E(function() local G = getfenv(0) setfenv(0, G) return getfenv(0) == G end))
         return table.concat(o, "|")"#),
@@ -491,7 +525,10 @@ b]])"#),
     ("fix-libs format_alt_g", r#"local z = 0 local m = -z
         return S(string.format("%#g", 123456), string.format("%#.0g", 1), string.format("%#G", 1e20), string.format("%#g", 0), string.format("%#.3g", 1), string.format("%#g", 1e-10), string.format("%#.0e", 1), string.format("%#.0f", 1), string.format("%#.0G", 1e20), string.format("%#10.1g|%-#8g|", 5, 2.5), string.format("%g %f %e %.3g", m, m, m, m))"#),
     ("fix-libs format_ulong", r#"local z = 0 local o = {} for _, v in {2^64, 1e300, 1 / z, -1 / z, 0 / z, 2^63, -2^63, -1, 2^65, 2^63 + 2^11, -2^64, -1e300, 2^64 - 2^11} do table.insert(o, E(string.format, "%x %u %o %X", v, v, v, v)) end return table.concat(o, "|")"#),
+    // `luaH_next` raises the client's text (`0x6fa467`, `0x871aac`): "for", not 5.1's "to".
     ("fix-libs foreach_invalid_key", r#"local t = {a = 1} return S(E(foreach, t, function(k) t[k] = nil for i = 1, 20 do t["x" .. i] = i end end), E(next, {}, "nope"))"#),
+    // A chunk name's first line ends at `\n` alone (`strcspn` set `0x835144`), and a `\r` ends
+    // no line of the source (`0x6ffb94`).
     ("fix-libs chunkid_cr", r#"local o = {}
         for _, s in {"error('e')\r--x", "error('e')\n--x", "error('e')\r\n--x", "error('e') --" .. string.rep("y", 100), "\rerror('e')", "error('e')", "error('e')\0--x"} do
           local f, e = loadstring(s) if f then table.insert(o, E(f)) else table.insert(o, e) end
@@ -554,26 +591,6 @@ b]])"#),
         E(function() local q = setmetatable({}, {__index = 5}) return q.x end))"#),
     ("fix-vm tm_unm_args", r#"local u = setmetatable({}, {__unm = function(a, b) return S(a == b, rawequal(a, b)) end})
         return -u"#),
-    // ── fix-vm: a callback's arguments and results share `LUAI_MAXCSTACK` slots ──
-    ("fix-vm callback_results", r#"local t = {} for i = 1, 8000 do t[i] = i end
-        local function n(...) return arg.n end
-        -- The C build's first callback with many results fails earlier, an mlua artifact; warm it.
-        n(unpack(t, 1, 100))
-        local calls = {
-          [3] = function(k) return n(unpack(t, 1, k)) end,
-          [4] = function(k) return n(unpack(t, 1, k, nil)) end,
-          [6] = function(k) return n(unpack(t, 1, k, nil, nil, nil)) end,
-        }
-        local o = {}
-        for _, a in ipairs({3, 4, 6}) do
-          local most = 0
-          for k = 7985, 7999 do if pcall(calls[a], k) then most = k end end
-          table.insert(o, a .. ":" .. most)
-        end
-        -- The message alone: the C build's carries a Rust-side traceback after it.
-        local ok, e = pcall(calls[3], 7999)
-        local _, _, m = string.find(tostring(e), "^([^\n]*)")
-        return table.concat(o, " ") .. " " .. m"#),
     // ── perf-fix: gsub skips to a literal first byte; every shape answers as before ──
     ("perf-fix gsub_literal_first", r##"local s = "a-b--c-d.e%f(g)h"
         return S(string.gsub(s, "%-", "+"), string.gsub(s, "-", "+"), string.gsub(s, "%-+", "+"), string.gsub(s, "%-*", "+"),
@@ -581,7 +598,7 @@ b]])"#),
           string.gsub(s, "%.", "!"), string.gsub(s, "%%", "#"), string.gsub(s, "%(", "["), string.gsub(s, "d(.)", "<%1>"),
           string.gsub(s, "x", "y"), string.gsub("", "x", "y"), string.gsub(s, "^a", "A"), string.gsub(s, "^b", "B"),
           string.gsub(s, "h$", "H"), string.gsub(s, "-c", function(m) return "[" .. m .. "]" end),
-          string.gsub(s, "c", {c = "C"}), string.gsub("aaa", "a", "%0%0"))"##),
+          E(string.gsub, s, "c", {c = "C"}), E(string.gsub, "aaa", "a", "%0%0"))"##),
     ("perf-fix gsub_literal_errors", r#"return S(E(function() return string.gsub("abc", "b%", "x") end), E(function() return string.gsub("xyz", "b%", "x") end),
           E(function() return string.gsub("abc", "b(", "x") end), E(function() return string.gsub("xyz", "b(", "x") end),
           E(function() return string.gsub("abc", "b%1", "x") end), E(function() return string.gsub("xyz", "b[", "x") end),
@@ -649,9 +666,10 @@ b]])"#),
           table.insert(o, E(function() local t = chain(n, "__newindex") t.y = 1 return "set" end))
         end
         return table.concat(o, "|")"#),
-    // A collection marks a deleted key dead (5.1.5's `removeentry`): a key set again takes a new
-    // node by `newkey`'s rules, not its old one, so `pairs` order shows it. A key equal to an
-    // existing one keeps that key, `-0` or `0`.
+    // A collection leaves a deleted key whose string lives in its node (5.0's `traversetable`
+    // passes an empty entry by, `0x6f76be`), so a key set again finds its old node, as it does
+    // with no collection: each pair of orders is one. A key equal to an existing one keeps that
+    // key, `-0` or `0`.
     ("fix-vm dead_keys", r#"local function order(t) local o = {} for k in pairs(t) do table.insert(o, k) end return table.concat(o, " ") end
         local o = {}
         for _, c in {{5, 4}, {6, 5}, {7, 6}, {8, 4}, {13, 10}, {14, 14}} do
@@ -671,6 +689,7 @@ b]])"#),
         return table.concat(o, " | ")"#),
     // ── fix-libs: library errors the cases above leave out ──
     // The message's first line: the C build's carries a Rust-side traceback after it.
+    // `auxsort` raises through `luaL_error` (`0x7fb990`), at the line that called `sort`.
     ("fix-libs sort_invalid_order", r#"local function M(f, ...) local ok, e = pcall(f, unpack(arg)) if ok then return "ok" end
           local _, _, m = string.find(tostring(e), "^([^\n]*)") return m end
         local t = {} for i = 1, 50 do t[i] = math.mod(i * 7, 13) end
@@ -722,7 +741,8 @@ b]])"#),
         local o = {}
         for i = 1, 3 do n = 0 local ok, e = pcall(f) table.insert(o, n .. ":" .. tostring(e)) end
         return table.concat(o, " ")"#),
-    // ── r2-vm: the script host's loadstring refuses a binary chunk with mlua's text ──
+    // ── r2-vm: a binary chunk is lexed as source (`luaD_protectedparser` zeroes the binary
+    // flag, `0x6f6a15`), so its `\27` is an `invalid control char` (`0x6ffabb`) ──
     ("r2-vm loadstring_binary", r#"return S(loadstring("\27Lua\81\0", "=bin"), loadstring("\27Lua"))"#),
 ];
 
@@ -742,6 +762,10 @@ const SWEEP_FNS: &[&str] = &[
     "string.match",
     "string.gmatch",
     "string.reverse",
+    // The table library and `unpack` are the client's: `luaL_checktype`, `luaL_checknumber` and
+    // `luaL_argerror`'s messages (`0x6f4b50`, `0x6f4c80`, `0x6f4810`), in the order each reads
+    // its arguments (`str_concat` 2, 3, 4, then 1), and `tinsert`'s position form for any count
+    // but 2 (`0x7fb6e0`).
     "table.concat",
     "table.getn",
     "table.setn",
@@ -756,6 +780,8 @@ const SWEEP_FNS: &[&str] = &[
     "math.floor",
     "math.max",
     "math.min",
+    // `math.mod`, `math.pow` and `math.atan2` check argument 1, then 2, as the client's do
+    // (`0x7fafd0`, `0x7fb050`, `0x7faf30`), on every platform.
     "math.mod",
     "math.fmod",
     "math.sqrt",
@@ -784,12 +810,17 @@ const SWEEP_FNS: &[&str] = &[
     "rawget",
     "rawset",
     "select",
+    // The client's `unpack` reads its table alone (`0x7030a0`): items 1 to `getn`.
     "unpack",
+    // `luaH_next`'s text is the client's (`0x871aac`).
     "next",
+    // 5.0's `ipairs` (`0x702cd0`): any second argument steps once, as the client answers.
     "ipairs",
     "pairs",
     "getmetatable",
     "setmetatable",
+    // `assert` and `loadstring` check their arguments as `luaL_argerror` words it (`0x6f4810`),
+    // named `?` when a C function, `pcall`, called them.
     "assert",
     "error",
     "pcall",
@@ -805,6 +836,7 @@ const SWEEP_FNS: &[&str] = &[
     "strrep",
     "format",
     "gsub",
+    // The table library's own functions, so its messages, as above.
     "tinsert",
     "tremove",
     "getn",
@@ -816,6 +848,7 @@ const SWEEP_FNS: &[&str] = &[
     "floor",
     "max",
     "min",
+    // `math.mod`'s order, as above.
     "mod",
     "sqrt",
     "frexp",
@@ -841,8 +874,8 @@ local function ARGS() return {
 end
 local function name(f)
   local t, k = string.find(f, ".", 1, true)
-  if t then return _G[string.sub(f, 1, t - 1)][string.sub(f, t + 1)] end
-  return _G[f]
+  if t then return getfenv(0)[string.sub(f, 1, t - 1)][string.sub(f, t + 1)] end
+  return getfenv(0)[f]
 end
 function SWEEP(fname)
   local f = name(fname)
@@ -899,21 +932,20 @@ fn unescape(s: &str) -> String {
 /// - the transcendental functions are the host libm's, rounded differently by glibc and Apple's;
 /// - a NaN prints its sign under glibc (`-nan`), never under Apple's libc, and which NaN a
 ///   function answers is the host libm's;
-/// - `luaL_checknumber` on two arguments in one C call (`fmod`, `pow`, `ldexp`, `atan2`) checks
-///   them in the compiler's order: gcc on x86-64 the second first, clang on arm64 the first;
+/// - `luaL_checknumber` on two arguments in one C call (`fmod`, `pow`, `ldexp`, `atan2`) checked
+///   them in the compiler's order: gcc on x86-64 the second first, clang on arm64 the first.
+///   benilla-lua checks them in the client's order on every platform (`pow`, `atan2` and `mod`
+///   the first, `ldexp` the second), so the error items of the first three agree everywhere;
 /// - a `double` past the integer range cast to `ptrdiff_t` or `unsigned long` is undefined: x86-64
-///   answers `INT64_MIN`, arm64 saturates;
-/// - `math.random` is the host `rand`.
+///   answers `INT64_MIN`, arm64 saturates.
 ///
-/// benilla-lua pins the reference platform's answers for the compiler and `rand` cases, and runs
+/// benilla-lua pins the reference platform's answers for the compiler cases, and runs
 /// the host libm, so it answers a whole case as the C build only on the reference platform.
 /// Elsewhere, and on a platform no answer was blessed on, a case's answer is split into items at
 /// its separator, and each item every recorded platform answers alike is checked: only the items
 /// the platforms differ on go unchecked.
 const PLATFORM_CASES: &[&str] = &[
     "fix-libs deg_rad",
-    "fix-libs random_ranges",
-    "fix-libs format_ulong",
     "sweep string.char",
     "sweep string.sub",
     "sweep strsub",

@@ -19,7 +19,9 @@
 
 mod faces;
 mod gpu;
+mod mono;
 mod sfnt;
+mod smooth;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -36,7 +38,7 @@ use benilla_assets::WorldAssets;
 use faces::{charmap_glyph, hhea_ascent_ratio, register_font, unicode_charmap, CLIENT_FONTS};
 pub(crate) use gpu::{FontAtlasInit, UiTextPlugin};
 
-use super::outline::outlined_cell;
+use super::outline::{mono_cell, outlined_cell, Bake};
 use super::pack::{Cell, Sheet};
 
 /// The raster size floor in device pixels, the reference's `max(2, …)` (`0x5ca030`).
@@ -65,8 +67,8 @@ struct Face {
     charmap: u16,
 }
 
-/// `(face, glyph, ppem, outline radius)`: one bitmap per exact device-pixel size.
-type GlyphKey = (fontdb::ID, u16, u16, u8);
+/// `(face, glyph, ppem, bake)`: one bitmap per exact device-pixel size and bake.
+type GlyphKey = (fontdb::ID, u16, u16, Bake);
 
 /// One rasterized cell, all in physical px; the layout divides by [`TextEngine::dpi`].
 #[derive(Clone, Copy, Debug)]
@@ -83,7 +85,7 @@ pub(super) struct GlyphInfo {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct GlyphRef {
     pub(super) glyph_id: u16,
-    /// Swash's raster key at zero subpixel offset, so another outline radius needs no re-shaping.
+    /// Swash's raster key at zero subpixel offset, so another bake needs no re-shaping.
     key: CacheKey,
     /// The advance in whole physical px, as the reference's FreeType rounds it
     /// ([`sfnt::GlyphPx::advance`]); the step law adds its bias ([`TextEngine::step`]).
@@ -140,7 +142,7 @@ pub(crate) struct TextEngine {
     dpi: f32,
     /// `(face, ppem, char)` to pen metrics; never touches the GPU, so the VM's measurer fills it.
     chars: HashMap<(usize, u16, char), CharCell>,
-    /// `(face, glyph, ppem, radius)` to cell; `None` for no ink or no room, so a miss is paid once.
+    /// `(face, glyph, ppem, bake)` to cell; `None` for no ink or no room, so a miss is paid once.
     cells: HashMap<GlyphKey, Option<GlyphInfo>>,
     sheet: Sheet,
     /// Bumped on a [reset][Sheet::reset], the only event that moves a UV, so it is what a
@@ -347,12 +349,12 @@ impl TextEngine {
         self.ascent_ratio_of(face)
     }
 
-    /// Shape and rasterize whatever `text` lacks at this `(face, ppem, radius)`, so every lookup
+    /// Shape and rasterize whatever `text` lacks at this `(face, ppem, bake)`, so every lookup
     /// after it hits; the reference does this per character in its layout kernels (`0x5cabd0`).
     /// `AllGlyphsCached` (`0x5c9fa0`) is not this: it gates geometry invalidation after eviction.
-    pub(super) fn ensure_str(&mut self, face: usize, ppem: u16, radius: u8, text: &str) {
+    pub(super) fn ensure_str(&mut self, face: usize, ppem: u16, bake: Bake, text: &str) {
         for ch in text.chars() {
-            self.ensure_char(face, ppem, Some(radius), ch);
+            self.ensure_char(face, ppem, Some(bake), ch);
         }
     }
 
@@ -373,19 +375,19 @@ impl TextEngine {
         self.dpi = dpi;
     }
 
-    /// One character: shape it alone into its [`CharCell`] and rasterize its glyphs at `radius`.
+    /// One character: shape it alone into its [`CharCell`] and rasterize its glyphs for `bake`.
     /// Alone, so a glyph's metrics hold no neighbour term (the pair kern is [`Self::step`]'s) and
     /// one table answers a measure and a draw.
-    fn ensure_char(&mut self, face: usize, ppem: u16, radius: Option<u8>, ch: char) {
+    fn ensure_char(&mut self, face: usize, ppem: u16, bake: Option<Bake>, ch: char) {
         if let Some(known) = self.chars.get(&(face, ppem, ch)) {
-            let Some(radius) = radius else { return };
-            // The pen metrics are cached; the cells for this radius may not be.
+            let Some(bake) = bake else { return };
+            // The pen metrics are cached; the cells for this bake may not be.
             let glyphs = known.glyphs.clone();
             let Some(id) = self.faces.get(face).map(|f| f.id) else {
                 return;
             };
             for g in &glyphs {
-                self.ensure_cell(id, ppem, radius, g);
+                self.ensure_cell(id, ppem, bake, g);
             }
             return;
         }
@@ -500,10 +502,10 @@ impl TextEngine {
                 None => g.ink = glyph_ink(&mut self.swash, &mut self.font_system, g.key, ppem),
             }
         }
-        if let Some(radius) = radius {
+        if let Some(bake) = bake {
             for g in &glyphs {
                 let g = *g;
-                self.ensure_cell(face_id, ppem, radius, &g);
+                self.ensure_cell(face_id, ppem, bake, &g);
             }
         }
         self.chars.insert((face, ppem, ch), CharCell { glyphs });
@@ -543,59 +545,99 @@ impl TextEngine {
         (sum as f32).ceil()
     }
 
-    /// Rasterize and pack one glyph's cell, unless it is already there.
-    fn ensure_cell(&mut self, face_id: fontdb::ID, ppem: u16, radius: u8, g: &GlyphRef) {
-        let key: GlyphKey = (face_id, g.glyph_id, ppem, radius);
+    /// Rasterize and pack one glyph's cell, unless it is already there. The raster is FreeType's
+    /// unhinted one off the face's own outline, 1-bit for a monochrome bake ([`mono::rasterize`])
+    /// and smooth otherwise ([`smooth::rasterize`]); a glyph another face shaped, whose tables are
+    /// not held, takes the shaper's unhinted antialiased raster.
+    ///
+    /// The cell's left edge sits at `ceil(horiBearingX)` from the pen, the quad x of `0x5ccbe0`
+    /// (`0x5cb080` mode 0, `0x5cd099`), not at the bitmap's `floor(xMin)`; the bakes put the ink
+    /// `pad` columns in (`0x5cf237` plain, `0x5ce481`/`0x5cea7e` outlined, `0x5ce48a`/`0x5cea87` one more for THICK).
+    /// Its top sits `pad` rows over FreeType's `bitmap_top`, which the reference's vertical seat
+    /// (`0x5d1360`) hangs from the ascender, so the ink keeps the bitmap's own row. Only the
+    /// raster's first `ppem` rows are baked ([`em_rows`]), before any ring, and they keep their rows.
+    fn ensure_cell(&mut self, face_id: fontdb::ID, ppem: u16, bake: Bake, g: &GlyphRef) {
+        let key: GlyphKey = (face_id, g.glyph_id, ppem, bake);
         if self.cells.contains_key(&key) {
             return;
         }
-        let raster = {
-            let Self {
-                swash, font_system, ..
-            } = self;
-            swash
-                .get_image(font_system, g.key)
-                .as_ref()
-                .map(|i| (i.placement, i.data.clone()))
+        let outline = self
+            .faces
+            .iter()
+            .find(|f| f.id == g.key.font_id)
+            .and_then(|f| f.sfnt.clone())
+            .and_then(|t| t.outline(g.glyph_id, ppem));
+        // `(cell, w, h, pad, bearing, top)`: the baked cell, its ring's reach, and the bitmap's
+        // seat in whole px.
+        let baked = match &outline {
+            Some(o) if bake.mono => mono::rasterize(o, ppem).map(|m| {
+                let (bits, rows) = em_rows(m.bits, m.w, m.h, ppem);
+                let (rgba, w, h, pad) = mono_cell(&bits, m.w, rows, bake.radius, self.dpi);
+                (OwnedCell::Rgba(rgba), w, h, pad, o.bearing(), m.top)
+            }),
+            Some(o) => smooth::rasterize(o).map(|m| {
+                let (cov, rows) = em_rows(m.coverage, m.w, m.h, ppem);
+                let (cell, w, h, pad) = self.coverage_cell(cov, m.w, rows, bake);
+                (cell, w, h, pad, o.bearing(), m.top)
+            }),
+            None => self.shaper_raster(g.key).map(|(cov, p, bearing)| {
+                let (cov, rows) = em_rows(cov, p.width, p.height, ppem);
+                let (cell, w, h, pad) = self.coverage_cell(cov, p.width, rows, bake);
+                (cell, w, h, pad, Some(bearing), p.top)
+            }),
         };
-        let Some((placement, cov)) = raster else {
-            self.cells.insert(key, None);
-            return;
-        };
-        let (w, h) = (placement.width, placement.height);
-        if w == 0 || h == 0 {
+        let Some((cell, w, h, pad, Some(bearing), top)) = baked else {
             // Whitespace / zero-ink glyph: real metrics, no cell.
             self.cells.insert(key, None);
             return;
-        }
-        self.stats.cells_rasterized += 1;
-        // An outlined cell grows by `pad` each side and its bearings move out; the advance stays.
-        let (uv, cw, ch, bx, bt) = if radius == 0 {
-            (
-                self.sheet.alloc(w, h, &Cell::Coverage(&cov)),
-                w,
-                h,
-                placement.left as f32,
-                placement.top as f32,
-            )
-        } else {
-            let (rgba, ow, oh, pad) = outlined_cell(&cov, w, h, radius, self.dpi);
-            (
-                self.sheet.alloc(ow, oh, &Cell::Rgba(&rgba)),
-                ow,
-                oh,
-                placement.left as f32 - pad as f32,
-                placement.top as f32 + pad as f32,
-            )
         };
+        self.stats.cells_rasterized += 1;
+        let uv = self.sheet.alloc(w, h, &cell.as_cell());
+        self.place(key, uv, w, h, bearing as f32, (top + pad as i32) as f32);
+    }
+
+    /// A coverage bitmap baked for `bake`: as it is when plain, ringed when outlined, the cell then
+    /// grown by `pad` texels each side. `(cell, w, h, pad)`.
+    fn coverage_cell(
+        &self,
+        cov: Vec<u8>,
+        w: u32,
+        h: u32,
+        bake: Bake,
+    ) -> (OwnedCell, u32, u32, u32) {
+        if bake.radius == 0 {
+            return (OwnedCell::Coverage(cov), w, h, 0);
+        }
+        let (rgba, ow, oh, pad) = outlined_cell(&cov, w, h, bake.radius, self.dpi);
+        (OwnedCell::Rgba(rgba), ow, oh, pad)
+    }
+
+    /// The shaper's unhinted antialiased raster of a glyph, its placement and `ceil` of its
+    /// outline's `xMin`, for a glyph whose face's tables are not held; `None` with no ink.
+    fn shaper_raster(&mut self, key: CacheKey) -> Option<(Vec<u8>, cosmic_text::Placement, i32)> {
+        let key = CacheKey {
+            flags: key.flags | CacheKeyFlags::DISABLE_HINTING,
+            ..key
+        };
+        let Self {
+            swash, font_system, ..
+        } = self;
+        let (x0, ..) = outline_box(swash, font_system, key)?;
+        let image = swash.get_image_uncached(font_system, key)?;
+        let p = image.placement;
+        (p.width > 0 && p.height > 0).then(|| (image.data, p, x0.ceil() as i32))
+    }
+
+    /// Record a packed cell, or its absence when the sheet had no room.
+    fn place(&mut self, key: GlyphKey, uv: Option<Rect>, w: u32, h: u32, bx: f32, bt: f32) {
         match uv {
             Some(uv) => {
                 self.cells.insert(
                     key,
                     Some(GlyphInfo {
                         uv,
-                        px_w: cw as f32,
-                        px_h: ch as f32,
+                        px_w: w as f32,
+                        px_h: h as f32,
                         bearing_x: bx,
                         bearing_top: bt,
                     }),
@@ -634,12 +676,12 @@ impl TextEngine {
         &self,
         face: usize,
         ppem: u16,
-        radius: u8,
+        bake: Bake,
         glyph_id: u16,
     ) -> Option<GlyphInfo> {
         let id = self.faces.get(face)?.id;
         self.cells
-            .get(&(id, glyph_id, ppem, radius))
+            .get(&(id, glyph_id, ppem, bake))
             .copied()
             .flatten()
     }
@@ -669,6 +711,12 @@ impl UiFontAtlas {
         self.engine
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The DPI the engine lays out at, which follows the window's at the frame boundary
+    /// (`gpu::publish_sheet`): a holder of laid-out glyphs re-lays them when it moves.
+    pub(crate) fn dpi(&self) -> f32 {
+        self.lock().dpi
     }
 
     /// The shared engine, for the VM's measurer.
@@ -758,6 +806,11 @@ pub(super) const TEST_FACES: &[&str] = CLIENT_FONTS;
 
 #[cfg(test)]
 impl UiFontAtlas {
+    /// A glyph-sheet texel's alpha as this frame queued it ([`Sheet::pending_alpha`]).
+    pub(crate) fn pending_alpha_for_test(&self, x: u32, y: u32) -> Option<u8> {
+        self.lock().sheet.pending_alpha(x, y)
+    }
+
     /// [`test_engine`] as the app holds it, for a host test that draws text; `None` as there.
     pub(crate) fn for_test(dpi: f32) -> Option<Self> {
         Some(UiFontAtlas {
@@ -779,13 +832,28 @@ impl UiFontAtlas {
 /// (`0x5d1300`: both load-flag words carry `FT_LOAD_NO_HINTING`).
 fn glyph_ink(swash: &mut SwashCache, fs: &mut FontSystem, key: CacheKey, ppem: u16) -> f32 {
     let blank = f32::from((ppem + 3) >> 2);
+    let Some((x0, x1, y0, y1)) = outline_box(swash, fs, key) else {
+        return blank;
+    };
+    let (width, rows) = (x1.ceil() - x0.floor(), y1.ceil() - y0.floor());
+    if !(width > 0.0 && rows > 0.0) {
+        return blank;
+    }
+    x0.ceil() + width
+}
+
+/// The unhinted outline's control box `(xMin, xMax, yMin, yMax)` in px, on FreeType's 26.6 grid so
+/// an edge a float hair past a whole pixel does not round out; `None` with no outline.
+fn outline_box(
+    swash: &mut SwashCache,
+    fs: &mut FontSystem,
+    key: CacheKey,
+) -> Option<(f32, f32, f32, f32)> {
     let key = CacheKey {
         flags: key.flags | CacheKeyFlags::DISABLE_HINTING,
         ..key
     };
-    let Some(commands) = swash.get_outline_commands_uncached(fs, key) else {
-        return blank;
-    };
+    let commands = swash.get_outline_commands_uncached(fs, key)?;
     let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
     for c in commands.iter() {
         let pts = match *c {
@@ -801,14 +869,49 @@ fn glyph_ink(swash: &mut SwashCache, fs: &mut FontSystem, key: CacheKey, ppem: u
             (y0, y1) = (y0.min(p.y), y1.max(p.y));
         }
     }
-    // FreeType's 26.6 grid, so an edge a float hair past a whole pixel does not round out.
     let q = |v: f32| (v * 64.0).round() / 64.0;
-    let (x0, x1, y0, y1) = (q(x0), q(x1), q(y0), q(y1));
-    let (width, rows) = (x1.ceil() - x0.floor(), y1.ceil() - y0.floor());
-    if !(width > 0.0 && rows > 0.0) {
-        return blank;
+    (x0 <= x1).then(|| (q(x0), q(x1), q(y0), q(y1)))
+}
+
+/// A raster's first `em` rows, one byte per texel, and how many that is: the reference keeps
+/// `min(em, rows)` of a glyph's rows from the top (`0x5d1195`), `em` being the pixel size its face
+/// is set to (`0x5ca1b5`, `[CGxFont+0x24c]`), which here is the ppem the raster was made at.
+fn em_rows(mut texels: Vec<u8>, w: u32, h: u32, em: u16) -> (Vec<u8>, u32) {
+    let rows = h.min(u32::from(em));
+    texels.truncate((w * rows) as usize);
+    (texels, rows)
+}
+
+/// A baked cell's texels, owned until the sheet copies them ([`Cell`]).
+enum OwnedCell {
+    Coverage(Vec<u8>),
+    Rgba(Vec<u8>),
+}
+
+impl OwnedCell {
+    fn as_cell(&self) -> Cell<'_> {
+        match self {
+            OwnedCell::Coverage(c) => Cell::Coverage(c),
+            OwnedCell::Rgba(c) => Cell::Rgba(c),
+        }
     }
-    x0.ceil() + width
+}
+
+#[cfg(test)]
+mod em_rows_tests {
+    use super::em_rows;
+
+    #[test]
+    fn a_raster_keeps_at_most_its_em_rows_from_the_top() {
+        let tall: Vec<u8> = (0..12).collect(); // 3 wide, 4 rows
+        assert_eq!(em_rows(tall.clone(), 3, 4, 3), ((0..9).collect(), 3));
+        assert_eq!(em_rows(tall.clone(), 3, 4, 4), (tall.clone(), 4));
+        assert_eq!(
+            em_rows(tall.clone(), 3, 4, 9),
+            (tall, 4),
+            "a short glyph is whole"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -861,6 +964,7 @@ mod line_law_tests {
                     path: Some(FRIZ),
                     height: Some(f32::from(ppem) / dpi),
                     outline,
+                    monochrome: false,
                     spacing: 0.0,
                     shadow_x: 0.0,
                     alpha_gradient: None,
@@ -890,24 +994,28 @@ mod line_law_tests {
             e.face_for(Some("Fonts\\ARIALN.TTF")),
         );
         for ch in ['Ж', 'я', '中'] {
-            e.ensure_str(friz, 12, 0, &ch.to_string());
+            e.ensure_str(friz, 12, Bake::ring(0), &ch.to_string());
             let cell = e.char_cell(friz, 12, ch).expect("the miss is cached");
             assert!(
                 cell.glyphs.is_empty(),
                 "Friz has no {ch:?}: no glyph, no step"
             );
         }
-        e.ensure_str(arial, 12, 0, "Ж");
+        e.ensure_str(arial, 12, Bake::ring(0), "Ж");
         let g = e.char_cell(arial, 12, 'Ж').expect("shaped").glyphs[0];
         assert!(
             g.glyph_id != 0 && g.px > 0.0,
             "ARIALN maps Ж to a real glyph"
         );
-        assert!(e.cell(arial, 12, 0, g.glyph_id).is_some(), "…and draws it");
+        assert!(
+            e.cell(arial, 12, Bake::ring(0), g.glyph_id).is_some(),
+            "…and draws it"
+        );
         let spec = |path| FontSpec {
             path: Some(path),
             height: Some(12.0),
             outline: Outline::None,
+            monochrome: false,
             spacing: 0.0,
             shadow_x: 0.0,
             alpha_gradient: None,
@@ -943,6 +1051,7 @@ mod line_law_tests {
                 path: Some("Fonts\\ARIALN.TTF"),
                 height: Some(f32::from(ppem)),
                 outline: Outline::None,
+                monochrome: false,
                 spacing: 0.0,
                 shadow_x: 0.0,
                 alpha_gradient: None,
@@ -1098,16 +1207,16 @@ mod ppem_tests {
             return;
         };
         let face = e.face_for(None);
-        e.ensure_str(face, 14, 0, "Ab");
+        e.ensure_str(face, 14, Bake::ring(0), "Ab");
         let (shaped, cells) = (e.stats.chars_shaped, e.stats.cells_rasterized);
         assert_eq!(shaped, 2, "two characters");
         assert_eq!(cells, 2, "two plain cells");
 
-        e.ensure_str(face, 14, 0, "Ab");
+        e.ensure_str(face, 14, Bake::ring(0), "Ab");
         assert_eq!(e.stats.chars_shaped, shaped, "a repeat costs no shaping");
         assert_eq!(e.stats.cells_rasterized, cells, "…and no raster");
 
-        e.ensure_str(face, 14, 1, "Ab");
+        e.ensure_str(face, 14, Bake::ring(1), "Ab");
         assert_eq!(
             e.stats.chars_shaped, shaped,
             "the pen metrics were already there"
@@ -1118,14 +1227,17 @@ mod ppem_tests {
             "…but the ring is a new cell"
         );
 
-        e.ensure_str(face, 15, 0, "Ab");
+        e.ensure_str(face, 15, Bake::ring(0), "Ab");
         assert_eq!(e.stats.chars_shaped, shaped + 2);
 
         for ppem in [14u16, 15] {
             for ch in "Ab".chars() {
                 let c = e.char_cell(face, ppem, ch).expect("shaped");
                 for g in &c.glyphs {
-                    assert!(e.cell(face, ppem, 0, g.glyph_id).is_some(), "{ch} @{ppem}");
+                    assert!(
+                        e.cell(face, ppem, Bake::ring(0), g.glyph_id).is_some(),
+                        "{ch} @{ppem}"
+                    );
                 }
             }
         }
@@ -1137,16 +1249,17 @@ mod ppem_tests {
             return;
         };
         let face = e.face_for(None);
-        e.ensure_str(face, 14, 0, " ");
+        e.ensure_str(face, 14, Bake::ring(0), " ");
         let c = e.char_cell(face, 14, ' ').expect("a space still shapes");
         assert_eq!(c.glyphs.len(), 1);
         assert!(c.glyphs[0].px > 0.0, "a space is wide");
         assert!(
-            e.cell(face, 14, 0, c.glyphs[0].glyph_id).is_none(),
+            e.cell(face, 14, Bake::ring(0), c.glyphs[0].glyph_id)
+                .is_none(),
             "…and has no ink"
         );
         let raster = e.stats.cells_rasterized;
-        e.ensure_str(face, 14, 0, " ");
+        e.ensure_str(face, 14, Bake::ring(0), " ");
         assert_eq!(e.stats.cells_rasterized, raster, "the miss is paid once");
     }
 
@@ -1158,7 +1271,7 @@ mod ppem_tests {
         };
         let face = e.face_for(None);
         let shaped = e.stats.chars_shaped;
-        e.ensure_str(face, 14, 0, "\n");
+        e.ensure_str(face, 14, Bake::ring(0), "\n");
         let c = e
             .char_cell(face, 14, '\n')
             .expect("the miss is cached, so the second ask short-circuits");
@@ -1366,7 +1479,7 @@ mod ppem_tests {
     }
 
     /// A face read from the AddOns root takes the outline path: one cell per radius, each grown by
-    /// `pad` on every side with its bearings moved out, and the plain cell untouched.
+    /// `pad` on every side, its left edge kept at `ceil(horiBearingX)` and its top raised by `pad`.
     #[test]
     fn an_addon_shipped_face_rasterizes_an_outlined_cell() {
         let Some(mut e) = engine_or_skip() else {
@@ -1389,30 +1502,39 @@ mod ppem_tests {
             "Interface\\Addons\\MikScrollingBattleText\\Fonts\\porky.ttf",
         ));
         assert_ne!(face, e.face_for(None), "the addon's own face, not Friz");
-        // The addon's default, `SetFont(porky, 18, "OUTLINE")`: radius 1 (`outline::radius_of`).
+        // The addon's default, `SetFont(porky, 18, "OUTLINE")`: radius 1 (`outline::Bake::of`).
         let ppem = e.ppem(18.0);
-        e.ensure_str(face, ppem, 0, "6");
-        e.ensure_str(face, ppem, 1, "6");
+        e.ensure_str(face, ppem, Bake::ring(0), "6");
+        e.ensure_str(face, ppem, Bake::ring(1), "6");
         let g = e.char_cell(face, ppem, '6').expect("shaped").glyphs[0].glyph_id;
-        let plain = e.cell(face, ppem, 0, g).expect("a plain cell");
-        let ringed = e.cell(face, ppem, 1, g).expect("an outlined cell");
+        let plain = e.cell(face, ppem, Bake::ring(0), g).expect("a plain cell");
+        let ringed = e
+            .cell(face, ppem, Bake::ring(1), g)
+            .expect("an outlined cell");
         // `dpi` is 1 here, so NORMAL is one dilation pass: `pad` = 1 texel every side.
         assert_eq!(
             (ringed.px_w, ringed.px_h),
             (plain.px_w + 2.0, plain.px_h + 2.0),
             "the ring grows the cell by pad on every side"
         );
+        // The quad x is the pen plus `ceil(horiBearingX)` for every bake (`0x5cb080`), and the
+        // bake puts the ink one column in (`0x5cea7e`); its top row stays the bitmap's.
         assert_eq!(
             (ringed.bearing_x, ringed.bearing_top),
-            (plain.bearing_x - 1.0, plain.bearing_top + 1.0),
-            "…and the bearings move out with it, so the ink sits where it did"
+            (plain.bearing_x, plain.bearing_top + 1.0),
+            "…its left edge stays and its top rises by the ring"
         );
         // THICK is two passes and a third cell.
-        e.ensure_str(face, ppem, 2, "6");
-        let thick = e.cell(face, ppem, 2, g).expect("a THICK cell");
+        e.ensure_str(face, ppem, Bake::ring(2), "6");
+        let thick = e.cell(face, ppem, Bake::ring(2), g).expect("a THICK cell");
         assert_eq!(
-            (thick.px_w, thick.px_h),
-            (plain.px_w + 4.0, plain.px_h + 4.0)
+            (thick.px_w, thick.px_h, thick.bearing_x, thick.bearing_top),
+            (
+                plain.px_w + 4.0,
+                plain.px_h + 4.0,
+                plain.bearing_x,
+                plain.bearing_top + 2.0
+            )
         );
         assert_ne!(thick.uv, ringed.uv, "each radius packs its own cell");
         assert_ne!(plain.uv, ringed.uv);
@@ -1432,5 +1554,252 @@ mod ppem_tests {
         // An empty path, `SetFont("")`, names no face and is not a miss.
         assert_eq!(friz, e.face_for(Some("")));
         assert!(!e.missing_fonts.contains(""));
+    }
+
+    /// One glyph's cell at `(face, ppem, bake)` and its texels, RGBA rows from the top, read back
+    /// off the upload the raster queued.
+    fn cell_texels(
+        e: &mut TextEngine,
+        face: usize,
+        ppem: u16,
+        bake: Bake,
+        ch: char,
+    ) -> (GlyphInfo, Vec<[u8; 4]>) {
+        let _ = e.sheet.take_pending();
+        e.ensure_str(face, ppem, bake, &ch.to_string());
+        let gid = e.char_cell(face, ppem, ch).expect("shaped").glyphs[0].glyph_id;
+        let info = e.cell(face, ppem, bake, gid).expect("a cell");
+        let (_, ups) = e.sheet.take_pending();
+        let up = ups.last().expect("the cell's upload");
+        let side = crate::ui_text::pack::SHEET_SIZE as f32;
+        let (cx, cy) = (
+            (info.uv.min.x * side).round() as u32 - up.x,
+            (info.uv.min.y * side).round() as u32 - up.y,
+        );
+        let (w, h) = (info.px_w as u32, info.px_h as u32);
+        let texels = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let i = (((cy + y) * up.w + cx + x) * 4) as usize;
+                [up.rgba[i], up.rgba[i + 1], up.rgba[i + 2], up.rgba[i + 3]]
+            })
+            .collect();
+        (info, texels)
+    }
+
+    /// An antialiased cell is the unhinted raster (`0x5d1300`: both load-flag words carry
+    /// `FT_LOAD_NO_HINTING`, rendered in mode 0 at `0x7cec20`). Arial Narrow's `e` at 18 px, the
+    /// chat frame's, as FreeType's smooth rasterizer draws it unhinted, computed outside this code
+    /// base: the bar spreads over two partial rows, where a hinter snaps it to one full row. The
+    /// golden is the raster's coverage; the cell holds its top 4 bits ([`Cell::Coverage`]).
+    #[test]
+    fn an_antialiased_cell_is_the_unhinted_raster() {
+        let Some(mut e) = engine_or_skip() else {
+            return;
+        };
+        let face = e.face_for(Some("Fonts\\ARIALN.TTF"));
+        let golden = [
+            "000021777e2e0000",
+            "0042f6e4dafc5b00",
+            "05e4a6040081f211",
+            "44ff1c000006f35b",
+            "6efb90909090ed83",
+            "78f6bcbcbcbcbc68",
+            "68f5010000000000",
+            "33ff41000010e853",
+            "00c7de442ab6ee13",
+            "001cc9ffffe34000",
+            "0000002429040000",
+        ];
+        let (info, texels) = cell_texels(&mut e, face, 18, Bake::ring(0), 'e');
+        assert_eq!(
+            (info.px_w, info.px_h, info.bearing_top),
+            (8.0, 11.0, 10.0),
+            "FreeType's bitmap: the control box rounded out, `bitmap_top` 10"
+        );
+        let got: Vec<String> = texels
+            .chunks(8)
+            .map(|row| row.iter().map(|t| format!("{:02x}", t[3])).collect())
+            .collect();
+        let want: Vec<String> = golden
+            .iter()
+            .map(|row| {
+                (0..row.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&row[i..i + 2], 16).expect("hex"))
+                    .map(|c| format!("{:02x}", crate::ui_text::pack::widen4(c >> 4)))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    /// A glyph taller than the em keeps its first `em` rows (`0x5d1195`), whatever the bake, and
+    /// they stay where they were. Arial Narrow's `Ò` at 14 px, the chat size, is 15 rows unhinted.
+    #[test]
+    fn an_over_tall_glyph_keeps_its_top_em_rows() {
+        let Some(mut e) = engine_or_skip() else {
+            return;
+        };
+        let face = e.face_for(Some("Fonts\\ARIALN.TTF"));
+        let (info, texels) = cell_texels(&mut e, face, 14, Bake::ring(0), 'Ò');
+        let gid = e.char_cell(face, 14, 'Ò').expect("shaped").glyphs[0].glyph_id;
+        let sfnt = e.faces[face].sfnt.clone().expect("Arial Narrow's tables");
+        let outline = sfnt.outline(gid, 14).expect("outline");
+        let raster = smooth::rasterize(&outline).expect("ink");
+        assert_eq!(raster.h, 15, "the unhinted raster is one row over the em");
+        assert!(
+            raster.coverage[(14 * raster.w) as usize..]
+                .iter()
+                .any(|&c| c >= 16),
+            "its last row has ink that would draw"
+        );
+        assert_eq!((info.px_w, info.px_h), (raster.w as f32, 14.0));
+        assert_eq!(
+            info.bearing_top, raster.top as f32,
+            "the kept rows keep their seat"
+        );
+        let top: Vec<u8> = texels.iter().map(|t| t[3]).collect();
+        let want: Vec<u8> = raster.coverage[..(14 * raster.w) as usize]
+            .iter()
+            .map(|&c| crate::ui_text::pack::widen4(c >> 4))
+            .collect();
+        assert_eq!(top, want, "the top 14 rows, not the bottom");
+
+        for (radius, mono) in [(1u8, false), (2, false), (0, true), (2, true)] {
+            let bake = Bake { radius, mono };
+            let (info, _) = cell_texels(&mut e, face, 14, bake, 'Ò');
+            let grow = 2.0 * f32::from(radius);
+            assert_eq!(
+                info.px_h,
+                14.0 + grow,
+                "{bake:?}: an outline grows the em, not the raster"
+            );
+            assert_eq!(
+                info.bearing_top,
+                raster.top as f32 + f32::from(radius),
+                "{bake:?}"
+            );
+        }
+    }
+
+    /// A cell's left edge is the pen plus `ceil(horiBearingX)`, the quad x of `0x5ccbe0` (`0x5cb080`
+    /// mode 0, `0x5cd099`), with no padding taken off, and its bake puts the ink 0, 1 or 2 columns
+    /// in for plain, NORMAL and THICK (`0x5cf237`; `0x5ce481`/`0x5cea7e`, `0x5ce48a`/`0x5cea87`), monochrome
+    /// or not. Arial Narrow at 14 px: `a`'s bearing is 25/64 px and `1`'s 79/64 (FreeType,
+    /// unhinted), so their bitmaps' `floor(xMin)` columns 0 and 1 land at 1 and 2.
+    #[test]
+    fn a_cell_sits_at_its_rounded_up_bearing_with_its_ink_the_bake_column_in() {
+        let Some(mut e) = engine_or_skip() else {
+            return;
+        };
+        let face = e.face_for(Some("Fonts\\ARIALN.TTF"));
+        for (ch, bearing) in [('a', 1.0f32), ('1', 2.0)] {
+            for (radius, mono) in [(0u8, false), (1, false), (2, false), (0, true), (2, true)] {
+                let bake = Bake { radius, mono };
+                let (info, texels) = cell_texels(&mut e, face, 14, bake, ch);
+                assert_eq!(
+                    info.bearing_x, bearing,
+                    "{ch:?} {bake:?}: the cell's left edge"
+                );
+                // The ink is the fill, white; a ring is black.
+                let w = info.px_w as usize;
+                let ink = (0..w)
+                    .find(|&x| {
+                        texels
+                            .iter()
+                            .skip(x)
+                            .step_by(w)
+                            .any(|t| t[3] > 0 && t[0] > 0)
+                    })
+                    .expect("ink");
+                assert_eq!(
+                    ink,
+                    usize::from(radius),
+                    "{ch:?} {bake:?}: the ink's column"
+                );
+            }
+        }
+        // Through the layout: a left-justified `a` at x 10 draws its cell at 11.
+        let spec = crate::ui_text::FontSpec {
+            path: Some("Fonts\\ARIALN.TTF"),
+            height: Some(14.0),
+            outline: benilla_ui::script::Outline::None,
+            monochrome: false,
+            spacing: 0.0,
+            shadow_x: 0.0,
+            alpha_gradient: None,
+            non_space_wrap: false,
+            max_lines: 0,
+        };
+        let quads = crate::ui_text::layout_text_quads(
+            &mut e,
+            "a",
+            Rect::new(10.0, 0.0, 210.0, 20.0),
+            [1.0; 4],
+            crate::ui_text::Justify {
+                h: benilla_ui::script::JustifyH::Left,
+                v: benilla_ui::script::JustifyV::Top,
+            },
+            0,
+            spec,
+            crate::ui_text::TextSeat::UiGrid,
+        );
+        assert_eq!(quads[0].rect.min.x, 11.0);
+    }
+
+    /// The action bar's hotkey numeral, `NumberFontNormalSmallGray` (Arial Narrow, monochrome,
+    /// THICK) at 15 px: its cell holds the 1-bit glyph, an opaque ring one texel round the
+    /// strokes and the second ring at 7/15 beyond, so the `2`'s counters show through rather than
+    /// filling one opaque box.
+    #[test]
+    fn a_monochrome_thick_numeral_rings_its_strokes_not_a_box() {
+        let Some(mut e) = engine_or_skip() else {
+            return;
+        };
+        let face = e.face_for(Some("Fonts\\ARIALN.TTF"));
+        let bake = Bake {
+            radius: 2,
+            mono: true,
+        };
+        let _ = e.sheet.take_pending();
+        e.ensure_str(face, 15, bake, "2");
+        let gid = e.char_cell(face, 15, '2').expect("shaped").glyphs[0].glyph_id;
+        let info = e.cell(face, 15, bake, gid).expect("a cell");
+        let (_, ups) = e.sheet.take_pending();
+        let up = &ups[0];
+        let side = crate::ui_text::pack::SHEET_SIZE as f32;
+        let (cx, cy) = (
+            (info.uv.min.x * side).round() as u32 - up.x,
+            (info.uv.min.y * side).round() as u32 - up.y,
+        );
+        let (w, h) = (info.px_w as u32, info.px_h as u32);
+        let alpha = |x: u32, y: u32| up.rgba[(((cy + y) * up.w + cx + x) * 4 + 3) as usize];
+
+        // The glyph and its 8-neighbours, off the same 1-bit raster.
+        let sfnt = e.faces[face].sfnt.clone().expect("Arial Narrow's tables");
+        let g = mono::rasterize(&sfnt.outline(gid, 15).expect("outline"), 15).expect("ink");
+        assert_eq!(
+            (w, h),
+            (g.w + 4, g.h + 4),
+            "THICK grows the cell two texels a side"
+        );
+        let inked = |x: i64, y: i64| {
+            (0..i64::from(g.w)).contains(&x)
+                && (0..i64::from(g.h)).contains(&y)
+                && g.bits[(y * i64::from(g.w) + x) as usize] != 0
+        };
+        for y in 0..h {
+            for x in 0..w {
+                let (gx, gy) = (i64::from(x) - 2, i64::from(y) - 2);
+                let near = (-1..=1).any(|dy| (-1..=1).any(|dx| inked(gx + dx, gy + dy)));
+                let a = alpha(x, y);
+                if near {
+                    assert_eq!(a, 255, "glyph or first ring at {x},{y}");
+                } else {
+                    assert!(a == 0 || a == 119, "{a} past the first ring at {x},{y}");
+                }
+            }
+        }
     }
 }

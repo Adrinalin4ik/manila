@@ -89,7 +89,7 @@ pub(super) fn load_skyboxes(chain: &mut Chain, file: &str) -> Result<HashMap<u32
         m.insert(
             id,
             SkyboxDef {
-                path: crate::models::model_path(&name),
+                path: crate::models::model_name(&name),
                 flags,
                 celestial,
             },
@@ -143,7 +143,7 @@ impl LightCatalog {
 
     /// The row whose model is `path`, for a MOSB skybox the table also names.
     pub fn skybox_def_by_path(&self, path: &str) -> Option<&SkyboxDef> {
-        let path = crate::models::model_path(path).to_ascii_lowercase();
+        let path = crate::models::model_name(path).to_ascii_lowercase();
         self.skybox_by_path
             .get(&path)
             .and_then(|id| self.skyboxes.get(id))

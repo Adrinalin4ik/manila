@@ -16,8 +16,9 @@ pub const RK_CONST: u16 = 256;
 
 /// 5.1's `MAXSTACK`: a function uses fewer registers than this.
 pub const MAXSTACK: usize = 250;
-/// 5.1's `LFIELDS_PER_FLUSH`: list items a constructor stores per `SetList`.
-pub const FIELDS_PER_FLUSH: u32 = 50;
+/// 5.0's `LFIELDS_PER_FLUSH`: list items a constructor stores per `SetList`, 32 in the client's
+/// `closelistfield` (`0x6fd6d0`).
+pub const FIELDS_PER_FLUSH: u32 = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cmp {
@@ -28,7 +29,7 @@ pub enum Cmp {
 
 /// A comparison and the result that jumps, in one byte, so a compare-and-jump fits in an
 /// eight-byte instruction.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CmpJ(u8);
 
 impl CmpJ {
@@ -66,7 +67,7 @@ pub enum Arith {
     Pow,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash)]
 pub enum Op {
     Move(Reg, Reg),
     LoadK(Reg, u32),
@@ -83,7 +84,8 @@ pub enum Op {
     GetField(Reg, Reg, u16),
     /// `R(a)[K(b)] = RK(c)` for a string constant key.
     SetField(Reg, u16, Rk),
-    /// `R(a) = {}` with an array part and a hash part of `2^c` nodes.
+    /// `R(a) = {}` with an array part of `b` slots and a hash part of `2^c` nodes, the dummy
+    /// node for 0: `luaH_new(L, fb2int(B), C)` (`0x6f8b45`), `b` kept decoded.
     NewTable(Reg, u32, u8),
     /// `R(a+1) = R(b); R(a) = R(b)[RK(c)]`.
     SelfOp(Reg, Reg, Rk),
@@ -140,8 +142,8 @@ pub enum Op {
     /// variables, into the variables from `R(a+2)`, the first of them the control; when it is
     /// nil the next instruction, the jump back to the body, is skipped.
     TForLoop(Reg, u8),
-    /// 5.1's `SETLIST`: `R(a)[base + i] = R(a + i)` for `i` in `1..=n`, the array part grown
-    /// first to hold them all.
+    /// 5.0's `SETLIST`: `R(a)[base + i] = R(a + i)` for `i` from `n` down to 1, each by
+    /// `luaH_setnum` (`0x6f95b1`), the array part as it is.
     SetList(Reg, u32, u16),
     /// The same, items up to the top (the last item was a call).
     SetListTop(Reg, u32),
@@ -328,6 +330,15 @@ pub struct Proto {
     pub source: Bytes,
     pub line_defined: u32,
     pub locvars: Vec<LocVar>,
+    /// The strings 5.0's prototype holds besides its constants, interned so the collector keeps
+    /// and counts them as `traverseproto` does: the chunk name, each local's name and each
+    /// upvalue's.
+    pub names: Box<[Value]>,
+    /// The client's 5.0 code size for this function ([`crate::compile::FuncState::code_size50`]),
+    /// which sizes its code and its line info alike (`0x6fcb2b`, `0x6fcb59`).
+    pub code50: usize,
+    /// The client's 5.0 constant count ([`crate::compile::FuncState::consts50`]).
+    pub consts50: usize,
     /// The instructions 5.1 has no word for, ascending: the jump a skipping `LOADBOOL` makes, a
     /// `LOADNIL` at the head that `luaD_precall`'s clearing stands for, a constant loaded into a
     /// scratch register. The count hook does not count them, as 5.1 never dispatches them.
@@ -346,16 +357,35 @@ pub struct Proto {
     pub(crate) gc_mark: std::cell::Cell<u32>,
 }
 
+/// 5.0's `Proto` record, which `luaF_newproto` allocates (`0x6f9fea`).
+pub(crate) const PROTO_BYTES: usize = 0x48;
+
 impl Proto {
-    /// The bytes 5.1 allocates for this function's prototype, for the collector's count: the
-    /// `Proto` and its code, constants, nested prototype list, line info, locals and upvalue names.
+    /// This function's prototype in the collector's count, as 5.0's `close_func` sizes its
+    /// vectors (`0x6fcb48`..`0x6fcc26`) and `luaF_freeproto` frees them (`0x6fa069`..`0x6fa102`):
+    /// the 0x48-byte `Proto` (`0x6f9fea`), 4 bytes an instruction and 4 its line, 16 a constant,
+    /// 4 a nested prototype, 12 a local and 4 an upvalue name, at the client's own code size and
+    /// constant count.
     pub fn bytes(&self) -> usize {
-        120 + 4 * self.code.len()
-            + 16 * self.consts.len()
-            + 8 * self.protos.len()
-            + 4 * self.lines.len()
-            + 16 * self.locvars.len()
-            + 8 * self.upval_names.len()
+        PROTO_BYTES
+            + 8 * self.code50
+            + 16 * self.consts50
+            + 4 * self.protos.len()
+            + 12 * self.locvars.len()
+            + 4 * self.upval_names.len()
+    }
+
+    /// The vectors [`Proto::bytes`] counts beside the `Proto`, as (element bytes, elements): the
+    /// code and its lines, the constants, the nested prototypes, the locals, the upvalue names.
+    pub(crate) fn vectors(&self) -> [(usize, usize); 6] {
+        [
+            (4, self.code50),
+            (4, self.code50),
+            (16, self.consts50),
+            (4, self.protos.len()),
+            (12, self.locvars.len()),
+            (4, self.upval_names.len()),
+        ]
     }
 
     /// [`Proto::bytes`] of this function and every one nested in it.
@@ -374,6 +404,18 @@ impl Proto {
 }
 
 impl Proto {
+    /// A hash of what this function runs, its code and constants, without its lines or the
+    /// functions nested in it: two compiles of a chunk whose top level is the same agree on the
+    /// main function's, however its functions' bodies changed, when one heap holds both (a string
+    /// constant is its id there).
+    pub(crate) fn code_digest(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.code.hash(&mut h);
+        self.consts.hash(&mut h);
+        h.finish()
+    }
+
     /// Check, once per compiled function, every fact the interpreter's unchecked reads take on
     /// trust: each register an instruction touches is below `maxstack`, each constant, upvalue
     /// and child index exists, each jump lands inside the code, and the code ends in a return,
@@ -599,6 +641,40 @@ mod tests {
         let mut heap = crate::heap::Heap::default();
         let p = crate::compile::compile(src.as_bytes(), b"=t", &mut heap).unwrap();
         (*p).clone()
+    }
+
+    /// A prototype is counted at the client's 5.0 code size and constant count, which its own
+    /// code generator gives for the same source.
+    #[test]
+    fn a_prototype_is_counted_at_the_clients_code_and_constants() {
+        // (source, 5.0's instructions, 5.0's constants)
+        for (src, code, k) in [
+            // `LOADNIL 0 1`, which 5.1 leaves out, and `RETURN`.
+            ("local a, b", 2, 0),
+            // One `OP_LOADNIL`, widened.
+            ("local a local b", 2, 0),
+            // `MUL 0 K K`, no fold: the two numerals are constants, the product is not.
+            ("local x = 2 * 3", 2, 2),
+            // `5` as its token is read, and `-5` (`luaK_prefix`).
+            ("local x = -5", 2, 2),
+            // `GETGLOBAL`, `LOADBOOL`, `SETTABLE`, `RETURN`: no boolean constant.
+            ("t.a = true", 4, 2),
+            // `NEWTABLE`, 33 `LOADK`s, a `SETLIST` at 32 items and one for the last, `RETURN`.
+            (
+                "local t = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,\
+                 26,27,28,29,30,31,32,33}",
+                37,
+                33,
+            ),
+        ] {
+            let p = compiled(src);
+            assert_eq!((p.code50, p.consts50), (code, k), "{src}");
+            assert_eq!(
+                p.bytes(),
+                0x48 + 8 * code + 16 * k + 12 * p.locvars.len(),
+                "{src}"
+            );
+        }
     }
 
     fn rejects(p: Proto) -> String {

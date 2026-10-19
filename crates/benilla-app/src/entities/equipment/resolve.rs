@@ -8,6 +8,7 @@ use crate::creature_anim::{
 };
 use crate::items::{HeldTemplate, Items};
 use crate::net::{NetCommands, NetEntity, ObjectStore};
+use crate::query_cache::Ask;
 
 use super::super::item_glow::{self, ItemGlows};
 use super::super::Creatures;
@@ -129,9 +130,12 @@ impl SlotReads<'_> {
     /// will ever come for it. Any other slot only reads.
     fn read(&self, changed: bool, entry: u32) -> Option<HeldTemplate> {
         if changed || !self.templates.template_known(entry) {
-            self.templates.held_lookup(entry, self.net)
+            // The visible item's change, the lookup with the callback `0x5ed880` (`0x5ed764`).
+            self.templates.held(entry, Ask::Event(self.net))
         } else {
-            self.templates.template_cached(entry).map(HeldTemplate::of)
+            self.templates
+                .template(entry, 0, Ask::Read)
+                .map(HeldTemplate::of)
         }
     }
 
@@ -211,8 +215,8 @@ pub(in crate::entities) fn resolve_equipment(
     mut last_epochs: Local<Option<(u64, u64)>>,
     // The object lookup and the item entities' change watch, one param under Bevy's limit of 16.
     item_objects: (crate::net::Objects, crate::items::ItemChanges),
-    // Mutable because a miss sends the `CMSG_GUILD_QUERY` whose answer paints the tabard.
-    mut guilds: Option<ResMut<crate::ui_guild::GuildState>>,
+    // A miss sends the `CMSG_GUILD_QUERY` whose answer paints the tabard.
+    guilds: Option<Res<crate::ui_guild::GuildState>>,
     tabard_design: Option<Res<crate::ui_tabard::TabardDesign>>,
 ) {
     let Some(mut held) = held else {
@@ -333,14 +337,15 @@ pub(in crate::entities) fn resolve_equipment(
             let guild_id = s.player_guild_id();
             reads.now.guild = guild_id;
             let tabard_moved = reads.now.visible[18] != prev.visible[18];
-            eq.emblem = guilds.as_deref_mut().and_then(|g| {
+            eq.emblem = guilds.as_deref().and_then(|g| {
                 // `0x5e078f` → `0x6d6d20` → `0x560e30` with callback `0x5e0650`; a guild the
                 // cache knows nothing of, its ask dropped, is looked up again too.
-                if guild_id != prev.guild || tabard_moved || !g.identity_known(guild_id) {
-                    crate::ui_guild::unit_guild_emblem_lookup(s, g, &net)
+                let ask = if guild_id != prev.guild || tabard_moved || !g.identity_known(guild_id) {
+                    Ask::Event(&net)
                 } else {
-                    crate::ui_guild::unit_guild_emblem_cached(s, g)
-                }
+                    Ask::Read
+                };
+                crate::ui_guild::unit_guild_emblem(s, g, ask)
             });
             // The designer's preview, our own body only (`[cc+0xc]`, the `0x47a610` install).
             if is_self {
@@ -694,8 +699,8 @@ pub(in crate::entities) fn resolve_corpse_equipment(
     held: Option<ResMut<ItemDisplays>>,
     asset_server: Res<AssetServer>,
     net: Res<NetCommands>,
-    // Mutable because a miss sends the `CMSG_GUILD_QUERY` whose answer paints the crest.
-    mut guilds: Option<ResMut<crate::ui_guild::GuildState>>,
+    // A miss sends the `CMSG_GUILD_QUERY` whose answer paints the crest.
+    guilds: Option<Res<crate::ui_guild::GuildState>>,
     mut last_guild_epoch: Local<Option<u64>>,
 ) {
     let Some(mut held) = held else {
@@ -731,8 +736,8 @@ pub(in crate::entities) fn resolve_corpse_equipment(
             // The crest off the corpse's own `CORPSE_FIELD_GUILD` (`0x5d6ec0`, at tabard slot 0x12
             // when its display has flag bit 0), through the living body's guild cache (`0x6d6d20`).
             eq.emblem = guilds
-                .as_deref_mut()
-                .and_then(|g| crate::ui_guild::corpse_guild_emblem(s, g, &net));
+                .as_deref()
+                .and_then(|g| crate::ui_guild::corpse_guild_emblem(s, g, Ask::New(&net)));
         }
         if current != Some(&eq) {
             commands.entity(entity).insert(eq);
@@ -780,6 +785,7 @@ mod tests {
     use super::{ammo_attach, attach_id, placement, resolve_corpse_equipment, resolve_equipment};
     use crate::items::Items;
     use crate::net::{ClientCommand, NetCommands, NetEntity, ObjectStore};
+    use crate::query_cache::Ask;
     use benilla_protocol::messages::{ItemInfo, ObjectFields};
     use benilla_protocol::EntityKind;
 
@@ -1092,7 +1098,7 @@ mod tests {
     fn a_slot_changing_to_a_refused_entry_asks_again_at_once() {
         let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
         let mut items = Items::default();
-        items.template(300, 0, &NetCommands(tx.clone()));
+        items.template(300, 0, Ask::New(&NetCommands(tx.clone())));
         items.insert_template(300, None);
         let _ = rx.try_iter().count();
         let mut app = equip_app(items, Default::default(), tx);
@@ -1182,8 +1188,7 @@ mod tests {
     }
 
     /// `0x5ed700` looks a slot's item up when the slot's entry changes: a template landing for
-    /// another item, past the refusal's window, does not ask a refused slot again or hold the
-    /// player.
+    /// another item does not ask a refused slot again or hold the player.
     #[test]
     fn a_refused_slot_is_not_asked_again_when_another_template_lands() {
         let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
@@ -1197,9 +1202,6 @@ mod tests {
         app.update();
         assert!(app.world().get::<Equipment>(player).unwrap().settled);
 
-        crate::query_cache::test_clock::advance(
-            crate::query_cache::RELOOK_AFTER + std::time::Duration::from_secs(1),
-        );
         app.world_mut()
             .resource_mut::<Items>()
             .insert_template(555, Some(worn(901, 1)));

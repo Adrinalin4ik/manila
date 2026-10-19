@@ -27,7 +27,7 @@ fn a_stack_level_names_its_function() {
 #[test]
 fn a_host_index_through_a_bad_index_metamethod_raises() {
     let lua = Lua::new();
-    lua.load("setmetatable(_G, {__index = true})")
+    lua.load("setmetatable(getfenv(0), {__index = true})")
         .exec()
         .unwrap();
     let err = lua.globals().get::<benilla_mlua::Value>("x").unwrap_err();
@@ -122,11 +122,11 @@ fn raw_insert_and_remove_shift_within_bounds() {
     assert_eq!(t.raw_get::<Option<i64>>("k").unwrap(), None);
 }
 
-/// A table made from an iterator is sized for it first, as mlua's `lua_createtable` sizes it:
-/// five values fill an array of five, where growing by rehash would make one of eight, and five
-/// pairs a hash part of eight, which keeps integer keys there with no rehash to move them.
+/// A table made from an iterator starts empty and grows by rehash, as the client's C code builds
+/// one: five values make an array of eight, and five integer pairs move into it too, the sizes
+/// the client gives `t = {} t[1] = 1 ... t[5] = 5`.
 #[test]
-fn a_table_from_an_iterator_is_sized_for_it() {
+fn a_table_from_an_iterator_grows_from_empty() {
     let lua = Lua::new();
     let seq = lua.create_sequence_from([1, 2, 3, 4, 5]).unwrap();
     let map = lua
@@ -134,16 +134,50 @@ fn a_table_from_an_iterator_is_sized_for_it() {
         .unwrap();
     lua.globals().set("Seq", seq).unwrap();
     lua.globals().set("Map", map).unwrap();
-    // SAFETY: plain heap reads; nothing else reaches the VM while the reference lives.
-    let vm = unsafe { lua.raw_vm() };
-    let seq = vm.get_global("Seq").as_table().unwrap();
-    let map = vm.get_global("Map").as_table().unwrap();
-    assert_eq!(vm.heap.table(seq).array.len(), 5);
-    assert_eq!(
-        (
-            vm.heap.table(map).array.len(),
-            vm.heap.table(map).node.len()
-        ),
-        (0, 8)
+    lua.with_vm(|vm| {
+        let seq = vm.get_global("Seq").as_table().unwrap();
+        let map = vm.get_global("Map").as_table().unwrap();
+        assert_eq!(vm.heap.table(seq).array.len(), 8);
+        assert_eq!(
+            (vm.heap.table(map).array.len(), vm.heap.table(map).lsizenode),
+            (8, 0)
+        );
+    });
+}
+
+/// Every chunk compiles as source, whatever its mode (`luaD_protectedparser` zeroes the binary
+/// flag, `0x6f6a15`): a binary chunk meets the lexer's control-byte error (`0x6ffabb`).
+#[test]
+fn a_binary_chunk_is_lexed_as_source() {
+    let lua = Lua::new();
+    for mode in [None, Some(benilla_mlua::ChunkMode::Text)] {
+        let mut chunk = lua.load(&b"\x1bLuaP\x01\x04"[..]).set_name("=bin");
+        if let Some(m) = mode {
+            chunk = chunk.set_mode(m);
+        }
+        let Err(benilla_mlua::Error::SyntaxError { message, .. }) = chunk.into_function() else {
+            panic!("a binary chunk compiled");
+        };
+        assert_eq!(message, "bin:1: invalid control char near `char(27)'");
+    }
+}
+
+/// `Value::to_string` of a table or function is the text Lua's `tostring` gives it: the type and
+/// MSVC's `%p`, eight uppercase hex digits with no `0x`.
+#[test]
+fn an_objects_text_is_the_vms_tostring() {
+    let lua = Lua::new();
+    let (t, f, ts, fs): (benilla_mlua::Value, benilla_mlua::Value, String, String) = lua
+        .load("local t, f = {}, function() end return t, f, tostring(t), tostring(f)")
+        .eval()
+        .unwrap();
+    assert_eq!(t.to_string().unwrap(), ts);
+    assert_eq!(f.to_string().unwrap(), fs);
+    let hex = ts.strip_prefix("table: ").unwrap();
+    assert_eq!(hex.len(), 8, "{ts}");
+    assert!(
+        hex.bytes()
+            .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b)),
+        "{ts}"
     );
 }

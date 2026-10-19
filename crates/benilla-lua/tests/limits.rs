@@ -14,7 +14,7 @@ fn run_with(
     std::thread::Builder::new()
         .stack_size(2 << 20)
         .spawn(move || {
-            let mut vm = benilla_lua::new_script_host_state();
+            let mut vm = benilla_lua::new_state();
             setup(&mut vm);
             match vm.exec(src.as_bytes(), b"=t") {
                 Ok(vs) => Ok(vs.into_iter().map(|v| vm.display(v)).collect()),
@@ -83,39 +83,30 @@ fn a_deep_match_is_pattern_too_complex() {
     );
 }
 
-/// A native pushes at most `LUAI_MAXCSTACK` values, its arguments counted, as 5.1's
-/// `lua_checkstack` allows: `unpack` raises `too many results to unpack`, `string.byte` its
-/// `luaL_checkstack` message.
+/// `unpack` checks against the client's own bound, 5.0's 2048 (`0x6f2f43`), its one argument
+/// counted, and raises its text (`0x872bc4`).
 #[test]
 fn results_beyond_the_c_stack_raise() {
     let src = r#"local t = {} for i = 1, 9000 do t[i] = i end
-        local s = string.rep("a", 9000)
         local ok1, e1 = pcall(unpack, t)
-        local ok2, e2 = pcall(function() return unpack(t, 1, 7998) end)
-        local n3 = table.getn({unpack(t, 1, 7997)})
-        local ok4, e4 = pcall(string.byte, s, 1, -1)
-        local n5 = table.getn({string.byte(s, 1, 7997)})
-        local ok6, e6 = pcall(function() return string.byte(s, 1, 7998) end)
-        return ok1, e1, ok2, e2, n3, ok4, e4, n5, ok6, e6"#;
+        local u = {} for i = 1, 2048 do u[i] = i end
+        local ok2, e2 = pcall(function() return unpack(u) end)
+        u[2048] = nil
+        local n3 = table.getn({unpack(u)})
+        return ok1, e1, ok2, e2, n3"#;
     let got = run(src).unwrap();
     assert_eq!(
         &got[..2],
-        ["false", "too many results to unpack"],
+        ["false", "stack overflow (table too big to unpack)"],
         "{got:?}"
     );
+    // One argument in use: 2048 more pass 2048.
     assert_eq!(got[2], "false", "{got:?}");
-    assert!(got[3].ends_with("too many results to unpack"), "{got:?}");
-    assert_eq!(got[4], "7997");
     assert_eq!(
-        &got[5..7],
-        ["false", "stack overflow (string slice too long)"]
-    );
-    assert_eq!(got[7], "7997");
-    assert_eq!(got[8], "false");
-    assert!(
-        got[9].ends_with("stack overflow (string slice too long)"),
+        got[3], "t:4: stack overflow (table too big to unpack)",
         "{got:?}"
     );
+    assert_eq!(got[4], "2047");
 }
 
 /// Past the ids a string value can name, a new string is `not enough memory`, raised where it
@@ -187,7 +178,7 @@ fn a_hot_reload_out_of_string_ids_is_not_enough_memory() {
     let got = std::thread::Builder::new()
         .stack_size(2 << 20)
         .spawn(|| {
-            let mut vm = benilla_lua::new_script_host_state();
+            let mut vm = benilla_lua::new_state();
             vm.heap.limit_string_ids(50_000);
             vm.exec(b"function F() return 'old' end", b"@f.lua")
                 .unwrap();
@@ -213,5 +204,31 @@ fn a_hot_reload_out_of_string_ids_is_not_enough_memory() {
             Err("not enough memory".to_string()),
             Some("old".to_string())
         )
+    );
+}
+
+/// `pcall` and `xpcall` return every result of the call, however many fill its frame, as
+/// `luaB_pcall` does: the C build's API check aborted a debug build at 22.
+#[test]
+fn a_protected_call_returns_every_result() {
+    let src = r#"local function seq(k) local t = {} for i = 1, k do t[i] = i end return t end
+        local forty = seq(40)
+        local function many() return unpack(forty) end
+        local function n(...) return arg.n, arg[1], arg[arg.n] end
+        local o = {}
+        for _, k in {21, 22, 23, 60, 300} do
+          local a, b, c = n(pcall(unpack, seq(k)))
+          table.insert(o, a .. ":" .. tostring(b) .. ":" .. c)
+        end
+        local a, b, c = n(pcall(many))
+        table.insert(o, a .. ":" .. tostring(b) .. ":" .. c)
+        a, b, c = n(xpcall(many, function(e) return e end))
+        table.insert(o, a .. ":" .. tostring(b) .. ":" .. c)
+        a, b, c = n(pcall(string.find, string.rep("a", 30), string.rep("(a)", 30)))
+        table.insert(o, a .. ":" .. tostring(b) .. ":" .. c)
+        return table.concat(o, " ")"#;
+    assert_eq!(
+        run(src).unwrap(),
+        ["22:true:21 23:true:22 24:true:23 61:true:60 301:true:300 41:true:40 41:true:40 33:true:a"]
     );
 }

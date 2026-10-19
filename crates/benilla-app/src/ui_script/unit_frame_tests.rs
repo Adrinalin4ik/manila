@@ -90,7 +90,7 @@ fn shipped_unit_frames_drive_end_to_end() {
             local r, g, b = pb:GetStatusBarColor()
             return hb:GetValue() == 72 and hmax == 100
                and pb:GetValue() == 45 and pmax == 80 and pb:IsVisible()
-               and b == 1 and r == 0 -- mana blue
+               and math.abs(b - 1) < 1/255 and r == 0 -- mana blue
         "#,
         )
         .unwrap();
@@ -191,8 +191,9 @@ fn shipped_unit_frames_drive_end_to_end() {
         "neutral name plate is yellow, got {plate:?}"
     );
 
-    // The health fill is 30/50 of the 119px bar (`TargetFrame.xml:253-255`).
-    s.resolve();
+    // The health fill is 30/50 of the 119px bar (`TargetFrame.xml:253-255`), written by the bar's
+    // update in the tick's walk (`0x7833c0`).
+    s.tick(0.0);
     let quads = s.extract();
     let bar_rect = quads
         .iter()
@@ -294,10 +295,12 @@ fn unit_combat_drives_the_player_hit_indicator() {
         )
         .unwrap();
     assert!(ok, "physical wound paints the amount ({:?})", s.errors());
+    // `NumberFontNormalHuge` is already 30 (`Fonts.xml:174`), so `SetTextHeight(30)` changes
+    // nothing (`0x77161c`) and the string stays one-to-one, drawn at its font's 30.
     assert_eq!(
         extracted_text_height(&mut s, "17"),
-        Some(30.0),
-        "base height 30 (the SetTextHeight regime)"
+        None,
+        "base height 30 is the font's own, one-to-one"
     );
 
     s.fire_event("UNIT_COMBAT", ev("player", "WOUND", "CRITICAL", 64, 4));

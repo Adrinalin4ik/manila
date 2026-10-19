@@ -221,6 +221,10 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // the session's realm when addons load. `Ace/AceState.lua:27` trims it at
     // PLAYER_ENTERING_WORLD, so a nil breaks every Ace addon.
     same("realmName", ""),
+    // `accountName` (`0x402bd2`, record `[0x8826c8]`): registered `""`, help "Saved account
+    // name", category 4. The login screen's remembered name: `GetSavedAccountName` (`0x46cdd0`)
+    // reads it and `SetSavedAccountName` (`0x46cdf0`) sets it.
+    same("accountName", ""),
     // The logon server address (register site `0x5ab6a6`), a string row judged by
     // `realmlist::on_cvar`.
     deviates(
@@ -235,8 +239,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // forward/back, strafe and turn (`0x513d36`/`0x514e23`/`0x514f0b`/`0x514fca`). Off, the clear
     // does nothing at all: no echo, no mirror write, no packet.
     same("autoClearAFK", "1"),
-    same("MasterVolume", "1"),
-    same("SoundVolume", "1"),
+    same("MasterVolume", "1.0"),
+    same("SoundVolume", "1.0"),
     same("MusicVolume", "0.4"),
     same("AmbienceVolume", "0.6"),
     // Registered "1" at `0x45737a`/`0x45739b`/`0x460a9d`. `MasterSoundEffects` is the Enable All
@@ -494,8 +498,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // OS-accelerated pixels where we take raw device deltas, so the unit factor lives in
     // `camera::LOOK_YAW_PER_SPEED` and these defaults stay the reference's. The validator
     // `0x50c000` → `0x50b330` refuses values outside [0.1, 360] rather than clamping.
-    same("cameraYawMoveSpeed", "180").checked(benilla_ui::script::check_camera_rate),
-    same("cameraPitchMoveSpeed", "90").checked(benilla_ui::script::check_camera_rate),
+    same("cameraYawMoveSpeed", "180.0").checked(benilla_ui::script::check_camera_rate),
+    same("cameraPitchMoveSpeed", "90.0").checked(benilla_ui::script::check_camera_rate),
     // MOUSE_SENSITIVITY (`UIOptionsFrame.lua:87`): FrameXML's spelling of the binary's `mouseSpeed`
     // (`0x402c7b`); lookups are case-insensitive (`CVar::Lookup 0x63de30`), here as there. The
     // reference's default is `SPI_GETMOUSESPEED × 0.1`, "1.0" on stock Windows, and its record
@@ -509,7 +513,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // (`UIOptionsFrame.lua:90`), registered "1.0" (`0x82e92c`) with no validator: the slider's 1
     // to 2 is the slider's, not the CVar's.
     same("cameraDistanceMax", "15.0").checked(benilla_ui::script::check_camera_distance_max),
-    same("cameraDistanceMaxFactor", "1"),
+    same("cameraDistanceMaxFactor", "1.0"),
     // `cameraSmoothStyle` (`0x50ba92`, default `[0x84f4f4]` "1"), the auto-return behind the
     // character. The engine's enum is 0 Never, 1 Smart, 2 Always, as the stock dropdown writes it
     // (`UIOptionsFrame.lua:525,536,547`); 3, the Never entry's position, is the validator's upper
@@ -521,7 +525,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // sets the transition's duration (`|dyaw| / rate * factor`), an average rate, not a slew. The
     // validator `0x50c000` refuses outside [0.1, 360] and the follow reader (`0x512d75`) uses the
     // stored value as is; 90 to 270 is only the stock slider's range.
-    same("cameraYawSmoothSpeed", "180").checked(benilla_ui::script::check_camera_rate),
+    same("cameraYawSmoothSpeed", "180.0").checked(benilla_ui::script::check_camera_rate),
     // `UIOptionsFrame.lua:353` names `cameraPitchSmoothSpeed`, registered "45.0" (`0x50b90b`) with
     // the same validator, and `SetCVar` raises on a name no CVar has (`0x488c53`). `FollowRig` has
     // one rate, so nothing reads it.
@@ -532,10 +536,10 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // Read by the routing (`0x50fff5`/`0x510004`) in radians of camera rotation, so they carry to
     // benilla's raw-device units unchanged.
     same("cameraPivotDXMax", "0.05"),
-    same("cameraPivotDYMin", "0"),
+    same("cameraPivotDYMin", "0.00"),
     // The pitch bias's ease-back once the pivot lets go, deg/s (`[0xbe0fc8]`; `0x512a50` divides
     // |Δ| by rate · π/180 for the duration); no panel row.
-    same("cameraTargetSmoothSpeed", "90").checked(benilla_ui::script::check_camera_rate),
+    same("cameraTargetSmoothSpeed", "90.0").checked(benilla_ui::script::check_camera_rate),
     // `cameraWaterCollision` `[0xbe1088]` "1" (`0x50bd63`, `0x82e748`): one register, two consumers
     // that must ship together. `0x50e5ec` builds it; its `0xf0000` nibble joins the trace mask of
     // all three `0x50e570` queries (reaching `0x69cc13`), and `0x50e629` tests it to lift the sweep
@@ -549,16 +553,16 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // floor always binds (20° at 7.5°/s is 2.67 s), so the camera leans rather than tracks.
     // Their validators: `0x50c000` for the rate, `0x50bfe0` for the bounds.
     same("cameraGroundSmoothSpeed", "7.5").checked(benilla_ui::script::check_camera_rate),
-    same("cameraTerrainTiltTimeMin", "3").checked(benilla_ui::script::check_camera_time),
-    same("cameraTerrainTiltTimeMax", "10").checked(benilla_ui::script::check_camera_time),
+    same("cameraTerrainTiltTimeMin", "3.0").checked(benilla_ui::script::check_camera_time),
+    same("cameraTerrainTiltTimeMax", "10.0").checked(benilla_ui::script::check_camera_time),
     // `cameraBobbing` `[0xbe10c0]` "0" (`0x50b76d`), head bob: kernel `0x511920`, gate `0x5105e0`;
     // ours is `player::camera_dynamics::HeadBob`.
     same("cameraBobbing", "0"),
     // Amplitudes in the CVar's units, scaled by 1/36 (`[0x7ff9d0]`) to yards.
     // `cameraBobbingSmoothSpeed` is the decay rate, read only in the disarm `0x51113a`, which
     // divides the largest component by it for the ramp's duration (~0.069 s at these defaults).
-    same("cameraBobbingLRAmplitude", "2"),
-    same("cameraBobbingUDAmplitude", "2"),
+    same("cameraBobbingLRAmplitude", "2.0"),
+    same("cameraBobbingUDAmplitude", "2.0"),
     // Validated by `0x50bfe0` and `0x50c040`.
     same("cameraBobbingFrequency", "0.8").checked(benilla_ui::script::check_camera_time),
     same("cameraBobbingSmoothSpeed", "0.8").checked(benilla_ui::script::check_camera_decay),
@@ -599,9 +603,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // ([`Cvars::addon_version_check`]) and live by the VM's gate.
     same("checkAddonVersion", "1"),
     // `scriptMemory` (`0x402e63`: name `0x82e81c`, "49152" `0x82e858`, category 4, record
-    // `0x882654`): the Lua heap cap in KB, shown in MB by the glue AddOns screen
-    // (`GetScriptMemory 0x46da10`, `SetScriptMemory 0x46da50`). Deviation: nothing caps the heap
-    // here; the row holds what the screen's box was set to.
+    // `0x882654`): the Lua state's limit in KB, shown in MB by the glue AddOns screen
+    // (`GetScriptMemory 0x46da10`, `SetScriptMemory 0x46da50`) and watched each frame in the
+    // world (`0x495599`), [`crate::ui_memory`].
     same("scriptMemory", "49152"),
     // `gxApi` (`0x63a833`: name `0x842a64`, default `0x864f7c` "direct3d", flags 3, callback
     // `0x63b030`, record `[0xc4ea94]`): the reference builds D3D9 unless it reads "OpenGl"
@@ -1275,7 +1279,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // callers are the spawn-count `fmul`s, so it scales emission RATE and nothing else. The engine
     // side has existed all along (`benilla_world::particles::ParticleTuning::density`) and was
     // reachable only from the debug panel; registering it is what makes it a player setting.
-    same("particleDensity", "1.0"),
+    same("particleDensity", "1.0").checked(benilla_ui::script::check_particle_density), // 0x688738
     // **`effectsDistance` — OURS, and the only row on this table that is.** 1.12 has no particle
     // draw-distance CVar; this one exists because the measured cost is overdraw (looking at a fight
     // is 15 fps, turning away is 25), and a wall is the only knob that cuts the effects you are not

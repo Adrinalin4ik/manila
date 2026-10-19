@@ -18,12 +18,12 @@ mod feed;
 pub(crate) mod net;
 mod pets;
 mod records;
-#[cfg(test)]
-pub(crate) use feed::{feed_party, PARTY_PET_TOKENS};
 pub(crate) use feed::{
-    raid_row_guid, raid_row_guids, synthetic_raid, synthetic_roster, GROUPTYPE_RAID,
+    drain_party, raid_row_guid, raid_row_guids, synthetic_raid, synthetic_roster, GROUPTYPE_RAID,
     GROUP_MEMBER_SUBGROUP,
 };
+#[cfg(test)]
+pub(crate) use feed::{feed_party, PARTY_PET_TOKENS};
 pub(crate) use records::record_notices;
 
 pub(crate) struct UiPartyPlugin;
@@ -39,8 +39,13 @@ impl Plugin for UiPartyPlugin {
             .add_systems(
                 Update,
                 (
-                    // Ahead of the field events, whose handlers read the group tokens.
+                    // Ahead of the field events, whose handlers read the group tokens, and after
+                    // the unit snapshots: TargetFrame answers RAID_TARGET_UPDATE with
+                    // GetRaidTargetIndex("target"), which reads the target snapshot's
+                    // `raid_target`, so a new mark landed on the target frame only when the target
+                    // changed if this ran first.
                     feed::feed_party
+                        .after(crate::ui_unit::UnitSnapshots)
                         .in_set(UiFeed)
                         .in_set(crate::ui_unit::field_events::FieldEventPushes),
                     feed::drain_party.after(UiInput),

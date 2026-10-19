@@ -373,8 +373,18 @@ mod tests {
         let failures = super::super::manifest::load_default_ui(&s);
         assert!(failures.is_empty(), "the default UI: {failures:#?}");
 
+        // The stock files and the layer run in context 0, which `RegisterForSave` requires
+        // (`0x4884e0`).
+        let names = s.saved_variable_names();
+        for name in ["NAMEPLATES_ON", "FRIENDNAMEPLATES_ON", "AUTO_QUEST_WATCH"] {
+            assert!(
+                names.iter().any(|n| n == name),
+                "{name} registered: {names:?}"
+            );
+        }
+
         let (mut checked, mut uncovered, mut wrong) = (0usize, Vec::new(), Vec::new());
-        for name in s.saved_variable_names() {
+        for name in names {
             let Some(want) = theirs.get(&name) else {
                 uncovered.push(name);
                 continue;
@@ -708,7 +718,7 @@ mod tests {
         assert!(failures.is_empty(), "the shipped manifest: {failures:#?}");
         let have: std::collections::HashSet<String> = s
             .eval::<Vec<String>>(
-                "local t = {} for k in pairs(_G) do table.insert(t, k) end return t",
+                "local t = {} for k in pairs(getfenv(0)) do table.insert(t, k) end return t",
             )
             .expect("dump _G")
             .into_iter()
@@ -1334,7 +1344,7 @@ mod tests {
         }
         let have: std::collections::HashSet<String> = s
             .eval::<Vec<String>>(
-                "local t = {} for k in pairs(_G) do table.insert(t, k) end return t",
+                "local t = {} for k in pairs(getfenv(0)) do table.insert(t, k) end return t",
             )
             .expect("dump _G")
             .into_iter()
@@ -1920,15 +1930,6 @@ mod tests {
                  benilla's gossip feed carries no code-entry option kind yet",
             ),
             (
-                "MEMORY_EXHAUSTED",
-                "UIParent.lua — the client's own out-of-memory dialog; benilla's allocator \
-                 failure is a Rust abort, not a Lua event",
-            ),
-            (
-                "MEMORY_RECOVERED",
-                "UIParent.lua — the other half of MEMORY_EXHAUSTED",
-            ),
-            (
                 "PLAYER_SKINNED",
                 "UIParent.lua — the corpse-skinned notice; benilla's loot feed does not derive it",
             ),
@@ -2074,6 +2075,141 @@ mod tests {
     /// Seats a player before a probe loads the manifest, as the live client always has one by
     /// then: the stock macro window formats `UnitName("player")` into a tab label in its `OnLoad`,
     /// and without a player that raises like a load failure.
+    /// The reference fills an XML texture whose file does not load opaque green and logs it
+    /// (`0x770136`-`0x770171`). No stock texture the core or the glue load draws fails on an
+    /// install, so a line here is benilla's resolver missing a file the reference opens, which
+    /// would paint part of the stock interface green.
+    #[test]
+    fn every_texture_the_stock_interface_loads_opens() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let probe = |s: &mut UiScript| {
+            let chain = std::sync::Mutex::new(benilla_formats::open_chain(&data).expect("chain"));
+            let loose = benilla_assets::LooseFiles::install();
+            s.set_texture_probe(Box::new(move |path| {
+                benilla_assets::sprite_found(&chain, &loose, path)
+            }));
+        };
+        let failed = |s: &mut UiScript| -> Vec<String> {
+            s.finish_ui_load_log();
+            let mut lines: Vec<String> = s.diagnostics().into_iter().map(|d| d.message).collect();
+            lines.extend(s.take_load_log_writes().iter().map(|w| format!("{w:?}")));
+            lines.retain(|l| l.contains("Unable to load texture file"));
+            lines
+        };
+        let mut core = UiScript::new().expect("VM");
+        core.set_screen_size(1024.0, 768.0);
+        probe(&mut core);
+        super::super::manifest::load_default_ui(&core);
+        assert_eq!(failed(&mut core), Vec::<String>::new(), "the core");
+
+        let mut glue = UiScript::new_glue().expect("VM");
+        glue.set_screen_size(1024.0, 768.0);
+        probe(&mut glue);
+        super::super::glue::load_glue(&mut glue);
+        assert_eq!(failed(&mut glue), Vec::<String>::new(), "the glue");
+    }
+
+    /// An XML font file that does not load is logged and leaves the font as it was (`0x771226`,
+    /// `0x783eaf`). No stock font the core or the glue declares fails on an install, so a line
+    /// here is benilla's font probe missing a face the reference opens, which would strip a stock
+    /// font.
+    #[test]
+    fn every_font_file_the_stock_interface_loads_opens() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let probe = |s: &mut UiScript| {
+            let chain = std::sync::Mutex::new(benilla_formats::open_chain(&data).expect("chain"));
+            let loose = benilla_assets::LooseFiles::install();
+            s.set_font_probe(Box::new(move |path| {
+                super::super::lifecycle::font_found(&chain, &loose, path)
+            }));
+        };
+        let failed = |s: &mut UiScript| -> Vec<String> {
+            s.finish_ui_load_log();
+            let mut lines: Vec<String> = s.diagnostics().into_iter().map(|d| d.message).collect();
+            lines.extend(s.take_load_log_writes().iter().map(|w| format!("{w:?}")));
+            lines.retain(|l| l.contains("Unable to load font file"));
+            lines
+        };
+        let mut core = UiScript::new().expect("VM");
+        core.set_screen_size(1024.0, 768.0);
+        probe(&mut core);
+        super::super::manifest::load_default_ui(&core);
+        assert_eq!(failed(&mut core), Vec::<String>::new(), "the core");
+
+        let mut glue = UiScript::new_glue().expect("VM");
+        glue.set_screen_size(1024.0, 768.0);
+        probe(&mut glue);
+        super::super::glue::load_glue(&mut glue);
+        assert_eq!(failed(&mut glue), Vec::<String>::new(), "the glue");
+    }
+
+    /// The anchor loop (`0x767800`), the XML length readers (`0x6f1eb0`, `0x6f1d60`, `0x6f20a0`),
+    /// the Backdrop's child loop (`0x77e875`), a text frame's `font=` (`0x879bc8`) and
+    /// `<FontString>` child (`0x879b3c`) and a model's `scale` (`0x8788d8`) log a node they refuse.
+    /// The core and glue the default load reads, and benilla's layer, write none of these in
+    /// 1.12.1, so a line here is a read stricter than the reference's, or a layer file the
+    /// reference would refuse. (The one stock line among them, BrowseName's font override, is in
+    /// the load-on-demand Blizzard_AuctionUI, which `tests/auction_frame.rs` holds to it.)
+    #[test]
+    fn every_anchor_and_length_the_stock_interface_writes_reads() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let refused = |s: &mut UiScript| -> Vec<String> {
+            s.finish_ui_load_log();
+            let mut lines: Vec<String> = s.diagnostics().into_iter().map(|d| d.message).collect();
+            lines.extend(s.take_load_log_writes().iter().map(|w| format!("{w:?}")));
+            lines.retain(|l| {
+                [
+                    "Invalid anchor point in frame",
+                    "Frame anchored to itself",
+                    "Couldn't find relative frame",
+                    "attributes in element",
+                    "attribute in element",
+                    "Unknown child node in",
+                    "Couldn't find font object named",
+                    "Invalid model scale",
+                    "FontString element overriding font",
+                ]
+                .iter()
+                .any(|t| l.contains(t))
+            });
+            lines
+        };
+        let mut core = UiScript::new().expect("VM");
+        core.set_screen_size(1024.0, 768.0);
+        super::super::manifest::load_default_ui(&core);
+        assert_eq!(refused(&mut core), Vec::<String>::new(), "the core");
+
+        let mut glue = UiScript::new_glue().expect("VM");
+        glue.set_screen_size(1024.0, 768.0);
+        super::super::glue::load_glue(&mut glue);
+        assert_eq!(refused(&mut glue), Vec::<String>::new(), "the glue");
+    }
+
+    /// The frame loader's child loop applies each `<HitRectInsets>` in turn (`0x769c8c`), so the
+    /// reputation detail checkboxes' own `right="0"` wins over OptionsCheckButtonTemplate's -100,
+    /// and WorldStateScoreFrame's second element over its first.
+    #[test]
+    fn a_stock_frames_last_hit_rect_insets_win() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let core = UiScript::new().expect("VM");
+        super::super::manifest::load_default_ui(&core);
+        let insets = |f: &str| -> Vec<f32> {
+            core.eval(&format!("return {{{f}:GetHitRectInsets()}}"))
+                .unwrap_or_else(|e| panic!("{f}: {e}"))
+        };
+        for f in [
+            "ReputationDetailMainScreenCheckBox",
+            "ReputationDetailInactiveCheckBox",
+        ] {
+            assert_eq!(insets(f), [0.0; 4], "{f}");
+        }
+        // Each inset through the setter and getter steps at 4:3: `G(S(13))` is 13.000001.
+        assert_eq!(
+            insets("WorldStateScoreFrame"),
+            [13.000_001, 115.0, 10.0, 13.000_001]
+        );
+    }
+
     fn seat_a_player(s: &mut UiScript) {
         s.set_unit(
             "player",

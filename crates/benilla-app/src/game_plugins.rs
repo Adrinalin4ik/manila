@@ -206,9 +206,6 @@ impl PluginGroup for GamePlugins {
             .add(BattlefieldPositionsPlugin)
             .add(crate::game_tip::GameTipPlugin)
             .add(crate::text_filter::TextFilterPlugin)
-            // Re-shapes a `bevy_ui` text root whose last span was despawned, an upstream hole
-            // that otherwise panics in `bevy_text` on the next resize.
-            .add(crate::text_reshape::TextReshapePlugin)
             .add(TutorialPlugin)
             .add(crate::swing_refusal::SwingRefusalPlugin)
             .add(UiSummonPlugin)
@@ -216,6 +213,7 @@ impl PluginGroup for GamePlugins {
             .add(UiFollowPlugin)
             .add(UiInstancePlugin)
             .add(crate::ui_billing::UiBillingPlugin)
+            .add(crate::ui_memory::UiMemoryPlugin)
             .add(UiLogoutPlugin)
             .add(UiSocialPlugin)
             // After the social session, whose FriendsFrame and ignore list it uses.
@@ -873,7 +871,13 @@ pub(crate) mod schedule_tests {
     ///   `PlayerActions`, so a book change seen a frame late is pushed the next;
     /// - the item gate's control-bypass feed (`ui_unit::control_gate::feed_control_bypass`)
     ///   against `player::camera_saved::load_camera_pose` over `Player`: the feed reads
-    ///   `own_control_lost` only, and the loader writes the saved camera pose.
+    ///   `own_control_lost` only, and the loader writes the saved camera pose;
+    /// - the terrain stream's spawn half (`terrain_stream::spawn_streamed_tiles`) against the
+    ///   readers of `TerrainStreamer`, `Placements` and the asset stores its request half
+    ///   (`stream_terrain`) already pairs with: the inner-window wait sits between the two, so a
+    ///   pair the one system carried now counts on both; and `attach_inner_colliders` against the
+    ///   other users of `PendingCollider`, `StreamActivity` and `TerrainStreamer`: it attaches
+    ///   only the held inner tiles' terrain builds, and the others never touch those.
     ///
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
@@ -884,7 +888,10 @@ pub(crate) mod schedule_tests {
     ///
     /// MONKEY (merge upstream 87f3b24f, 2026-10-16): upstream 3,939 → 3,348 with the native glue
     /// screens gone; 3,999 − 591 by arithmetic.
-    const UPDATE_ACTIONABLE_CEILING: usize = 3_408;
+    ///
+    /// MONKEY (merge upstream 9969b845, 2026-10-19): upstream 3,348 → 3,355; 3,408 + 7 by
+    /// arithmetic.
+    const UPDATE_ACTIONABLE_CEILING: usize = 3_415;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -1388,6 +1395,50 @@ pub(crate) mod schedule_tests {
         assert!(seen.contains(&vm), "the VM is built after the glyph cache");
     }
 
+    /// The party feed fires `RAID_TARGET_UPDATE` after the unit feed has pushed this frame's
+    /// snapshots: TargetFrame answers it with `GetRaidTargetIndex("target")`, which reads the
+    /// target snapshot's `raid_target`, so a party feed that ran first left a new mark off the
+    /// target frame until the target changed. Read off the declared graph.
+    #[test]
+    fn the_party_feed_runs_after_the_unit_snapshots() {
+        let mut app = headless_client();
+        let c = census(&mut app, Update, SyncPoints::Declared);
+        if !type_names_available(&c) {
+            eprintln!(
+                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
+            );
+            return;
+        }
+        let one = |suffix: &str| -> SystemKey {
+            let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
+            match (hits.next(), hits.next()) {
+                (Some((k, _)), None) => *k,
+                _ => panic!("exactly one system named `…{suffix}` in Update"),
+            }
+        };
+        let mut succ: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
+        for (a, b) in &c.dependencies {
+            succ.entry(*a).or_default().push(*b);
+        }
+        let (units, party) = (
+            one("::ui_unit::feed_units"),
+            one("::ui_party::feed::feed_party"),
+        );
+        let mut seen = HashSet::new();
+        let mut stack = vec![units];
+        while let Some(n) = stack.pop() {
+            for m in succ.get(&n).into_iter().flatten() {
+                if seen.insert(*m) {
+                    stack.push(*m);
+                }
+            }
+        }
+        assert!(
+            seen.contains(&party),
+            "feed_party runs after feed_units, whose snapshots RAID_TARGET_UPDATE's handler reads"
+        );
+    }
+
     /// The VM ticks once a frame (`extract::tick_script`, in `UiInput`): a push the tick must
     /// see rides `UiFeed`, chained after the net drain and before the tick; a drain of what it
     /// produced is `.after(UiInput)`. Read off the built graph. Fails a holder with no path to or
@@ -1601,6 +1652,8 @@ pub(crate) mod schedule_tests {
          "it acts only on a glue-kind VM (`script.filter(vm_kind() == Glue)`, documented at the fire sites), never the entry VM the window leaves frameless; news that arrives with no glue VM is held in `AddonInfoReply` for the next one"),
         ("ui_script/extract/mod.rs", "paint_script", Because::Deliberate,
          "per-frame paint and cost state, not a queue"),
+        ("ui_social/feed.rs", "feed_social", Because::Deliberate,
+         "its take is `name_events`, the packets' ask markers: taken before the interface is up they still send their name queries, to the server and not the VM, and the lists and lines are read again as the names land"),
         ("ui_stable/mod.rs", "feed_stable", Because::PlayerRoundTrip,
          "both packets follow a stable master's gossip and a click in its window"),
         ("ui_summon.rs", "feed_summon", Because::PlayerRoundTrip,
@@ -1613,6 +1666,8 @@ pub(crate) mod schedule_tests {
          "`MSG_TALENT_WIPE_CONFIRM` answers the trainer's gossip option"),
         ("ui_taxi/mod.rs", "feed_taxi", Because::PlayerRoundTrip,
          "both packets follow talking to a flight master"),
+        ("ui_trade/mod.rs", "feed_trade", Because::Deliberate,
+         "its take is `named_lines_asked`, how many held lines have been asked: taken before the interface is up the lines' names are still asked, to the server and not the VM, and the lines stay held until they show"),
         ("ui_trainer/mod.rs", "feed_trainer", Because::PlayerRoundTrip,
          "a refusal answers a Train click and a list answers a trainer gossip click; the edges ride `VmMemo`s"),
     ];
@@ -1664,6 +1719,8 @@ pub(crate) mod schedule_tests {
             return;
         }
         let post = census(&mut app, PostUpdate, SyncPoints::Built);
+        // `PreUpdate` holds the frame's head: the script memory watch, ahead of the reload.
+        let pre = census(&mut app, PreUpdate, SyncPoints::Built);
         // The leave-world sweep's legs run only inside its schedule, whose callers hold the
         // interface up: the worldport's producer is gated with the unit feed, the shutdown edges
         // run the sweep before a parked glue VM returns, and the quit returns inside the
@@ -1685,6 +1742,7 @@ pub(crate) mod schedule_tests {
             .systems
             .values()
             .chain(post.systems.values())
+            .chain(pre.systems.values())
             .map(|s| (s.name.as_str(), s))
             .collect();
         let mut gated = 0;
@@ -1731,7 +1789,7 @@ pub(crate) mod schedule_tests {
             } else {
                 // Name its sets: the fix is usually a gate on one of them.
                 let where_ = match info {
-                    None => " (not found in Update/PostUpdate)".to_string(),
+                    None => " (not found in PreUpdate/Update/PostUpdate)".to_string(),
                     Some(i) => {
                         let named: Vec<&str> = i
                             .sets

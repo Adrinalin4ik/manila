@@ -75,6 +75,11 @@ pub(crate) struct CapturePointerPinned(pub(crate) bool);
 #[derive(Resource, Default)]
 pub(crate) struct EguiPointerOver(pub(crate) bool);
 
+/// Whether a dev overlay's text field has the keyboard: the UI and the bindings get no keys, as
+/// when an EditBox has focus.
+#[derive(Resource, Default)]
+pub(crate) struct EguiKeyboard(pub(crate) bool);
+
 /// Whether the dev `I` inspector's world picking is armed; `player::control` and `target::click`
 /// read it every frame, so it lives here, and the default (disarmed) is the player's.
 #[derive(Resource, Default)]
@@ -187,14 +192,17 @@ pub(crate) struct UiInput;
 /// `Cooldown.lua:3` gates on `start > 0`, so a reset would hide every running cooldown's sweep.
 #[derive(Resource)]
 pub(crate) struct UiClock {
-    /// The `Instant` leg: `Time<Real>::last_update()` at the tick that produced [`Self::ui_now`].
-    /// `bevy::platform::time::Instant`, not `std::time::Instant`: it's what `Time<Real>` itself
-    /// hands back, and on wasm32 (the default `web` Bevy feature) the two are genuinely different
-    /// types — `web_time::Instant` there, a plain alias for `std::time::Instant` everywhere else —
-    /// so this is the one spelling that's correct on both. [`crate::cooldowns`] takes the same
-    /// type for exactly this reason: every `Instant` this clock's value ever meets must agree.
+    /// [`FrameStep::at`] at the tick that produced [`Self::ui_now`].
+    ///
+    /// `bevy::platform::time::Instant`, not `std::time::Instant`: on wasm32 (the default `web`
+    /// Bevy feature) the two are genuinely different types — `web_time::Instant` there, a plain
+    /// alias for `std::time::Instant` everywhere else — so this is the one spelling that's correct
+    /// on both. [`crate::cooldowns`] takes the same type for exactly this reason: every `Instant`
+    /// this clock's value ever meets must agree.
+    ///
+    /// [`FrameStep::at`]: benilla_world::frame_pace::FrameStep::at
     pub(crate) anchor: bevy::platform::time::Instant,
-    /// The `GetTime` leg: the clock's value after that tick (seconds since this process started).
+    /// The VM clock after that tick, in seconds since this process started.
     pub(crate) ui_now: f64,
 }
 
@@ -286,25 +294,30 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut scale: ResMut<UiSca
 
 /// `/console reloadUI` (`0x4035f0`): a glue rebuild asked for whatever the state
 /// ([`glue::run_pending_glue_rebuild`] spends it), then the same deferred rebuild `ReloadUI()` and
-/// `/reload` queue, which the world alone honours.
+/// `/reload` queue, which the world alone honours. It prints nothing in any state: the handler
+/// sets the flag `[0xb41d8c]` and calls `CGGameUI::Reload` (`0x491380`), neither of which writes
+/// a line, so a run with no interface to reload is silent too.
 fn console_reload_ui(world: &mut World, _args: &str) -> Vec<String> {
     if let Some(mut rebuild) = world.get_resource_mut::<glue::GlueRebuild>() {
         rebuild.request();
     }
-    match world.get_non_send_resource_mut::<UiScript>() {
-        Some(mut script) => {
-            script.queue_session_request(benilla_ui::script::SessionRequest::ReloadUi);
-            Vec::new()
-        }
-        None => vec!["reloadUI: no interface to reload".to_string()],
+    if let Some(mut script) = world.get_non_send_resource_mut::<UiScript>() {
+        script.queue_session_request(benilla_ui::script::SessionRequest::ReloadUi);
     }
+    Vec::new()
 }
 
 impl Plugin for UiScriptPlugin {
     fn build(&self, app: &mut App) {
         use crate::console::ConsoleCommandApp;
         app.add_observer(on_cvar);
-        app.console_command("reloadUI", "Reload the interface.", console_reload_ui);
+        // Category 1 with no help (`0x402ba6`-`0x402bb4`).
+        app.console_command(
+            "reloadUI",
+            crate::console::GRAPHICS,
+            None,
+            console_reload_ui,
+        );
         // The quit root runs in `Last`: the close button's `AppExit` is written in `PostUpdate`.
         crate::shutdown::on_app_exit(app, shutdown_on_exit.into_configs());
         app.insert_resource(UiScaleCvar(default_ui_scale()))
@@ -321,6 +334,7 @@ impl Plugin for UiScriptPlugin {
                     || std::env::var_os("WOW_CAPTURE_UI").is_some(),
             ))
             .init_resource::<EguiPointerOver>()
+            .init_resource::<EguiKeyboard>()
             .init_resource::<InspectMode>()
             .init_resource::<PlayerUiHover>()
             .init_resource::<UiKeyboardCapture>()
@@ -328,6 +342,7 @@ impl Plugin for UiScriptPlugin {
             .init_resource::<PlayerUiPressConsumed>()
             .init_resource::<CursorPayloadHeld>()
             .init_resource::<UiClock>()
+            .init_resource::<benilla_world::frame_pace::FrameStep>()
             .init_resource::<AddOnIdentity>()
             // After `AssetSet::Open`: the VM's first load is the chain's `GlobalStrings.lua`.
             .add_systems(
@@ -382,8 +397,19 @@ impl Plugin for UiScriptPlugin {
                 )
                     .chain(),
             )
-            // In the feed phase, so an `OnUpdate` reads this frame's `GetFramerate()`.
+            // `GetFramerate()`'s ring, a static of the client's that no reload or logout
+            // resets: the feed hands a new VM its rate before the tick, and each world frame's
+            // step joins the ring after its paint, standing for `CGWorldFrame::OnRender`
+            // (`0x482ea0`), so an `OnUpdate` reads the frames before its own.
+            .init_resource::<WorldFrameTimes>()
             .add_systems(Update, feed_framerate.in_set(UiFeed))
+            .add_systems(
+                Update,
+                record_world_frame_time
+                    .after(UiPaint)
+                    .after(WorldStage::Present)
+                    .run_if(in_state(crate::client_state::ClientState::InWorld)),
+            )
             // The input pass hit-tests the rects the tick just resolved, and runs in-world only or
             // on the stock glue screens.
             .init_resource::<UiPassState>()
@@ -498,29 +524,27 @@ pub(crate) use lifecycle::{
     finish_ui_load, is_emote_token_line, seat_from_roster, shutdown_ui_state,
 };
 
-/// `GetFramerate()`'s host half: FPS on `Time<Real>`, smoothed by a one-second pole; how the
-/// reference averages it is untraced.
-fn feed_framerate(
-    script: Option<NonSendMut<UiScript>>,
-    time: Res<Time<bevy::time::Real>>,
-    mut smoothed: Local<f64>,
-) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let dt = time.delta_secs_f64();
-    if dt <= 0.0 {
-        return; // the first frame, or a paused one
+/// The 30 world-frame times `GetFramerate()` averages (`0xc631c8`).
+#[derive(Resource, Default)]
+struct WorldFrameTimes(benilla_ui::script::FrameTimeRing);
+
+/// `GetFramerate()`'s rate as the ring stands, for the tick about to run.
+fn feed_framerate(script: Option<NonSendMut<UiScript>>, times: Res<WorldFrameTimes>) {
+    if let Some(mut script) = script {
+        script.set_framerate(times.0.rate());
     }
-    let instant = 1.0 / dt;
-    // One-pole IIR with a 1 s time constant, frame-rate independent.
-    let alpha = (dt / 1.0).min(1.0);
-    *smoothed = if *smoothed <= 0.0 {
-        instant
-    } else {
-        *smoothed + alpha * (instant - *smoothed)
-    };
-    script.set_framerate(*smoothed);
+}
+
+/// One world frame's step into the ring (`0x672700`), the elapsed every `OnUpdate` was handed.
+fn record_world_frame_time(
+    script: Option<NonSendMut<UiScript>>,
+    step: Res<benilla_world::frame_pace::FrameStep>,
+    mut times: ResMut<WorldFrameTimes>,
+) {
+    times.0.push(step.delta.as_secs_f32());
+    if let Some(mut script) = script {
+        script.set_framerate(times.0.rate());
+    }
 }
 
 /// Synthetic player and target snapshots for a server-less UI capture, and its first events once.
@@ -817,6 +841,9 @@ mod dropdown_tests;
 
 #[cfg(test)]
 mod ui_scale_tests;
+
+#[cfg(test)]
+mod frame_step_tests;
 
 #[cfg(test)]
 mod action_bar_tests;

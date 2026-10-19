@@ -15,7 +15,7 @@
 
 use mlua::{Lua, Table, Value};
 
-use super::binding_abi::flag;
+use super::binding_abi::{self, flag};
 use super::object::{frame_handle_of, frame_wrapper};
 use super::tooltip::{append_line, clear, clear_silent, tip_mut};
 use super::{CraftTooltip, Model, TrainerTooltip};
@@ -145,7 +145,15 @@ impl super::UiScript {
                     .quest_log
                     .entries
                     .iter()
-                    .filter_map(|e| e.detail.as_ref()?.reward_spell.as_ref()),
+                    .filter(|e| !e.is_header)
+                    .filter_map(|e| {
+                        model
+                            .quest_store
+                            .records
+                            .get(&e.quest_id)?
+                            .reward_spell
+                            .as_ref()
+                    }),
             )
             .map(|s| s.spell_id);
         let craft = model
@@ -183,7 +191,7 @@ pub(crate) struct SpellWait {
 }
 
 /// Each shown line's left and right cell as `(text, colour)`.
-type Drawn = Vec<(Option<String>, Option<[f32; 4]>)>;
+type Drawn = Vec<(Option<String>, Option<crate::color::Rgba8>)>;
 
 fn drawn_lines(model: &mut Model, h: FrameHandle) -> mlua::Result<Drawn> {
     let t = tip_mut(model, h)?;
@@ -239,8 +247,11 @@ fn answer_wait(lua: &Lua, h: FrameHandle, spell_id: u32, alt_caster: bool) -> ml
         wait.fallback_name,
         wait.opts,
         wait.remaining,
-    )
-    .map(|_| ())
+    )?;
+    // As the reference's spell callback sizes after its builder's show (`0x52f869`).
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    super::tooltip::size_tooltip(&mut model, h);
+    Ok(())
 }
 
 /// The view store and its asks for the unit a render is built against: the pet's when the
@@ -647,7 +658,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // the builder's return value, 1 or nil, with a cooldown running (`0x532a89`).
     m.set(
         "SetShapeshift",
-        lua.create_function(|lua, (this, index): (Table, usize)| {
+        lua.create_function(|lua, (this, index): (Table, Value)| {
+            // `is-number` else `Usage: SetShapeshift(slot)` (`0x85523c`, `0x532ad6`).
+            let index = binding_abi::index_arg(lua, index, "Usage: SetShapeshift(slot)")?;
             let now = crate::script::clock::now(lua);
             let (spell_id, name, remaining_ms) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
@@ -677,7 +690,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // 1 or nil, with a cooldown running (`0x5328ca`).
     m.set(
         "SetPetAction",
-        lua.create_function(|lua, (this, index): (Table, usize)| {
+        lua.create_function(|lua, (this, index): (Table, Value)| {
+            // `is-number` else `Usage: SetPetAction(slot)` (`0x855220`, `0x5328f4`).
+            let index = binding_abi::index_arg(lua, index, "Usage: SetPetAction(slot)")?;
             let now = crate::script::clock::now(lua);
             let (spell_id, name, remaining_ms) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
@@ -712,7 +727,13 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // surplus argument is ignored, as in the reference.
     m.set(
         "SetPlayerBuff",
-        lua.create_function(|lua, (this, index): (Table, i64)| {
+        lua.create_function(|lua, (this, index): (Table, Value)| {
+            // `is-number` else `Usage: SetPlayerBuff(buffIndex)` (`0x855258`, `0x532c2b`).
+            let index = i64::from(binding_abi::number_arg(
+                lua,
+                index,
+                "Usage: SetPlayerBuff(buffIndex)",
+            )?);
             let now = crate::script::clock::now(lua);
             let (spell_id, name, remaining_ms) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
@@ -864,8 +885,8 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let id = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 model
-                    .selected_quest_detail()
-                    .and_then(|d| d.reward_spell.as_ref())
+                    .selected_quest_record()
+                    .and_then(|r| r.reward_spell.as_ref())
                     .map(|s| (s.spell_id, s.name.clone()))
             };
             set_reward_spell(lua, &this, id)
@@ -880,7 +901,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // `ActionButton_SetTooltip` arms `updateTooltip` from it.
     m.set(
         "SetAction",
-        lua.create_function(|lua, (this, slot): (Table, u32)| {
+        lua.create_function(|lua, (this, slot): (Table, Value)| {
+            // `is-number` else `Usage: SetAction(slot)` (`0x855200`, `0x5326c3`).
+            let slot = binding_abi::index_arg32(lua, slot, "Usage: SetAction(slot)")?;
             let now = crate::script::clock::now(lua);
             let (action, remaining_ms, owned) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
@@ -958,7 +981,14 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // is a visible row, headers included; a header is a no-op.
     m.set(
         "SetTrainerService",
-        lua.create_function(|lua, (this, index): (Table, usize)| {
+        lua.create_function(|lua, (this, index): (Table, Value)| {
+            // `is-number` else `Invalid trainer service in SetTrainerService(index)` (`0x8553a4`,
+            // `0x533968`).
+            let index = binding_abi::index_arg(
+                lua,
+                index,
+                "Invalid trainer service in SetTrainerService(index)",
+            )?;
             let subject = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 match super::trainer::service(&model, index) {
@@ -995,7 +1025,10 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // recipe position: the craft list has no headers.
     m.set(
         "SetCraftSpell",
-        lua.create_function(|lua, (this, craft_index): (Table, usize)| {
+        lua.create_function(|lua, (this, craft_index): (Table, Value)| {
+            // `is-number` else `Invalid craft in SetCraftSpell(index)` (`0x85544c`, `0x533f54`).
+            let craft_index =
+                binding_abi::index_arg(lua, craft_index, "Invalid craft in SetCraftSpell(index)")?;
             let subject = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 let Some(c) = &model.craft else {

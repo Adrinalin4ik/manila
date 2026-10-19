@@ -30,6 +30,7 @@ use benilla_ui::script::{
 use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
 use crate::names::NameCache;
 use crate::net::{Guid, NetEntity, ObjectStore, Reputations, SelfPlayer};
+use crate::query_cache::Ask;
 use crate::target::{ring_reaction, Factions, Hovered, Selection, TargetUpdate};
 use benilla_world::view::WorldCamera;
 
@@ -119,7 +120,7 @@ const PLATE_LIFT: f32 = 2.0 / 3.0;
 const MAX_DIST_SQ: f32 = 20.0 * 20.0;
 /// Deviation: the reference dims non-target plates to `0x7F`; raised because that fades them too
 /// far to read.
-const DIM_ALPHA: f32 = 178.0 / 255.0;
+const DIM_ALPHA: u8 = 178;
 
 /// The bar-fill palette, the dwords at `0xcf60d0`/`e8`/`c8`/`dc`, in sRGB.
 const PLATE_HOSTILE: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
@@ -264,7 +265,7 @@ pub(crate) fn take_legacy_settings(cvars: &mut crate::cvars::Cvars) -> LegacyPla
     )
 }
 
-/// Seat the legacy settings over the saved-variables chunk's values, before `VARIABLES_LOADED`,
+/// Seat the legacy settings over the saved-variables file's values, before `VARIABLES_LOADED`,
 /// as the number 1 or nil (a Lua 0 is truthy). Until now the setting was the CVar, which
 /// outranked the file.
 pub(crate) fn seat_legacy_settings(
@@ -491,7 +492,7 @@ fn drive_vplates(
         plates.0.insert(entity);
 
         let alpha = if !has_target || world.selection.target == Some(entity) {
-            1.0
+            255
         } else {
             DIM_ALPHA
         };
@@ -585,7 +586,7 @@ fn drive_vplates(
             bar_colour: [tint[0], tint[1], tint[2]],
             // Read, never asked: this runs every frame; the unit's create asks.
             name: names
-                .peek_unit(guid.0, store)
+                .resolve_unit(guid.0, store, Ask::Read)
                 .filter(|name| !name.is_empty())
                 .map(str::to_owned)
                 .unwrap_or_else(|| unknown_object.clone()),
@@ -900,7 +901,7 @@ mod tests {
         );
 
         let s = benilla_ui::script::UiScript::new().unwrap();
-        // The saved-variables chunk said off; the CVar was the store, so it wins.
+        // The saved-variables file said off; the CVar was the store, so it wins.
         s.run("FRIENDNAMEPLATES_ON = nil NAMEPLATES_ON = 1")
             .unwrap();
         seat_legacy_settings(&s, &legacy);

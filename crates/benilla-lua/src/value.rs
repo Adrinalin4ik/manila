@@ -51,7 +51,7 @@ pub struct UserRef(pub u32);
 /// (`Value::Num(1.0)`, `Value::Nil`); read one with [`Value::unpack`] or the `as_*` accessors.
 /// `==` compares bits, which is raw equality for everything but numbers (`0 == -0`, NaN):
 /// use [`Value::raw_eq`] for Lua's.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct Value(u64);
 
@@ -88,6 +88,9 @@ impl Value {
     pub const Nil: Value = Value(tagged(T_NIL, 0));
     pub const False: Value = Value(tagged(T_BOOL, 0));
     pub const True: Value = Value(tagged(T_BOOL, 1));
+    /// 5.0's `LUA_TNONE` as a table key, which a weak table's clearing leaves (`removekey`,
+    /// `0x6f79d0`): the canonical NaN, which no lookup matches and no write makes a key.
+    pub(crate) const NONE_KEY: Value = Value(0x7FF8_0000_0000_0000);
 
     /// A number; a NaN becomes the canonical one of its sign.
     #[inline(always)]

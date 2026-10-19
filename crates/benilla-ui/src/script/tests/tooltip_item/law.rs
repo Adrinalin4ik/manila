@@ -53,7 +53,11 @@ fn item_line_law_and_red_requirements() {
         ],
         "the reference's line order"
     );
-    assert_eq!(lines[0].1, [0.0, 0.439, 0.867, 1.0], "rare-blue name");
+    assert_eq!(
+        lines[0].1,
+        crate::color::quant::drawn([0.0, 0.439, 0.867, 1.0]),
+        "rare-blue name"
+    );
     let class_line = &lines[10];
     assert_eq!(
         class_line.1,
@@ -491,7 +495,7 @@ fn charter_lines_sit_between_the_name_and_the_signable_line() {
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 4,
             slots,
         }),
@@ -625,7 +629,7 @@ fn instance_tail_creator_and_readable() {
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 6,
             slots,
         }),
@@ -723,7 +727,7 @@ fn a_wrapped_item_names_its_giver_and_hides_the_creator_line() {
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 3,
             slots,
         }),
@@ -844,7 +848,7 @@ fn a_wrapped_gift_in_trade_names_its_giver_on_both_sides() {
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 1,
             slots: HashMap::from([(
                 1,
@@ -912,7 +916,7 @@ fn a_runtime_bound_instance_overrides_the_bind_line_to_soulbound() {
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots,
         }),

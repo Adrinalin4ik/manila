@@ -69,7 +69,7 @@ fn the_menu_has_the_era_frame_and_button_ladder() {
     let (w, h) = s
         .eval::<(f64, f64)>("return GameMenuFrame:GetWidth(), GameMenuFrame:GetHeight()")
         .unwrap();
-    assert_eq!((w, h), (200.0, 267.0), "the era frame size");
+    benilla_ui::assert_near!((w, h), (200.0, 267.0), "the era frame size");
 
     let top = s.eval::<f64>("return GameMenuFrame:GetTop()").unwrap();
     let left = s.eval::<f64>("return GameMenuFrame:GetLeft()").unwrap();
@@ -80,7 +80,7 @@ fn the_menu_has_the_era_frame_and_button_ladder() {
                 "return {name}:GetWidth(), {name}:GetHeight(), {name}:GetTop(), {name}:GetLeft()"
             ))
             .unwrap_or_else(|e| panic!("{name}: {e}"));
-        assert_eq!(
+        benilla_ui::assert_near!(
             (bw, bh),
             (144.0, 21.0),
             "{name} is a GameMenuButtonTemplate"
@@ -99,24 +99,37 @@ fn the_menu_has_the_era_frame_and_button_ladder() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// Support closes the menu and toggles the stock help window, as the "?" micro button does
+/// (`MainMenuBarMicroButtons.xml:217`).
 #[test]
-fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
+fn support_closes_the_menu_and_toggles_the_help_window() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let s = harness();
+    s.run("HELP_TOGGLES = 0; function ToggleHelpFrame() HELP_TOGGLES = HELP_TOGGLES + 1 end")
+        .unwrap();
+    s.run("ShowUIPanel(GameMenuFrame); BenillaGameMenuButtonSupport:Click()")
+        .unwrap();
+    assert_eq!(s.eval::<i64>("return HELP_TOGGLES").unwrap(), 1);
+    assert!(!s
+        .eval::<bool>("return GameMenuFrame:IsVisible() == 1")
+        .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+#[test]
+fn the_unbacked_entry_is_disabled_and_the_rest_are_live() {
     let _data = benilla_formats::wow_data_or_skip!();
     let s = harness();
     s.run("ShowUIPanel(GameMenuFrame)").unwrap();
 
-    for name in [
-        "BenillaGameMenuButtonEditMode",
-        "BenillaGameMenuButtonSupport",
-    ] {
-        assert!(
-            !s.eval::<bool>(&format!("return {name}:IsEnabled() ~= 0"))
-                .unwrap(),
-            "{name} has no panel behind it and must read that way"
-        );
-    }
+    assert!(
+        !s.eval::<bool>("return BenillaGameMenuButtonEditMode:IsEnabled() ~= 0")
+            .unwrap(),
+        "Edit Mode has no panel behind it and must read that way"
+    );
     for name in [
         "GameMenuButtonOptions",
+        "BenillaGameMenuButtonSupport",
         "GameMenuButtonMacros",
         "GameMenuButtonLogout",
         "GameMenuButtonQuit",
@@ -725,7 +738,7 @@ fn backpack() -> ContainerState {
         },
     );
     ContainerState {
-        name: Some("Backpack".into()),
+        name: None,
         num_slots: 16,
         slots,
     }

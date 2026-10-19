@@ -110,6 +110,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("ffx_glow::FfxSwitches", "record"),
     ("ffx_glow::GlueFfx", "record"),
     ("final_pass::FinalPassTarget", "record"),
+    ("frame_pace::FrameStep", "record"),
     ("instance_tint::InstanceTintMirrors", "record"),
     ("instance_tint::InstanceTints", "record"),
     ("interact::PickMesh", "record"),
@@ -439,11 +440,7 @@ fn measure() -> BTreeMap<String, BTreeSet<String>> {
     let src = app.join("src");
     let tests = test_module_files(&src);
     for file in rs_files(&src) {
-        let rel = file
-            .strip_prefix(&src)
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        let rel = rel_to(&file, &src);
         // Without the world crate the file's module decides its side; with it, every file here
         // is on the game side.
         if (!split && is_engine(&rel)) || tests.contains(&rel) {
@@ -486,11 +483,7 @@ fn measure_back() -> BTreeMap<String, BTreeSet<String>> {
     let src = app.join("src");
     let tests = test_module_files(&src);
     for file in rs_files(&src) {
-        let rel = file
-            .strip_prefix(&src)
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        let rel = rel_to(&file, &src);
         if tests.contains(&rel) {
             continue;
         }
@@ -508,7 +501,8 @@ fn measure_back() -> BTreeMap<String, BTreeSet<String>> {
 }
 
 /// Every source file that is a test module in its own file: declared `#[cfg(test)] mod x;`,
-/// with its body in `x.rs` or `x/mod.rs` beside its parent. Its names do not count.
+/// with its body in `x.rs` or `x/mod.rs` beside its parent, or where a `#[path]` puts it. Its
+/// names do not count.
 fn test_module_files(src: &Path) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for file in rs_files(src) {
@@ -521,6 +515,9 @@ fn test_module_files(src: &Path) -> BTreeSet<String> {
             _ => file.with_extension(""),
         };
         let mut armed = false;
+        // A `#[path = "x.rs"]` between the guard and the `mod` names the body's file, relative to
+        // the declaring file's folder.
+        let mut path_attr: Option<PathBuf> = None;
         for line in text.lines() {
             let t = line.trim();
             if t == "#[cfg(test)]" {
@@ -528,30 +525,46 @@ fn test_module_files(src: &Path) -> BTreeSet<String> {
                 continue;
             }
             if armed {
+                if let Some(rel) = t
+                    .strip_prefix("#[path = \"")
+                    .and_then(|r| r.strip_suffix("\"]"))
+                {
+                    path_attr = Some(file.parent().unwrap().join(rel));
+                    continue;
+                }
                 if let Some(name) = t
                     .strip_suffix(';')
                     .and_then(|d| d.rsplit_once("mod "))
                     .map(|(_, n)| n)
                 {
-                    for cand in [
-                        dir.join(format!("{name}.rs")),
-                        dir.join(name).join("mod.rs"),
-                    ] {
+                    let cands = match path_attr.take() {
+                        Some(body) => vec![body],
+                        None => vec![
+                            dir.join(format!("{name}.rs")),
+                            dir.join(name).join("mod.rs"),
+                        ],
+                    };
+                    for cand in cands {
                         if cand.is_file() {
-                            out.insert(
-                                cand.strip_prefix(src)
-                                    .unwrap()
-                                    .to_string_lossy()
-                                    .to_string(),
-                            );
+                            out.insert(rel_to(&cand, src));
                         }
                     }
                 }
                 armed = false;
+                path_attr = None;
             }
         }
     }
     out
+}
+
+/// `file` under `src`, with forward slashes whichever separator the platform uses: the key every
+/// table here uses.
+fn rel_to(file: &Path, src: &Path) -> String {
+    file.strip_prefix(src)
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn is_engine(rel: &str) -> bool {

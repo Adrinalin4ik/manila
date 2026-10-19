@@ -30,6 +30,7 @@ use benilla_protocol::{SessionEvent, SessionEventKind};
 use bevy::ecs::system::SystemParam;
 
 use crate::net::{GuidIndex, NetCommands, NetHandlerApp, ObjectStore, SelfGuid, SelfPlayer};
+use crate::query_cache::Ask;
 
 /// Register the spell's handlers; called from [`super::SpellPlugin`].
 pub(super) fn register(app: &mut App) {
@@ -636,7 +637,8 @@ fn cast_result(
             arg,
             spell,
             spells.map(|s| &s.forms),
-            |item| items.is_some_and(|i| i.template(item, 0, net).is_some()),
+            // The packet's lookup with the callback `0x6e29b0` (`0x6e1ea4`).
+            |item| items.is_some_and(|i| i.template(item, 0, Ask::Event(net)).is_some()),
         );
         report_pops = in_flight && reaches_pop;
         // That pop's `0x6e4940(cl=1)` fires its event and clears the caster word (`0x6e4a5a`).
@@ -1018,8 +1020,9 @@ fn spell_go(
         // The item's entry, off its own store.
         match item_caster.and_then(|g| stores.get(*index.0.get(&g)?).ok()?.0.object_entry()) {
             Some(entry) => {
+                // The item's record, which its create asked.
                 let use_spell = items
-                    .template(entry, 0, net_commands)
+                    .template(entry, 0, Ask::Read)
                     .and_then(|t| t.use_spell)
                     .filter(|u| u.spell_id == spell_id);
                 match use_spell {

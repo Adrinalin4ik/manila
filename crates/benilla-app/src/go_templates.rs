@@ -110,16 +110,6 @@ impl GameObjectTemplates {
         }
     }
 
-    /// A reader's ask for an object's template, run every frame while it is missing (a hover, a
-    /// quest's background): a refused entry is asked again only once the window from the refusal
-    /// has passed ([`QueryCache::get_or_ask`]).
-    pub(crate) fn request(&self, guid: u64, fields: &ObjectFields, commands: &NetCommands) {
-        if let Some(entry) = Self::key(fields) {
-            self.templates
-                .get_or_ask(entry, || Self::send(entry, guid, commands));
-        }
-    }
-
     fn send(entry: u32, guid: u64, commands: &NetCommands) {
         debug!("go: asking template (entry {entry}, guid {guid:#x})");
         let _ = commands
@@ -186,6 +176,11 @@ impl GameObjectTemplates {
                 quest_material,
             },
         );
+    }
+
+    /// A template's name by entry, read without a callback (the cache `0xc0e318`).
+    pub(crate) fn name(&self, entry: u32) -> Option<&str> {
+        self.templates.get(entry).map(|t| t.name.as_str())
     }
 
     /// The cached template for a GameObject, found through its own descriptor.
@@ -374,8 +369,8 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
         let commands = NetCommands(tx);
         let mut t = GameObjectTemplates::default();
-        t.request(boat, &fields, &commands);
-        t.request(boat, &fields, &commands);
+        t.request_at_create(boat, &fields, &commands);
+        t.request_at_create(boat, &fields, &commands);
         let asked: Vec<_> = rx
             .try_iter()
             .map(|c| match c {
@@ -392,7 +387,7 @@ mod tests {
         assert_eq!(mo.map(|m| m.taxi_path_id), Some(292), "read by the field");
 
         // A second object of the same template shares the one query.
-        t.request(boat + 2, &fields, &commands);
+        t.request_at_create(boat + 2, &fields, &commands);
         assert!(rx.try_recv().is_err(), "the cached entry is not re-asked");
     }
 
@@ -402,7 +397,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
         let commands = NetCommands(tx);
         let mut t = GameObjectTemplates::default();
-        t.request(1, &ObjectFields::default(), &commands);
+        t.request_at_create(1, &ObjectFields::default(), &commands);
         assert!(rx.try_recv().is_err());
         t.insert(0, 3, "Chest".into(), &[0; 24]);
         assert!(t.of(&ObjectFields::default()).is_none());

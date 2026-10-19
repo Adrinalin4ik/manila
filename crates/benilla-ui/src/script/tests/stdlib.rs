@@ -3,37 +3,62 @@
 
 use super::common::script;
 
-// ── The positional format wrapper ──
+// ── format's positional items ──
 
+/// `str_format` (`0x7fd3d0`) reads one digit and `$` as the item's argument (`0x7fd4ac`) and goes on
+/// from the one after it, so a positional and a sequential item mix without an error.
 #[test]
-fn positional_format_reorders_and_mix_is_an_error() {
+fn format_takes_positional_items_as_the_client() {
     let s = script();
+    let f = |src: &str| s.eval::<String>(src).unwrap();
+    assert_eq!(f(r#"return format("%2$s %1$s", "a", "b")"#), "b a");
+    assert_eq!(f(r#"return format("%1$05d", 42)"#), "00042");
+    assert_eq!(f(r#"return string.format("%d-%s", 1, "x")"#), "1-x");
+    assert_eq!(f(r#"return format("%1$d%%", 50)"#), "50%");
+    // The cursor goes on from a positional item.
+    assert_eq!(f(r#"return format("%1$s %s", "a", "b")"#), "a b");
     assert_eq!(
-        s.eval::<String>(r#"return format("%2$s %1$s", "a", "b")"#)
-            .unwrap(),
-        "b a"
+        f(r#"return format("%2$s %s %1$s", "a", "b", "c")"#),
+        "b c a"
     );
-    // width/precision travel with the positional spec
+    // `%0$s` is the format itself.
+    assert_eq!(f(r#"return format("<%0$s>")"#), "<<%0$s>>");
+}
+
+/// A bad call raises from `format` itself, at its caller's line, in the client's words.
+#[test]
+fn format_errors_are_the_clients() {
+    let s = script();
+    // The message past the chunk's name: the caller's line, then the text.
+    let err = |src: &str| {
+        let e = s
+            .eval::<String>(&format!(
+                "local ok, e = pcall(function()\n{src}\nend) return e"
+            ))
+            .unwrap();
+        e[e.find(":2: ").expect("the caller's line")..].to_string()
+    };
     assert_eq!(
-        s.eval::<String>(r#"return format("%1$05d", 42)"#).unwrap(),
-        "00042"
+        err(r#"return format("%d")"#),
+        ":2: bad argument #2 to `format' (number expected, got no value)"
     );
-    // sequential still works, through the patched `string.format` too
     assert_eq!(
-        s.eval::<String>(r#"return string.format("%d-%s", 1, "x")"#)
-            .unwrap(),
-        "1-x"
+        err(r#"return string.format("%d", "x")"#),
+        ":2: bad argument #2 to `format' (number expected, got string)"
     );
-    // %% is preserved
     assert_eq!(
-        s.eval::<String>(r#"return format("%1$d%%", 50)"#).unwrap(),
-        "50%"
+        err(r#"return format("%y", 1)"#),
+        ":2: invalid option in `format'"
     );
-    // mixing positional and sequential is an error, as in the reference
-    let mixed_ok: bool = s
-        .eval(r#"return pcall(format, "%1$s %s", "a", "b")"#)
-        .unwrap();
-    assert!(!mixed_ok, "mixed positional+sequential must error");
+    // A positional item is one digit: `%10$s` is a width of 10 and the conversion `$`.
+    assert_eq!(
+        err(r#"return format("%10$s", "a")"#),
+        ":2: invalid option in `format'"
+    );
+    assert_eq!(
+        err(r#"return format("%123d", 1)"#),
+        ":2: invalid format (width or precision too long)"
+    );
 }
 
 // ── getglobal and the alias layer ──
@@ -185,7 +210,8 @@ fn debugstack_frames_end_in_newline_and_count1_does_not_clamp() {
 
 /// An addon chunk is named as the reference names it, `@Interface\AddOns\<folder>\<file>`:
 /// `FuBarPlugin-2.0.lua:752` finds its folder with a greedy `"\\AddOns\\(.*)\\"`, which captures
-/// up to the last backslash, so the file must be in the name.
+/// up to the last backslash, so the file must be in the name. The test bounds the capture at the
+/// folder's own backslash, so a later frame named by a host path (`\` on Windows) stays out of it.
 #[test]
 fn an_addon_chunk_is_named_the_way_the_client_names_it() {
     let name = crate::script::addon_chunk_name("FuBar_BagFu", "FuBar_BagFu.lua");
@@ -200,7 +226,7 @@ fn an_addon_chunk_is_named_the_way_the_client_names_it() {
     .unwrap();
     let folder: String = s
         .eval(
-            "local _, _, f = string.find(BenillaProbeFolder(), \"\\\\AddOns\\\\(.*)\\\\\") \
+            "local _, _, f = string.find(BenillaProbeFolder(), \"\\\\AddOns\\\\([^\\\\]*)\\\\\") \
              return f or '<no match>'",
         )
         .unwrap();
@@ -233,6 +259,45 @@ fn loadstring_is_text_only_bytecode_rejected() {
         )
         .unwrap();
     assert!(ok, "loadstring must reject bytecode");
+}
+
+/// `luaB_loadstring` (`0x703280`) names a chunk by its source's bytes as a C string, which
+/// `luaO_chunkid` (`0x6f5c40`) cuts at the first `\n` alone; a NUL in the source compiles.
+#[test]
+fn loadstring_names_a_chunk_by_its_raw_bytes() {
+    let s = script();
+    let err = |src: &str| {
+        s.eval::<String>(&format!(
+            "local f, e = loadstring({src}) if not f then return e end \
+             local ok, m = pcall(f) return m"
+        ))
+        .unwrap()
+    };
+    assert_eq!(
+        s.eval::<i64>(r#"return string.len(loadstring("return '\0'")())"#)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        err(r#""error('e') --\0x""#),
+        "[string \"error('e') --\"]:1: e"
+    );
+    assert_eq!(
+        err(r#""error('e')\r--x""#),
+        "[string \"error('e')\r--x\"]:1: e"
+    );
+    assert_eq!(
+        err(r#""error('e')\n--x""#),
+        "[string \"error('e')...\"]:1: e"
+    );
+    assert!(
+        s.eval::<bool>(
+            r#"local f = loadstring("error('e') --\233") local ok, m = pcall(f)
+               return string.find(m, "\233", 1, true) ~= nil"#
+        )
+        .unwrap(),
+        "a Latin-1 byte in the name stays itself"
+    );
 }
 
 // ── GetTime: the session clock ──
@@ -337,10 +402,8 @@ fn time_is_epoch_seconds_and_date_formats_them() {
         ("%I:%M %p", "01:46 AM"),
         ("%j", "252"),
         ("%w", "0"),
-        ("%c", "Sun Sep  9 01:46:40 2001"),
         ("100%%", "100%"),
-        // An unknown specifier is emitted verbatim rather than swallowed.
-        ("%Q", "%Q"),
+        ("!%H", "01"),
     ] {
         let got: String = s
             .eval(&format!(r#"return date("{fmt}", 1000000000)"#))
@@ -358,6 +421,118 @@ fn time_is_epoch_seconds_and_date_formats_them() {
     // A leap day, the civil conversion's edge case.
     let leap: String = s.eval(r#"return date("%Y-%m-%d %A", 951782400)"#).unwrap();
     assert_eq!(leap, "2000-02-29 Tuesday");
+}
+
+/// `date` formats with the client's MSVC `strftime` (`0x4134e3`) in the C locale (`0x8323a0`):
+/// `%x` `M/d/yy` and `%X` `H:mm:ss`, zero-padded all the same (`0x4138e2`), `%c` both, `#` the
+/// long date and unpadded numbers, `%U`/`%W` weeks, `%z`/`%Z` the zone's name, and an unknown
+/// specifier writes nothing. An empty or 256-byte answer raises, a negative time answers nil.
+#[test]
+fn date_formats_as_msvcs_strftime() {
+    let s = script();
+    let date = |args: &str| -> String {
+        s.eval::<String>(&format!("return date({args})"))
+            .unwrap_or_else(|e| format!("error: {e}"))
+    };
+    // 1_000_000_000 is Sunday 2001-09-09 01:46:40, the next day a Monday.
+    for (args, want) in [
+        (r#""%c", 1000000000"#, "09/09/01 01:46:40"),
+        (r#""%x", 1000000000"#, "09/09/01"),
+        (r#""%X", 1000000000"#, "01:46:40"),
+        (
+            r#""%#c", 1000000000"#,
+            "Sunday, September 09, 2001 01:46:40",
+        ),
+        (r#""%#x", 1000000000"#, "Sunday, September 09, 2001"),
+        (r#""%#d.%#m %#H:%#M %#j", 1000000000"#, "9.9 1:46 252"),
+        (r#""%U %W", 1000086400"#, "36 37"),
+        (r#""%U %W", 1000000000"#, "36 36"),
+        (
+            r#""%Z|%z", 1000000000"#,
+            "Coordinated Universal Time|Coordinated Universal Time",
+        ),
+        (r#""a%Qb%hc%ed", 1000000000"#, "abcd"),
+        (r#""*tx", 1000000000"#, "*tx"),
+        (r#""%Y", "1000000000""#, "2001"),
+        (r#"20010909, 1000000000"#, "20010909"),
+    ] {
+        assert_eq!(date(args), want, "date({args})");
+    }
+    assert_eq!(date(r#"string.rep("a", 255), 0"#).len(), 255);
+    for args in [
+        r#""""#,
+        r#""%Q""#,
+        r#"string.rep("a", 256)"#,
+        r#"string.rep("%c", 16)"#,
+    ] {
+        assert!(
+            date(args).ends_with("`date' format too long"),
+            "date({args}): {}",
+            date(args)
+        );
+    }
+    let nil: bool = s
+        .eval(r#"return date("%c", -5) == nil and date("*t", -2) == nil"#)
+        .unwrap();
+    assert!(nil, "a negative time is no date");
+}
+
+/// `time` with a table converts it (`0x7035a0`): its fields through `lua_gettable` and `__ftol`,
+/// `hour` 12 by default, `day`, `month` and `year` required, then the runtime's `_mktime`
+/// (`0x74066b`): the month folded into the year, years 1969 to 2039 only, a 32-bit overflow or a
+/// negative time nil.
+#[test]
+fn time_converts_a_date_table() {
+    let s = script();
+    let time = |t: &str| -> String {
+        s.eval::<mlua::Value>(&format!("return time({t})"))
+            .map(|v| match v {
+                mlua::Value::Nil => "nil".to_string(),
+                v => format!("{}", v.as_f64().unwrap()),
+            })
+            .unwrap_or_else(|e| format!("error: {e}"))
+    };
+    for (t, want) in [
+        (
+            "{year=2001, month=9, day=9, hour=1, min=46, sec=40}",
+            "1000000000",
+        ),
+        ("{year=1970, month=1, day=1}", "43200"),
+        ("{year=2000, month=14, day=1, hour=0}", "980985600"),
+        ("{year=2001, month=2, day=1, hour=0}", "980985600"),
+        (
+            "{year=2001, month=9, day=9, hour=1, min=46, sec=40, isdst=true}",
+            "1000000000",
+        ),
+        (
+            r#"{year="2001", month="9", day=9.9, hour=1.5, min=46, sec=40}"#,
+            "1000000000",
+        ),
+        (
+            "setmetatable({}, {__index = {year=2001, month=9, day=9, hour=1, min=46, sec=40}})",
+            "1000000000",
+        ),
+        (
+            "{year=2038, month=1, day=19, hour=3, min=14, sec=7}",
+            "2147483647",
+        ),
+        ("{year=2038, month=1, day=19, hour=3, min=14, sec=8}", "nil"),
+        ("{year=1969, month=12, day=31, hour=0}", "nil"),
+        ("{year=1968, month=12, day=31}", "nil"),
+        ("{year=2040, month=1, day=1}", "nil"),
+        ("{year=2001, month=-11, day=1, hour=0}", "946684800"),
+    ] {
+        assert_eq!(time(t), want, "time({t})");
+    }
+    assert!(time("{year=2001, month=9}").ends_with("field `day' missing in date table"));
+    assert!(time("{day=1}").ends_with("field `month' missing in date table"));
+    assert!(time("5").ends_with("bad argument #1 to `time' (table expected, got number)"));
+    let round: bool = s
+        .eval(
+            "local t = date('*t', 1000000000) return time(t) == 1000000000 and time(nil) == time()",
+        )
+        .unwrap();
+    assert!(round, "a date table converts back");
 }
 
 // ── RunScript ──
@@ -436,5 +611,95 @@ fn a_runscript_error_reaches_the_handler_and_not_the_caller() {
     assert!(
         errs[1].starts_with("[string \"this is not lua\"]:1:"),
         "a compile failure is reported under the same name, undecorated: {errs:?}"
+    );
+}
+
+/// `date("*t")` sets its fields in the client's order, `sec` to `isdst` (`0x703452`..`0x7034e2`),
+/// so `pairs` walks the table as the client's does for the same sets, run in its code.
+#[test]
+fn date_star_t_walks_as_the_clients() {
+    let s = script();
+    let got: String = s
+        .eval(
+            r#"local o = {} for k in pairs(date("*t", 1000000000)) do table.insert(o, k) end
+               return table.concat(o, " ")"#,
+        )
+        .unwrap();
+    assert_eq!(got, "hour min wday year yday month sec day isdst");
+}
+
+/// The host's `setglobal` is the client's (`0x702770`): the global gets the top value, so a lone
+/// name sets it to itself and a third argument wins over the second.
+#[test]
+fn setglobal_sets_the_top_value_as_the_clients() {
+    let s = script();
+    let got: Vec<String> = s
+        .eval(
+            "setglobal('SgOne') setglobal('SgThree', 5, 6)
+             return { tostring(SgOne), tostring(SgThree), tostring(getglobal('SgThree')) }",
+        )
+        .unwrap();
+    assert_eq!(got, ["SgOne", "6", "6"]);
+}
+
+/// `debugprofilestop` (`0x702860`) reads its counter live at the call, so a span inside one frame
+/// measures; ours answers it in milliseconds (the `Deviation:` at `install_profile`).
+#[test]
+fn debugprofilestop_measures_within_a_frame_in_milliseconds() {
+    let s = script();
+    s.run("debugprofilestart()").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let ms = s.eval::<f64>("return debugprofilestop()").unwrap();
+    assert!(
+        (20.0..2000.0).contains(&ms),
+        "no tick between, 20 ms slept: {ms}"
+    );
+    let busy = s
+        .eval::<f64>(
+            "debugprofilestart() local x = 0 for i = 1, 100000 do x = x + i end \
+             return debugprofilestop()",
+        )
+        .unwrap();
+    assert!(
+        busy > 0.0,
+        "a span of work inside one call answers above 0: {busy}"
+    );
+}
+
+/// `lua_getinfo`'s `n` falls back on a global holding the function when the calling instruction
+/// names nothing (`0x6fbe11` → `travglobals` `0x6fbf90`), as for a function a C function called:
+/// `debugstack` and `luaL_argerror` both print that global's name.
+#[test]
+fn a_frame_no_instruction_names_takes_a_globals_name() {
+    let s = script();
+    let stack = s
+        .eval::<String>(
+            r#"
+            function NamedOnlyByAGlobal() return debugstack(1, 1, 0) end
+            local _, stack = pcall(NamedOnlyByAGlobal)
+            return stack
+            "#,
+        )
+        .unwrap();
+    assert!(
+        stack.contains("in function `NamedOnlyByAGlobal'"),
+        "{stack}"
+    );
+    let e = s
+        .eval::<String>("local _, e = pcall(strfind) return e")
+        .unwrap();
+    assert!(e.contains("bad argument #1 to `strfind'"), "{e}");
+    let named = s
+        .eval::<String>(
+            r#"
+            local function unnamed() return debugstack(1, 1, 0) end
+            local _, stack = pcall(unnamed)
+            return stack
+            "#,
+        )
+        .unwrap();
+    assert!(
+        named.contains("in function <"),
+        "no global holds it: {named}"
     );
 }

@@ -852,25 +852,17 @@ fn a_reload_keeps_the_quest_folds_and_the_repeat() {
     world.init_resource::<crate::ui_tradeskill::TradeSkillRepeatCarry>();
     log_in_as(&mut world, "Onehunter", 1);
 
-    let rows = || benilla_ui::script::QuestLogState {
-        entries: vec![
-            benilla_ui::script::QuestLogEntryView {
-                title: "Elwynn Forest".into(),
-                is_header: true,
-                ..Default::default()
-            },
-            benilla_ui::script::QuestLogEntryView {
-                quest_id: 7,
-                title: "Wolves Across the Border".into(),
-                ..Default::default()
-            },
-        ],
-        num_quests: 1,
-        hidden_quest_ids: Vec::new(),
+    // One quest under its header: two rows open, one folded.
+    let rows = || {
+        [crate::ui_quest_log::fixture::quest(
+            7,
+            "Wolves Across the Border",
+            10,
+        )]
     };
     let visible = |world: &mut World| {
         let mut script = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
-        script.set_quest_log(rows());
+        crate::ui_quest_log::fixture::seat(&mut script, &rows());
         script
             .eval::<u32>("return (GetNumQuestLogEntries())")
             .expect("count")
@@ -897,7 +889,7 @@ fn a_reload_keeps_the_quest_folds_and_the_repeat() {
                 icon: None,
                 min_made: 1,
                 max_made: 1,
-                cooldown_secs: None,
+                cooldown: None,
                 product_item: 2996,
                 product_inv_type: 0,
                 product_item_level: 0,
@@ -1659,7 +1651,7 @@ fn a_placed_window_comes_back_after_a_reload() {
     world
         .run_system_once(crate::ui_layout::load_layout)
         .expect("the layout loader ran");
-    assert_eq!(
+    benilla_ui::assert_near!(
         window_geometry(&world),
         placed,
         "the window the player placed is back where they left it"
@@ -2366,6 +2358,141 @@ fn addons_load_against_the_buff_anchors_the_xml_gives() {
             .ok(),
         Some("TempEnchant1"),
         "VARIABLES_LOADED then runs the stock pass (BuffFrame.lua:152-160)"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Some 4 MB the hog holds while `MemoryHog` does: 40,000 distinct 70-byte strings.
+const HOG_LUA: &str = "\
+MemoryHog = {}
+for i = 1, 40000 do MemoryHog[i] = string.rep(\"x\", 64) .. i end
+";
+
+/// In the world with `MemoryHog` loaded and `scriptMemory` at `limit_kb`, the watch's resources
+/// declared as its plugin declares them.
+fn hog_world(tag: &str, limit_kb: &str) -> (World, std::path::PathBuf, EnvGuard, EnvGuard) {
+    let (tmp, c, h) = hermetic_addon(
+        tag,
+        "MemoryHog",
+        "## Interface: 11200\nMemoryHog.lua\n",
+        HOG_LUA,
+    );
+    let mut world = booted_world();
+    world.init_resource::<super::LeavingWorldArmed>();
+    world.init_resource::<crate::ui_memory::ScriptMemoryWatch>();
+    world.init_resource::<Messages<AppExit>>();
+    world.insert_resource(Time::<bevy::time::Real>::default());
+    world.spawn(crate::net::SelfPlayer);
+    log_in_as(&mut world, "Onehunter", 1);
+    let mut s = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
+    s.register_cvars(crate::cvars::registered_pairs());
+    // The limit as the saved file holds it: in the world the row is read-only (`0x48f566`), so
+    // only the mirror sync moves it.
+    s.set_cvar_host("scriptMemory", limit_kb);
+    assert!(
+        s.eval::<bool>("return MemoryHog ~= nil").unwrap(),
+        "the hog loaded"
+    );
+    (world, tmp, c, h)
+}
+
+/// One frame of the watch, as `0x495590` runs it.
+fn watch_frame(world: &mut World) {
+    use bevy::ecs::system::RunSystemOnce;
+    world
+        .run_system_once(crate::ui_memory::watch_script_memory)
+        .unwrap();
+}
+
+/// The text of the shown `MEMORY_EXHAUSTED` popup, if one is shown.
+fn memory_popup(world: &World) -> Option<String> {
+    world
+        .non_send_resource::<benilla_ui::script::UiScript>()
+        .eval::<Option<String>>(
+            "local f = StaticPopup_Visible(\"MEMORY_EXHAUSTED\") \
+             return f and getglobal(f .. \"Text\"):GetText()",
+        )
+        .unwrap()
+}
+
+/// What the whole state counts, in KB, after a full collection.
+fn collected_kb(world: &World) -> usize {
+    let s = world.non_send_resource::<benilla_ui::script::UiScript>();
+    s.lua().gc_collect().unwrap();
+    s.lua().used_memory() >> 10
+}
+
+/// `scriptMemory` at 1 MB, which the stock interface and the hog are well over: the first frame
+/// shows the stock popup with the limit (`0x49563d`, `MEMORY_EXHAUSTED` of `GlobalStrings.lua`),
+/// and the hog let go, the next hides it (`0x495656`).
+#[test]
+fn a_state_over_script_memory_shows_the_stock_warning_and_recovers() {
+    benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut world, tmp, _c, _h) = hog_world("memory-over", "1024");
+
+    assert_eq!(
+        memory_popup(&world),
+        None,
+        "nothing before the frame's watch"
+    );
+    watch_frame(&mut world);
+    assert_eq!(
+        memory_popup(&world).as_deref(),
+        Some(
+            "The user interface is using more than 1MB of memory. Please disable some \
+             interface add-ons and restart."
+        ),
+    );
+
+    // Within the limit again: a limit above the stock interface, with the hog freed.
+    world
+        .non_send_resource::<benilla_ui::script::UiScript>()
+        .run("MemoryHog = nil")
+        .unwrap();
+    let stock_kb = collected_kb(&world);
+    world
+        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .set_cvar_host("scriptMemory", &(stock_kb + 1024).to_string());
+    watch_frame(&mut world);
+    assert_eq!(memory_popup(&world), None, "MEMORY_RECOVERED hides it");
+    assert!(world.resource::<Messages<AppExit>>().is_empty());
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A limit the interface and the hog fit within says nothing. The stock interface alone, every
+/// FrameXML file loaded and collected, counts some 10 MB here ([`crate::ui_memory`]), under a
+/// third of the default's 48 MB.
+#[test]
+fn a_state_within_script_memory_shows_nothing() {
+    benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut world, tmp, _c, _h) = hog_world("memory-within", "49152");
+    let with_hog = collected_kb(&world);
+    watch_frame(&mut world);
+    assert_eq!(memory_popup(&world), None);
+
+    world
+        .non_send_resource::<benilla_ui::script::UiScript>()
+        .run("MemoryHog = nil")
+        .unwrap();
+    let stock_kb = collected_kb(&world);
+    eprintln!("script memory: stock interface {stock_kb} KB, with the hog {with_hog} KB");
+    assert!(
+        with_hog >= stock_kb + 3 * 1024,
+        "the hog holds its megabytes: {with_hog} KB against {stock_kb} KB"
+    );
+    assert!(
+        stock_kb < 49_152 / 3,
+        "the stock interface alone counts {stock_kb} KB, a third of the default or more"
     );
 
     drop(world);

@@ -25,11 +25,13 @@ pub(crate) struct FieldNoticeCursor(MessageCursor<FieldNotice>);
 
 /// Fire this frame's field notices in the order the packets wrote them. Under the unit feed's
 /// gate, so only while the in-game interface is up; [`drop_field_notices`] takes them otherwise.
-pub(super) fn fire_field_notices(
+pub(crate) fn fire_field_notices(
     script: Option<NonSendMut<UiScript>>,
     notices: Res<Messages<FieldNotice>>,
     mut cursor: ResMut<FieldNoticeCursor>,
     mut sink: crate::ui_action::MessageSink,
+    // The quest log's watcher reads the slots.
+    me: Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
 ) {
     let fresh: Vec<FieldNotice> = cursor.0.read(&notices).copied().collect();
     // No VM, nobody to hear them: they are dropped, as below.
@@ -37,6 +39,12 @@ pub(super) fn fire_field_notices(
         return;
     };
     for notice in fresh {
+        if notice == FieldNotice::QuestLog {
+            if let Some(store) = me.iter().next() {
+                script.quest_log_changed(crate::ui_quest_log::slot_views(&store.0));
+            }
+            continue;
+        }
         fire(&mut script, &mut sink, notice);
     }
 }
@@ -106,6 +114,8 @@ fn fire(script: &mut UiScript, sink: &mut crate::ui_action::MessageSink, notice:
                 script.fire_event(global, vec![]);
             }
         }
+        // Fired by [`fire_field_notices`], which holds the slots.
+        FieldNotice::QuestLog => {}
         FieldNotice::PvpPreference { on } => {
             let (toast, verbose) = super::pvp_announcement(on);
             // The verbose sentence is no catalog row, so it goes `unkeyed` to chat:
@@ -676,5 +686,85 @@ mod tests {
             .run_system_once(super::super::feed_units)
             .unwrap();
         assert_eq!(seen(&mut app), ["PLAYER_ENTERING_WORLD 3"]);
+    }
+
+    /// The login in the server's order: the faction list lands before the player's create (vmangos
+    /// `SendInitialPacketsBeforeAddToMap`, `Player.cpp:19256`), so the list's first push and the
+    /// world-enter cascade share the create's frame. The cascade's rebuild signals
+    /// `UPDATE_FACTION` after `PLAYER_ENTERING_WORLD` (`0x4909d3`), the player seated, so
+    /// `ReputationWatchBar_Update` reads the level and a 60 trades the XP bar for the max-level art
+    /// (`ReputationFrame.lua:236-239`), a 59 keeps it (`:241-243`). Skips without client data.
+    #[test]
+    fn the_world_enter_rebuild_sets_the_xp_bar_by_the_seated_level() {
+        benilla_formats::wow_data_or_skip!();
+        const WATCHED: u16 = 1261;
+        const XP: u16 = 716;
+        let mut headless = crate::game_plugins::schedule_tests::headless_client();
+        assert!(crate::test_support::runs_before(
+            &mut headless,
+            crate::ui_reputation::feed_reputation,
+            super::super::feed_units
+        ));
+
+        for (level, xp_bar) in [(60, false), (59, true)] {
+            let (mut app, _) = feed_world(
+                &[
+                    (benilla_protocol::field::FIELD_UNIT_LEVEL, level),
+                    (WATCHED, u32::MAX),
+                    // `PLAYER_XP` and `PLAYER_NEXT_LEVEL_XP`: a 60 on vmangos reads 0 / 217400.
+                    (XP, 0),
+                    (XP + 1, 217_400),
+                    // `PLAYER_BYTES_2` byte 3, rest state 2, normal: `ExhaustionTick_Update`
+                    // compares `GetRestState()` at `PLAYER_ENTERING_WORLD`.
+                    (194, 2 << 24),
+                ],
+                "",
+            );
+            app.insert_resource(crate::target::Factions::from_catalog(
+                benilla_formats::FactionCatalog::from_rows(Default::default(), Default::default()),
+            ));
+            {
+                let s = app.world().non_send_resource::<UiScript>();
+                for file in [
+                    r"Interface\FrameXML\GlobalStrings.lua",
+                    r"Interface\FrameXML\Fonts.xml",
+                    r"Interface\FrameXML\UIParent.xml",
+                    r"Interface\FrameXML\MoneyFrame.lua",
+                    r"Interface\FrameXML\MoneyFrame.xml",
+                    r"Interface\FrameXML\GameTooltip.xml",
+                    r"Interface\FrameXML\UIPanelTemplates.lua",
+                    r"Interface\FrameXML\UIPanelTemplates.xml",
+                    r"Interface\FrameXML\OptionsFrameTemplates.xml",
+                    r"Interface\FrameXML\TextStatusBar.lua",
+                    r"Interface\FrameXML\TextStatusBar.xml",
+                    r"Interface\FrameXML\MainMenuBar.xml",
+                    r"Interface\FrameXML\Cooldown.xml",
+                    r"Interface\FrameXML\ActionButtonTemplate.xml",
+                    r"Interface\FrameXML\ActionBarFrame.xml",
+                    r"Interface\FrameXML\ReputationFrame.xml",
+                    r"Interface\FrameXML\BonusActionBarFrame.xml",
+                ] {
+                    crate::ui_script::test_ui::load_ui(s, file);
+                }
+            }
+            app.world_mut()
+                .run_system_once(crate::ui_reputation::feed_reputation)
+                .unwrap();
+            app.world_mut()
+                .run_system_once(super::super::feed_units)
+                .unwrap();
+            let s = app.world().non_send_resource::<UiScript>();
+            let shown = |frame: &str| {
+                s.eval::<bool>(&format!("return {frame}:IsShown() ~= nil"))
+                    .unwrap()
+            };
+            assert_eq!(shown("MainMenuExpBar"), xp_bar, "level {level}: the XP bar");
+            assert_eq!(
+                shown("MainMenuBarMaxLevelBar"),
+                !xp_bar,
+                "level {level}: the max-level art"
+            );
+            assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+        }
     }
 }
