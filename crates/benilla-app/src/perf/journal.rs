@@ -2151,6 +2151,45 @@ vm {:.1}   ui {:.1}",
     // **The costliest systems of that second, by name.** A `#` line, so every existing reader of
     // this file skips it and the columns stay a table. This is what ends the
     // guess-a-suspect-then-rebuild loop: one capture names them all.
+    // **What we hand the browser's GPU process** - draw calls per frame by phase, and the bone
+    // palette's `write_buffer` calls and KiB per frame. A trace with the crowd on screen had
+    // Chrome's `CrGpuMain` 93% busy while our own thread waited (2026-10-18T085709).
+    {
+        let per = frames.max(1);
+        let (calls, bytes) = benilla_world::rig_palette::take_upload_stats();
+        let (static_draws, torch_draws) = benilla_world::static_gx::take_draw_counts();
+        let (posed, skipped) = benilla_world::rig_anim::take_pose_counts();
+        if let Some([o, t, sh, u]) = super::gpu::take_draws() {
+            let _ = write!(
+                line,
+                "\n# gpu draws_opaque={o} draws_transp={t} draws_shadow={sh} draws_ui={u} draws_static={} draws_torch={} rig_writes={} rig_kb={} poses={} pose_skips={} gpu_frame_ms={}\n",
+                static_draws / per,
+                torch_draws / per,
+                calls / per,
+                bytes / 1024 / per,
+                posed / per,
+                skipped / per,
+                // The meter's own pass timestamps (`/console gpuMs 1`), not bevy's encoder spans.
+                super::gpu::take_gpu_ms().map_or("-".to_string(), |ms| format!("{ms:.2}"))
+            );
+        }
+    }
+    // wenilla carry: **the inbound stream's decode** (`benilla_protocol::world::parse_clock`)
+    // per frame: on the web it runs on this thread, between frames, and no other column holds it -
+    // `net_us` is the apply to the world, after the decode.
+    {
+        let per = frames.max(1);
+        let (us, bytes, pkts) = benilla_protocol::world::parse_clock::take();
+        let _ = write!(
+            line,
+            "
+# net parse_us={} in_kb_s={} in_pkts_s={}
+",
+            us / per,
+            bytes / 1024,
+            pkts
+        );
+    }
     // **Every system's own time** (`perf::systime`), us per frame, costliest first.
     {
         let top = super::systime::take_top(30);

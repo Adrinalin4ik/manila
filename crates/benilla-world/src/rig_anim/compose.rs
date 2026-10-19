@@ -179,10 +179,13 @@ pub fn finalize_rig_worlds(
         let roots_changed = worlds_params.p0();
         rigs.iter()
             .filter(|(_, rig, _, parked, _)| {
+                // wenilla carry: a billboarding rig on a pose stride (`RigPose::eval_stride`)
+                // re-faces the camera with its pose, not every frame - a few frames late, at the
+                // distance the stride is given, is invisible, and every frame rewrote all its rows.
                 !parked
                     && (rig.pose_dirty
                         || roots_changed.contains(rig.joints_root)
-                        || rig.has_billboard)
+                        || (rig.has_billboard && rig.eval_stride <= 1))
             })
             .map(|(holder, ..)| holder)
             .collect()
@@ -214,14 +217,41 @@ pub fn finalize_rig_worlds(
             // Rig-relative, which translation-equivariant steps allow: at ~9.5 k yards an f32 ULP
             // (~1 mm) per matmul, fresh each frame, shimmers. `WOW_NO_RIG_REBASE=1` turns it off.
             let origin = crate::rig_palette::rebase_origin(root_g.translation());
+            // wenilla carry: **a rig refreshed only because its root walked keeps its rows.** The
+            // rows are relative to `origin`, the root's own position (`rebase_origin`), so with
+            // the pose, the root's basis and the palette slot unchanged since the last write they
+            // are already right and only the origin word moves. A walking crowd under the pose
+            // stride (`RigPose::eval_stride`) was rewriting ~1 MB of bone rows a frame in ~90
+            // `write_buffer` calls (journal 2026-10-18T093418, `# gpu rig_kb`), mostly unchanged.
+            // Special bones (billboards face the camera, arms) and a seat cascade take the full
+            // path, and the basis compares bit-exact.
+            let basis = root_g.affine().matrix3;
+            // The rows still stand when pose, basis and slot are the ones they were written under and
+            // nothing faces the camera. A rig with arm-flagged bones still composes below, so its
+            // anchors re-seat exactly, but sends no rows - only its origin moves.
+            let rows_still = skin.is_some_and(|skin| {
+                !rig.pose_dirty
+                    && (!rig.has_billboard || rig.eval_stride > 1)
+                    && !root_moved
+                    && rig.rows_basis == Some((skin.slot, basis))
+            });
+            if rows_still && !rig.has_special {
+                if let Some(skin) = skin {
+                    palettes.move_rig_origin(skin, origin);
+                }
+                return;
+            }
             let root_rel = crate::rig_palette::rebase_global(root_g, origin);
             #[cfg(target_os = "macos")]
             let (worlds, touched) = rig_worlds(rig, root_rel, cam_basis);
             #[cfg(not(target_os = "macos"))]
             let (worlds, touched) = scratch.compose(rig, root_rel, cam_basis);
             if let Some(skin) = skin {
-                if let Some(ibp) = ibps.get(&skin.ibp) {
+                if rows_still {
+                    palettes.move_rig_origin(skin, origin);
+                } else if let Some(ibp) = ibps.get(&skin.ibp) {
                     palettes.write_rig_worlds(skin, &worlds, ibp, origin);
+                    rig.rows_basis = Some((skin.slot, basis));
                 }
             }
             if !rig.has_special && !root_moved {

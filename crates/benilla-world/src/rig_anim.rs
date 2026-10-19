@@ -12,7 +12,7 @@ mod pose;
 pub(crate) use compose::seed_rig_rows;
 pub use compose::{finalize_rig_worlds, PosePost};
 pub use global_seq::GlobalSeqDrive;
-pub use pose::{RigAnchor, RigFrame, RigPose};
+pub use pose::{take_pose_counts, RigAnchor, RigFrame, RigPose};
 
 /// **Does the compare-before-write guard actually bite?** - the `rig_wr`/`rig_sk` journal pair.
 ///

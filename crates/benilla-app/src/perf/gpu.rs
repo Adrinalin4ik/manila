@@ -146,15 +146,46 @@ fn count_draws(
             .unwrap_or(0)
     }
     let c = &shared.0;
-    c.draws_opaque
-        .store(binned(opaque) + binned(mask), Ordering::Relaxed);
-    c.draws_transparent
-        .store(sorted(transparent), Ordering::Relaxed);
-    c.draws_shadow.store(binned(shadow), Ordering::Relaxed);
-    c.draws_ui.store(
+    let (o, t, sh, u) = (
+        binned(opaque) + binned(mask),
+        sorted(transparent),
+        binned(shadow),
         sorted(ui) + sorted(two_d) + binned(opaque_2d),
-        Ordering::Relaxed,
     );
+    c.draws_opaque.store(o, Ordering::Relaxed);
+    c.draws_transparent.store(t, Ordering::Relaxed);
+    c.draws_shadow.store(sh, Ordering::Relaxed);
+    c.draws_ui.store(u, Ordering::Relaxed);
+    // wenilla carry: summed for the fps journal's `# gpu` line (see `take_draws`).
+    for (cell, n) in DRAW_SUMS.iter().zip([o, t, sh, u]) {
+        cell.fetch_add(n, Ordering::Relaxed);
+    }
+    DRAW_FRAMES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// wenilla carry: per-frame draw calls summed since the last [`take_draws`] - opaque (with alpha
+/// mask), transparent, shadow, UI - and the frames they cover.
+static DRAW_SUMS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static DRAW_FRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// wenilla carry: whole-frame GPU time readings (ns) summed since the last [`take_gpu_ms`].
+static GPU_NS_SUM: AtomicU64 = AtomicU64::new(0);
+static GPU_NS_N: AtomicU64 = AtomicU64::new(0);
+
+/// Mean whole-frame GPU milliseconds over the readings since the last call, and a reset; `None`
+/// with the meter disarmed (`/console gpuMs 1`) or no reading landed.
+pub(crate) fn take_gpu_ms() -> Option<f64> {
+    let n = GPU_NS_N.swap(0, Ordering::Relaxed);
+    let sum = GPU_NS_SUM.swap(0, Ordering::Relaxed);
+    (n > 0).then(|| sum as f64 / n as f64 / 1e6)
+}
+
+/// Mean draw calls per frame since the last call `[opaque, transparent, shadow, ui]`, and a reset;
+/// `None` when no frame was counted.
+pub(crate) fn take_draws() -> Option<[u64; 4]> {
+    let frames = DRAW_FRAMES.swap(0, Ordering::Relaxed);
+    let sums = DRAW_SUMS.each_ref().map(|c| c.swap(0, Ordering::Relaxed));
+    (frames > 0).then(|| sums.map(|s| s / frames))
 }
 
 const RING: usize = 4;
@@ -361,6 +392,8 @@ fn readback(stamp: Option<ResMut<GpuStamp>>) {
             if t1 > t0 {
                 let ns = (t1 - t0) as f64 * f64::from(stamp.period);
                 stamp.shared.store(ns as u64, Ordering::Relaxed);
+                GPU_NS_SUM.fetch_add(ns as u64, Ordering::Relaxed);
+                GPU_NS_N.fetch_add(1, Ordering::Relaxed);
             }
         }
     }

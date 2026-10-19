@@ -278,6 +278,13 @@ impl RigPalettes {
         }
     }
 
+    /// wenilla carry: move a rig's origin and leave its rows, for a root that translated while its
+    /// basis and pose held (`compose::finalize_rig_worlds`): the rows are root-relative, so they
+    /// are already right.
+    pub(crate) fn move_rig_origin(&mut self, rig: &RigSkin, origin: Vec3) {
+        self.set_origin(rig.slot, origin);
+    }
+
     /// Publish a slot's origin, called by each row writer with the origin it subtracted.
     fn set_origin(&mut self, slot: u16, origin: Vec3) {
         let s = slot as usize;
@@ -712,6 +719,19 @@ struct UploadedGenerations {
     origin_mirror: Option<u64>,
 }
 
+/// wenilla carry: palette `write_buffer` calls and bytes since the last [`take_upload_stats`], for
+/// the fps journal's `# gpu` line - each call is an IPC round into the browser's GPU process.
+static UPLOAD_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static UPLOAD_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `(write_buffer calls, bytes)` since the last call, and a reset.
+pub fn take_upload_stats() -> (u64, u64) {
+    (
+        UPLOAD_CALLS.swap(0, std::sync::atomic::Ordering::Relaxed),
+        UPLOAD_BYTES.swap(0, std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 /// Render world (`PrepareResources`): write the dirty rows, and on change the slot and origin
 /// tables, into the shared buffer and every mirror.
 fn upload_rig_palettes(
@@ -791,6 +811,8 @@ fn upload_rig_palettes(
             }
         }
     }
+    UPLOAD_CALLS.fetch_add(cost_calls as u64, std::sync::atomic::Ordering::Relaxed);
+    UPLOAD_BYTES.fetch_add(cost_bytes, std::sync::atomic::Ordering::Relaxed);
     if let Some(t0) = cost_t0 {
         eprintln!(
             "[rig-upload] calls={cost_calls} kb={} ms={:.3}",
@@ -802,7 +824,12 @@ fn upload_rig_palettes(
 
 /// The widest gap, in bones, two dirty runs may leave and still upload as one `write_buffer`: a
 /// call's fixed cost (a staging buffer each) is about what re-sending this many live rows costs.
-const COALESCE_GAP_BONES: u32 = 256;
+///
+/// wenilla carry: **32, not 256.** With the pose stride (`RigPose::eval_stride`) and the
+/// origin-only refresh only a minority of rigs write rows in a frame, scattered over the whole
+/// palette, so a 256-bone bridge merged nearly all of it: journal 2026-10-18T115434 in a crowd
+/// uploaded ~1.9 MB a frame in ~45 calls (`# gpu rig_kb`), `R:upload_rig_palettes` 14.5 ms.
+const COALESCE_GAP_BONES: u32 = 32;
 
 /// Merge `(base, len)` bone ranges that overlap or lie within [`COALESCE_GAP_BONES`] into runs.
 fn coalesce_ranges(ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {

@@ -1536,7 +1536,15 @@ fn collect_torch_entities(
 ) -> (u32, u32) {
     let mut admitted = 0;
     let mut excluded = 0;
-    for (entity, pick, part, global, rig_part, occluder, _, object, aabb) in &ents.parts {
+    // wenilla carry: **the dynamic gather skins nearest-first, within a vertex budget.** It used to
+    // CPU-skin every body part inside any dynamic fixture's reach: beside a crowd that was dozens of
+    // bodies of thousands of vertices each, `update_torch_shadows` 10.7 ms a frame plus the
+    // re-upload in `R:allocate_and_free_meshes` 9.4 ms (journal 2026-10-18T083257, ~640 bodies on
+    // screen). The bodies nearest a light cast the shadows anyone sees; past
+    // [`DYNAMIC_GATHER_VERTS`] the rest cast none from it. The static gather is uncapped: it is
+    // cached, rebuilt only when its census moves.
+    let mut eligible: Vec<(f32, Entity)> = Vec::new();
+    for (entity, _, part, global, rig_part, occluder, _, object, aabb) in &ents.parts {
         if !occluder.0 || static_part(part, rig_part.is_some()) != want_static { continue; }
         let solid = part.blend == ModelBlend::Opaque
             || (part.kind == ModelKind::Creature && part.blend == ModelBlend::AlphaTest);
@@ -1552,6 +1560,22 @@ fn collect_torch_entities(
             excluded += 1;
             continue;
         }
+        let near = fixtures
+            .iter()
+            .map(|f| f.1.distance_squared(origin))
+            .fold(f32::INFINITY, f32::min);
+        eligible.push((near, entity));
+    }
+    if !want_static {
+        eligible.sort_by(|a, b| a.0.total_cmp(&b.0));
+    }
+    for (_, entity) in eligible {
+        if !want_static && positions.len() >= DYNAMIC_GATHER_VERTS { break; }
+        let Ok((_, pick, _, global, rig_part, ..)) = ents.parts.get(entity) else { continue };
+        let rig = rig_part.and_then(|r| ents.rigs.get(r.0).ok());
+        let origin = global.map(GlobalTransform::translation)
+            .or_else(|| rig.and_then(|r| ents.palettes.slot_origin(r.slot)));
+        let Some(origin) = origin else { continue };
         let base = positions.len() as u32;
         if let Some(rig) = rig {
             let Some(palette) = ents.palettes.world_palette(rig.slot, rig.bones() as usize) else { continue };
@@ -1585,6 +1609,10 @@ fn collect_torch_entities(
     }
     (admitted, excluded)
 }
+
+/// The dynamic gather's vertex budget per gather (see [`collect_torch_entities`]): about five to
+/// eight character bodies.
+const DYNAMIC_GATHER_VERTS: usize = 40_000;
 
 /// MONKEY (torch lane perf): the entity half of [`PartCensus`] — one branch-free mix per RIGID
 /// OPAQUE model part (the exact set the fingerprint's own entity walk hashes), folded

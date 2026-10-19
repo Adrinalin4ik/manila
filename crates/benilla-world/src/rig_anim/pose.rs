@@ -37,6 +37,15 @@ pub struct RigPose {
     pub anchors: Vec<(u16, Entity)>,
     /// `locals` changed since the last world pass; starts raised so the bind pose is written.
     pub pose_dirty: bool,
+    /// wenilla carry: evaluate the pose every this-many frames, staggered by entity (1 = every
+    /// frame). Written by the game's LOD gate (`creature_anim::lod`) for distant rigs; a skipped
+    /// frame leaves `pose_dirty` down, so compose, anchors and the palette upload skip with it,
+    /// while the `AnimationPlayer` clock runs on and the next evaluated frame samples true time.
+    pub eval_stride: u8,
+    /// wenilla carry: the palette slot and root basis the rows were last written under; while
+    /// both and the pose hold, a root that only translated moves the slot's origin alone (see
+    /// `compose::finalize_rig_worlds`).
+    pub(crate) rows_basis: Option<(u16, bevy::math::Mat3A)>,
 }
 
 impl RigPose {
@@ -66,6 +75,8 @@ impl RigPose {
                 .any(|j| j.billboard.is_some() || j.parent_arm.is_some()),
             anchors: Vec::new(),
             pose_dirty: true,
+            eval_stride: 1,
+            rows_basis: None,
         };
         rig.compose();
         rig
@@ -176,12 +187,37 @@ struct Active {
     cursor: usize,
 }
 
+/// wenilla carry: rigs evaluated and skipped by stride since the last [`take_pose_counts`], for the
+/// fps journal.
+static POSES_EVALUATED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static POSES_SKIPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `(evaluated, skipped)` since the last call, and a reset.
+pub fn take_pose_counts() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (POSES_EVALUATED.swap(0, Relaxed), POSES_SKIPPED.swap(0, Relaxed))
+}
+
 /// Pose every live rig where `animate_targets` runs, after `advance_animations`.
 fn evaluate_rig_poses(
-    mut rigs: Query<(&AnimationPlayer, &ModelAnimations, &mut RigPose), Without<AnimParked>>,
+    mut rigs: Query<
+        (Entity, &AnimationPlayer, &ModelAnimations, &mut RigPose),
+        Without<AnimParked>,
+    >,
+    mut frame: Local<u32>,
 ) {
+    *frame = frame.wrapping_add(1);
+    let frame = *frame;
     // Parallel: a rig reads shared clips and writes only its own pose.
-    rigs.par_iter_mut().for_each(|(player, anims, mut rig)| {
+    rigs.par_iter_mut().for_each(|(entity, player, anims, mut rig)| {
+        // wenilla carry: not this rig's turn (see `RigPose::eval_stride`). Read through `Deref`,
+        // so a skipped rig is not marked changed.
+        let stride = u32::from(rig.eval_stride.max(1));
+        if stride > 1 && (entity.to_bits() as u32).wrapping_add(frame) % stride != 0 {
+            POSES_SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        POSES_EVALUATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let src = &anims.pose;
         // The contributing animations in node order, in one scratch per worker thread.
         thread_local! {

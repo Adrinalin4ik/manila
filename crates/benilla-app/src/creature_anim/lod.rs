@@ -64,6 +64,19 @@ pub(crate) fn set_room_lod_off(on: bool) {
 
 const PARK_AFTER_SECS: f32 = 0.5;
 
+/// Camera distance (yd) inside which a rig is posed every frame; beyond it every second frame,
+/// and every third beyond [`POSE_STRIDE_FAR`]. See the stride leg of [`gate_rig_animation`].
+const POSE_STRIDE_NEAR: f32 = 30.0;
+const POSE_STRIDE_FAR: f32 = 60.0;
+
+/// In a crowd the cuts also fall by rank: only the nearest [`POSE_RANK_NEAR`] unparked rigs pose
+/// every frame, up to [`POSE_RANK_MID`] every second, up to [`POSE_RANK_FAR`] every third, the rest
+/// every fourth. Journal 2026-10-18T083257: ~640 visible bodies nearly all inside 30 yd, poses
+/// ~9.3 ms a frame with the distance cuts alone.
+const POSE_RANK_NEAR: usize = 40;
+const POSE_RANK_MID: usize = 120;
+const POSE_RANK_FAR: usize = 240;
+
 /// The frustum sphere, `SelectionRadius × root scale × RADIUS_SCALE + RADIUS_PAD`, keeps any rig
 /// with a pixel on screen inside, past swings, attachments and the one-frame-old frustum; a
 /// model-less unit takes [`FALLBACK_RADIUS`]. Too large only keeps more rigs live.
@@ -95,7 +108,8 @@ const FALLBACK_RADIUS: f32 = 6.0;
 /// or the number of joints in one, because the rigs cannot be separated by where they are.
 pub(super) fn gate_rig_animation(
     time: Res<Time>,
-    cam: Query<&Frustum, With<WorldCamera>>,
+    // The camera's `GlobalTransform` rides along for the pose stride (see `POSE_STRIDE_NEAR`).
+    cam: Query<(&Frustum, Option<&GlobalTransform>), With<WorldCamera>>,
     mut rigs: Query<
         (
             Entity,
@@ -110,6 +124,8 @@ pub(super) fn gate_rig_animation(
             // Stopped outright under `animParkAll`; see the `stop_all` below for why parking the
             // pose is not enough to freeze a model.
             Option<&mut AnimationPlayer>,
+            // The pose stride's home; written only when it changes.
+            &mut benilla_world::rig_anim::RigPose,
         ),
         // Every rig, driver or not: a GameObject rig's looping player is its whole animation.
         // Doodads and booth stages are left out: their own gates own their `AnimParked`, and two
@@ -127,6 +143,8 @@ pub(super) fn gate_rig_animation(
     mut disabled: Local<Option<bool>>,
     mut park_all: Local<Option<bool>>,
     mut no_room: Local<Option<bool>>,
+    // Our target keeps its full pose rate whatever its distance.
+    selection: Option<Res<crate::target::Selection>>,
     mut commands: Commands,
 ) {
     let disabled = *disabled.get_or_insert_with(|| std::env::var_os("WOW_NO_ANIM_LOD").is_some())
@@ -141,13 +159,63 @@ pub(super) fn gate_rig_animation(
     // the PVS rejects, even under `WOW_NO_ROOM_LOD`.
     let cost_on = benilla_world::rig_palette::rig_cost_enabled();
     let (mut n_rigs, mut n_parked, mut room_out) = (0u32, 0u32, 0u32);
-    let Ok(frustum) = cam.single() else {
+    let Ok((frustum, cam_tf)) = cam.single() else {
         return;
     };
+    let cam_pos = cam_tf.map(GlobalTransform::translation);
+    let target = selection.as_deref().and_then(|s| s.target);
+    // The crowd cuts: the camera distance of the `POSE_RANK_*`th nearest unparked rig, so a dense
+    // square, where every body is inside `POSE_STRIDE_NEAR`, still thins out by rank. Last
+    // frame's parked set is close enough; a rig that wakes is counted from the next frame.
+    let rank_cut = |ds: &mut Vec<f32>, k: usize| -> f32 {
+        if ds.len() <= k {
+            return f32::INFINITY;
+        }
+        *ds.select_nth_unstable_by(k, f32::total_cmp).1
+    };
+    let (cut_near, cut_mid, cut_far) = match cam_pos {
+        Some(c) => {
+            let mut ds: Vec<f32> = rigs
+                .iter()
+                .filter(|r| !r.3)
+                .map(|r| r.1.translation().distance(c))
+                .collect();
+            (
+                rank_cut(&mut ds, POSE_RANK_NEAR).min(POSE_STRIDE_NEAR),
+                rank_cut(&mut ds, POSE_RANK_MID).min(POSE_STRIDE_FAR),
+                rank_cut(&mut ds, POSE_RANK_FAR),
+            )
+        }
+        None => (f32::INFINITY, f32::INFINITY, f32::INFINITY),
+    };
     let now = time.elapsed_secs();
-    for (entity, tf, radius, parked, is_self, mount, room, vis, player) in &mut rigs {
+    for (entity, tf, radius, parked, is_self, mount, room, vis, player, mut pose) in &mut rigs {
         let exempt =
             disabled || is_self || mount.is_some_and(|m| self_hosts.get(m.host).unwrap_or(false));
+        // wenilla carry: **a distant rig is posed every second or third frame**, staggered by
+        // entity, its clock running on (`RigPose::eval_stride`). Not a park and not a distance
+        // wall - every visible rig still animates; only the sampling rate drops with distance.
+        // Measured in a crowd of ~270 visible bodies (journal 2026-10-17T211251, `# sysus`):
+        // `evaluate_rig_poses` 3.2 ms, `finalize_rig_worlds` 1.2, `R:upload_rig_palettes` 1.1.
+        let stride = match cam_pos {
+            _ if exempt || target == Some(entity) => 1,
+            Some(c) => {
+                let d = tf.translation().distance(c);
+                if d < cut_near {
+                    1
+                } else if d < cut_mid {
+                    2
+                } else if d < cut_far {
+                    3
+                } else {
+                    4
+                }
+            }
+            None => 1,
+        };
+        if pose.eval_stride != stride {
+            pose.eval_stride = stride;
+        }
         // **A body the crowd wall hid is still animated, and that is why `playerDistance 0` never
         // bought anything.** This gate asks the frustum and the portal PVS; `player_distance`
         // writes `Visibility::Hidden`, which neither leg reads, so a hidden body stays in the
