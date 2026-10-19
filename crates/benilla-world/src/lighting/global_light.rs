@@ -165,6 +165,11 @@ const INTERIOR_NEAR_ADMIT: f32 = 90.0;
 /// (0285: each unit picks its ≤3 nearest from this table) bounded.
 const POINT_PACK_RADIUS: f32 = 300.0;
 
+/// Mirror of `wow_model.wgsl`'s `INTERIOR_FILL_SPAN`: an interior fixture's outermost candidacy
+/// radius is this times its packed lane reach (the fill dome reaches `1.5 R` where the direct pool
+/// windows to zero at `R`). Read only to size the frustum cull's sphere. Keep in sync.
+const INTERIOR_FILL_SPAN: f32 = 1.5;
+
 /// The rooms a point light belongs to: a WMO's MOLT fixture (the groups whose MOLR names it) or a
 /// prop's M2 light (the groups whose MODR names the prop). The reference admits a WMO's props only
 /// in frames the portal walk visits their group (`0x6838f0`, from `0x685d70`), so a culled room's
@@ -1329,7 +1334,9 @@ fn build_light_data(
     light: Res<WowLighting>,
     debug: Res<DebugState>,
     view: Res<ViewDistance>,
-    cam: Query<&GlobalTransform, With<WorldCamera>>,
+    // The camera frustum rides the same query, so the point table is bounded by the view as well
+    // as by distance (from benilla-octo 799196e1).
+    cam: Query<(&GlobalTransform, Option<&bevy::camera::primitives::Frustum>), With<WorldCamera>>,
     // `Without<ShadowProxyLight>`: the torch-shadow proxies are `WorldPointLight`s too, but they
     // exist only to cast a cube map — never to light benilla's receivers (see [`ShadowProxyLight`]).
     // MONKEY (fire GO lights): `Has<SyntheticFireLight>` rides along so the live `fireLightGain`
@@ -1496,7 +1503,11 @@ fn build_light_data(
     // packed RAW as the reference commits it ([`commit_raw`]: the encode→decode round trip is
     // identity, over-gamut preserved). Entries past `count` stay stale in the blob — the count row
     // guards every reader.
-    let cam_pos = cam.single().map(|t| t.translation()).unwrap_or(Vec3::ZERO);
+    let cam_view = cam.single().ok();
+    let cam_pos = cam_view.map_or(Vec3::ZERO, |(t, _)| t.translation());
+    // Absent on a headless or first frame: the cull is then a no-op and the distance cap alone
+    // bounds the table, exactly as before.
+    let frustum = cam_view.and_then(|(_, f)| f);
     // MONKEY (flame flicker): the one clock read for the whole table — every flame's phase is a
     // function of this absolute second and its own seed, so the frame is internally consistent and
     // the result does not depend on how long the frame took.
@@ -1515,6 +1526,13 @@ fn build_light_data(
     let mut pts: Vec<(f32, Vec3, f32, [f32; 3], bool, f32, RoomClaim, usize)> = lights_q
         .iter()
         .filter(|(_, gt, rooms, _, _, _, _, _, _, _)| {
+            // The cheap camera-distance bound FIRST: a light past [`POINT_PACK_RADIUS`] never
+            // enters the table, so it must not pay for the portal walk below, which used to run
+            // on every light in the world before the distance test dropped it (benilla-octo
+            // 799196e1).
+            if gt.translation().distance_squared(cam_pos) >= POINT_PACK_RADIUS * POINT_PACK_RADIUS {
+                return false;
+            }
             // The ROOM term (decision 0689's law, fourth lane — see [`LightRooms`]). Not a
             // visibility test bolted onto a faithful gather: the reference's register walk has no
             // such term either, it simply never has a culled room's torch to register. Ungated for
@@ -1630,6 +1648,27 @@ fn build_light_data(
             })
         })
         .collect();
+    // **A light whose whole candidacy sphere is off-screen leaves the table**, so a city's torches
+    // behind the camera stop padding the shaders' per-vertex walk (benilla-octo 799196e1). The
+    // radius is the shader's own candidacy bound - `range` on the exterior lane, the fill dome's
+    // `INTERIOR_FILL_SPAN * lane` on the interior (`wow_model.wgsl`) - so a light whose pool still
+    // reaches into view is never dropped.
+    if let Some(f) = frustum {
+        pts.retain(|(_, p, range, _, _, lane, _, _)| {
+            let reach = if *lane > 0.5 {
+                INTERIOR_FILL_SPAN * *lane
+            } else {
+                *range
+            };
+            f.intersects_sphere(
+                &bevy::camera::primitives::Sphere {
+                    center: (*p).into(),
+                    radius: reach.max(1e-3),
+                },
+                false,
+            )
+        });
+    }
     pts.sort_by(|a, b| a.0.total_cmp(&b.0));
     // MONKEY (ext light k8): 255, not 256 — index 255 is the shaders' `EXT_SEL_EMPTY` sentinel now
     // that a draw unit's selection packs eight 8-bit ranks. See [`MAX_LIVE_POINT_LIGHTS`]. The sort
