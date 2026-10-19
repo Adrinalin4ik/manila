@@ -668,6 +668,7 @@ mod tests {
             texture: Some("Interface\\Icons\\Spell_A".into()),
             count: 0,
             consumable: false,
+            state: None,
         }));
 
         s.run("UseAction(9, 0)").unwrap();
