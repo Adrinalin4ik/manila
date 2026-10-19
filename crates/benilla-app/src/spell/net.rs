@@ -809,32 +809,38 @@ fn spell_start(
             }
         }
     }
-    // Deviation from the reference's `0x6e7700` gate (`cast_time > 0 && !(SpellRec+0x18 & 2)`):
-    // the reference suppresses the bar for *every* `Attributes & 0x2` ranged spell, so Aimed Shot
-    // and Multi-Shot show none (a later client added `Force Display Castbar` to fix exactly this).
-    // Here a spell opens a bar on the wire cast time whenever it *has* one in `SpellCastTimes.dbc`
-    // — Aimed Shot's real 3 s cast does, while vmangos's +500 ms pad on an instant shot
-    // (`SpellEntry::GetCastTime`) does not, so Multi-Shot and Throw stay bar-free. Auto Shot and
-    // wand Shoot are instant rows too. An unknown spell, or a build without the cast-time table,
-    // keeps the reference's bar rather than losing every bar.
-    let has_cast_time = match (spells, spells.and_then(|s| s.catalog.get(spell_id))) {
-        (Some(s), Some(d)) if !s.cast_times.is_empty() => s.cast_time_ms(d, d.base_level) > 0,
-        _ => true,
+    // `0x6e7700`, the reference's `SMSG_SPELL_START` handler, opens the cast bar only when the
+    // *wire* cast time is nonzero and the spell is not in the ranged slot (`SpellRec+0x18 & 2`, so
+    // every `Attributes & 0x2` spell), and only when the spell's `Spell.dbc` record exists — the
+    // whole block sits behind a null check on it. The time is the server's, not
+    // `SpellCastTimes.dbc`'s: our own cast opened the bar from the DBC row at cast time, and a
+    // server START only confirms it. The ranged suppression covers a real 3 s Aimed Shot too, so
+    // 1.12 shows no bar for it — the gap the later `Force Display Castbar` option fixed — and an
+    // instant spell never bars from a START, which is what leaves vmangos's +500 ms pad on
+    // Multi-Shot, Throw, Auto Shot and wand Shoot bar-free.
+    let row = spells.and_then(|s| s.catalog.get(spell_id));
+    let opens_bar = match row {
+        Some(d) => cast_time_ms > 0 && !d.ranged_slot(),
+        None => false,
     };
     if *crate::net::CAST_TRACE && self_guid.0 == Some(caster) {
         info!(
             "cast-trace: RECV SPELL_START — spell {spell_id} cast_time={cast_time_ms}ms \
              (bar {})",
-            if has_cast_time {
+            if opens_bar {
                 "opens"
+            } else if row.is_none() {
+                "closed: no spell record"
+            } else if cast_time_ms == 0 {
+                "closed: instant"
             } else {
-                "suppressed: instant row"
+                "suppressed: ranged"
             }
         );
     }
     // Our own timed cast opens the bar.
     if self_guid.0 == Some(caster) && cast_time_ms > 0 {
-        if has_cast_time {
+        if opens_bar {
             cast_bar.0.push(CastBarEdge::Start {
                 spell_id,
                 cast_time_ms,
@@ -3427,20 +3433,23 @@ mod tests {
         );
     }
 
-    /// The shot cast bar is a deliberate deviation from the reference's `0x6e7700` gate: a ranged
-    /// spell with a real `SpellCastTimes.dbc` cast opens it, while the instant shots (and so
-    /// vmangos's +500 ms pad on them) and the auto-repeat shots do not.
+    /// `0x6e7700`'s gate, verbatim: a server START bars only on a nonzero *wire* cast time, only
+    /// for a spell whose `Spell.dbc` record exists, and never for a ranged one. So a real 3 s
+    /// Aimed Shot is bar-free (the 1.12 gap `Force Display Castbar` later closed), a +500 ms pad
+    /// on an instant shot cannot bar, and the capture spells bar exactly when the server times
+    /// them rather than because `SpellCastTimes.dbc` calls their row instant.
     #[test]
-    fn a_timed_ranged_cast_opens_the_shot_bar_but_an_instant_shot_does_not() {
+    fn a_ranged_spell_never_bars_but_a_timed_capture_does() {
         use crate::net::{Guid, SelfPlayer};
         use bevy::ecs::system::RunSystemOnce;
 
         const AIMED_SHOT: u32 = 19434;
         const MULTI_SHOT: u32 = 2643;
         const AUTO_SHOT: u32 = 75;
+        const TOWER_CAPTURE: u32 = 23466;
 
-        // The real 1.12 rows: Aimed Shot is a 3 s cast (`SpellCastTimes` row 5); Multi-Shot and
-        // Auto Shot point at row 1, the instant sentinel.
+        // The real 1.12 rows: Aimed Shot is a 3 s cast (`SpellCastTimes` row 5); Multi-Shot, Auto
+        // Shot and Tower Capture point at row 1, the instant sentinel.
         let spells = || {
             let mut s = Spells::empty_for_tests();
             s.catalog = benilla_formats::SpellCatalog::from_displays(
@@ -3470,6 +3479,15 @@ mod tests {
                             name: "Auto Shot".into(),
                             attributes: 0x0005_0012,
                             attributes_ex2: 0x20,
+                            casting_time_index: 1,
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        TOWER_CAPTURE,
+                        benilla_formats::SpellDisplay {
+                            name: "Tower Capture".into(),
+                            attributes: 0x0000_0100,
                             casting_time_index: 1,
                             ..Default::default()
                         },
@@ -3549,14 +3567,26 @@ mod tests {
             };
 
         assert!(
-            start_for(AIMED_SHOT, 3_500),
-            "Aimed Shot's real 3 s cast opens the shot bar"
+            !start_for(AIMED_SHOT, 3_500),
+            "Aimed Shot is ranged: even its real 3 s cast shows no bar in 1.12"
         );
         assert!(
             !start_for(MULTI_SHOT, 500),
-            "Multi-Shot is an instant row: vmangos's +500 ms pad must not open a bar"
+            "Multi-Shot is ranged: vmangos's +500 ms pad must not open a bar"
         );
         assert!(!start_for(AUTO_SHOT, 0), "Auto Shot is instant: no bar");
         assert!(!start_for(AUTO_SHOT, 500), "nor a padded instant one");
+        assert!(
+            start_for(TOWER_CAPTURE, 5_000),
+            "Tower Capture is not ranged: a timed wire cast opens the bar"
+        );
+        assert!(
+            !start_for(TOWER_CAPTURE, 0),
+            "an instant wire cast never bars: the gate reads the wire time, not the DBC row"
+        );
+        assert!(
+            !start_for(99_999, 5_000),
+            "a spell with no Spell.dbc record is skipped, as the reference null-checks it"
+        );
     }
 }
