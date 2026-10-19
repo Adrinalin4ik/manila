@@ -733,7 +733,8 @@ fn update_torch_shadows(
     mut lane: ResMut<TorchLane>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut views: ResMut<TorchShadowViews>,
-    cameras: Query<&GlobalTransform, With<WorldCamera>>,
+    // The `Frustum` rides along for the view gate on the entity gather (see `any_in_view`).
+    cameras: Query<(&GlobalTransform, Option<&bevy::camera::primitives::Frustum>), With<WorldCamera>>,
     // MONKEY (torch caster selection): the RANKING ANCHOR. Shadows are for the player's own
     // surroundings — a free-look camera swung across the room must not re-pick the casters — so
     // scoring is done at the body, and only falls back to the camera when there is none (the glue
@@ -794,7 +795,8 @@ fn update_torch_shadows(
         teardown(&mut lane, &mut meshes, &mut views);
         return;
     }
-    let Some(cam) = cameras.iter().next().map(GlobalTransform::translation) else {
+    let view_frustum = cameras.iter().next().and_then(|(_, f)| f.copied());
+    let Some(cam) = cameras.iter().next().map(|(t, _)| t.translation()) else {
         return;
     };
 
@@ -1382,14 +1384,35 @@ fn update_torch_shadows(
         // NEW position every frame, so a mesh gathered two frames ago puts the room's other bodies
         // in the wrong place relative to the light, which is the smear this change is about. The
         // rate is untouched for the settled case, which is every other slot in the room.
+        // wenilla carry: **no gather while no dynamic fixture's light reaches the view.** A
+        // fixture's direct term is zero past its reach, so when no reach sphere meets the frustum
+        // no pixel on screen is lit by any of them, and their shadows cannot be seen. The slots
+        // stay picked (the ranking anchor is the body, so a camera swing re-picks nothing); only
+        // the CPU skin + mesh re-upload is skipped, and the first frame a sphere enters the view
+        // the gather is due again, since `entity_at` has aged. Measured by the per-system timer
+        // (`perf::systime`, journal 2026-10-17T200606): `update_torch_shadows` 1,487 us and
+        // `R:allocate_and_free_meshes` 1,521 us a frame with the owner facing a wall, torches
+        // beside him and none on screen.
+        let any_in_view = view_frustum.is_none_or(|f| {
+            dynamic_positions.iter().any(|&(_, pos, radius, _)| {
+                f.intersects_sphere(
+                    &bevy::camera::primitives::Sphere {
+                        center: pos.into(),
+                        radius,
+                    },
+                    false,
+                )
+            })
+        });
         let due = fresh
-            || moving_mask != 0
-            || entity_gather_due(
-                video.interior_shadow_entity_rate,
-                now - lane.entity_at,
-                dynamic,
-                lane.entity_mask,
-            );
+            || any_in_view
+                && (moving_mask != 0
+                    || entity_gather_due(
+                        video.interior_shadow_entity_rate,
+                        now - lane.entity_at,
+                        dynamic,
+                        lane.entity_mask,
+                    ));
         if due {
             if let Some(mesh) = lane.entity_mesh.as_ref().and_then(|h| meshes.get_mut(h)) {
                 let (mut positions, mut indices) = take_mesh_buffers(mesh);
@@ -1513,7 +1536,15 @@ fn collect_torch_entities(
 ) -> (u32, u32) {
     let mut admitted = 0;
     let mut excluded = 0;
-    for (entity, pick, part, global, rig_part, occluder, _, object, aabb) in &ents.parts {
+    // wenilla carry: **the dynamic gather skins nearest-first, within a vertex budget.** It used to
+    // CPU-skin every body part inside any dynamic fixture's reach: beside a crowd that was dozens of
+    // bodies of thousands of vertices each, `update_torch_shadows` 10.7 ms a frame plus the
+    // re-upload in `R:allocate_and_free_meshes` 9.4 ms (journal 2026-10-18T083257, ~640 bodies on
+    // screen). The bodies nearest a light cast the shadows anyone sees; past
+    // [`DYNAMIC_GATHER_VERTS`] the rest cast none from it. The static gather is uncapped: it is
+    // cached, rebuilt only when its census moves.
+    let mut eligible: Vec<(f32, Entity)> = Vec::new();
+    for (entity, _, part, global, rig_part, occluder, _, object, aabb) in &ents.parts {
         if !occluder.0 || static_part(part, rig_part.is_some()) != want_static { continue; }
         let solid = part.blend == ModelBlend::Opaque
             || (part.kind == ModelKind::Creature && part.blend == ModelBlend::AlphaTest);
@@ -1529,6 +1560,22 @@ fn collect_torch_entities(
             excluded += 1;
             continue;
         }
+        let near = fixtures
+            .iter()
+            .map(|f| f.1.distance_squared(origin))
+            .fold(f32::INFINITY, f32::min);
+        eligible.push((near, entity));
+    }
+    if !want_static {
+        eligible.sort_by(|a, b| a.0.total_cmp(&b.0));
+    }
+    for (_, entity) in eligible {
+        if !want_static && positions.len() >= DYNAMIC_GATHER_VERTS { break; }
+        let Ok((_, pick, _, global, rig_part, ..)) = ents.parts.get(entity) else { continue };
+        let rig = rig_part.and_then(|r| ents.rigs.get(r.0).ok());
+        let origin = global.map(GlobalTransform::translation)
+            .or_else(|| rig.and_then(|r| ents.palettes.slot_origin(r.slot)));
+        let Some(origin) = origin else { continue };
         let base = positions.len() as u32;
         if let Some(rig) = rig {
             let Some(palette) = ents.palettes.world_palette(rig.slot, rig.bones() as usize) else { continue };
@@ -1562,6 +1609,10 @@ fn collect_torch_entities(
     }
     (admitted, excluded)
 }
+
+/// The dynamic gather's vertex budget per gather (see [`collect_torch_entities`]): about five to
+/// eight character bodies.
+const DYNAMIC_GATHER_VERTS: usize = 40_000;
 
 /// MONKEY (torch lane perf): the entity half of [`PartCensus`] — one branch-free mix per RIGID
 /// OPAQUE model part (the exact set the fingerprint's own entity walk hashes), folded

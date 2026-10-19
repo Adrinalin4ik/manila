@@ -4,6 +4,9 @@
 // prerequisite made visible. Everything here is `wenilla.state` and two listeners.
 import { wenilla } from '../bridge.js';
 
+// A HUD redraws from every snapshot, so it asks for the bridge's old 20 Hz (bridge.js defaults to 5).
+window.__wenilla_bridge.hz = 20;
+
 const el = document.createElement('div');
 el.id = 'wenilla-hud';
 el.style.cssText = `

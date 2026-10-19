@@ -743,6 +743,8 @@ impl Plugin for EntitiesPlugin {
                     refresh_live_display,
                     tick_scale_ease,
                     live_display::heal_rig_starved,
+                    // wenilla carry: a player past `playerDistance` gives its model back.
+                    live_display::release_far_visuals,
                 )
                     .chain(),
             )

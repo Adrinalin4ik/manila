@@ -15,6 +15,8 @@ use crate::transport::ReadExactAsync;
 
 mod movement;
 mod reader;
+// wenilla carry: the inbound decode meter, read by the app's fps journal.
+pub use reader::parse_clock;
 mod session;
 pub mod warden;
 mod writer;

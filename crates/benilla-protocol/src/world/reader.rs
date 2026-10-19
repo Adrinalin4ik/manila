@@ -56,13 +56,19 @@ impl WorldReader {
         if let Err(e) = self.reader.read_exact_async(&mut body).await {
             return Err(anyhow!("world stream closed: {e}"));
         }
-        match messages::parse_server_with_tail(opcode, &body) {
-            Ok((packet, tail)) => Ok(crate::Poll::Events {
-                opcode,
-                events: crate::decode(packet),
-                tail,
-                body,
-            }),
+        let t0 = parse_clock::now();
+        let parsed = messages::parse_server_with_tail(opcode, &body);
+        match parsed {
+            Ok((packet, tail)) => {
+                let events = crate::decode(packet);
+                parse_clock::note(t0, body_len);
+                Ok(crate::Poll::Events {
+                    opcode,
+                    events,
+                    tail,
+                    body,
+                })
+            }
             Err(e) => Ok(crate::Poll::Skipped {
                 opcode,
                 reason: format!(
@@ -73,6 +79,42 @@ impl WorldReader {
                 body,
             }),
         }
+    }
+}
+
+/// wenilla carry: **what decoding the inbound stream costs the thread that runs it** - the
+/// parse and the event decode of each packet (an `SMSG_COMPRESSED_UPDATE_OBJECT`'s inflate
+/// included), not the wait for bytes. On the web that thread is the page's own (the sequencer is
+/// a `spawn_local` task), so this is frame time; the app's fps journal reads it as `# net`.
+pub mod parse_clock {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    #[cfg(target_arch = "wasm32")]
+    use web_time::Instant;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::time::Instant;
+
+    static MICROS: AtomicU64 = AtomicU64::new(0);
+    static BYTES: AtomicU64 = AtomicU64::new(0);
+    static PACKETS: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn now() -> Instant {
+        Instant::now()
+    }
+
+    pub(super) fn note(t0: Instant, bytes: usize) {
+        MICROS.fetch_add(t0.elapsed().as_micros() as u64, Relaxed);
+        BYTES.fetch_add(bytes as u64, Relaxed);
+        PACKETS.fetch_add(1, Relaxed);
+    }
+
+    /// `(micros, bytes, packets)` decoded since the last call, and a reset.
+    pub fn take() -> (u64, u64, u64) {
+        (
+            MICROS.swap(0, Relaxed),
+            BYTES.swap(0, Relaxed),
+            PACKETS.swap(0, Relaxed),
+        )
     }
 }
 

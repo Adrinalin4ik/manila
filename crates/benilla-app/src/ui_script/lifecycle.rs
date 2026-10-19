@@ -66,6 +66,11 @@ fn install_glue_vm(world: &mut World, screen: &str) -> bool {
         cvars.seed_vm(&mut script);
     }
     seed_agreements(world, &mut script);
+    // The saved account name before the load, as the reference's `accountName` CVar is registered
+    // at startup (`0x402bd2`), ahead of the glue build: `AccountLoginSaveAccountName`'s `OnLoad`
+    // checks itself off `GetSavedAccountName() ~= ""`, and seeded only at the seat below it read
+    // empty, came up unchecked, and the next Login cleared the name.
+    script.set_glue_saved_account(&crate::glue_session::login::load_saved_account());
     let start = bevy::platform::time::Instant::now();
     let failures = super::glue::load_glue(&mut script);
     super::glue::finish_glue_load_log(&mut script);

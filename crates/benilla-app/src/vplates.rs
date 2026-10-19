@@ -293,7 +293,11 @@ struct PlateWorld<'w, 's> {
             &'static Transform,
             Option<&'static ObjectStore>,
         ),
-        Without<SelfPlayer>,
+        // wenilla carry: a player past `playerDistance` has no body, so no plate floats over it.
+        (
+            Without<SelfPlayer>,
+            Without<crate::player_distance::BeyondPlayerDistance>,
+        ),
     >,
     self_q: Query<'w, 's, (&'static Transform, Option<&'static ObjectStore>), With<SelfPlayer>>,
     factions: Option<Res<'w, Factions>>,

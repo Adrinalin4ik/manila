@@ -174,6 +174,11 @@ const fn ours(name: &'static str, default: &'static str, why: &'static str) -> R
 /// file. Each still works for the session that types it.
 pub(crate) const SESSION_ONLY: &[&str] = &[
     "animParkAll",
+    // The wire's debug gates: `netPackets 0` saved into `config.toml` came back on the next boot
+    // and refused the login itself (2026-10-18).
+    "netPackets",
+    "netChat",
+    "netOthers",
     "animLodOff",
     "roomLodOff",
     "matAnimOff",
@@ -1276,7 +1281,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // is 15 fps, turning away is 25), and a wall is the only knob that cuts the effects you are not
     // looking at while leaving the one in front of you intact. Default is the top of FARCLIP_RANGE,
     // i.e. no wall: `min(farclip, this)` is `farclip` until the slider moves.
-    ours("effectsDistance", "800", "benilla's own: the particle draw-distance wall"),
+    // wenilla carry: 50 yd in the browser, the owner's default (2026-10-19).
+    ours("effectsDistance", if cfg!(target_arch = "wasm32") { "50" } else { "800" }, "benilla's own: the particle draw-distance wall"),
     // **`playerDistance` - OURS, and the third wall on this table.** The world has `farclip` and
     // the particles have `effectsDistance`; other players had none, and they are the one part of
     // a city a client cannot budget for: their count, their gear and their composited skins all
@@ -1284,7 +1290,23 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // next, with the frame at 37 ms and 89 ms. `0` is a real setting ("draw none"), not a guard
     // value. Default is the top of `FARCLIP_RANGE`, i.e. no wall of ours - every build before
     // this one.
-    ours("playerDistance", "777", "benilla's own: the other-players draw-distance wall"),
+    // wenilla carry: 250 yd in the browser, the owner's default (2026-10-19).
+    ours("playerDistance", if cfg!(target_arch = "wasm32") { "250" } else { "777" }, "benilla's own: the other-players draw-distance wall"),
+    // **`smartPlayerDistance`/`smartPlayerCount` - OURS**: the wall above pulled in to the
+    // `count`-th nearest other player, so a crowd shows its nearest players only
+    // (`player_distance::SmartPlayerDistance`). On by default (the owner, 2026-10-19).
+    ours("smartPlayerDistance", "1", "benilla's own: playerDistance shrinks to the nearest smartPlayerCount players"),
+    ours("smartPlayerCount", "60", "benilla's own: how many other players Smart Player Distance keeps"),
+    // **`playerShard*` - OURS**: a crowd's area split into shards, ours shown
+    // (`player_distance::PlayerShards`). On, 40 a shard, with shadows, by default (the owner,
+    // 2026-10-19).
+    ours("playerShards", "1", "benilla's own: show one layer of a crowd at a time"),
+    ours("playerShard", "0", "benilla's own: which crowd layer playerShards shows"),
+    ours("playerShardCapacity", "40", "benilla's own: how many players one playerShards layer holds"),
+    ours("playerShardRadius", "150", "benilla's own: the radius (yd) of a crowd's playerShards area"),
+    ours("playerShardShow", "0", "benilla's own: draw the playerShards areas and each player's shard"),
+    ours("playerShardGhosts", "1", "benilla's own: a shadow disc where a player of another shard stands"),
+    ours("playerShardSwap", "0", "benilla's own: one who stands by us 10 s trades places with our farthest"),
     // **`staticTransforms` - OURS, a knob on bevy's own static-tree threshold.** Transform
     // propagation measured 14.45 ms of a 74 ms frame over 29 082 entities - the single most
     // expensive step in the client. bevy skips unchanged subtrees, but stops tracking them at all

@@ -253,6 +253,8 @@ pub(super) fn attach_entity_visuals(
         (
             Without<VisualAttached>,
             Without<benilla_world::model_fade::DespawnFade>,
+            // wenilla carry: a player past `playerDistance` is not built at all.
+            Without<crate::player_distance::BeyondPlayerDistance>,
         ),
     >,
     // A mounted rider waits on its mount child, whose attachment-0 point is the seat.
@@ -373,7 +375,13 @@ pub(super) fn attach_entity_visuals(
         let body_tex = match look.as_ref() {
             Some(l) => {
                 let key = skin_key(l, equip, worn.emblem, worn.tabard_preview);
-                if shown_rebuild {
+                // wenilla carry: on wasm a shown rebuild takes the arrival's lane too. The forced
+                // lane composites on the drawing thread with a blocking fetch per BLP, and a fetch
+                // that failed there was cached as "no atlas" for good - a white body for the
+                // session, seen in crowds where rig heals rebuild shown bodies (owner's screenshot,
+                // 2026-10-18). The rebuilt look is nearly always cached already; a new one waits
+                // for its composite like an arrival.
+                if shown_rebuild && !cfg!(target_arch = "wasm32") {
                     char_skin::forced_body_atlas(
                         l,
                         key,
@@ -399,6 +407,17 @@ pub(super) fn attach_entity_visuals(
             }
             None => None,
         };
+        // wenilla carry: the white-body hunt (owner's screenshots, 2026-10-18). A composited look
+        // that reaches its build with no atlas draws its body and robe white; say so, with the
+        // look, so the next one names its path instead of being guessed at.
+        if body_tex.is_none() {
+            if let Some(l) = look.as_ref().filter(|l| matches!(l.body, char_skin::BodySkin::Composite { .. })) {
+                warn!(
+                    "white body: {entity} built with no atlas (race {} sex {} skin {}, shown                      rebuild {shown_rebuild}) - see the 'body skin composite' lines above",
+                    l.race, l.sex, l.skin
+                );
+            }
+        }
 
         // Invisible GameObjects and trigger creatures hide by transparent or empty M2s, never by a
         // flag: the reference draws any loaded model and culls zero-alpha batches (`0x707b3a`),

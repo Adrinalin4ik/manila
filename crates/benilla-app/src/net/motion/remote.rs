@@ -317,6 +317,21 @@ pub(in crate::net) fn drain_pending_moves(
     }
 }
 
+/// wenilla carry: **a body nobody can see is stepped every [`HIDDEN_STRIDE`]th frame**, with the
+/// time it is owed. Measured by the per-system timer (`perf::systime`, journal
+/// 2026-10-17T191956): this system 994 us and [`super::ground_clamp_creatures`] 416 us a frame
+/// with ~300 units streamed and almost all of them behind a wall - one capsule sweep (or ray) per
+/// moving body per frame, drawn or not. A sweep over the owed time is still a sweep, so a hidden
+/// mover cannot pass a wall it would have hit; it is only coarser in time, and the next packet
+/// corrects the pose as it always did. Shown again, it steps every frame from the next one.
+/// Staggered by entity, so the hidden crowd's sweeps spread evenly over the frames.
+pub(in crate::net) const HIDDEN_STRIDE: u32 = 4;
+
+/// Whether hidden body `e` takes its turn on frame `frame` (see [`HIDDEN_STRIDE`]).
+pub(in crate::net) fn hidden_turn(e: Entity, frame: u32) -> bool {
+    (e.to_bits() as u32).wrapping_add(frame) % HIDDEN_STRIDE == 0
+}
+
 /// Dead-reckons every remote mover each frame from its flags, then resolves the step against the
 /// world with our own controller's capsule and step election, as the reference drives every mover
 /// through one controller. A mover with no [`move_flags::INTEGRATED`] bit is not integrated, as in
@@ -349,14 +364,32 @@ pub(in crate::net) fn extrapolate_remote_units(
             // Modes from `SMSG_SPLINE_MOVE_*`, which vmangos sends only for a unit it drives; a
             // player's ride the pose, so the union is the reference's one `CMovement+0x40` word.
             Option<&crate::net::UnitMoveModes>,
+            // The draw election's verdict, for the hidden stride (see [`HIDDEN_STRIDE`]).
+            Option<&Visibility>,
         ),
         (Without<Spline>, Without<ActiveMover>),
     >,
+    mut frame: Local<u32>,
+    // Seconds each hidden mover is owed since its last step.
+    mut owed: Local<bevy::ecs::entity::EntityHashMap<f32>>,
 ) {
     use crate::creature_anim::{ease_strafe_yaw, strafe_body_offset, wrap_pi};
-    let dt = time.delta_secs();
+    let frame_dt = time.delta_secs();
+    *frame = frame.wrapping_add(1);
     let now_ms = time.elapsed_secs_f64() * 1000.0;
-    for (e, mut t, mut rm, speeds, twist, latched, riding, guid, granted) in &mut q {
+    for (e, mut t, mut rm, speeds, twist, latched, riding, guid, granted, vis) in &mut q {
+        let hidden = vis.is_some_and(|v| *v == Visibility::Hidden);
+        let dt = if hidden {
+            let acc = owed.entry(e).or_insert(0.0);
+            *acc += frame_dt;
+            if !hidden_turn(e, *frame) {
+                continue;
+            }
+            std::mem::take(acc)
+        } else {
+            frame_dt + owed.remove(&e).unwrap_or(0.0)
+        };
+        let delta = std::time::Duration::from_secs_f32(dt);
         if benilla_assets::trace::enabled() {
             let silent = now_ms - rm.last_apply_ms;
             let moving = rm.flags & move_flags::ANY_MOVE != 0;
@@ -396,7 +429,7 @@ pub(in crate::net) fn extrapolate_remote_units(
                 Vec3::ZERO
             };
             let resolved_center = if airborne {
-                crate::player::mover::airborne_step(&world, &capsule.0, from, vel, time.delta())
+                crate::player::mover::airborne_step(&world, &capsule.0, from, vel, delta)
             } else {
                 // The mover's granted modes: `HOVER` raises it a yard (`0x636e81`), and
                 // `WATER_WALKING` makes the liquid plane floor (`0x63162e`) unless swimming
@@ -415,7 +448,7 @@ pub(in crate::net) fn extrapolate_remote_units(
                     &capsule.0,
                     from,
                     vel,
-                    time.delta(),
+                    delta,
                     crate::player::mover::Support {
                         // `0x5fa550` is true for an uncharmed player, so the step height is 1.0.
                         rise: crate::player::STEP_UP_HEIGHT,
@@ -519,6 +552,10 @@ pub(in crate::net) fn extrapolate_remote_units(
                 twist.yaw_gap = gap;
             }
         }
+    }
+    // Despawned movers leave the ledger.
+    if *frame % 256 == 0 {
+        owed.retain(|e, _| q.contains(*e));
     }
 }
 

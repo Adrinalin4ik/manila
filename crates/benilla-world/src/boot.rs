@@ -6,6 +6,45 @@ use bevy::prelude::*;
 
 use crate::thread_qos;
 
+/// wenilla carry: **every span disabled in the browser; events (the console log) untouched.**
+///
+/// On wasm32 `LogPlugin` adds `tracing_wasm::WASMLayer` itself (`bevy_log-0.18.1/src/lib.rs:396`),
+/// and that layer calls `performance.mark` on every span enter and a string-formatting
+/// `performance.measure` on every exit, with no setting to stop it (`tracing-wasm-0.2.1`
+/// `src/lib.rs:360-380`). bevy's render opens such spans many times a frame -
+/// `gpu_preprocessing.rs` alone has ten `info_span!`s inside its per-phase loops. The owner's
+/// Chrome trace (2026-10-17T224035), standing at 16 fps with almost nobody on screen, spent 68% of
+/// the main thread's samples in `mark` and `measure` under `write_indirect_parameters_buffers`.
+///
+/// A layer whose `enabled` says no disables the span for the whole subscriber, `WASMLayer`
+/// included, and `Interest::never` retires the callsite so the question is not asked again.
+/// Nothing here reads spans in the browser: `sysprof` needs bevy's `trace` feature, which is off,
+/// and `perf::systime` times systems without them.
+#[cfg(target_arch = "wasm32")]
+struct NoSpans;
+
+#[cfg(target_arch = "wasm32")]
+impl<S: bevy::log::tracing::Subscriber> bevy::log::tracing_subscriber::Layer<S> for NoSpans {
+    fn register_callsite(
+        &self,
+        metadata: &'static bevy::log::tracing::Metadata<'static>,
+    ) -> bevy::log::tracing::subscriber::Interest {
+        if metadata.is_span() {
+            bevy::log::tracing::subscriber::Interest::never()
+        } else {
+            bevy::log::tracing::subscriber::Interest::sometimes()
+        }
+    }
+
+    fn enabled(
+        &self,
+        metadata: &bevy::log::tracing::Metadata<'_>,
+        _ctx: bevy::log::tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        !metadata.is_span()
+    }
+}
+
 /// `DefaultPlugins` with benilla's engine tuning applied, around the caller's primary window.
 #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
 pub fn tuned_default_plugins(mut primary_window: Window) -> PluginGroupBuilder {
@@ -35,9 +74,11 @@ pub fn tuned_default_plugins(mut primary_window: Window) -> PluginGroupBuilder {
             // until `sysprof::arm` flips it.
             custom_layer: |_| {
                 use bevy::log::tracing_subscriber::Layer as _;
-                Some(Box::new(
-                    crate::log_ring::LogRing.and_then(crate::sysprof::SystemProfiler),
-                ))
+                let layers = crate::log_ring::LogRing.and_then(crate::sysprof::SystemProfiler);
+                // wenilla carry: no spans in the browser - see `NoSpans`.
+                #[cfg(target_arch = "wasm32")]
+                let layers = layers.and_then(NoSpans);
+                Some(Box::new(layers))
             },
             ..default()
         })

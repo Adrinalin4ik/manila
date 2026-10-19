@@ -668,6 +668,18 @@ fn drain_instance_emitters(
     }
 }
 
+/// The whole teardown `0x6203e0`: the drain, then the root. The root hangs under the unit's
+/// visual, so a display swap or rig heal (`despawn_related::<Children>`) may already have taken
+/// it while the instance still names it; a plain despawn of that id is a command error.
+fn end_instance_root(
+    commands: &mut Commands,
+    emitters: &mut Query<&mut benilla_world::particles::ParticleEmitter>,
+    root: Entity,
+) {
+    drain_instance_emitters(emitters, root);
+    commands.entity(root).try_despawn();
+}
+
 /// The same-slot replace (`0x6208e0`): destroy each live node with the same `SpellVisualEffectName`
 /// record at the same tag, without a decay, which keeps the effect count flat in the number of
 /// attackers. The world-plant tag (-1) is exempt (`0x620913`); a decaying instance is out of reach.
@@ -687,8 +699,7 @@ fn replace_same_slot(
         }
         if let Some(root) = i.root {
             // Through the shared teardown `0x6203e0`, so its particles finish.
-            drain_instance_emitters(emitters, root);
-            commands.entity(root).despawn();
+            end_instance_root(commands, emitters, root);
         }
         false
     });
@@ -716,8 +727,7 @@ fn reap_matching(
         let (Some(root), Some(span)) = (i.root, span) else {
             if let Some(root) = i.root {
                 // Destroyed at once, through `0x6203e0` like any other, so its particles drain.
-                drain_instance_emitters(emitters, root);
-                commands.entity(root).despawn();
+                end_instance_root(commands, emitters, root);
             }
             return false;
         };
@@ -741,6 +751,8 @@ pub(super) fn attach_spell_fx(
         Option<&mut benilla_world::rig_anim::RigPose>,
         &GlobalTransform,
         Has<crate::entities::VisualAttached>,
+        // wenilla carry: a unit past `playerDistance` (see the release leg below).
+        Has<crate::player_distance::BeyondPlayerDistance>,
     )>,
     fx: Option<ResMut<SpellFx>>,
     asset_server: Res<AssetServer>,
@@ -758,15 +770,24 @@ pub(super) fn attach_spell_fx(
         return;
     };
     let now = time.elapsed_secs();
-    for (unit, mut att, bones, mut pose, unit_gt, body_built) in &mut units {
+    for (unit, mut att, bones, mut pose, unit_gt, body_built, released) in &mut units {
         att.instances.retain_mut(|inst| {
+            // wenilla carry: **no body, no effects.** A unit past `playerDistance` spawns none, and
+            // a world plant - the one root that does not hang under the body, so the release's
+            // teardown never reaches it - is ended here. A persistent one keeps its slot and is
+            // re-created with the body, as a rebuild's collateral already is; a one-shot goes.
+            if released {
+                if let Some(root) = inst.root.take() {
+                    end_instance_root(&mut commands, &mut emitters, root);
+                }
+                return inst.persistent && !inst.decaying;
+            }
             // Self-termination (the cast-release flash ran its span).
             if let Some(expires) = inst.expires {
                 if now >= expires {
                     if let Some(root) = inst.root {
                         // The `0x6203e0` teardown: the particles outlive the flash.
-                        drain_instance_emitters(&mut emitters, root);
-                        commands.entity(root).despawn();
+                        end_instance_root(&mut commands, &mut emitters, root);
                     }
                     if benilla_assets::trace::enabled() {
                         benilla_assets::trace::line(
@@ -1094,6 +1115,22 @@ mod tests {
             .unwrap()
             .instances[0]
             .decaying = true;
+        app.world_mut().entity_mut(roots[0]).despawn();
+        app.update();
+        assert_eq!(instances_of(&app, unit), vec![]);
+    }
+
+    /// A cast flash whose span ends after a display swap took its root: nothing is left to
+    /// despawn, and a despawn of the dead id is a command error (a battleground shapeshift).
+    #[test]
+    fn an_expiring_instance_whose_root_died_as_collateral_is_dropped_quietly() {
+        let (mut app, unit, roots) = standing(&[false]);
+        app.world_mut()
+            .entity_mut(unit)
+            .get_mut::<FxAttached>()
+            .unwrap()
+            .instances[0]
+            .expires = Some(0.0);
         app.world_mut().entity_mut(roots[0]).despawn();
         app.update();
         assert_eq!(instances_of(&app, unit), vec![]);

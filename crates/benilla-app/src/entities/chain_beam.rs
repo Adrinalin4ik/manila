@@ -179,6 +179,8 @@ pub(super) fn spawn_chain_beams(
     // The removal below lands at the next sync point, so a second play on the same caster this
     // frame would still see the array; this set is the reference's in-place zeroing.
     mut consumed: Local<bevy::ecs::entity::EntityHashSet>,
+    // wenilla carry: a caster past `playerDistance` has no body, so it draws no beam.
+    released: Query<(), With<crate::player_distance::BeyondPlayerDistance>>,
 ) {
     consumed.clear();
     for ev in kit_fx.read() {
@@ -207,6 +209,9 @@ pub(super) fn spawn_chain_beams(
         let hops = hops.filter(|_| !consumed.contains(&play.entity));
         consumed.insert(play.entity);
         commands.entity(play.entity).try_remove::<ChainHops>();
+        if released.contains(play.entity) {
+            continue;
+        }
         // `0x6ecbd0`'s guards: no spell, no strands or no targets is a silent return.
         let targets = select_targets(play.spell_id, hops, store, &index);
         if play.spell_id == 0 || play.proc.beams == 0 || targets.is_empty() {

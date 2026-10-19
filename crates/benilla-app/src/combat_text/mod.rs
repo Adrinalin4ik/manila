@@ -131,7 +131,9 @@ pub(crate) fn float_combat_text(
     mut spawns: MessageReader<CombatTextSpawn>,
     mut texts: ResMut<WorldTexts>,
     time: Res<Time>,
-    transforms: Query<&Transform>,
+    // wenilla carry: no text floats over a unit past `playerDistance` or in another shard (our
+    // AoE, DoT or pet hitting one); it rose from his feet with no body under it.
+    transforms: Query<&Transform, Without<crate::player_distance::BeyondPlayerDistance>>,
     // This frame's Transform, not last frame's propagated GlobalTransform, so the text does not
     // lag a moving camera; the world camera is a root entity, so `GlobalTransform::from` is exact.
     camera: Query<(&Camera, &Transform), With<WorldCamera>>,

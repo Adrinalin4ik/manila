@@ -2010,6 +2010,8 @@ fn the_layer_does_not_grow() {
         "ContainerFrameAdapters.xml",
         "SpellBookAdapters.xml",
         "ScriptLogFrame.xml",
+        // wenilla carry: the Player Shards selector (a fork feature, no upstream file to host it).
+        "ShardSelector.xml",
         "FrameXMLFixes.xml",
     ];
     assert_eq!(

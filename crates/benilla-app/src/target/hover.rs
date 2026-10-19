@@ -271,7 +271,8 @@ pub(super) fn update_hover(
 
     // ── Broad phase, then pass 1 and pass 2 ──
     // A candidate: the unit, its pass-2 priority, its parts' mesh ids and its posed joint palette.
-    let mut candidates: Vec<(Entity, u8, Vec<AssetId<Mesh>>, Vec<Mat4>)> = Vec::new();
+    // The trailing `f32` is the candidate's nearest possible hit along the ray (0 when unbounded).
+    let mut candidates: Vec<(Entity, u8, Vec<AssetId<Mesh>>, Vec<Mat4>, f32)> = Vec::new();
     // Units with skinned parts: out of the box fallback even when the broad phase rejects them.
     let mut faithful: HashSet<Entity> = HashSet::new();
     for (entity, is_self, gt, net, anims, drv, store, children, mount_child, drawn, held) in &roots
@@ -301,6 +302,7 @@ pub(super) fn update_hover(
             (Some(a), Some(d)) => d.active_anim().and_then(|id| a.find(id)),
             _ => None,
         };
+        let mut near = 0.0f32;
         if let Some(c) = clip.filter(|c| c.bounds_radius > 0.0 && mount_child.is_none()) {
             let centre = gt.transform_point(c.bounds_center);
             let radius = c.bounds_radius * gt.scale().max_element();
@@ -308,6 +310,15 @@ pub(super) fn update_hover(
             // origin clamps to t = 0, so a unit we stand inside stays clickable.
             let along = (centre - origin).dot(dir).max(0.0);
             if (centre - origin - dir * along).length_squared() > radius * radius {
+                continue;
+            }
+            // wenilla carry: **a body wholly behind the world hit cannot win**, since the
+            // occlusion compare below drops any pick strictly past `limit`, the halo's included.
+            // Skipped before its parts are CPU-skinned: in a crowd the unbounded ray passed near
+            // dozens of bodies behind the wall or ground the cursor rests on, and skinned every
+            // one each frame (`update_hover` 11.5 ms, journal 2026-10-18T083257, ~640 bodies).
+            near = (along - radius).max(0.0);
+            if near > limit {
                 continue;
             }
         }
@@ -344,6 +355,7 @@ pub(super) fn update_hover(
                 priority,
                 sk.iter().map(|(m, _)| m.id()).collect(),
                 palette,
+                near,
             ));
         }
     }
@@ -353,7 +365,14 @@ pub(super) fn update_hover(
     let mut best: Option<(f32, Entity)> = None;
     #[cfg(not(target_os = "macos"))]
     pose.scratch.clear();
-    for (entity, _, mesh_ids, palette) in &candidates {
+    // wenilla carry: nearest-first, so pass 1 stops at the first candidate that starts past the
+    // best exact hit - it cannot be nearer. Pass 2 runs only when pass 1 found nothing, which is
+    // exactly when no candidate was cut, so its spans still line up one per mesh.
+    candidates.sort_by(|a, b| a.4.total_cmp(&b.4));
+    for (entity, _, mesh_ids, palette, near) in &candidates {
+        if best.is_some_and(|(bt, _)| *near > bt) {
+            break;
+        }
         for id in mesh_ids {
             #[cfg(target_os = "macos")]
             let hit = benilla_world::interact::ray_posed_mesh(
@@ -414,7 +433,7 @@ pub(super) fn update_hover(
         // Pass 1 pushed one span per mesh in this same order.
         #[cfg(not(target_os = "macos"))]
         let mut span = 0usize;
-        for (entity, priority, mesh_ids, palette) in &candidates {
+        for (entity, priority, mesh_ids, palette, _) in &candidates {
             #[cfg(target_os = "macos")]
             let hit = mesh_ids
                 .iter()

@@ -479,10 +479,15 @@ pub(super) fn spawn_missiles(
     mut sounds: MessageWriter<MissileSound>,
     mut out: ArrivalOut,
     mut play_seq: ResMut<crate::creature_anim::PlaySeq>,
+    // wenilla carry: a caster past `playerDistance` has no body, so it throws no missile.
+    released: Query<(), With<crate::player_distance::BeyondPlayerDistance>>,
 ) {
     let Some(mut fx) = fx else { return };
     // Resolve the model now, so it loads while the release animation plays.
     for spawn in spawns.read() {
+        if released.contains(spawn.caster) {
+            continue;
+        }
         let key = match (&spawn.path, spawn.ammo_display_id) {
             (Some(path), _) => {
                 fx.models

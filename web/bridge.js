@@ -13,7 +13,10 @@
 const hook = (window.__wenilla_bridge ??= {});
 Object.assign(hook, {
   version: 1,
-  hz: hook.hz ?? 20,            // onFrame calls per second (0 = every frame)
+  // onFrame calls per second (0 = every frame). 5, not 20: each snapshot resolves the nearest
+  // `maxUnits` units' names and fields on the game's thread, ~1.7 ms a frame at 20 Hz in a
+  // 745-unit crowd (journal 2026-10-18T083257, `publish_frame`). A page that draws from it raises it.
+  hz: hook.hz ?? 5,
   radius: hook.radius ?? 60,    // yards; units[] is everything within it
   maxUnits: hook.maxUnits ?? 64,
   events: hook.events ?? [],    // Lua event names to relay, or '*'

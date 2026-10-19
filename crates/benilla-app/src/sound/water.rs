@@ -35,7 +35,8 @@ type SplashGate = Or<(Changed<Transform>, Changed<CollisionHeight>)>;
 
 /// Play the water splash on a unit's `0.4·h` depth-line crossing, in either direction.
 fn water_splashes(
-    units: Query<SplashQuery, (With<NetEntity>, SplashGate)>,
+    // wenilla carry: a unit past `playerDistance` or in another shard makes no splash.
+    units: Query<SplashQuery, (With<NetEntity>, SplashGate, Without<crate::player_distance::BeyondPlayerDistance>)>,
     world: benilla_world::world_point::WorldPoint,
     mut wet: Local<EntityHashMap<bool>>,
     kits: Option<ResMut<SoundKits>>,

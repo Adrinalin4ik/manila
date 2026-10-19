@@ -978,6 +978,7 @@ fn draw_torch_mesh<'a>(
     let (Some(v), Some(i)) = (allocator.mesh_vertex_slice(&id), allocator.mesh_index_slice(&id)) else { return };
     pass.set_vertex_buffer(0, v.buffer.slice(..));
     pass.set_index_buffer(i.buffer.slice(..), index_format);
+    super::TORCH_DRAWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     pass.draw_indexed(i.range.clone(), i32::try_from(v.range.start).unwrap_or(0), 0..1);
 }
 

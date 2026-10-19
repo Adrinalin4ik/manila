@@ -1139,6 +1139,7 @@ impl ViewNode for StaticGxNode {
                         continue;
                     }
                 }
+                super::STATIC_DRAWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 pass.set_render_pipeline(ready[&(run.cutout, run.two_sided)]);
                 pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
                 pass.set_bind_group(2, &light_bind.0, &[]);

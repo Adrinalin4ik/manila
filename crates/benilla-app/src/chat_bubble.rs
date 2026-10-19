@@ -409,7 +409,9 @@ fn drive_bubbles(
     mut active: ResMut<BubblesActive>,
     vplates: Res<VPlates>,
     self_guid: Res<SelfGuid>,
-    units: Query<(Entity, &Guid, &Transform), With<NetEntity>>,
+    // wenilla carry: a speaker past `playerDistance` or in another shard has no body to carry a
+    // bubble; it was flashed for its 250 ms fade and suppressed his name meanwhile.
+    units: Query<(Entity, &Guid, &Transform), (With<NetEntity>, Without<crate::player_distance::BeyondPlayerDistance>)>,
     self_q: Query<&Transform, With<Embodied>>,
     camera: Query<(&Camera, &Transform), With<WorldCamera>>,
     heights: Query<&StandBoxHeight>,

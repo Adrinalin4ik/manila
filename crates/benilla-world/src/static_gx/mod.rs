@@ -25,6 +25,18 @@ mod pool;
 mod render;
 mod shadow; // MONKEY (world shadows): CPU triangle collection for the static-world shadow caster
 mod torch_depth; // MONKEY (torch shadows Phase 1): the per-fixture depth-map render + its targets
+
+/// wenilla carry: draw calls this pass and the torch depth maps issued since the last
+/// [`take_draw_counts`], for the fps journal's `# gpu` line. bevy's phase census cannot see them:
+/// both render through their own nodes.
+static STATIC_DRAWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TORCH_DRAWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `(static pass draws, torch depth draws)` since the last call, and a reset.
+pub fn take_draw_counts() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (STATIC_DRAWS.swap(0, Relaxed), TORCH_DRAWS.swap(0, Relaxed))
+}
 pub use shadow::caster_in_reach; // MONKEY (B035): bounds-based caster reach, shared with the entity lane
 pub use shadow::CutoutBucket; // MONKEY (world shadows): per-leaf-texture alpha-cutout caster group
 pub use render::StaticGxMirror; // MONKEY (planar water): the water mirror's view draws the retained set too

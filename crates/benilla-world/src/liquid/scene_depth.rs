@@ -90,13 +90,24 @@ fn update_water_depth(
         light.celestial_dir.extend(0.0)
     } else { light.moon_dir_white.extend(1.0) };
     // Evaluated after lighting resolves each frame; mutate only on actual changes.
+    //
+    // wenilla carry: **the sun is compared within a quarter degree, not exactly.** It follows the
+    // game clock continuously, so `!=` held every frame and every water material was rewritten -
+    // and re-prepared by the render world - every frame, water on screen or not: `R:LiquidExt`
+    // ~0.7 ms in the per-system timer (journal 2026-10-17T211251). The sun turns a quarter degree
+    // in about a minute; that is the staleness a highlight can now carry. A moon/sun swap (`.w`)
+    // still publishes at once.
+    const CELESTIAL_COS: f32 = 0.999_990_5; // cos(0.25 deg)
+    let celestial_moved = |stored: Vec4| {
+        stored.w != celestial.w || stored.truncate().dot(celestial.truncate()) < CELESTIAL_COS
+    };
     let tier = quality.0.min(2) as f32;
     let changed: Vec<_> = materials.iter().filter(|(_, m)| {
         let water = &m.extension.water;
         water.lane.z < 0.5
             && (water.mode.x != tier
                 || (quality.0 > 0 && (water.sky_zenith != zenith
-                    || water.sky_horizon != horizon || water.celestial != celestial)))
+                    || water.sky_horizon != horizon || celestial_moved(water.celestial))))
     }).map(|(id, _)| id).collect();
     for id in changed {
         let water = &mut materials.get_mut(id).unwrap().extension.water;
