@@ -855,6 +855,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 sell_item_info(&model)
             };
+            // tortoise: Turtle's patched `Blizzard_AuctionUI.lua` reads two more values, the
+            // item's stack size and its link (its deposit does `maxStack - stackSize` unguarded),
+            // so both follow the stock six: 1 and nil for an empty slot.
+            let (max_stack, link) = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model.auction_sell_item.as_ref().map_or((1, None), |it| {
+                    let stack = model
+                        .item_templates
+                        .get(&it.item_id)
+                        .map_or(1, |v| v.stackable.max(1));
+                    (stack, it.link.clone())
+                })
+            };
+            let link = match link {
+                Some(l) => Value::String(lua.create_string(&l)?),
+                None => Value::Nil,
+            };
             let Some((name, texture, count, quality, can_use, price)) = info else {
                 return Ok(MultiValue::from_vec(vec![
                     Value::Nil,
@@ -863,6 +880,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     Value::Integer(-1),
                     Value::Nil,
                     Value::Integer(0),
+                    Value::Integer(i64::from(max_stack)),
+                    link,
                 ]));
             };
             Ok(MultiValue::from_vec(vec![
@@ -879,6 +898,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Value::Integer(quality),
                 flag(can_use),
                 Value::Integer(i64::from(price)),
+                Value::Integer(i64::from(max_stack)),
+                link,
             ]))
         })?,
     )?;
