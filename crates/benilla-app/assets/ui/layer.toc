@@ -19,5 +19,7 @@ ContainerFrameAdapters.xml
 SpellBookAdapters.xml
 # The `/errors` script error log and our slash commands.
 ScriptLogFrame.xml
+# wenilla carry: the Player Shards selector and the crowd rows' tooltips.
+ShardSelector.xml
 # Our fixes to the stock Lua.
 FrameXMLFixes.xml

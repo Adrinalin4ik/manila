@@ -137,6 +137,7 @@ pub(crate) fn apply_net_updates(world: &mut World) {
             crate::perf::journal::note_net_dropped(chat_dropped, (before - events.len()) as u32 - chat_dropped);
         }
     }
+    hold_far_moves(world, &mut events);
     // The journal's `net_pkts`/`net_us` pair (ours). Measured around the dispatch itself, and the
     // empty early-out is what keeps the column a measurement rather than a shape: without it every
     // idle frame files a 0-packet sample and the per-packet average reads as whatever the idle
@@ -148,6 +149,72 @@ pub(crate) fn apply_net_updates(world: &mut World) {
     let t0 = bevy::platform::time::Instant::now();
     super::handlers::dispatch(world, events);
     crate::perf::journal::note_net(count, t0.elapsed().as_micros() as u64);
+}
+
+/// wenilla carry: **the movement of a player past `playerDistance`, held and applied in turns.**
+///
+/// Such a player has no body (`player_distance::BeyondPlayerDistance`), yet every relayed move of
+/// his ran through the handlers, re-seated his transform and fed the per-unit lanes each frame -
+/// in a 900-unit square (journal 2026-10-18T115434) the wire's apply was 3-12 ms. Only his LATEST
+/// `UnitMove` is kept, and the held ones are applied a quarter at a time ([`FAR_MOVE_SHARDS`]),
+/// staggered by guid, so each still lands within a few frames and the position stays the
+/// server's. Our own unit and our target are never held, and a player who comes back inside
+/// the wall has his move applied the same frame. Fields, casts and everything else pass as before.
+#[derive(Resource, Default)]
+struct FarMoves {
+    pending: bevy::platform::collections::HashMap<u64, SessionEvent>,
+    frame: u32,
+}
+
+/// The held moves are applied over this many frames.
+const FAR_MOVE_SHARDS: u32 = 4;
+
+fn hold_far_moves(world: &mut World, events: &mut Vec<SessionEvent>) {
+    let mut far = world.remove_resource::<FarMoves>().unwrap_or_default();
+    far.frame = far.frame.wrapping_add(1);
+    let me = world.resource::<SelfGuid>().0;
+    let target = world
+        .get_resource::<crate::target::Selection>()
+        .and_then(|s| s.guid);
+    let beyond = |w: &World, guid: u64| -> bool {
+        Some(guid) != me
+            && Some(guid) != target
+            && w.resource::<super::GuidIndex>()
+                .0
+                .get(&guid)
+                .and_then(|&e| w.get_entity(e).ok())
+                .is_some_and(|e| e.contains::<crate::player_distance::BeyondPlayerDistance>())
+    };
+    events.retain(|ev| {
+        if let SessionEvent::UnitMove { guid, .. } = ev {
+            if beyond(world, *guid) {
+                far.pending.insert(*guid, ev.clone());
+                return false;
+            }
+        }
+        true
+    });
+    if !far.pending.is_empty() {
+        let frame = far.frame;
+        let due: Vec<u64> = far
+            .pending
+            .keys()
+            .copied()
+            .filter(|&g| {
+                // Gone (streamed out): dropped below by the removal without a push.
+                (g as u32).wrapping_add(frame) % FAR_MOVE_SHARDS == 0 || !beyond(world, g)
+            })
+            .collect();
+        let index = &world.resource::<super::GuidIndex>().0;
+        for guid in due {
+            if let Some(ev) = far.pending.remove(&guid) {
+                if index.contains_key(&guid) {
+                    events.push(ev);
+                }
+            }
+        }
+    }
+    world.insert_resource(far);
 }
 
 /// Tags our own streamed entity with [`SelfPlayer`] by matching [`Guid`] against [`SelfGuid`].

@@ -741,6 +741,8 @@ pub(super) fn attach_spell_fx(
         Option<&mut benilla_world::rig_anim::RigPose>,
         &GlobalTransform,
         Has<crate::entities::VisualAttached>,
+        // wenilla carry: a unit past `playerDistance` (see the release leg below).
+        Has<crate::player_distance::BeyondPlayerDistance>,
     )>,
     fx: Option<ResMut<SpellFx>>,
     asset_server: Res<AssetServer>,
@@ -758,8 +760,21 @@ pub(super) fn attach_spell_fx(
         return;
     };
     let now = time.elapsed_secs();
-    for (unit, mut att, bones, mut pose, unit_gt, body_built) in &mut units {
+    for (unit, mut att, bones, mut pose, unit_gt, body_built, released) in &mut units {
         att.instances.retain_mut(|inst| {
+            // wenilla carry: **no body, no effects.** A unit past `playerDistance` spawns none, and
+            // a world plant - the one root that does not hang under the body, so the release's
+            // teardown never reaches it - is ended here. A persistent one keeps its slot and is
+            // re-created with the body, as a rebuild's collateral already is; a one-shot goes.
+            if released {
+                if let Some(root) = inst.root.take() {
+                    // The `0x6203e0` teardown, so its particles finish; `try_`, as the root may
+                    // already have gone with the body.
+                    drain_instance_emitters(&mut emitters, root);
+                    commands.entity(root).try_despawn();
+                }
+                return inst.persistent && !inst.decaying;
+            }
             // Self-termination (the cast-release flash ran its span).
             if let Some(expires) = inst.expires {
                 if now >= expires {

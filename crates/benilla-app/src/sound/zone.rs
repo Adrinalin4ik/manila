@@ -1003,7 +1003,8 @@ fn server_sounds(
     assets: Option<Res<WorldAssets>>,
     config: Res<SoundConfig>,
     listener: Res<AudioListener>,
-    transforms: Query<&Transform, Without<Camera3d>>,
+    // wenilla carry: with the release marker, so a unit with no body is not heard.
+    transforms: Query<(&Transform, Has<crate::player_distance::BeyondPlayerDistance>), Without<Camera3d>>,
 ) {
     if msgs.is_empty() {
         return;
@@ -1031,11 +1032,19 @@ fn server_sounds(
                 start_music_stream(&mut zone, &mut out, &mut kits, &assets, &config, m.sound_id);
             }
             ServerSoundKind::Sound2d | ServerSoundKind::ObjectSound => {
+                // wenilla carry: an object sound of a released unit is not heard.
+                if m
+                    .source
+                    .and_then(|e| transforms.get(e).ok())
+                    .is_some_and(|(_, released)| released)
+                {
+                    continue;
+                }
                 // At the source entity when it is streamed to us; otherwise flat.
                 let pos = m
                     .source
                     .and_then(|e| transforms.get(e).ok())
-                    .map(|t| t.translation);
+                    .map(|(t, _)| t.translation);
                 // An object sound registers on its unit (the reference's `AISOUNDDESC` pool,
                 // `0x458fb0` → `0x459120`), so the vocal gates (`0x4591f0`) keep the creature's
                 // grunts off a scripted voice line.

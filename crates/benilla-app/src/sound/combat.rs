@@ -288,6 +288,8 @@ fn combat_sounds(
     mut out: NonSendMut<SoundOutput>,
     config: Res<SoundConfig>,
     listener: Res<AudioListener>,
+    // wenilla carry: units past `playerDistance` or in another shard - no body, not heard.
+    released: Query<(), With<crate::player_distance::BeyondPlayerDistance>>,
 ) {
     // Exertion fires from the packet, at swing start (`0x6246a0` → `0x624786`).
     let mut exertions: Vec<(Entity, bool)> = Vec::new();
@@ -349,6 +351,9 @@ fn combat_sounds(
     // `force = 0` (`0x62477e`), so the class roll applies: class 0 is 70 for a creature and 35
     // for a player, class 1 (a crit) 100.
     for (attacker, crit) in exertions {
+        if released.contains(attacker) {
+            continue;
+        }
         let Ok((tr, _, net, _, _)) = units.get(attacker) else {
             continue;
         };
@@ -456,7 +461,10 @@ fn combat_sounds(
         }
         let swing = &imp.swing;
         let attacker = units.get(swing.attacker).ok();
-        let victim = swing.victim.and_then(|v| units.get(v).ok());
+        let victim = swing
+            .victim
+            .filter(|&v| !released.contains(v))
+            .and_then(|v| units.get(v).ok());
         // The fired tag's own point (`0x6248ef`, `0x624950`); the receive-time fallback fired no
         // tag, so it takes the attacker, then the victim.
         let Some(pos) = imp

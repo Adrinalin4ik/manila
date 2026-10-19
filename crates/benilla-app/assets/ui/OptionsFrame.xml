@@ -1081,7 +1081,7 @@
             Graphics = {
                 "RowUiScale", "RowFarclip", "RowWorldDetail", "RowSpellDetail", "RowBrightness",
                 "RowWeatherDensity", "RowEffectsQuality", "RowEffectsDistance",
-                "RowPlayerDistance",
+                "RowPlayerDistance", "RowSmartPlayerDistance", "RowSmartPlayerCount", "RowPlayerShards", "RowPlayerShardCapacity", "RowPlayerShardRadius", "RowPlayerShardGhosts", "RowPlayerShardSwap",
                 "RowDisplayMode", "RowVerticalSync", "RowRenderScale",
             },
             -- MONKEY (advanced graphics): the dynamic light + shadow system's own page. Order is
@@ -1724,6 +1724,19 @@
 
         -- Each page's dependency rules, the 1.12 panel's own.
         function BenillaOptionsPage_UpdateDependencies(key)
+            if key == "Graphics" then
+                -- wenilla carry: each crowd master greys its own rows. Smart Player Distance and
+                -- Player Shards work together (the owner, 2026-10-19: with shards on, the smart wall
+                -- thins our shard - `player_distance.rs`), so neither greys the other.
+                local base = "BenillaOptionsFrameContainerBodyGraphics"
+                local smart = GetCVar("smartPlayerDistance") ~= "0"
+                local shards = GetCVar("playerShards") ~= "0"
+                BenillaOptionsRow_SetEnabled(getglobal(base .. "RowSmartPlayerCount"), smart)
+                for _, rkey in ipairs({ "RowPlayerShardCapacity", "RowPlayerShardRadius",
+                        "RowPlayerShardGhosts", "RowPlayerShardSwap" }) do
+                    BenillaOptionsRow_SetEnabled(getglobal(base .. rkey), shards)
+                end
+            end
             if key == "Combat" then
                 -- Combo Points is for rogues and druids only.
                 local on = SHOW_COMBAT_TEXT ~= "0"
@@ -2965,11 +2978,87 @@
                                                 BenillaOptionsSliderRow_Setup(this, 0, 777, 25, "raw")
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowDisplayMode" inherits="BenillaOptionsDropdownRowTemplate">
+                                        <!-- wenilla carry: Smart Player Distance - Player Distance pulled in to the
+                                             nearest N other players, so a crowd shows only its nearest (player_distance.rs). -->
+                                        <Frame name="$parentRowSmartPlayerDistance" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
-                                                <!-- Re-anchored off the three rows of ours seated above it. -->
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowPlayerDistance" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowPlayerDistance" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "smartPlayerDistance", "Smart Player Distance", "BENILLA_TOOLTIP_SMART_PLAYER_DISTANCE")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowSmartPlayerCount" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowSmartPlayerDistance" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowSmartPlayerDistance" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- How many other players Smart Player Distance keeps; the range is
+                                                -- player_distance.rs SMART_COUNT_RANGE.
+                                                BenillaOptionsRow_OnLoad(this, "smartPlayerCount", "Smart Player Count", "BENILLA_TOOLTIP_SMART_PLAYER_COUNT")
+                                                BenillaOptionsSliderRow_Setup(this, 10, 300, 10, "raw")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- wenilla carry: Player Shards - a crowd shown one layer of Smart Player Count
+                                             players at a time; /console playerShard N picks the layer (player_distance.rs). -->
+                                        <Frame name="$parentRowPlayerShards" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowSmartPlayerCount" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowSmartPlayerCount" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "playerShards", "Player Shards", "BENILLA_TOOLTIP_PLAYER_SHARDS")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- How many players one Player Shards layer holds (player_distance.rs SHARD_CAPACITY_RANGE). -->
+                                        <Frame name="$parentRowPlayerShardCapacity" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowPlayerShards" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowPlayerShards" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "playerShardCapacity", "Shard Capacity", "BENILLA_TOOLTIP_PLAYER_SHARD_CAPACITY")
+                                                BenillaOptionsSliderRow_Setup(this, 10, 300, 10, "raw")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- A crowd's shard area radius, yards (player_distance.rs SHARD_RADIUS_RANGE). -->
+                                        <Frame name="$parentRowPlayerShardRadius" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowPlayerShardCapacity" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowPlayerShardCapacity" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "playerShardRadius", "Shard Radius", "BENILLA_TOOLTIP_PLAYER_SHARD_RADIUS")
+                                                BenillaOptionsSliderRow_Setup(this, 50, 400, 10, "raw")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- A shadow disc where a player of another shard stands (player_distance.rs sync_ghosts). -->
+                                        <Frame name="$parentRowPlayerShardGhosts" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowPlayerShardRadius" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowPlayerShardRadius" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "playerShardGhosts", "Other Shards' Shadows", "BENILLA_TOOLTIP_PLAYER_SHARD_GHOSTS")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- One who stands by us 10 s trades places with our farthest (player_distance.rs swap). -->
+                                        <Frame name="$parentRowPlayerShardSwap" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowPlayerShardGhosts" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowPlayerShardGhosts" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "playerShardSwap", "Shard Replacement", "BENILLA_TOOLTIP_PLAYER_SHARD_SWAP")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowDisplayMode" inherits="BenillaOptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <!-- Re-anchored off the rows of ours seated above it. -->
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowPlayerShardSwap" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowPlayerShardSwap" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- Deviation: modern Classic's two-entry Display

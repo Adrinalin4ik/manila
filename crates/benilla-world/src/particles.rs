@@ -80,6 +80,11 @@ impl Default for ParticleTuning {
     fn default() -> Self {
         Self {
             density: 1.0,
+            // wenilla carry: 50 yd in the browser, `effectsDistance`'s default there (the
+            // owner's, 2026-10-19); the CVar's default fires no change, so the two must agree.
+            #[cfg(target_arch = "wasm32")]
+            max_distance: 50.0,
+            #[cfg(not(target_arch = "wasm32"))]
             max_distance: *EFFECTS_DISTANCE_RANGE.end(),
         }
     }

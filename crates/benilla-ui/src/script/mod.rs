@@ -140,6 +140,7 @@ mod model;
 mod modelframe;
 mod mouseover;
 mod net_stats;
+mod shard_info;
 pub(crate) mod object;
 pub use object::frame_kind_from_tag;
 mod party;
@@ -737,6 +738,8 @@ fn install_in_game(lua: &Lua) -> mlua::Result<()> {
     worldmap::install(lua)?;
     worldstate::install(lua)?;
     net_stats::install(lua)?;
+    // wenilla carry: the shard selector's one input.
+    shard_info::install(lua)?;
     Ok(())
 }
 

@@ -19,7 +19,8 @@ use super::{AudioListener, SoundConfig, SoundOutput};
 
 fn route_spell_kit_sounds(
     mut events: MessageReader<SpellKitSound>,
-    transforms: Query<&Transform, Without<Camera3d>>,
+    // wenilla carry: with the release marker, so a unit with no body plays no kit sound.
+    transforms: Query<(&Transform, Has<crate::player_distance::BeyondPlayerDistance>), Without<Camera3d>>,
     kits: Option<ResMut<SoundKits>>,
     assets: Option<Res<WorldAssets>>,
     mut out: NonSendMut<SoundOutput>,
@@ -48,8 +49,12 @@ fn route_spell_kit_sounds(
                 if played_now.contains(&(entity, kit_sound)) {
                     continue;
                 }
+                // wenilla carry: a unit past `playerDistance` or in another shard is not heard.
+                if transforms.get(entity).is_ok_and(|(_, released)| released) {
+                    continue;
+                }
                 played_now.push((entity, kit_sound));
-                let pos = transforms.get(entity).map(|t| t.translation).ok();
+                let pos = transforms.get(entity).map(|(t, _)| t.translation).ok();
                 let looping = kit_looping(&kits, kit_sound);
                 // The line a headless probe greps to prove a spell's sound fired.
                 debug!("spell kit sound {kit_sound} on {entity:?} (looping {looping})");

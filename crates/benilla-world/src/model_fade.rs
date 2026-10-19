@@ -103,7 +103,15 @@ impl RenderFade {
 }
 
 /// The appear fade's length, `FadeTo(1.0, 2000 ms)` on the wall clock (`OsGetAsyncTimeMs`).
+#[cfg(not(target_arch = "wasm32"))]
 pub const APPEAR_FADE_SECS: f32 = 2.0;
+
+/// wenilla carry: **0.6 s in the browser, not the reference's 2 s.** With `playerDistance`, Smart
+/// Player Distance and Player Shards bodies come and go as the crowd moves, not only as they stream
+/// in, and the owner asked for a quicker appear and teardown (2026-10-18). Our choice, not a
+/// reference value.
+#[cfg(target_arch = "wasm32")]
+pub const APPEAR_FADE_SECS: f32 = 0.6;
 
 impl RenderFade {
     /// A spawn appear-fade armed at `now`: `α = t³` from 0 → 1 over [`APPEAR_FADE_SECS`].

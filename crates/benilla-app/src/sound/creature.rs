@@ -128,7 +128,8 @@ fn play_bark(
 /// unit that streams in dead cries nothing: create edges are suppressed.
 fn death_vocals(
     mut edges: MessageReader<FieldChanged>,
-    units: Query<(&NetEntity, &Transform)>,
+    // wenilla carry: a unit past `playerDistance` or in another shard is not heard.
+    units: Query<(&NetEntity, &Transform), Without<crate::player_distance::BeyondPlayerDistance>>,
     voices: Option<Res<CreatureVoices>>,
     kits: Option<ResMut<SoundKits>>,
     assets: Option<Res<WorldAssets>>,
@@ -180,7 +181,8 @@ fn death_vocals(
 /// a non-player unit. It stores no latch.
 fn ai_reaction_vocals(
     mut reactions: MessageReader<crate::net::AiReactionMessage>,
-    units: Query<(&NetEntity, &Transform, Option<&MountChild>)>,
+    // wenilla carry: a unit past `playerDistance` or in another shard is not heard.
+    units: Query<(&NetEntity, &Transform, Option<&MountChild>), Without<crate::player_distance::BeyondPlayerDistance>>,
     mounts: Query<&NetEntity, With<MountBody>>,
     voices: Option<Res<CreatureVoices>>,
     kits: Option<ResMut<SoundKits>>,
@@ -359,6 +361,9 @@ fn creature_body_loops(
         &ObjectStore,
         &Transform,
         Option<&MountChild>,
+        // wenilla carry: released units fall silent through the stop below, not a filter, so a
+        // loop already running ends when the unit is released.
+        Has<crate::player_distance::BeyondPlayerDistance>,
     )>,
     mounts: Query<&NetEntity, With<MountBody>>,
     // The kit last armed per unit: a mount swap changes it, and the old loop must stop.
@@ -374,7 +379,7 @@ fn creature_body_loops(
         return;
     };
     let listener = listener.pos;
-    for (entity, net, store, transform, mount_child) in &units {
+    for (entity, net, store, transform, mount_child, released) in &units {
         if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
             continue;
         }
@@ -390,7 +395,7 @@ fn creature_body_loops(
         // `0x623800`'s gate: raw health (`0x623817`), absent read as 0 so a unit awaiting its
         // snapshot stays silent, and `UNIT_DYNFLAG_DEAD` (`0x62381e`, re-evaluated at `0x60053c`).
         let alive = store.0.unit_health().unwrap_or(0) > 0 && !store.0.unit_reads_dead();
-        let desired = if alive { kit } else { 0 };
+        let desired = if alive && !released { kit } else { 0 };
         // Stop a superseded loop: death, or a mount swap that changed the row.
         if let Some(&prev) = armed.get(&entity) {
             if prev != desired && source_kit_playing(&out, entity, prev) {
@@ -518,7 +523,8 @@ fn creature_anim_vocals(
 /// (`0x605f30`, `0x602d71`) in the 13-70 yd band.
 fn fall_landing_vocals(
     mut landings: MessageReader<crate::creature_anim::HardLanding>,
-    units: Query<(&NetEntity, &Transform)>,
+    // wenilla carry: a unit past `playerDistance` or in another shard is not heard.
+    units: Query<(&NetEntity, &Transform), Without<crate::player_distance::BeyondPlayerDistance>>,
     voices: Option<Res<CreatureVoices>>,
     kits: Option<ResMut<SoundKits>>,
     assets: Option<Res<WorldAssets>>,

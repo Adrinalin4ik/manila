@@ -20,7 +20,8 @@ const DISMOUNT_KIT: &str = "SpiritWolf (DONOTRENAME)";
 /// stream skips creates, so streaming in unmounted is not a dismount.
 fn dismount_sounds(
     mut edges: MessageReader<FieldChanged>,
-    poses: Query<&Transform>,
+    // wenilla carry: a unit past `playerDistance` or in another shard is not heard.
+    poses: Query<&Transform, Without<crate::player_distance::BeyondPlayerDistance>>,
     kits: Option<ResMut<SoundKits>>,
     assets: Option<Res<WorldAssets>>,
     mut out: NonSendMut<SoundOutput>,

@@ -255,6 +255,151 @@ pub(super) fn heal_rig_starved(
     }
 }
 
+/// Teardowns per frame for players who walked past `playerDistance`, so a crowd falling outside a
+/// lowered wall is released over a few frames, not one.
+const RELEASE_PER_FRAME: usize = 8;
+
+/// The fade-out before a release, seconds: the teardown curve (`FadeCurve::Smoothstep`) the
+/// reference gives an object's leftover model, shortened from its 2 s; the owner asked for it
+/// quicker still (2026-10-18), from 1 s.
+const RELEASE_FADE_SECS: f32 = 0.4;
+
+/// A teardown ramp this long past its end on a part no teardown still owns is a leftover.
+const STALE_FADE_GRACE_SECS: f32 = 0.5;
+
+/// A body fading out ahead of its release, since `Time::elapsed_secs`.
+#[derive(Component)]
+pub(super) struct ReleaseFade(f32);
+
+/// wenilla carry: **fade out and release the model of a player past `playerDistance`** - the display
+/// swap's own teardown (above), without its `Reattached`: coming back in, the body is a fresh attach,
+/// with its appear ramp. A body that comes back inside the wall mid-fade fades back in instead. See
+/// [`crate::player_distance::BeyondPlayerDistance`] for why hiding alone was not enough.
+#[allow(clippy::type_complexity)] // the marker filters
+pub(super) fn release_far_visuals(
+    mut commands: Commands,
+    time: Res<Time>,
+    start: Query<
+        Entity,
+        (
+            With<crate::player_distance::BeyondPlayerDistance>,
+            With<VisualAttached>,
+            Without<ReleaseFade>,
+            Without<benilla_world::model_fade::DespawnFade>,
+        ),
+    >,
+    fading: Query<(Entity, &ReleaseFade, Has<crate::player_distance::BeyondPlayerDistance>)>,
+    children: Query<&Children>,
+    parts: Query<(), With<bevy::mesh::MeshTag>>,
+    // The leftover sweep below: every part still ramping, and the walk up from one.
+    ramping: Query<(Entity, &benilla_world::model_fade::RenderFade), With<bevy::mesh::MeshTag>>,
+    parents: Query<&ChildOf>,
+    owners: Query<(
+        Has<ReleaseFade>,
+        Has<benilla_world::model_fade::DespawnFade>,
+        Has<crate::net::NetEntity>,
+    )>,
+) {
+    let now = time.elapsed_secs();
+    // **A part left at alpha 0 is faded back in.** A teardown ramp (`to` 0) is never removed by
+    // `apply_render_fade` - the part is meant to die with its root - so a part that outlives the
+    // release it was ramped for stays invisible for good. The owner saw a rider on an invisible
+    // mount (2026-10-18) and no path that leaves one was found by reading; this is the backstop,
+    // and its warning says whether it ever fires. Cheap: only parts still carrying a ramp are
+    // walked (an appear ramp removes itself when opaque).
+    let mut healed = 0usize;
+    for (part, fade) in &ramping {
+        if fade.to > 0.0 || now - fade.started < fade.duration + STALE_FADE_GRACE_SECS {
+            continue;
+        }
+        // Owned by a teardown in flight, or by no unit at all (weather, a doodad): not ours.
+        let mut at = part;
+        let mut unit = false;
+        let mut owned = false;
+        for _ in 0..16 {
+            let Ok(child_of) = parents.get(at) else {
+                break;
+            };
+            at = child_of.parent();
+            if let Ok((release, despawn, net)) = owners.get(at) {
+                if release || despawn {
+                    owned = true;
+                    break;
+                }
+                unit |= net;
+            }
+        }
+        if unit && !owned {
+            commands
+                .entity(part)
+                .try_insert(benilla_world::model_fade::RenderFade::appear(now));
+            healed += 1;
+        }
+    }
+    if healed > 0 {
+        warn!("release fade: {healed} parts left at alpha 0 on a live unit, faded back in");
+    }
+    let mut ramp = |root: Entity, fade: benilla_world::model_fade::RenderFade, commands: &mut Commands| {
+        for e in children.iter_descendants(root) {
+            if parts.contains(e) {
+                commands.entity(e).try_insert(fade.clone());
+            }
+        }
+    };
+    for entity in &start {
+        ramp(
+            entity,
+            benilla_world::model_fade::RenderFade {
+                started: now,
+                duration: RELEASE_FADE_SECS,
+                from: 1.0,
+                to: 0.0,
+                curve: benilla_world::model_fade::FadeCurve::Smoothstep,
+            },
+            &mut commands,
+        );
+        commands.entity(entity).insert(ReleaseFade(now));
+    }
+    let mut released = 0;
+    for (entity, fade, beyond) in &fading {
+        if !beyond {
+            // Back inside the wall before the fade ended: fade back in, keep the model.
+            ramp(entity, benilla_world::model_fade::RenderFade::appear(now), &mut commands);
+            commands.entity(entity).remove::<ReleaseFade>();
+            continue;
+        }
+        if now - fade.0 < RELEASE_FADE_SECS || released >= RELEASE_PER_FRAME {
+            continue;
+        }
+        released += 1;
+        commands.entity(entity).remove::<ReleaseFade>();
+        commands
+            .entity(entity)
+            .despawn_related::<Children>()
+            .remove::<(
+                VisualAttached,
+                AppliedDisplay,
+                super::equipment::AppliedEquipment,
+                super::mount::AppliedMount,
+                super::mount::MountChild,
+                AnimationPlayer,
+                bevy::animation::transition::AnimationTransitions,
+                AnimationGraphHandle,
+                benilla_assets::ModelAnimations,
+                crate::creature_anim::AnimDriver,
+                (
+                    benilla_world::rig_anim::RigPose,
+                    crate::creature_anim::BodyTwist,
+                    benilla_world::rig_anim::GlobalSeqDrive,
+                ),
+                benilla_world::rig_palette::RigSkin,
+                super::BoneAttach,
+                super::equipment::HeldAttached,
+                benilla_world::rig_palette::RigStarved,
+            )>();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,153 @@
+<Ui>
+    <!--
+        wenilla carry: the Player Shards selector, and the tooltips of the crowd rows in the
+        options (the owner's request, 2026-10-19). Ours; no reference frame.
+
+        `BenillaShardSelector` sits top centre, shows "Shard 2 / 5" with a step either way, and is
+        shown only while Player Shards is on and we stand in a crowd's shard area
+        (`GetPlayerShardInfo`, pushed by `player_distance.rs`). Always dragged with the left button
+        (the owner dropped the pin, 2026-10-19); a named movable frame, so the layout cache keeps
+        where it was put per character (`ui_layout.rs`). The shard is `playerShard`, saved with the
+        CVars. A hidden frame runs no OnUpdate, so the driver below, always
+        shown and drawing nothing, refreshes it four times a second.
+    -->
+    <Script><![CDATA[
+        local ru = GetLocale and GetLocale() == "ruRU"
+        BENILLA_SHARD_TEXT = ru and {
+            shard = "Шард",
+            title = "Шарды игроков",
+            help = "Стрелки переключают шард, который вы видите в этой толпе. Перетащите рамку левой кнопкой мыши, чтобы переместить её.",
+        } or {
+            shard = "Shard",
+            title = "Player Shards",
+            help = "The arrows switch which shard of this crowd you see. Drag the frame with the left mouse button to move it.",
+        }
+
+        -- The crowd rows' tooltips (`BenillaOptionsRow_ShowTooltip` resolves the names at hover).
+        local tips = ru and {
+            SMART_PLAYER_DISTANCE = "Умная дальность игроков\n\nПоказывает только N ближайших персонажей - игроков и NPC. В толпе граница сама сужается, на пустой улице расширяется до Дальности игроков.\n\nВместе с Шардами игроков считает только тех, кто виден в вашем шарде: если шард большой, убирает из кадра дальних.",
+            SMART_PLAYER_COUNT = "Сколько ближайших персонажей (игроков и NPC) оставляет Умная дальность игроков.",
+            PLAYER_SHARDS = "Шарды игроков\n\nТолпа делится на шарды - слои, лежащие друг на друге в одной области. Вы видите только свой шард, зато на любом расстоянии. Группа, рейд, ваша цель и те, кто целится в вас, видны всегда. На полях боя шардов нет.\n\nМожно включить вместе с Умной дальностью игроков: тогда она прореживает ваш шард, если в нём слишком много людей.",
+            PLAYER_SHARD_CAPACITY = "Сколько игроков вмещает один шард. Больше - больше людей вокруг и выше нагрузка.",
+            PLAYER_SHARD_RADIUS = "Радиус области толпы в ярдах. Область ставится в самую плотную точку толпы и раз в минуту следует за ней.",
+            PLAYER_SHARD_GHOSTS = "Мягкая тень там, где стоит игрок из другого шарда: толпа ощущается, но не рисуется.",
+            PLAYER_SHARD_SWAP = "Замещение\n\nИгрок из другого шарда, простоявший рядом с вами (ближе 8 ярдов) 10 секунд, переходит в ваш шард насовсем, а самый дальний от вас игрок вашего шарда уходит на его место. Размер шарда не меняется.\n\nВыключено: такой игрок виден, только пока стоит рядом.",
+        } or {
+            SMART_PLAYER_DISTANCE = "Smart Player Distance\n\nShows only the N nearest characters - players and NPCs. In a crowd the limit pulls in on its own; in an empty street it widens back to Player Distance.\n\nWith Player Shards on, it counts only those your shard shows: a large shard loses its farthest from the frame.",
+            SMART_PLAYER_COUNT = "How many of the nearest characters (players and NPCs) Smart Player Distance keeps.",
+            PLAYER_SHARDS = "Player Shards\n\nA crowd is split into shards - layers stacked in one area. You see only your shard, but at any distance. Your group, raid, target and anyone targeting you are always shown. Battlegrounds are never sharded.\n\nWorks together with Smart Player Distance, which then thins your shard when it holds too many.",
+            PLAYER_SHARD_CAPACITY = "How many players one shard holds. More means more people around and more load.",
+            PLAYER_SHARD_RADIUS = "The radius of a crowd's area, in yards. The area sits on the crowd's densest point and follows it once a minute.",
+            PLAYER_SHARD_GHOSTS = "A soft shadow where a player of another shard stands: the crowd is felt, not drawn.",
+            PLAYER_SHARD_SWAP = "Shard Replacement\n\nA player of another shard who stands by you (within 8 yards) for 10 seconds joins your shard for good, and the player of your shard farthest from you takes his place. The shard keeps its size.\n\nOff: such a player is shown only while he stays by you.",
+        }
+        for key, text in pairs(tips) do
+            setglobal("BENILLA_TOOLTIP_" .. key, text)
+        end
+
+        function BenillaShardSelector_Refresh()
+            local f = BenillaShardSelector
+            local on, inArea, shard, count = GetPlayerShardInfo()
+            if not (on and inArea) then
+                if f:IsShown() then f:Hide() end
+                return
+            end
+            if not f:IsShown() then f:Show() end
+            BenillaShardSelectorText:SetText(BENILLA_SHARD_TEXT.shard .. "  |cffffffff" .. shard .. " / " .. count .. "|r")
+            if count > 1 then
+                BenillaShardSelectorPrev:Enable()
+                BenillaShardSelectorNext:Enable()
+            else
+                BenillaShardSelectorPrev:Disable()
+                BenillaShardSelectorNext:Disable()
+            end
+        end
+
+        -- One step through this area's shards, wrapping; the area takes `playerShard` modulo its
+        -- count, so the wrapped index is the one written.
+        function BenillaShardSelector_Step(delta)
+            local on, inArea, shard, count = GetPlayerShardInfo()
+            if not (on and inArea) or count < 2 then return end
+            local n = shard - 1 + delta
+            if n < 0 then n = count - 1 elseif n >= count then n = 0 end
+            SetCVar("playerShard", tostring(n))
+            BenillaShardSelector_Refresh()
+        end
+
+        function BenillaShardSelector_ShowTooltip(owner)
+            GameTooltip:SetOwner(owner, "ANCHOR_BOTTOM")
+            GameTooltip:SetText(BENILLA_SHARD_TEXT.title)
+            GameTooltip:AddLine(BENILLA_SHARD_TEXT.help, 1, 1, 1, 1)
+            GameTooltip:Show()
+        end
+    ]]></Script>
+
+    <Button name="BenillaShardSelectorArrowTemplate" virtual="true">
+        <Size><AbsDimension x="26" y="26"/></Size>
+        <HighlightTexture file="Interface\Buttons\UI-Common-MouseHilight" alphaMode="ADD"/>
+        <Scripts>
+            <OnEnter>BenillaShardSelector_ShowTooltip(this:GetParent())</OnEnter>
+            <OnLeave>GameTooltip:Hide()</OnLeave>
+        </Scripts>
+    </Button>
+
+    <Frame name="BenillaShardSelector" parent="UIParent" frameStrata="MEDIUM" movable="true" enableMouse="true" clampedToScreen="true" hidden="true">
+        <Size><AbsDimension x="164" y="38"/></Size>
+        <Anchors>
+            <Anchor point="TOP"><Offset><AbsDimension x="0" y="-56"/></Offset></Anchor>
+        </Anchors>
+        <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
+            <EdgeSize><AbsValue val="16"/></EdgeSize>
+            <TileSize><AbsValue val="16"/></TileSize>
+            <BackgroundInsets><AbsInset left="4" right="4" top="4" bottom="4"/></BackgroundInsets>
+        </Backdrop>
+        <Layers>
+            <Layer level="OVERLAY">
+                <FontString name="$parentText" inherits="GameFontNormal">
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button name="$parentPrev" inherits="BenillaShardSelectorArrowTemplate">
+                <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Down"/>
+                <DisabledTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Disabled"/>
+                <Scripts><OnClick>BenillaShardSelector_Step(-1)</OnClick></Scripts>
+            </Button>
+            <Button name="$parentNext" inherits="BenillaShardSelectorArrowTemplate">
+                <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Down"/>
+                <DisabledTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Disabled"/>
+                <Scripts><OnClick>BenillaShardSelector_Step(1)</OnClick></Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>
+                this:SetBackdropColor(0.05, 0.05, 0.08, 0.85)
+                this:SetBackdropBorderColor(0.85, 0.7, 0.3)
+                this:RegisterForDrag("LeftButton")
+            </OnLoad>
+            <OnDragStart>this:StartMoving()</OnDragStart>
+            <OnDragStop>this:StopMovingOrSizing()</OnDragStop>
+            <OnEnter>BenillaShardSelector_ShowTooltip(this)</OnEnter>
+            <OnLeave>GameTooltip:Hide()</OnLeave>
+        </Scripts>
+    </Frame>
+
+    <!-- Always shown, draws nothing: the selector's refresh tick. -->
+    <Frame name="BenillaShardSelectorDriver" parent="UIParent">
+        <Size><AbsDimension x="1" y="1"/></Size>
+        <Anchors><Anchor point="TOPLEFT"/></Anchors>
+        <Scripts>
+            <OnUpdate>
+                this.wait = (this.wait or 0) - arg1
+                if this.wait > 0 then return end
+                this.wait = 0.25
+                BenillaShardSelector_Refresh()
+            </OnUpdate>
+        </Scripts>
+    </Frame>
+</Ui>
