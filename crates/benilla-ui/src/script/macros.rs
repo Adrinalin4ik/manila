@@ -417,18 +417,22 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 a.first().cloned().unwrap_or(Value::Nil),
                 "Usage: CreateMacro(name, iconIndex, body, local, perCharacter)",
             )?;
-            let icon = lua
-                .coerce_number(a.get(1).cloned().unwrap_or(Value::Nil))?
-                .ok_or_else(usage)?;
+            let icon = lua.coerce_number(a.get(1).cloned().unwrap_or(Value::Nil))?;
+            let named = icon.is_none().then(|| icon_by_name(a.get(1))).flatten();
+            if icon.is_none() && named.is_none() {
+                return Err(usage());
+            }
             if name.is_empty() {
                 return Err(mlua::Error::RuntimeError(
                     "CreateMacro() failed, no name specified".into(),
                 ));
             }
-            ensure_macro_icons(lua);
+            if icon.is_some() {
+                ensure_macro_icons(lua);
+            }
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             // `0x4f1632`, `0x4f163c`.
-            let texture = icon_at(&model, icon);
+            let texture = named.or_else(|| icon.and_then(|n| icon_at(&model, n)));
             let body = a
                 .get(2)
                 .and_then(|v| super::binding_abi::optional_string(lua, v))
@@ -462,7 +466,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             }
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             // `0x4f1966`-`0x4f1983`: a miss leaves the pointer null, and the macro its old icon.
-            let texture = icon.and_then(|n| icon_at(&model, n));
+            let texture = icon
+                .and_then(|n| icon_at(&model, n))
+                .or_else(|| icon.is_none().then(|| icon_by_name(a.get(2))).flatten());
             let name = opt_string(a.get(1));
             let body = opt_string(a.get(3));
             let local_only = flag(a.get(4));
@@ -504,6 +510,29 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 fn icon_at(model: &Model, n: f64) -> Option<String> {
     let i = (super::binding_abi::ftol(n) as u32).wrapping_sub(1);
     model.macro_icons.get(i as usize).cloned()
+}
+
+/// wenilla carry: an icon given by FILE NAME rather than chooser number. Not 1.12.1, whose
+/// `CreateMacro`/`EditMacro` take only a number; but the Capybara client's own
+/// `Blizzard_MacroUI.lua` (the later macro UI, with a search box and spellbook icons) passes
+/// `MACRO_ICON_FILENAMES[i]`, a bare upper-case name such as `INV_MISC_QUESTIONMARK`
+/// (`MacroPopupOkayButton_OnClick`, its line 378), having stripped `INTERFACE\ICONS\` to build
+/// that list. A non-empty string that is no number is that name, under `Interface\Icons\` unless
+/// it already carries a folder; anything else is no name, so 1.12.1's numeric path and refusals
+/// stand for every other caller.
+fn icon_by_name(v: Option<&Value>) -> Option<String> {
+    let Some(Value::String(s)) = v else {
+        return None;
+    };
+    let name = s.to_str().ok()?.trim().to_string();
+    if name.is_empty() || name.parse::<f64>().is_ok() {
+        return None;
+    }
+    Some(if name.contains('\\') {
+        name
+    } else {
+        format!("Interface\\Icons\\{name}")
+    })
 }
 
 #[cfg(test)]
@@ -625,12 +654,14 @@ mod tests {
             1
         );
         s.run("DeleteMacro(1)").unwrap();
-        // A non-string name, a non-numeric icon and a missing icon raise the usage text.
+        // A non-string name, a non-numeric icon and a missing icon raise the usage text. (A
+        // non-numeric STRING icon is a file name here, `icon_by_name`, the wenilla carry; a table
+        // stands for the non-number.)
         for call in [
             "CreateMacro()",
             "CreateMacro({}, 1)",
             "CreateMacro('a')",
-            "CreateMacro('a', 'x')",
+            "CreateMacro('a', {})",
             "CreateMacro('a', nil, 'b')",
         ] {
             assert!(
@@ -768,8 +799,9 @@ mod tests {
     }
 
     /// `EditMacro` reads its icon through `lua_isnumber` (`0x4f1945`) and truncates it
-    /// (`0x4f195a`); a string that is no number, or a number off the list, keeps the old icon
-    /// (`0x4f1983`, `0x4f12f0`).
+    /// (`0x4f195a`); a number off the list keeps the old icon (`0x4f1983`, `0x4f12f0`). In 1.12.1 a
+    /// string that is no number keeps it too; here it names the icon file (`icon_by_name`, the
+    /// wenilla carry).
     #[test]
     fn edit_macro_reads_its_icon_as_a_number_and_keeps_the_old_one_on_a_miss() {
         let s = seeded();
@@ -779,7 +811,6 @@ mod tests {
                 .unwrap()
         };
         for kept in [
-            r#"EditMacro(1, nil, "Interface\\Icons\\Spell_Fire_FlameBolt")"#,
             "EditMacro(1, nil, 0)",
             "EditMacro(1, nil, -1)",
             "EditMacro(1, nil, 4)",
@@ -793,6 +824,10 @@ mod tests {
                 "{kept} keeps the icon"
             );
         }
+        // wenilla carry (`icon_by_name`): a string that is no number names the icon file.
+        s.run(r#"EditMacro(1, nil, "Interface\\Icons\\Spell_Fire_FlameBolt")"#)
+            .unwrap();
+        assert_eq!(icon(&s), "Interface\\Icons\\Spell_Fire_FlameBolt");
         s.run(r#"EditMacro(1, nil, "3")"#).unwrap();
         assert_eq!(
             icon(&s),
@@ -870,7 +905,7 @@ mod tests {
     #[test]
     fn create_macro_builds_the_list_only_past_its_checks() {
         let (s, runs) = lazily_listed(TWO_ICONS);
-        assert!(s.run("CreateMacro('a', 'x')").is_err());
+        assert!(s.run("CreateMacro('a', {})").is_err());
         assert!(s.run("CreateMacro('', 1)").is_err());
         assert_eq!(runs.get(), 0, "a refused call lists nothing");
         s.run("CreateMacro('a', 2, '/say hi')").unwrap();
@@ -879,6 +914,14 @@ mod tests {
             s.eval::<String>("local _, t = GetMacroInfo(1) return t")
                 .unwrap(),
             "Interface\\Icons\\Ability_BackStab"
+        );
+        // wenilla carry: the Capybara macro UI names its icon by file, and lists nothing for it.
+        s.run("CreateMacro('b', 'INV_MISC_QUESTIONMARK')").unwrap();
+        assert_eq!(runs.get(), 1);
+        assert_eq!(
+            s.eval::<String>("local _, t = GetMacroInfo(2) return t")
+                .unwrap(),
+            "Interface\\Icons\\INV_MISC_QUESTIONMARK"
         );
     }
 
