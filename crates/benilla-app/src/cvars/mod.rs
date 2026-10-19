@@ -1156,12 +1156,20 @@ pub(crate) fn apply_lighting_preset(cvars: &mut Cvars, name: &str) -> bool {
 /// Derive after all ordered writes, before the mirror/observer flush. File loading bypasses
 /// `set`, so saved members remain authoritative even when the saved preset name disagrees.
 fn lighting_quality(cvars: &mut Cvars) {
+    // MONKEY (presets): the labels are derived, never the player's change, so their mirror leaves
+    // `dirty` as it found it. A member row's own write has already dirtied the registry by the
+    // time the label follows (no save runs between), so a real change still saves the label;
+    // what this stops is a boot whose rows were never seeded (a malformed `config.toml`, a
+    // capture) re-labelling itself and saving over that file with no change at all
+    // (`the_old_saved_account_file_outlives_a_failed_save`).
+    let was_dirty = cvars.dirty;
     let derived = derive_lighting_quality(cvars);
     // A derived label is a mirror, never another request to apply a preset.
     cvars.mirror("lightingQuality", derived);
     // MONKEY (presets): after the lighting label, which the graphics ladder reads as a member.
     let graphics = derive_graphics_quality(cvars);
     cvars.mirror("graphicsQuality", graphics);
+    cvars.dirty = was_dirty;
 }
 
 // ─── MONKEY (presets): the Graphics Preset ladder ─────────────────────────────────────────────

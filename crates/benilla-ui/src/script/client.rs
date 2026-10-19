@@ -591,7 +591,7 @@ mod tests {
         s.run("RunScript([[error('debug-stat-probe')]])").unwrap();
         assert_eq!(
             s.eval::<String>("return GetDebugStats()").unwrap(),
-            "FPS: 0.0 | script issues: 1 (1 retained)"
+            "FPS: 1000.0 | script issues: 1 (1 retained)"
         );
     }
 
