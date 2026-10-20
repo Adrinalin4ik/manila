@@ -777,12 +777,20 @@ pub(crate) struct GameTime {
     received: Instant,
 }
 
+/// The slowest game-time speed the clock takes, the `f32` 1/60 at `0x80e45c`.
+const MIN_TIMESCALE: f32 = 1.0 / 60.0;
+/// The fastest, 60.0 at `0x80e448`.
+const MAX_TIMESCALE: f32 = 60.0;
+
 impl GameTime {
+    /// The clock at `hours:minutes`, its speed held to [`MIN_TIMESCALE`]..[`MAX_TIMESCALE`] as
+    /// `0x643820` stores it, a NaN passing both compares unchanged.
     pub(crate) fn new(hours: u8, minutes: u8, day_serial: u32, timescale: f32) -> Self {
         Self {
             base_minute: hours as u32 * 60 + minutes as u32,
             base_day: day_serial,
-            timescale,
+            // `clamp` passes a NaN through, as the two compares do.
+            timescale: timescale.clamp(MIN_TIMESCALE, MAX_TIMESCALE),
             received: Instant::now(),
         }
     }
@@ -2474,6 +2482,23 @@ pub(crate) struct PetDismissSoundMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `0x643820` stores the speed clamped to `[1/60, 60]`, the bounds the `f32`s `0x80e45c`
+    /// (`0x3c888889`) and `0x80e448` (60.0); a NaN passes both compares and is stored as it is.
+    #[test]
+    fn the_game_time_speed_is_held_to_a_sixtieth_to_sixty() {
+        let speed = |s: f32| GameTime::new(12, 0, 0, s).timescale;
+        let sixtieth = f32::from_bits(0x3c88_8889);
+        assert_eq!(speed(0.0), sixtieth);
+        assert_eq!(speed(-5.0), sixtieth);
+        assert_eq!(speed(f32::NEG_INFINITY), sixtieth);
+        assert_eq!(speed(1.0 / 60.0), sixtieth);
+        assert_eq!(speed(0.5), 0.5);
+        assert_eq!(speed(60.0), 60.0);
+        assert_eq!(speed(60.5), 60.0);
+        assert_eq!(speed(f32::INFINITY), 60.0);
+        assert!(speed(f32::NAN).is_nan());
+    }
 
     /// The write's edges: one per moved dword, none for a first create; a re-create replaces the
     /// store, clearing what it omits (`0x466582`).

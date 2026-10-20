@@ -1,4 +1,5 @@
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::TcpStream;
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 use benilla_srp::vanilla_header::{HeaderCrypto, ProofSeed};
@@ -9,9 +10,13 @@ use crate::messages::{self, opcode, Character, MoveMode, ServerPacket};
 use super::movement::{client_uptime_ms, movement_info, MOVEMENT_FLAG_FORWARD};
 use super::reader::WorldReader;
 use super::writer::WorldWriter;
-use super::{recv_packet, send_packet};
+use super::{recv_packet, send_packet, LinkTraffic};
 
-/// Read timeout through `player_login`, where each step awaits one reply.
+/// Read timeout through `player_login`, where each step awaits one reply. Deviation: 10 s of
+/// silence ends the wait, where the reference has no timer and waits for the reply, a disconnect
+/// or the player's Cancel (`0x46b720`; its connect reports only success or a socket error,
+/// `0x5b60c6`-`0x5b61ac`), because each wait here is a blocking read on the net thread, which a
+/// server that stays connected and never answers would hold for good.
 const HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Read timeout in the login queue, where updates can be minutes apart. Deviation: the reference
@@ -42,6 +47,8 @@ pub struct WorldSession {
     stream: TcpStream,
     crypto: HeaderCrypto,
     link: LinkFacts,
+    /// The bytes this connection carried, shared with both halves of a split.
+    traffic: Arc<LinkTraffic>,
     /// The language chat sends speak, the character's faction tongue: vmangos drops chat, even
     /// dot-commands, in a language the character does not know.
     chat_language: u32,
@@ -80,13 +87,14 @@ pub enum WorldConnectEvent {
 }
 
 impl WorldSession {
-    /// Connect and complete the auth handshake with the logon's account and session key.
+    /// Connect to a realm's world `address` (`host[:port]`, port 9090 when it names none) and
+    /// complete the auth handshake with the logon's account and session key.
     pub fn connect(
-        addr: impl ToSocketAddrs,
+        address: &str,
         username: &str,
         session_key: [u8; SESSION_KEY_LENGTH],
     ) -> Result<Self> {
-        Self::connect_queued(addr, username, session_key, &mut |_| true)
+        Self::connect_queued(address, username, session_key, &mut |_| true)
     }
 
     /// [`Self::connect`], calling `on_event` once the socket connects and with each queue position;
@@ -94,13 +102,15 @@ impl WorldSession {
     /// Deviation: checked per queue packet where the reference checks each tick, so a cancel can
     /// lag one server update.
     pub fn connect_queued(
-        addr: impl ToSocketAddrs,
+        address: &str,
         username: &str,
         session_key: [u8; SESSION_KEY_LENGTH],
         on_event: &mut dyn FnMut(WorldConnectEvent) -> bool,
     ) -> Result<Self> {
         let mut queued = false;
-        let mut stream = TcpStream::connect(addr).context("connecting to world server")?;
+        let mut stream = crate::dial_world(address).context("connecting to world server")?;
+        // The connect hook's reset (`0x537b90`): the counts start at zero and the clock now.
+        let traffic = Arc::new(LinkTraffic::new());
         if !on_event(WorldConnectEvent::Connected) {
             bail!("world connect abandoned");
         }
@@ -113,7 +123,7 @@ impl WorldSession {
             .set_read_timeout(Some(HANDSHAKE_READ_TIMEOUT))
             .context("setting handshake read timeout")?;
 
-        let server_seed = match recv_packet(&mut stream, None)? {
+        let server_seed = match recv_packet(&mut stream, None, &traffic)? {
             ServerPacket::AuthChallenge { server_seed } => server_seed,
             other => bail!("expected SMSG_AUTH_CHALLENGE, got {}", other.name()),
         };
@@ -134,13 +144,20 @@ impl WorldSession {
             &client_proof,
             &messages::STOCK_SECURE_ADDONS,
         );
-        send_packet(&mut stream, None, opcode::CMSG_AUTH_SESSION, &body)
-            .context("sending CMSG_AUTH_SESSION")?;
+        send_packet(
+            &mut stream,
+            None,
+            &traffic,
+            opcode::CMSG_AUTH_SESSION,
+            &body,
+        )
+        .context("sending CMSG_AUTH_SESSION")?;
 
         let mut session = WorldSession {
             stream,
             crypto,
             link: LinkFacts::default(),
+            traffic,
             chat_language: messages::LANGUAGE_COMMON,
             tutorial_flags: None,
         };
@@ -192,6 +209,11 @@ impl WorldSession {
         Ok(session)
     }
 
+    /// The bytes this connection has carried each way since it connected, for `GetNetStats`.
+    pub fn traffic(&self) -> Arc<LinkTraffic> {
+        Arc::clone(&self.traffic)
+    }
+
     /// The connection's billing group; vmangos sends no time and no rest (`World.cpp:327-331`).
     pub fn billing(&self) -> messages::Billing {
         self.link.billing
@@ -211,7 +233,11 @@ impl WorldSession {
 
     /// Read + decrypt + parse one server packet.
     pub fn recv(&mut self) -> Result<ServerPacket> {
-        let packet = recv_packet(&mut self.stream, Some(self.crypto.decrypter()))?;
+        let packet = recv_packet(
+            &mut self.stream,
+            Some(self.crypto.decrypter()),
+            &self.traffic,
+        )?;
         // `SMSG_ADDON_INFO` can reach any of the handshake's read loops, so it is caught here.
         match &packet {
             ServerPacket::AddonInfo { records } => self.link.addon_info = Some(records.clone()),
@@ -258,6 +284,7 @@ impl WorldSession {
         send_packet(
             &mut self.stream,
             Some(self.crypto.encrypter()),
+            &self.traffic,
             opcode,
             body,
         )
@@ -859,11 +886,13 @@ impl WorldSession {
                 stream: read_stream,
                 decrypter,
                 link: self.link,
+                traffic: Arc::clone(&self.traffic),
             },
             WorldWriter {
                 stream: self.stream,
                 encrypter,
                 chat_language: self.chat_language,
+                traffic: self.traffic,
             },
         ))
     }
@@ -882,6 +911,7 @@ impl WorldSession {
             stream: writer.stream,
             crypto: HeaderCrypto::join(writer.encrypter, decrypter),
             link,
+            traffic: writer.traffic,
             chat_language: writer.chat_language,
             tutorial_flags: None,
         };

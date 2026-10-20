@@ -450,8 +450,9 @@ pub(crate) struct Model {
     /// `GetTime()`'s session seconds, which only the host moves ([`super::UiScript::tick`],
     /// [`super::UiScript::set_now`]); off `_G`, as the reference's clock is the OS tick count.
     pub(crate) now: f64,
-    /// `GetGameTime()`'s `(hour, minute)`, pushed by the host as the game clock ticks.
-    pub(crate) game_time: (u32, u32),
+    /// `GetGameTime()`'s `(hour, minute)`, pushed by the host as the game clock ticks; `None`
+    /// until the server sets it.
+    pub(crate) game_time: Option<(u32, u32)>,
     /// The zone caches the four zone-text getters and `GetZonePVPInfo` read.
     pub(crate) zone: super::ZoneTexts,
     /// The current map's `Map.dbc` `InstanceType`, all `IsInInstance()` reads; `None` for no row.
@@ -1134,6 +1135,8 @@ pub(crate) struct Model {
 
     /// `GetNetStats`'s third return, the average round trip in ms; 0 before any sample.
     pub(crate) net_latency_ms: u32,
+    /// `GetNetStats`'s first two returns, the KB/s received and sent since the link connected.
+    pub(crate) net_bandwidth_kbps: (f32, f32),
 
     /// `UnitXP("player")` and `UnitXPMax("player")`, from the private `PLAYER_XP` fields.
     pub(crate) player_xp: u32,
@@ -1552,7 +1555,7 @@ impl Model {
             saved_instances: Vec::new(),
             raid_selection: 0,
             now: 0.0,
-            game_time: (0, 0),
+            game_time: None,
             zone: Default::default(),
             instance_type: None,
             can_reset_instances: false,
@@ -1897,6 +1900,7 @@ impl Model {
             modifiers: (false, false, false),
             money: 0,
             net_latency_ms: 0,
+            net_bandwidth_kbps: (0.0, 0.0),
             player_xp: 0,
             player_next_level_xp: 0,
             combo_points: 0,

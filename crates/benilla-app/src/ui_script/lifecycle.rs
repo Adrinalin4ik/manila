@@ -141,6 +141,7 @@ fn new_vm<E: std::fmt::Display>(
     // `[0x882730]`, `Wow.ini`'s `Region`, read once alike and handed to the name check.
     script.set_client_region(super::client_region());
     seed_vm_clock(world, &mut script);
+    seed_game_time(world, &mut script);
     // The reference seeds `rand` with the clock before `WinMain` (`0x5b800b`). Deviation: a
     // capture run (`scenario_active`) keeps the CRT's default seed, 1, so its frames reproduce.
     if crate::run_mode::scenario_active() {
@@ -169,6 +170,20 @@ fn seed_vm_clock(world: &mut World, script: &mut UiScript) {
             anchor,
             ui_now: now,
         };
+    }
+}
+
+/// Start the new VM's `GetGameTime()` at the game clock as it stands: the reference's clock is one
+/// object (`0xce8538`) built at start-up with every field -1 (`0x643300`, `0x642300`) and reset
+/// by no logout or `ReloadUI`, so a VM answers -1, -1 before any server time and the last known
+/// time after it, from the first line its addons run.
+fn seed_game_time(world: &World, script: &mut UiScript) {
+    let clock = world
+        .get_resource::<crate::net::ServerTime>()
+        .and_then(|time| time.0);
+    if let Some(clock) = clock {
+        let minute = clock.minute_of_day();
+        script.set_game_time(minute / 60, minute % 60);
     }
 }
 
@@ -1196,6 +1211,36 @@ mod tests {
             assert_eq!(answer, want.name());
             assert_eq!(script.client_region(), super::super::client_region());
         }
+    }
+
+    /// The game clock is one object built at start-up with every field -1 (`0x643300`, `0x642300`)
+    /// that no logout or `ReloadUI` resets, and `GetGameTime` reads it unguarded (`0x515ee0`), so a
+    /// VM answers -1, -1 before any server time and the last known time after it, from the first
+    /// line its addons run.
+    #[test]
+    fn a_new_vm_answers_the_game_clock_as_it_stands() {
+        let mut world = World::new();
+        let answer = |world: &mut World| {
+            new_vm(world, UiScript::new)
+                .expect("a VM")
+                .eval::<(f64, f64)>("return GetGameTime()")
+                .unwrap()
+        };
+        assert_eq!(answer(&mut world), (-1.0, -1.0), "no clock resource");
+        world.init_resource::<crate::net::ServerTime>();
+        assert_eq!(answer(&mut world), (-1.0, -1.0), "no server time yet");
+        world.insert_resource(crate::net::ServerTime(Some(crate::net::GameTime::new(
+            13,
+            45,
+            0,
+            1.0 / 60.0,
+        ))));
+        assert_eq!(answer(&mut world), (13.0, 45.0));
+        let glue = new_vm(&mut world, UiScript::new_glue).expect("a glue VM");
+        assert_eq!(
+            glue.eval::<(f64, f64)>("return GetGameTime()").unwrap(),
+            (13.0, 45.0)
+        );
     }
 
     /// `[0xcf4d24]` has one writer, `SetEuropeanNumbers` (`0x771c40`), and nothing resets it, so
