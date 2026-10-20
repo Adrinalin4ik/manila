@@ -648,15 +648,13 @@ pub(crate) struct Model {
     pub(crate) macro_icon_source: Option<MacroIconSource>,
     /// `ToggleSpellAutocast` ids for `CMSG_PET_SPELL_AUTOCAST` (`0x2F3`), which names a spell.
     pub(crate) pet_spell_autocasts: Vec<u32>,
-    /// An auto-repeat or cast that `SpellStopCasting()` can stop, not a channel (`0x6e6e80`). Its
-    /// 1 or nil matters: the ESC chain (`UIParent.lua:1489`) reaches `CloseAllWindows()` on nil.
-    pub(crate) casting: bool,
+    /// The player's cast state, which `IsCurrentAction`, `IsAutoRepeatAction` and
+    /// `SpellStopCasting()` (`0x6e6e80`) read: the last's 1 or nil matters, as the ESC chain
+    /// (`UIParent.lua:1489`) reaches `CloseAllWindows()` on nil.
+    pub(crate) cast_view: super::action::CastView,
     /// Spell targeting is on (`SpellIsTargeting`, `0x6e6cd0`); it gates `SpellStopTargeting()`,
     /// whose nil the ESC chain falls through on (`UIParent.lua:1490`).
     pub(crate) spell_targeting: bool,
-    /// The spell awaiting its target as the host last told this VM (`0x6e48e0`), so the host's
-    /// pushes signal `CURRENT_SPELL_CAST_CHANGED` once per change, whichever push sees it.
-    pub(crate) targeting_spell: Option<u32>,
     /// The units, by guid, for which `SpellCanTargetUnit`'s armed unit word clears fully, which
     /// stock unit frames ask before they call `SpellTargetUnit`; a token resolves to its guid
     /// through [`Self::unit_guids`].
@@ -1312,6 +1310,23 @@ pub(crate) struct Model {
 }
 
 impl Model {
+    /// The profession windows open (`[0xbde040]`, `[0xbdcfb8]`): the trade skill's line and the
+    /// craft's type while each window is open, which a close zeroes (`0x4fc870`, `0x4f5fe0`).
+    pub(crate) fn open_professions(&self) -> super::OpenProfessions {
+        super::OpenProfessions {
+            trade_skill: self
+                .trade_skill
+                .as_ref()
+                .filter(|_| self.trade_skill_open)
+                .map(|t| t.line),
+            craft: self
+                .craft
+                .as_ref()
+                .filter(|_| self.craft_open)
+                .map(|c| c.craft_type),
+        }
+    }
+
     /// The charsets the character name check holds a name to: this client's `Region` and locale.
     pub(crate) fn name_charsets(&self) -> super::NameCharsets {
         super::NameCharsets::for_client(self.client_region, self.locale)
@@ -1620,9 +1635,8 @@ impl Model {
             macro_icons: Vec::new(),
             macro_icon_source: None,
             pet_spell_autocasts: Vec::new(),
-            casting: false,
+            cast_view: Default::default(),
             spell_targeting: false,
-            targeting_spell: None,
             spell_targetable_units: HashSet::new(),
             talents: super::talent::TalentUiState::default(),
             talent_learns: Vec::new(),

@@ -94,7 +94,8 @@ pub(crate) enum CastWireTarget {
     Targeting(u16),
     /// Do not send; show this client error.
     Refused(u8),
-    /// A refusal the reference raises in its cast tail after `ArmCast` returns false (`0x6e5045`).
+    /// A refusal the reference raises in its cast tail after `ArmCast` returns false (`0x6e5045`):
+    /// the empty weapon hand's (`0x6e504b`) and the standing enemy word's (`0x6e507b`).
     /// That tail runs after the requirement validator `0x6094f0`, so it fires at the cursor-entry
     /// point in [`super::send_spell_cast`], not at the resolver's return.
     RefusedAtArm(u8),
@@ -308,11 +309,25 @@ pub(crate) struct CastTargeting<'w, 's> {
 impl CastTargeting<'_, '_> {
     /// This frame's [`CastContext`].
     pub(crate) fn context(&self) -> CastContext<'_> {
-        let target_store = self.selection.target.and_then(|e| self.stores.get(e).ok());
+        self.context_on(self.selection.target, self.selection.guid)
+    }
+
+    /// The context for an attempt passed a unit's guid (`0x6e4b60`'s last argument, as
+    /// `InteractWithSpell 0x5f05e0` passes the body's): the range test (`0x6e4f26` → `0x6e4440`)
+    /// and the arm's candidate (`0x6e5393`) take it in the selection's place. The arm's refusal of
+    /// an enemy word with nothing bound picks its line off the selection itself (`0x6e50a3`), which
+    /// this context no longer holds; Skinning's word (`Targets` 0x402, implicit target 25) has no
+    /// enemy bit.
+    pub(crate) fn context_at(&self, entity: Entity, guid: u64) -> CastContext<'_> {
+        self.context_on(Some(entity), Some(guid))
+    }
+
+    fn context_on(&self, target: Option<Entity>, guid: Option<u64>) -> CastContext<'_> {
+        let target_store = target.and_then(|e| self.stores.get(e).ok());
         let owner_store = |store| owner_store(store, self.index.as_deref(), &self.stores);
         let self_store = self.self_store.iter().next();
         CastContext {
-            selection_guid: self.selection.guid,
+            selection_guid: guid,
             self_guid: self.self_guid.0,
             auto_self_cast: self.auto_self_cast.0,
             rel: TargetRelations {
@@ -328,20 +343,18 @@ impl CastTargeting<'_, '_> {
                 },
                 group: GroupInputs {
                     self_guid: self.self_guid.0,
-                    target_guid: self.selection.guid,
+                    target_guid: guid,
                     self_owner_store: owner_store(self_store),
                     roster: self.roster.as_deref(),
                 },
             },
             range: RangeInputs {
                 self_pos: self.self_transform.iter().next().map(|t| t.translation),
-                target_pos: self
-                    .selection
-                    .target
+                target_pos: target
                     .and_then(|e| self.transforms.get(e).ok())
                     .map(|t| t.translation),
                 caster: self.range_units.caster(),
-                target: self.selection.target.and_then(|e| self.range_units.unit(e)),
+                target: target.and_then(|e| self.range_units.unit(e)),
             },
             main_hand_item: self
                 .self_store
@@ -529,10 +542,11 @@ pub(crate) fn resolve_cast_target(
             }
         }
     }
-    // A standing enemy word refuses locally. Every other residual unit word proceeds to
-    // `BindTarget`'s hand cursor.
+    // A standing enemy word is refused by the attempt's tail once the arm returns false
+    // (`0x6e507b`-`0x6e50a9`): "Invalid target" with a selection, else "You have no target", with
+    // the spell in flight. Every other residual unit word proceeds to `BindTarget`'s hand cursor.
     if word & TF_UNIT_ENEMY != 0 {
-        CastWireTarget::Refused(if cand.selection.is_some() {
+        CastWireTarget::RefusedAtArm(if cand.selection.is_some() {
             ERR_INVALID_TARGET
         } else {
             ERR_NO_TARGET
@@ -628,8 +642,8 @@ mod tests {
         let fireball = spell(0, 6);
         assert_eq!(
             resolve_cast_target(Some(&fireball), &cands(None, Some(1)), true, &rel),
-            CastWireTarget::Refused(ERR_NO_TARGET),
-            "enemy words retain the no-target refusal"
+            CastWireTarget::RefusedAtArm(ERR_NO_TARGET),
+            "enemy words retain the no-target refusal, the arm's"
         );
         // Neutral (3) is attackable by the mixed arm's `< 4` and not assistable by `>= 4`.
         assert_eq!(
@@ -659,7 +673,7 @@ mod tests {
         // A hostile-required cast never self-binds.
         assert_eq!(
             resolve_cast_target(Some(&fireball), &cands(None, Some(1)), false, &rel),
-            CastWireTarget::Refused(ERR_NO_TARGET)
+            CastWireTarget::RefusedAtArm(ERR_NO_TARGET)
         );
         // Unknown spell: the selection passes through.
         assert_eq!(
