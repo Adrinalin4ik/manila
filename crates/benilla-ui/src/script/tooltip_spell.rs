@@ -58,6 +58,10 @@ pub struct SpellTooltipView {
     pub requires_form: Option<String>,
     /// The current shapeshift form matches the mask; the app re-pushes on a form change.
     pub form_met: bool,
+    /// wenilla carry: "Tools: Earth Totem" (`SPELL_TOTEMS`, the two `Totem` columns), written
+    /// like the reagents, a missing tool behind the inline `|cffff2020` escape. Shaman addons read
+    /// the totem's element off it: CallOfElements builds its whole totem bar from this line.
+    pub totems: Option<String>,
     /// "Reagents: Light Feather" (`SPELL_REAGENTS 0x854e54` and the eight reagent slots); the app
     /// writes a missing reagent's inline `|cffff2020` escape.
     pub reagents: Option<String>,
@@ -438,8 +442,10 @@ fn render_spell(
             let color = if v.form_met { WHITE } else { RED };
             append_line(lua, this, (req.clone(), color), None, false)?;
         }
-        // Reagents, white and wrapped, unless altCaster drops them; the totem line it also drops
-        // is not built.
+        // The tools then the reagents, white and wrapped, both dropped under altCaster.
+        if let Some(totems) = v.totems.as_ref().filter(|_| !alt_caster) {
+            append_line(lua, this, (totems.clone(), WHITE), None, true)?;
+        }
         if let Some(reagents) = v.reagents.as_ref().filter(|_| !alt_caster) {
             append_line(lua, this, (reagents.clone(), WHITE), None, true)?;
         }

@@ -357,6 +357,35 @@ pub(super) fn build_view(
         }
         (!parts.is_empty()).then(|| format!("Reagents: {}", parts.join(", ")))
     };
+    // wenilla carry: the tools line (`SPELL_TOTEMS`, "Tools: %s"), built as the reagents are, a
+    // missing tool red: the reference prints it for a totem and shaman addons read the element
+    // off it (CallOfElements' totem scan reads `TextLeft4`).
+    let totems = {
+        let mut parts: Vec<String> = Vec::new();
+        for entry in d.totems.iter().copied().filter(|&e| e != 0) {
+            deps.borrow_mut().reagent(entry);
+            let Some(name) = vctx
+                .items
+                .template(entry, 0, Ask::Event(vctx.commands))
+                .map(|t| t.name.clone())
+            else {
+                continue;
+            };
+            let short = vctx.store.is_some_and(|s| {
+                find_item(&s.0, vctx.objects, entry, ItemSearch::default()).is_none()
+            });
+            parts.push(if short {
+                format!("|cffff2020{name}|r")
+            } else {
+                name
+            });
+        }
+        (!parts.is_empty()).then(|| {
+            let list = parts.join(", ");
+            keyed(vctx.get, "SPELL_TOTEMS", &[Arg::S(&list)])
+                .unwrap_or_else(|| format!("Tools: {list}"))
+        })
+    };
     let view = benilla_ui::script::SpellTooltipView {
         name: d.name.clone(),
         rank: d.rank.clone(),
@@ -372,6 +401,7 @@ pub(super) fn build_view(
         requires_form,
         form_met,
         chance,
+        totems,
         reagents,
         description: d
             .description
