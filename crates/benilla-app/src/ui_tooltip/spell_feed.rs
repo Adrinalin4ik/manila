@@ -386,8 +386,16 @@ pub(super) fn build_view(
         }
         (!parts.is_empty()).then(|| {
             let list = parts.join(", ");
-            keyed(vctx.get, "SPELL_TOTEMS", &[Arg::S(&list)])
-                .unwrap_or_else(|| format!("Tools: {list}"))
+            // 1.12's `SPELL_TOTEMS` is the bare prefix "Tools: ", the names appended after it,
+            // as `SPELL_REAGENTS` is "Reagents: " (filled as a template it answered "Tools: "
+            // alone - the owner's diagnostic, 2026-10-20). A chain whose string carries a `%s`
+            // is filled.
+            match (vctx.get)("SPELL_TOTEMS") {
+                Some(t) if t.contains('%') => keyed(vctx.get, "SPELL_TOTEMS", &[Arg::S(&list)])
+                    .unwrap_or_else(|| format!("Tools: {list}")),
+                Some(prefix) => format!("{prefix}{list}"),
+                None => format!("Tools: {list}"),
+            }
         })
     };
     let view = benilla_ui::script::SpellTooltipView {
