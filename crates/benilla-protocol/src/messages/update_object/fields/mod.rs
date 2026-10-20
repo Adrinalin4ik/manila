@@ -100,6 +100,8 @@ const FIELD_UNIT_TRAINING_POINTS: u16 = 149;
 pub const FIELD_UNIT_DYNAMIC_FLAGS: u16 = 143;
 /// The spell being channeled, 0 for none (`UpdateFields_1_12_1.h:89`).
 pub const FIELD_UNIT_CHANNEL_SPELL: u16 = 144;
+/// The cast-time factor, a float (`UpdateFields_1_12_1.h:90`).
+const FIELD_UNIT_MOD_CAST_SPEED: u16 = 145;
 /// The summoning spell, 0 for none; the first gate of the client's feed-pet path `0x6ea1e0`.
 const FIELD_UNIT_CREATED_BY_SPELL: u16 = 146;
 pub const FIELD_UNIT_NPC_FLAGS: u16 = 147;
@@ -134,6 +136,8 @@ const FIELD_UNIT_RANGED_ATTACK_POWER_MODS: u16 = 169; // +0xA3, TWO_SHORT as abo
 const FIELD_UNIT_RANGED_ATTACK_POWER_MULTIPLIER: u16 = 170; // +0xA4, FLOAT
 const FIELD_UNIT_MINRANGEDDAMAGE: u16 = 171; // +0xA5, FLOAT
 const FIELD_UNIT_MAXRANGEDDAMAGE: u16 = 172; // +0xA6, FLOAT
+const FIELD_UNIT_POWER_COST_MODIFIER: u16 = 173; // +0xA7 ×7, INT, by school
+const FIELD_UNIT_POWER_COST_MULTIPLIER: u16 = 180; // +0xAE ×7, FLOAT, by school
 
 /// Aura slots per unit (vmangos `MAX_AURAS`, `SpellAuraDefines.h:25`).
 pub const UNIT_AURA_SLOTS: u8 = 48;

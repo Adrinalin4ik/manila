@@ -23,6 +23,7 @@ pub(crate) mod control_gate;
 pub(crate) mod field_events;
 mod held;
 mod relations;
+pub(crate) mod tooltip_facts;
 
 /// The unit-feed pass, gated so none of its login one-shots or per-VM memos runs before the in-game
 /// interface exists; the demo override orders itself after it.
@@ -951,6 +952,11 @@ pub(crate) struct SnapshotTables<'w> {
     names: NameTables<'w>,
     spells: Option<Res<'w, crate::ui_action::Spells>>,
     creature_types: Option<Res<'w, crate::target::CreatureTypes>>,
+    /// The object manager's index, which the tooltip's owner line finds the owner through.
+    index: Option<Res<'w, crate::net::GuidIndex>>,
+    /// What the tooltip's studied-creature block reads.
+    study: Option<Res<'w, tooltip_facts::StudyTables>>,
+    families: Option<Res<'w, crate::ui_pet_stats::PetFamilyTables>>,
 }
 
 impl SnapshotTables<'_> {
@@ -958,6 +964,24 @@ impl SnapshotTables<'_> {
     /// reference's bounds leg.
     pub(crate) fn unit_names(&self) -> UnitNames<'_> {
         self.names.get()
+    }
+
+    /// `Spell.dbc`, absent without game data.
+    pub(crate) fn catalog(&self) -> Option<&benilla_formats::SpellCatalog> {
+        self.spells.as_deref().map(|s| &s.catalog)
+    }
+
+    /// The studied-creature block's tables.
+    pub(crate) fn study(&self) -> tooltip_facts::StudySources<'_> {
+        tooltip_facts::StudySources {
+            tables: self.study.as_deref(),
+            families: self.families.as_deref(),
+        }
+    }
+
+    /// The entity the object manager holds under `guid`.
+    pub(crate) fn entity(&self, guid: u64) -> Option<Entity> {
+        self.index.as_deref()?.0.get(&guid).copied()
     }
 
     /// The creature-type resolver's sources: the name cache, the form table and the type words.
@@ -1091,6 +1115,14 @@ pub(crate) fn snapshot(
         },
         // `PLAYER_GUILDID`, the cache key of `GetGuildInfo` (`0x4c93a9`).
         guild_id: store.0.player_guild_id(),
+        // `PLAYER_BYTES_3` byte 1; a creature has no PLAYER block and reads 0.
+        drunk: store.0.player_drunk_byte().unwrap_or(0),
+        tooltip: benilla_ui::script::UnitTooltipFacts {
+            // The builder's raw read (`0x52a89f`), not `UnitHealth`'s feign-death zero. The facts
+            // that read beyond the descriptor are [`tooltip_facts`]'.
+            health: store.0.unit_health().unwrap_or(0),
+            ..Default::default()
+        },
         // `is_player` and the creature-record fields come from [`enrich_unit`].
         ..Default::default()
     }
@@ -1437,6 +1469,10 @@ fn feed_units(
         feed.warned_sideless = sideless;
     }
     // What the three snapshots below (target, target-of-target, NPC) read besides a descriptor.
+    let object = |guid: u64| {
+        let entity = *index.as_ref()?.0.get(&guid)?;
+        stores.all.get(entity).ok()
+    };
     let held = held::HeldUnits {
         names: &names,
         commands: &commands,
@@ -1446,6 +1482,12 @@ fn feed_units(
         types,
         rel: world.get(),
         me: world.me(),
+        tooltip: tooltip_facts::TooltipSources {
+            names: &names,
+            catalog: tables.catalog(),
+            object: &object,
+            study: tables.study(),
+        },
     };
     let target = selection.target.zip(selection.guid).and_then(|(e, guid)| {
         let store = stores.all.get(e).ok()?;
@@ -3308,6 +3350,7 @@ mod tests {
                 pet_family: 4, // Bear, a real tameable family
                 rank: 1,
                 type_flags: 0,
+                pet_spell_list: 0,
                 civilian: false,
                 racial_leader: false,
                 display_id: 0,
@@ -3406,6 +3449,7 @@ mod tests {
             pet_family: 0,
             rank: 0,
             type_flags,
+            pet_spell_list: 0,
             civilian: false,
             racial_leader: false,
             display_id: 0,
@@ -3608,6 +3652,7 @@ mod tests {
                 pet_family: 0,
                 rank: 0,
                 type_flags: 0,
+                pet_spell_list: 0,
                 civilian: false,
                 racial_leader: false,
                 display_id: 0,
@@ -3708,6 +3753,7 @@ mod tests {
             pet_family: 0,
             rank: 0,
             type_flags: 0,
+            pet_spell_list: 0,
             civilian: false,
             racial_leader: false,
             display_id: 0,

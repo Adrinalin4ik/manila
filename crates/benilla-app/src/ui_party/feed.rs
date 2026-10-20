@@ -148,7 +148,14 @@ pub(crate) fn feed_party(
     let area_moved = fed.area.moved(here.area().map_or(u64::MAX, u64::from));
     let group_changed = group.is_changed();
     let index_changed = index.is_changed();
-    let look = pets::Lookup::new(&index, &stores, &names, types);
+    let look = pets::Lookup::new(
+        &index,
+        &stores,
+        &names,
+        types,
+        tables.catalog(),
+        tables.study(),
+    );
     // Only the stores the merged view reads: a crowd's other stores change every frame. The
     // members' pets are the group's too, `partypetN` and `raidpetN` reading their descriptors.
     let stores_changed = self_q
@@ -295,10 +302,11 @@ pub(crate) fn feed_party(
         fed.pushed_party = Some(fresh);
     }
 
+    let area_names = areas.as_deref().map(|a| &a.0);
     for (i, token) in PARTY_TOKENS.iter().enumerate() {
         let member = slots.get(i);
         let snap = member.map(|m| {
-            member_unit_state(
+            let mut s = member_unit_state(
                 m,
                 group.stats.get(&m.guid),
                 index.0.get(&m.guid).and_then(|e| stores.get(*e).ok()),
@@ -306,7 +314,9 @@ pub(crate) fn feed_party(
                 own_group.clone(),
                 chr,
                 types,
-            )
+            );
+            s.tooltip.party = party_record(&group, m.guid, area_names);
+            s
         });
         if fed.units[i] != snap {
             gate.audit("feed_party", "a party-token snapshot");
@@ -378,7 +388,7 @@ pub(crate) fn feed_party(
                 Some(s)
             } else {
                 let m = group.members.iter().find(|m| m.guid == *guid)?;
-                Some(member_unit_state(
+                let mut s = member_unit_state(
                     m,
                     group.stats.get(guid),
                     index.0.get(guid).and_then(|e| stores.get(*e).ok()),
@@ -386,7 +396,9 @@ pub(crate) fn feed_party(
                     own_group.clone(),
                     chr,
                     types,
-                ))
+                );
+                s.tooltip.party = party_record(&group, *guid, area_names);
+                Some(s)
             }
         });
         if fed.raid_units[i] != snap {
@@ -744,6 +756,28 @@ fn member_unit_state(
     // A held member's predicates read its descriptor alone (`0x517b16`, `0x517bef`, `0x5164d1`,
     // `0x51659f`): `snapshot`'s, the roster byte never.
     s
+}
+
+/// The group record the unit tooltip finds by guid (`0x496400`): the party's (`0x4e8820`, our own
+/// party slots), else the raid roster's (`0x4bb0f0`, its 40 entries); its online bit and the name of
+/// its area (`0x67e460`, with no parent zone). The roster's records are one per member either way.
+fn party_record(
+    group: &GroupState,
+    guid: u64,
+    areas: Option<&benilla_formats::AreaTableCatalog>,
+) -> Option<benilla_ui::script::PartyRecord> {
+    let in_party = group.party_slots().any(|m| m.guid == guid);
+    if !in_party && !group.raid_rows().any(|g| g == guid) {
+        return None;
+    }
+    let record = group.stats.get(&guid)?;
+    Some(benilla_ui::script::PartyRecord {
+        online: record.is_online(),
+        area: record
+            .zone
+            .and_then(|zone| areas?.name(u32::from(zone)))
+            .map(str::to_string),
+    })
 }
 
 /// A status bit of a member's record (`+0x08`), false with no record.
@@ -1453,6 +1487,41 @@ mod tests {
         );
         assert_eq!((bare.health, bare.max_health, bare.power), (0, 0, 0));
         assert!(bare.exists);
+    }
+
+    /// The tooltip's group record (`0x496400`): the party's for a member of our own slots, else the
+    /// raid roster's (`0x4bb0f0`) for one in another subgroup, and none for a guid off both.
+    #[test]
+    fn a_raid_member_off_our_party_slots_has_a_group_record() {
+        let m = |n: u64, flags: u8| GroupMemberEntry {
+            name: format!("M{n}"),
+            guid: member(n),
+            status: member_status::ONLINE,
+            flags,
+        };
+        let mut group = GroupState::default();
+        group.apply_list(
+            GROUPTYPE_RAID,
+            0,
+            vec![m(1, 0), m(2, 1)],
+            ME,
+            None,
+            Some(ME),
+        );
+        for n in [1, 2] {
+            let mut record = PartyMemberStatsInfo::default();
+            record.set_online(n == 1);
+            group.stats.insert(member(n), record);
+        }
+        assert_eq!(
+            group.party_slots().map(|e| e.guid).collect::<Vec<_>>(),
+            [member(1)],
+            "the second member sits in another subgroup"
+        );
+        let online = |guid| party_record(&group, guid, None).map(|r| r.online);
+        assert_eq!(online(member(1)), Some(true), "the party's record");
+        assert_eq!(online(member(2)), Some(false), "the raid roster's record");
+        assert_eq!(online(member(3)), None, "off the roster");
     }
 
     /// vmangos re-sends a member's status on join, login and the AFK, DND, PvP, FFA and ghost

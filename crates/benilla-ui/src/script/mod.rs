@@ -182,13 +182,17 @@ mod taxi;
 mod tick;
 pub use tick::system_chat_args;
 mod tooltip;
+mod tooltip_aura;
 mod tooltip_item;
 mod tooltip_spell;
+mod tooltip_studied;
+mod tooltip_text;
 mod tooltip_unit;
 mod ui_errors;
 mod ui_scale;
 mod update_walk;
-pub use tooltip_unit::TooltipTint;
+pub use tooltip_studied::{PetAbility, StudiedCreature};
+pub use tooltip_unit::{OwnerTitle, OwnerTitleKind, PartyRecord, TooltipTint, UnitTooltipFacts};
 mod trade;
 mod tradeskill;
 mod trainer;
@@ -212,7 +216,7 @@ pub use auction::{
     AuctionBid, AuctionCategory, AuctionHighBidder, AuctionItemRow, AuctionListState, AuctionQuery,
     AuctionStartRequest, AuctionState, AuctionSubCategory, BIDDER, LIST, OWNER, SORT_KEYS,
 };
-pub use aura::{AuraState, TrackingState};
+pub use aura::{AuraState, TrackingState, UnitAuraList};
 pub use backdrop::{Backdrop, Insets};
 pub use bank::BankState;
 pub use battlefield_positions::{BattlefieldFlagView, BattlefieldPositionView};
@@ -341,13 +345,15 @@ pub use skills::{SkillEntry, SkillsState};
 pub use social::{FriendInfo, SocialRequest, SocialState, WhoInfo};
 pub use sound::{MusicRequest, SoundRequest};
 pub use spellbook::{
-    resolve_spell_by_name, PetBookState, SpellBookState, SpellSlotView, SpellTabView,
+    resolve_spell_by_name, PetBookState, SpellBookState, SpellSlotView, SpellTabName, SpellTabView,
 };
 pub use stable::{StableIntent, StablePetSlot, StableState, NUM_STABLE_SLOTS};
 pub use summon::SummonConfirmUiState;
 pub use talent::{TalentPrereqView, TalentTabView, TalentUiState, TalentView};
 pub use taxi::{TaxiNodeType, TaxiUiNode, TaxiUiState};
-pub use tooltip_spell::SpellTooltipView;
+pub use tooltip_aura::{AuraKey, AuraTooltipView};
+pub use tooltip_spell::{ReputationRequirement, SpellTooltipView};
+pub use tooltip_text::{KeyedArg, TextPart, TooltipText};
 pub use trade::{TradeSideState, TradeSlotItem, TradeState, TRADE_SLOTS};
 pub use tradeskill::{TradeSkillDifficulty, TradeSkillReagent, TradeSkillRecipe, TradeSkillState};
 pub use trainer::{

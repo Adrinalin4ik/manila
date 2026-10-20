@@ -406,11 +406,11 @@ pub(crate) struct Model {
     /// `"target"` from the committed selection, whatever its memo holds.
     pub(crate) target_view_moved: bool,
     /// The player's auras in the reference cache's insertion order (`0xbc6040`), durations joined:
-    /// the `GetPlayerBuff` family's list, and any token naming the player's.
+    /// the `GetPlayerBuff` family's list.
     pub(crate) player_auras: Vec<AuraState>,
-    /// Every other unit's auras by guid, ascending aura slot: one list per unit, whatever token
-    /// names it.
-    pub(crate) unit_auras: HashMap<u64, Vec<AuraState>>,
+    /// Every unit's auras by guid, the player's too, ascending aura slot: one list per unit,
+    /// whatever token names it.
+    pub(crate) unit_auras: HashMap<u64, super::UnitAuraList>,
     /// The unit-token resolver's inputs (`0x515970`), which the aura bindings resolve through.
     pub(crate) unit_guids: super::UnitGuids,
     /// Spell ids the cancel verbs queued (`CancelPlayerBuff`, `CancelTrackingBuff`, …), one
@@ -1097,8 +1097,11 @@ pub(crate) struct Model {
     /// selector asks for (`0x52e610`'s fourth argument).
     pub(crate) pet_spell_tooltips: HashMap<u32, super::SpellTooltipView>,
     pub(crate) pet_spell_tooltip_asks: HashSet<u32>,
-    /// The tooltips whose spell render missed its view, re-rendered when the app answers.
-    pub(crate) spell_tooltip_waits: HashMap<FrameHandle, super::tooltip_spell::SpellWait>,
+    /// Each aura's view by the aura builder's arguments, and the misses asked for.
+    pub(crate) aura_tooltips: HashMap<super::AuraKey, super::AuraTooltipView>,
+    pub(crate) aura_tooltip_asks: HashSet<super::AuraKey>,
+    /// The tooltips whose spell or aura render missed its view, re-rendered when the app answers.
+    pub(crate) spell_tooltip_waits: HashMap<FrameHandle, super::tooltip_spell::ViewWait>,
     /// Each tooltip's last item build, kept until its next clear for the rebuild a cache answer
     /// runs (`+0x380`..`+0x440`, `0x52e530`).
     pub(crate) item_builds: HashMap<FrameHandle, super::tooltip_item::build::ItemBuild>,
@@ -1857,6 +1860,8 @@ impl Model {
             spell_tooltip_asks: HashSet::new(),
             pet_spell_tooltips: HashMap::new(),
             pet_spell_tooltip_asks: HashSet::new(),
+            aura_tooltips: HashMap::new(),
+            aura_tooltip_asks: HashSet::new(),
             spell_tooltip_waits: HashMap::new(),
             item_builds: HashMap::new(),
             item_cache_waits: HashMap::new(),
