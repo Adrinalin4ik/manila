@@ -853,6 +853,11 @@ pub(super) fn load_third_party(
     script.set_addon_chain_reader(Box::new(super::reference_ui::read));
     // wenilla carry: saved variables come back through the state store the logout wrote them to.
     script.set_addon_saved_reader(Box::new(|path| crate::local_state::read(path)));
+    // wenilla carry: `LoadAddOn` reads through the host's `/addons` route, as the walk does.
+    #[cfg(target_arch = "wasm32")]
+    script.set_addon_dir_reader(Box::new(|rel| {
+        read_addon_file(std::path::Path::new(""), &format!("{ADDONS_PREFIX}{rel}"))
+    }));
     // Each enable bit through the reference's query: the character's explicit row, else what the
     // realm's other characters agree on, else the manifest's `## DefaultState`.
     let store = load_store(
@@ -953,6 +958,11 @@ pub(super) fn open_third_party(
     script.set_addon_chain_reader(Box::new(super::reference_ui::read));
     // wenilla carry: saved variables come back through the state store the logout wrote them to.
     script.set_addon_saved_reader(Box::new(|path| crate::local_state::read(path)));
+    // wenilla carry: `LoadAddOn` reads through the host's `/addons` route, as the walk does.
+    #[cfg(target_arch = "wasm32")]
+    script.set_addon_dir_reader(Box::new(|rel| {
+        read_addon_file(std::path::Path::new(""), &format!("{ADDONS_PREFIX}{rel}"))
+    }));
     let store = load_store(
         identity
             .map(|(realm, _)| realm.as_str())

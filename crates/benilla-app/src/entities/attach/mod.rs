@@ -152,7 +152,7 @@ fn setup_skinned_instance(
         if let Some(drive) =
             benilla_world::rig_anim::GlobalSeqDrive::new_rig(&anims.global_bones, nbones)
         {
-            commands.entity(entity).insert(drive);
+            commands.entity(entity).try_insert(drive);
         }
     }
     Some(RigBuild { pose, slot })
@@ -187,14 +187,14 @@ fn arm_sequence_clock(
             }
         }
     }
-    commands.entity(entity).insert((
+    commands.entity(entity).try_insert((
         player,
         AnimationGraphHandle(anims.graph.clone()),
         anims.clone(),
     ));
     match kind {
         EntityKind::GameObject if go_state_machine => {
-            commands.entity(entity).insert((
+            commands.entity(entity).try_insert((
                 // Cross-fades each transition over the clip's blend-in time, from the seed.
                 transitions,
                 crate::go_anim::GoAnim::default(),
@@ -207,20 +207,20 @@ fn arm_sequence_clock(
         EntityKind::Corpse => {
             commands
                 .entity(entity)
-                .insert(AnimationTransitions::new())
-                .remove::<benilla_world::rig_anim::AnimParked>();
+                .try_insert(AnimationTransitions::new())
+                .try_remove::<benilla_world::rig_anim::AnimParked>();
         }
         _ => {
             commands
                 .entity(entity)
-                .insert((
+                .try_insert((
                     // Cross-fades over each clip's blend-in time, so a gait change eases.
                     AnimationTransitions::new(),
                     AnimDriver::default(),
                 ))
                 // A rebuilt rig is born live: a stale park marker would desync the LOD gate's
                 // edge-triggered bookkeeping.
-                .remove::<benilla_world::rig_anim::AnimParked>();
+                .try_remove::<benilla_world::rig_anim::AnimParked>();
         }
     }
 }
@@ -320,8 +320,17 @@ pub(super) fn attach_entity_visuals(
     {
         // The appear ramp's origin: the unit's arrival, however long its visual waited to build.
         let arrived = arrival.map_or(now, |a| a.0);
-        // A player attaches once its equipment settles, so it never flashes naked.
-        if net.kind == EntityKind::Player && !equipment.is_some_and(|e| e.settled) {
+        // A player attaches once its equipment settles, so it never flashes naked - or once
+        // `EQUIPMENT_SETTLE_WAIT` has passed since it arrived. wenilla carry: a TurtleWoW server
+        // can leave a `PLAYER_VISIBLE_ITEM` template unanswered for good, and the plain gate then
+        // withheld that body for the session - in a battleground crowd, half of it (benilla-octo
+        // 3247bc76 removed the gate outright). Past the wait the compositor paints the armour it
+        // knows and `redress_player_looks` re-dresses when a template lands, as 1.12.1 does. Not
+        // dropped outright: a crowd would composite every body twice, naked and then dressed.
+        if net.kind == EntityKind::Player
+            && !equipment.is_some_and(|e| e.settled)
+            && now - arrived < EQUIPMENT_SETTLE_WAIT
+        {
             continue;
         }
         // A corpse waits for `resolve_corpse_equipment`: it is never re-dressed, so a body
@@ -455,7 +464,7 @@ pub(super) fn attach_entity_visuals(
             } else if let Some(&super::mount::MountChild(child)) = mount_child {
                 // Dismounted while pending: drop the mount it ordered.
                 if let Ok(mut ec) = commands.get_entity(child) {
-                    ec.despawn();
+                    ec.try_despawn();
                 }
                 commands.entity(entity).queue_silenced(
                     bevy::ecs::system::entity_command::remove::<super::mount::MountChild>(),
@@ -553,8 +562,11 @@ pub(super) fn attach_entity_visuals(
                     // dispatches on the mount's model (`0x7106c0`) and tilts through its node.
                     let mut joints_root = rider_root;
                     if d.terrain_tilt != 0 && rider_root == entity {
+                        // Child-side `ChildOf`, not `add_child`: a parent-side add panics against a
+                        // unit that a same-frame teardown despawned mid-build.
                         let node = commands
                             .spawn((
+                                ChildOf(entity),
                                 super::conform::ConformNode {
                                     // The ground and yaw source: the unit, or a mount child's
                                     // host.
@@ -565,15 +577,6 @@ pub(super) fn attach_entity_visuals(
                                 Visibility::default(),
                             ))
                             .id();
-                        // Silenced like every other command on `entity` in this block: the
-                        // parent can be gone by the time this applies, and an `add_child` onto a
-                        // despawned parent panics exactly as the insert did. The node spawned
-                        // just above is then parentless and collected with the scene's own sweep.
-                        commands.entity(entity).queue_silenced(
-                            move |mut parent: bevy::ecs::world::EntityWorldMut| {
-                                parent.add_child(node);
-                            },
-                        );
                         joints_root = node;
                     }
                     setup_skinned_instance(
@@ -643,7 +646,7 @@ pub(super) fn attach_entity_visuals(
                 for m in &d.markers {
                     markers.entry(m.ident).or_insert((m.bone, m.offset));
                 }
-                commands.entity(entity).insert(super::BoneAttach {
+                commands.entity(entity).try_insert(super::BoneAttach {
                     points: d
                         .attachments
                         .iter()
@@ -662,7 +665,7 @@ pub(super) fn attach_entity_visuals(
                 if spine.is_some() || head.is_some() {
                     commands
                         .entity(entity)
-                        .insert(crate::creature_anim::BodyTwist::new(spine, head));
+                        .try_insert(crate::creature_anim::BodyTwist::new(spine, head));
                 }
             }
             // The worn geoset selectors, the helm's hide-mask rows included (`0x4799a0`).
@@ -720,7 +723,7 @@ pub(super) fn attach_entity_visuals(
                 .map(|c| bevy::camera::primitives::Aabb::from_min_max(c.bounds_min, c.bounds_max))
                 .or_else(|| union_aabb(model.unwrap_or_default().iter().filter_map(|p| p.aabb)));
             if let Some(aabb) = election_bound {
-                commands.entity(entity).insert(super::ModelBound(aabb));
+                commands.entity(entity).try_insert(super::ModelBound(aabb));
             }
             // A billboard card rides its live joint, so card anchors resolve here, over the spawn
             // loop's geoset predicate: a hidden variant's card bone spawns no anchor.
@@ -797,7 +800,7 @@ pub(super) fn attach_entity_visuals(
             } else if reattached {
                 commands
                     .entity(entity)
-                    .remove::<benilla_world::model_fade::UnitAppearFade>();
+                    .try_remove::<benilla_world::model_fade::UnitAppearFade>();
             }
             // Size is `OBJECT_FIELD_SCALE_X` alone: the server already folds the DBC scale into
             // it (vmangos `Unit::GetScaleForDisplayId`, `Unit.cpp:9579`), and the reference
@@ -812,25 +815,25 @@ pub(super) fn attach_entity_visuals(
             if let (EntityKind::Player, Some(e)) = (net.kind, equipment) {
                 commands
                     .entity(entity)
-                    .insert(super::equipment::AppliedEquipment(*e));
+                    .try_insert(super::equipment::AppliedEquipment(*e));
             }
             // The camera's framing pivot, model-local, before scale.
-            commands.entity(entity).insert(CameraPivot {
+            commands.entity(entity).try_insert(CameraPivot {
                 height_local: dm.map(|d| d.pivot_height_local).unwrap_or(0.0),
                 // The pivot's drop while swimming, the reference's third preset `cam+0x124`
                 // (`0x50ccf6`); 0 without a Swim sequence.
                 swim_drop_local: dm.map(|d| d.swim_pivot_drop_local).unwrap_or(0.0),
             });
             // The overhead fallback for a model with no PlayerName attachment (`0x608640`).
-            commands.entity(entity).insert(super::OverheadFallback(
+            commands.entity(entity).try_insert(super::OverheadFallback(
                 dm.map(|d| d.bbox_z_local).unwrap_or(0.0),
             ));
             // The chat bubble's height: the Stand box's Z, not the posed PlayerName attachment.
-            commands.entity(entity).insert(super::StandBoxHeight(
+            commands.entity(entity).try_insert(super::StandBoxHeight(
                 dm.map(|d| d.stand_box_z_local).unwrap_or(0.0),
             ));
             // The selection ring's model-local radius, scaled by the unit's scale.
-            commands.entity(entity).insert(SelectionRadius(
+            commands.entity(entity).try_insert(SelectionRadius(
                 dm.map(|d| d.ground_radius_local).unwrap_or(0.0),
             ));
             // Emitters ride their host bone's anchor, origin rebased into the bone frame
@@ -910,7 +913,7 @@ pub(super) fn attach_entity_visuals(
             }
             // The pose lands last, with every anchor the build resolved into it.
             if let Some(rb) = skin {
-                commands.entity(entity).insert(rb.pose);
+                commands.entity(entity).try_insert(rb.pose);
             }
             // A GameObject with a hull collides; an anchored transport stays Kinematic, as its arm
             // labelled it, since its body moves every frame.
@@ -921,7 +924,7 @@ pub(super) fn attach_entity_visuals(
                     } else {
                         RigidBody::Static
                     };
-                    commands.entity(entity).insert((body, col));
+                    commands.entity(entity).try_insert((body, col));
                     // This lane bypasses the streamer's attach queue, so it stamps the collider
                     // set itself.
                     collider_epoch.bump();
@@ -964,19 +967,21 @@ pub(super) fn attach_entity_visuals(
                     id: net.display_id.unwrap_or(0),
                     detail: String::new(),
                 };
-                commands.entity(entity).with_children(|parent| {
-                    parent.spawn((
-                        Mesh3d(mesh),
-                        MeshMaterial3d(material),
-                        Transform::from_translation(Vec3::Y * lift),
-                        object,
-                        benilla_world::interact::CreaturePickPart,
-                        // No `RenderSubmesh`: the picker casts against the cube's box.
-                        benilla_world::interact::PickBox,
-                        // Counted by `WOW_UNIT_VISUALS`.
-                        super::FallbackCube,
-                    ));
-                });
+                // Child-side `ChildOf`, like every model part in `dress`: the parent-side
+                // `with_children` would `add_related` against a unit that a same-frame teardown
+                // already despawned, and panic where the child spawn only warns.
+                commands.spawn((
+                    ChildOf(entity),
+                    Mesh3d(mesh),
+                    MeshMaterial3d(material),
+                    Transform::from_translation(Vec3::Y * lift),
+                    object,
+                    benilla_world::interact::CreaturePickPart,
+                    // No `RenderSubmesh`: the picker casts against the cube's box.
+                    benilla_world::interact::PickBox,
+                    // Counted by `WOW_UNIT_VISUALS`.
+                    super::FallbackCube,
+                ));
             }
         }
         // The mount the visual was built on, for `reseat_mounts` to diff; stamped on a cube too,
@@ -987,14 +992,14 @@ pub(super) fn attach_entity_visuals(
                 .map_or(0, |s| s.0.unit_mount_display_id());
             commands
                 .entity(entity)
-                .insert(super::mount::AppliedMount(applied));
+                .try_insert(super::mount::AppliedMount(applied));
         }
         commands
             .entity(entity)
-            .insert(VisualAttached)
+            .try_insert(VisualAttached)
             // The display the visual was built with, for `refresh_live_display` to diff.
-            .insert(super::live_display::AppliedDisplay(net.display_id))
-            .remove::<(
+            .try_insert(super::live_display::AppliedDisplay(net.display_id))
+            .try_remove::<(
                 super::equipment::Reattached,
                 super::live_display::ShownRebuild,
             )>();
@@ -1017,6 +1022,10 @@ pub(super) fn attach_entity_visuals(
         }
     }
 }
+
+/// How long a player's body waits for its equipment to settle before it is built with the armour
+/// known so far, seconds (see the gate in [`attach_entity_visuals`]).
+const EQUIPMENT_SETTLE_WAIT: f32 = 3.0;
 
 /// How long [`attach_entity_visuals`] may spend building arrivals before leaving the rest to the
 /// next frame. The same 4 ms the terrain streamer's own `SPAWN_BUDGET` uses, and for the same

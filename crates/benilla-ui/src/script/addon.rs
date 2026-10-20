@@ -27,6 +27,15 @@ pub type SavedReader = Box<dyn Fn(&std::path::Path) -> std::io::Result<Vec<u8>>>
 /// [`SavedReader`], shared so a load can call it without holding the model.
 pub(crate) type SharedSavedReader = std::rc::Rc<dyn Fn(&std::path::Path) -> std::io::Result<Vec<u8>>>;
 
+/// wenilla carry: the host's reader for a folder addon's file, by its path under the AddOns root
+/// (`Bagnon/Bagnon.xml`). The startup walk reads through the host already; `LoadAddOn` read with
+/// `std::fs`, which in the browser fails every file, so a LoadOnDemand addon "loaded" with none of
+/// its files run and every miss only logged: Bagnon answered `LoadAddOn` 1 with no `Bagnon` frame.
+pub type AddonDirReader = Box<dyn Fn(&str) -> Option<Vec<u8>>>;
+
+/// [`AddonDirReader`], shared so a load can call it without holding the model.
+pub(crate) type SharedDirReader = std::rc::Rc<dyn Fn(&str) -> Option<Vec<u8>>>;
+
 /// The security state `[rec+0x24]`, indexing the table at `0x85367c`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AddonSecurity {
@@ -682,6 +691,9 @@ impl DemandLoad<'_> {
             }))
         } else {
             let root = model.addons_root.clone()?;
+            if let Some(reader) = model.addons_dir_reader.clone() {
+                return Some(Box::new(move |req: &str| reader(req)));
+            }
             Some(Box::new(move |req: &str| read_under(&root, req)))
         }
     }
@@ -953,6 +965,11 @@ impl super::UiScript {
     /// Seat the reader chain-sourced addons (`AddOnInfo::chain`) are read through.
     pub fn set_addon_chain_reader(&self, reader: AddonChainReader) {
         self.model_mut().addons_chain_reader = Some(std::rc::Rc::from(reader));
+    }
+    /// wenilla carry: seat the reader `LoadAddOn` reads a folder addon's files through
+    /// ([`AddonDirReader`]); without one it reads the AddOns root with `std::fs`.
+    pub fn set_addon_dir_reader(&self, reader: AddonDirReader) {
+        self.model_mut().addons_dir_reader = Some(std::rc::Rc::from(reader));
     }
     /// wenilla carry: seat the reader saved-variables files are read through ([`SavedReader`]).
     pub fn set_addon_saved_reader(&self, reader: SavedReader) {

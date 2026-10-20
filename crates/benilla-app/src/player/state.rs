@@ -562,7 +562,8 @@ impl Player {
     }
 
     /// The states on this resource that stop WASD, comma-joined, or `"none"`: an instrument for the
-    /// log after a session boundary, not a gate. A stun lives on the descriptor and does not show.
+    /// log after a session boundary, not a gate. A stun lives on the descriptor and does not
+    /// show. `settling` is in the list because the settle hold is a mover hold, not a camera one.
     pub(crate) fn movement_suppressors(&self) -> String {
         let named = [
             (!self.active, "inactive"),
@@ -572,6 +573,7 @@ impl Player {
             (self.server_riding, "server-ride"),
             (self.foreign_mover.is_some(), "possession"),
             (self.reseat, "reseat-pending"),
+            (self.settling, "settling"),
         ];
         let list: Vec<&str> = named
             .into_iter()

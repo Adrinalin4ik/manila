@@ -46,6 +46,28 @@ pub fn addons_rel(name: &str) -> Option<&str> {
     })
 }
 
+/// The bytes behind a sync XHR's `responseText` decoded as `x-user-defined` (see `fetch_sync`):
+/// one char per byte, ASCII as itself and `0x80..=0xFF` as `U+F780..=U+F7FF`, so `& 0xFF`
+/// recovers them.
+///
+/// wenilla carry: **except a body that starts with a byte-order mark.** The XHR's text decode
+/// sniffs the BOM before it honours the override, so a UTF-8-BOM file comes back decoded as
+/// UTF-8, BOM dropped - and `& 0xFF` then cut every non-ASCII char to its low byte. CallOfElements'
+/// `Localization.cn.lua` (the owner's report, 2026-10-20) lost `当` (U+5F53) to `S` and `上`
+/// (U+4E0A) to a newline mid-string: "unfinished string near '\"S'". A char `x-user-defined`
+/// cannot produce is the tell; the text is then the file's UTF-8, re-encoded with its BOM. A
+/// UTF-16 BOM is not recovered (no shipped file found uses one).
+pub(crate) fn text_to_bytes(text: &str) -> Vec<u8> {
+    let user_defined = |c: char| (c as u32) < 0x80 || (0xF780..=0xF7FF).contains(&(c as u32));
+    if text.chars().all(user_defined) {
+        return text.chars().map(|c| (c as u32 & 0xff) as u8).collect();
+    }
+    let mut bytes = Vec::with_capacity(text.len() + 3);
+    bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    bytes.extend_from_slice(text.as_bytes());
+    bytes
+}
+
 #[cfg(target_arch = "wasm32")]
 mod wasm {
     use wasm_bindgen::JsValue;
@@ -188,7 +210,7 @@ mod wasm {
         match xhr.status().map_err(js_err)? {
             200 => {
                 let text = xhr.response_text().map_err(js_err)?.unwrap_or_default();
-                Ok(text.chars().map(|c| (c as u32 & 0xff) as u8).collect())
+                Ok(super::text_to_bytes(&text))
             }
             404 => Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -228,6 +250,21 @@ pub use wasm::{
 #[cfg(test)]
 mod tests {
     use super::addons_rel;
+
+    /// A BOM-sniffed body (decoded as UTF-8) comes back as the file's bytes, BOM restored; a
+    /// plain `x-user-defined` body still maps byte for byte.
+    #[test]
+    fn a_bom_sniffed_xhr_body_keeps_its_utf8() {
+        let cn = "x = \"当上\"";
+        let mut file = vec![0xEF, 0xBB, 0xBF];
+        file.extend_from_slice(cn.as_bytes());
+        assert_eq!(super::text_to_bytes(cn), file);
+        let user_defined: String = [b'a', 0xE5, 0xBD]
+            .iter()
+            .map(|&b| if b < 0x80 { b as char } else { char::from_u32(0xF700 + b as u32).unwrap() })
+            .collect();
+        assert_eq!(super::text_to_bytes(&user_defined), vec![b'a', 0xE5, 0xBD]);
+    }
 
     /// The prefix is matched however the path spells it, and nothing else is claimed.
     #[test]

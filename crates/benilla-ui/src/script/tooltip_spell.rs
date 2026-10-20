@@ -58,6 +58,18 @@ pub struct SpellTooltipView {
     pub requires_form: Option<String>,
     /// The current shapeshift form matches the mask; the app re-pushes on a form change.
     pub form_met: bool,
+    /// wenilla carry: "Tools: Earth Totem" (`SPELL_TOTEMS`, the two `Totem` columns): the line's
+    /// prefix and each tool's `(item entry, name)`. Shaman addons read the totem's element off it
+    /// (CallOfElements builds its totem bar from this line) and whether the tool is carried, a
+    /// missing one behind the inline `|cffff2020` escape. That test runs at the render, against
+    /// the bags as they stand ([`carries_item`]): an addon re-reads it inside `BAG_UPDATE`, a frame
+    /// before a view pushed on the bag change would land.
+    pub totems_prefix: String,
+    pub totem_items: Vec<(u32, String)>,
+    /// wenilla carry: a tool or reagent named by the spell had no streamed item name when this
+    /// view was built, so its line is short; the app re-pushes the view when the name lands.
+    /// The world-enter wait reads it (`book_spell_views_ready`).
+    pub names_pending: bool,
     /// "Reagents: Light Feather" (`SPELL_REAGENTS 0x854e54` and the eight reagent slots); the app
     /// writes a missing reagent's inline `|cffff2020` escape.
     pub reagents: Option<String>,
@@ -77,6 +89,26 @@ impl super::UiScript {
     /// at the call (`0x52e610`).
     pub fn set_spell_tooltip(&mut self, spell_id: u32, view: SpellTooltipView) {
         self.store_spell_view(false, spell_id, view);
+    }
+
+    /// wenilla carry: whether every spell in the player's book has its tooltip view seated. The
+    /// reference builds a spell tooltip whole at the call (`0x52e610`); here the view is pushed by
+    /// the host a frame after it is known, so an addon that scans the book through `SetSpell` at
+    /// `PLAYER_ENTERING_WORLD` (CallOfElements' heal scan reads `TextLeft2`) found only the name.
+    /// The host holds the world-enter cascade on this (`ui_unit::feed_units`).
+    pub fn book_spell_views_ready(&self) -> bool {
+        let model = self.model_mut();
+        model
+            .spellbook
+            .slots
+            .iter()
+            .all(|s| {
+                s.spell_id == 0
+                    || model
+                        .spell_tooltips
+                        .get(&s.spell_id)
+                        .is_some_and(|v| !v.names_pending)
+            })
     }
 
     /// Store or replace a spell's view built against the player's pet, the one the builder's unit
@@ -424,8 +456,25 @@ fn render_spell(
             let color = if v.form_met { WHITE } else { RED };
             append_line(lua, this, (req.clone(), color), None, false)?;
         }
-        // Reagents, white and wrapped, unless altCaster drops them; the totem line it also drops
-        // is not built.
+        // The tools then the reagents, white and wrapped, both dropped under altCaster.
+        if !v.totem_items.is_empty() && !alt_caster {
+            let line = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let names: Vec<String> = v
+                    .totem_items
+                    .iter()
+                    .map(|(entry, name)| {
+                        if carries_item(&model, *entry) {
+                            name.clone()
+                        } else {
+                            format!("|cffff2020{name}|r")
+                        }
+                    })
+                    .collect();
+                format!("{}{}", v.totems_prefix, names.join(", "))
+            };
+            append_line(lua, this, (line, WHITE), None, true)?;
+        }
         if let Some(reagents) = v.reagents.as_ref().filter(|_| !alt_caster) {
             append_line(lua, this, (reagents.clone(), WHITE), None, true)?;
         }
@@ -521,7 +570,7 @@ pub(super) fn set_spell_with_talent(
             }
         }
     }
-    super::tooltip::show_or_hide_empty(lua, h);
+    super::tooltip::show_or_hide_empty_spell(lua, h);
     Ok(())
 }
 
@@ -536,7 +585,7 @@ fn set_reward_spell(
         None => {
             let h = frame_handle_of(lua, this)?;
             clear_silent(lua, h);
-            super::tooltip::show_or_hide_empty(lua, h);
+            super::tooltip::show_or_hide_empty_spell(lua, h);
             Ok(())
         }
     }
@@ -603,8 +652,19 @@ fn fill_spell(
             false
         }
     };
-    super::tooltip::show_or_hide_empty(lua, h);
+    super::tooltip::show_or_hide_empty_spell(lua, h);
     Ok(live)
+}
+
+/// wenilla carry: whether the player carries `entry` in the backpack, a worn bag or the keyring,
+/// as the bag snapshot stands now (the totem line's test, see `SpellTooltipView::totem_items`).
+fn carries_item(model: &Model, entry: u32) -> bool {
+    [-2i64, 0, 1, 2, 3, 4].iter().any(|bag| {
+        model
+            .containers
+            .get(bag)
+            .is_some_and(|c| c.slots.values().any(|s| s.item_id == entry))
+    })
 }
 
 /// Register the spell and aura content methods on the GameTooltip method table.
@@ -858,7 +918,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     }
                 }
             }
-            super::tooltip::show_or_hide_empty(lua, h);
+            super::tooltip::show_or_hide_empty_spell(lua, h);
             Ok(())
         })?,
     )?;
@@ -966,7 +1026,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     if let Some(name) = name {
                         append_line(lua, &this, (name, WHITE), None, false)?;
                     }
-                    super::tooltip::show_or_hide_empty(lua, h);
+                    super::tooltip::show_or_hide_empty_spell(lua, h);
                     // The macro leg's builder return is dropped (`0x5326be`).
                     Ok(Value::Nil)
                 }

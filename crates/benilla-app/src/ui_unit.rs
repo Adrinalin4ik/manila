@@ -77,6 +77,9 @@ pub(crate) struct UnitFeedState {
     warned_sideless: bool,
 }
 
+/// How long the world-enter cascade may wait for the book's spell views (see `feed_units`).
+const WORLD_ENTER_VIEW_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// The per-VM half of [`UnitFeedState`]: the event-trigger diffs.
 #[derive(Default)]
 pub(crate) struct UnitFeedMemo {
@@ -85,6 +88,9 @@ pub(crate) struct UnitFeedMemo {
     guild_generation: gate::Watch,
     /// Whether the world-enter events have fired for this world entry.
     entered_world: bool,
+    /// wenilla carry: when the world-enter cascade first became due, for its bounded wait on the
+    /// book's spell views (see the cascade below).
+    enter_due_since: Option<bevy::platform::time::Instant>,
     /// Per token, the last snapshot pushed.
     last: HashMap<String, UnitState>,
     target_guid: Option<u64>,
@@ -637,10 +643,28 @@ impl<'a> UnitNames<'a> {
     }
 }
 
+/// The race -> PvP team digit table read from the chain at load (`chr_classes::load_chr_races`);
+/// unset before it, or in a data-less build, where the frozen copies below answer.
+static RACE_TEAMS: std::sync::OnceLock<std::collections::HashMap<u8, i8>> =
+    std::sync::OnceLock::new();
+
+/// Set [`RACE_TEAMS`] once, from the loaded chain.
+pub(crate) fn set_race_teams(teams: std::collections::HashMap<u8, i8>) {
+    let _ = RACE_TEAMS.set(teams);
+}
+
 /// A playable race's fixed side, for where no faction template is at hand, as at world entry,
 /// where addons concatenate `UnitFactionGroup("player")` at file scope; [`faction_group`] reads
 /// the live template.
 pub(crate) fn race_faction_group(race: u8) -> Option<&'static str> {
+    // wenilla carry: the chain's own side where it loaded (see `race_pvp_team`).
+    if let Some(teams) = RACE_TEAMS.get() {
+        return match teams.get(&race) {
+            Some(1) => Some("Alliance"),
+            Some(0) => Some("Horde"),
+            _ => None,
+        };
+    }
     if !(1..=10).contains(&race) {
         return None;
     }
@@ -659,6 +683,13 @@ pub(crate) fn race_faction_group(race: u8) -> Option<&'static str> {
 /// (`0x4aa200`). A frozen copy of TurtleWoW's ten rows; race 9 (Goblin, template 1609, mask 5)
 /// answers Horde and race 10 (Blood Elf, 1610, mask 3) Alliance.
 pub(crate) fn race_pvp_team(race: u8) -> i8 {
+    // wenilla carry: the chain's own `ChrRaces` -> `FactionTemplate` answer where it loaded, the
+    // reference's own read, so every chain answers from its own data - stock 1.12 (race 9 Goblin
+    // Alliance) and TurtleWoW (Goblin Horde, High Elf Alliance) alike. The frozen copy below, which
+    // answers Turtle's rows, is only the fallback for a data-less build.
+    if let Some(teams) = RACE_TEAMS.get() {
+        return teams.get(&race).copied().unwrap_or(-1);
+    }
     match race {
         // Group mask 3, Player|Alliance: `& 4` clear, `& 2` set.
         1 | 3 | 4 | 7 | 10 => 1,
@@ -1638,7 +1669,19 @@ pub(crate) fn feed_units(
     // re-entry fires `PLAYER_ENTERING_WORLD` alone. At world exit, re-arm the entry and forget the
     // player-global memos so the next character seeds them.
     if let Some((_, me)) = self_pair {
-        if !memo.entered_world {
+        // wenilla carry: **the cascade waits for the book's spell views, a few frames at most.**
+        // The reference builds a spell tooltip at the call, so an addon scanning the book with
+        // `SetSpell` at `PLAYER_ENTERING_WORLD` reads every line; here the views land a frame after
+        // the book (`ui_tooltip::feed_spell_tooltips`, ordered after this feed), so that scan read
+        // the name alone - CallOfElements' heal scan raised on a nil `TextLeft2` (the owner's
+        // report, 2026-10-20). Bounded by `WORLD_ENTER_VIEW_WAIT`, so a view that never comes
+        // cannot hold the world-enter events back.
+        let due = *memo
+            .enter_due_since
+            .get_or_insert_with(bevy::platform::time::Instant::now);
+        let views_ready = script.book_spell_views_ready()
+            || due.elapsed() >= WORLD_ENTER_VIEW_WAIT;
+        if !memo.entered_world && views_ready {
             gate.audit("feed_units", "the world-enter events");
             // `"player"` names us when the cascade runs, from our own create: the stock windows
             // bind their model panes to it here (`PaperDollFrame.lua:39`), so it is seated ahead
@@ -1647,9 +1690,10 @@ pub(crate) fn feed_units(
             script.fire_world_enter();
             memo.entered_world = true;
         }
-    } else if memo.entered_world {
+    } else if memo.entered_world || memo.enter_due_since.is_some() {
         gate.audit("feed_units", "the world-exit disarm");
         memo.entered_world = false;
+        memo.enter_due_since = None;
         memo.last_xp = None;
         memo.last_rest = None;
         memo.last_level = None;

@@ -809,33 +809,44 @@ fn spell_start(
             }
         }
     }
-    // SPELLCAST_START fires only on `cast_time > 0 && !(SpellRec+0x18 & 2)` (`0x6e7700`): a
-    // ranged-slot spell never opens a bar. vmangos pads a non-auto-repeat ranged cast by 500 ms
-    // (`SpellEntry::GetCastTime`), so Throw arrives as a 500 ms cast with no bar. An unknown spell
-    // keeps the bar.
-    let ranged_slot = spells
-        .and_then(|s| s.catalog.get(spell_id))
-        .is_some_and(|d| d.ranged_slot());
+    // `0x6e7700`, the reference's `SMSG_SPELL_START` handler, opens the cast bar only when the
+    // *wire* cast time is nonzero and the spell is not in the ranged slot (`SpellRec+0x18 & 2`, so
+    // every `Attributes & 0x2` spell), and only when the spell's `Spell.dbc` record exists — the
+    // whole block sits behind a null check on it. The time is the server's, not
+    // `SpellCastTimes.dbc`'s: our own cast opened the bar from the DBC row at cast time, and a
+    // server START only confirms it. The ranged suppression covers a real 3 s Aimed Shot too, so
+    // 1.12 shows no bar for it — the gap the later `Force Display Castbar` option fixed — and an
+    // instant spell never bars from a START, which is what leaves vmangos's +500 ms pad on
+    // Multi-Shot, Throw, Auto Shot and wand Shoot bar-free.
+    let row = spells.and_then(|s| s.catalog.get(spell_id));
+    let opens_bar = match row {
+        Some(d) => cast_time_ms > 0 && !d.ranged_slot(),
+        None => false,
+    };
     if *crate::net::CAST_TRACE && self_guid.0 == Some(caster) {
         info!(
             "cast-trace: RECV SPELL_START — spell {spell_id} cast_time={cast_time_ms}ms \
              (bar {})",
-            if ranged_slot {
-                "suppressed: ranged"
-            } else {
+            if opens_bar {
                 "opens"
+            } else if row.is_none() {
+                "closed: no spell record"
+            } else if cast_time_ms == 0 {
+                "closed: instant"
+            } else {
+                "suppressed: ranged"
             }
         );
     }
     // Our own timed cast opens the bar.
     if self_guid.0 == Some(caster) && cast_time_ms > 0 {
-        if !ranged_slot {
+        if opens_bar {
             cast_bar.0.push(CastBarEdge::Start {
                 spell_id,
                 cast_time_ms,
             });
         }
-        // The real cast time replaces the guard's send-time deadline, ranged casts included.
+        // The real cast time replaces the guard's send-time deadline, every cast included.
         pending.refine(cast_time_ms, Instant::now());
     }
     if let Some(&e) = index.0.get(&caster) {
@@ -3419,6 +3430,163 @@ mod tests {
             .0,
             None,
             "the save alone is not the in-flight slot"
+        );
+    }
+
+    /// `0x6e7700`'s gate, verbatim: a server START bars only on a nonzero *wire* cast time, only
+    /// for a spell whose `Spell.dbc` record exists, and never for a ranged one. So a real 3 s
+    /// Aimed Shot is bar-free (the 1.12 gap `Force Display Castbar` later closed), a +500 ms pad
+    /// on an instant shot cannot bar, and the capture spells bar exactly when the server times
+    /// them rather than because `SpellCastTimes.dbc` calls their row instant.
+    #[test]
+    fn a_ranged_spell_never_bars_but_a_timed_capture_does() {
+        use crate::net::{Guid, SelfPlayer};
+        use bevy::ecs::system::RunSystemOnce;
+
+        const AIMED_SHOT: u32 = 19434;
+        const MULTI_SHOT: u32 = 2643;
+        const AUTO_SHOT: u32 = 75;
+        const TOWER_CAPTURE: u32 = 23466;
+
+        // The real 1.12 rows: Aimed Shot is a 3 s cast (`SpellCastTimes` row 5); Multi-Shot, Auto
+        // Shot and Tower Capture point at row 1, the instant sentinel.
+        let spells = || {
+            let mut s = Spells::empty_for_tests();
+            s.catalog = benilla_formats::SpellCatalog::from_displays(
+                [
+                    (
+                        AIMED_SHOT,
+                        benilla_formats::SpellDisplay {
+                            name: "Aimed Shot".into(),
+                            attributes: 0x0041_0012,
+                            casting_time_index: 5,
+                            base_level: 20,
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        MULTI_SHOT,
+                        benilla_formats::SpellDisplay {
+                            name: "Multi-Shot".into(),
+                            attributes: 0x0001_0002,
+                            casting_time_index: 1,
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        AUTO_SHOT,
+                        benilla_formats::SpellDisplay {
+                            name: "Auto Shot".into(),
+                            attributes: 0x0005_0012,
+                            attributes_ex2: 0x20,
+                            casting_time_index: 1,
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        TOWER_CAPTURE,
+                        benilla_formats::SpellDisplay {
+                            name: "Tower Capture".into(),
+                            attributes: 0x0000_0100,
+                            casting_time_index: 1,
+                            ..Default::default()
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            );
+            s.cast_times = benilla_formats::SpellCastTimeCatalog::from_rows([
+                (
+                    1,
+                    benilla_formats::SpellCastTime {
+                        base_ms: 0,
+                        per_level_ms: 0,
+                        minimum_ms: 0,
+                    },
+                ),
+                (
+                    5,
+                    benilla_formats::SpellCastTime {
+                        base_ms: 3000,
+                        per_level_ms: 0,
+                        minimum_ms: 3000,
+                    },
+                ),
+            ]);
+            s
+        };
+
+        // Whether our own wire START for `spell_id` left a Start edge in the feed.
+        let start_for =
+            |spell_id: u32, cast_ms: u32| {
+                let mut app = App::new();
+                app.add_message::<CastEvent>()
+                    .init_resource::<GuidIndex>()
+                    .init_resource::<SelfGuid>()
+                    .init_resource::<CastBarFeed>()
+                    .init_resource::<PendingCast>()
+                    .init_resource::<crate::spell::SpellModifiers>();
+                let self_e = app.world_mut().spawn((Guid(10), SelfPlayer)).id();
+                app.world_mut()
+                    .resource_mut::<GuidIndex>()
+                    .0
+                    .insert(10, self_e);
+                app.world_mut().resource_mut::<SelfGuid>().0 = Some(10);
+                let cat = spells();
+                app.world_mut()
+                    .run_system_once(
+                        move |mut commands: Commands,
+                              index: Res<GuidIndex>,
+                              self_guid: Res<SelfGuid>,
+                              mut cast_events: MessageWriter<CastEvent>,
+                              mut cast_bar: ResMut<CastBarFeed>,
+                              mut pending: ResMut<PendingCast>| {
+                            spell_start(
+                                10,
+                                spell_id,
+                                0,
+                                cast_ms,
+                                None,
+                                None,
+                                &mut commands,
+                                &index,
+                                &mut cast_events,
+                                &self_guid,
+                                &mut cast_bar,
+                                &mut pending,
+                                Some(&cat),
+                                1,
+                            );
+                        },
+                    )
+                    .unwrap();
+                app.world().resource::<CastBarFeed>().0.iter().any(
+                    |e| matches!(e, CastBarEdge::Start { spell_id: id, .. } if *id == spell_id),
+                )
+            };
+
+        assert!(
+            !start_for(AIMED_SHOT, 3_500),
+            "Aimed Shot is ranged: even its real 3 s cast shows no bar in 1.12"
+        );
+        assert!(
+            !start_for(MULTI_SHOT, 500),
+            "Multi-Shot is ranged: vmangos's +500 ms pad must not open a bar"
+        );
+        assert!(!start_for(AUTO_SHOT, 0), "Auto Shot is instant: no bar");
+        assert!(!start_for(AUTO_SHOT, 500), "nor a padded instant one");
+        assert!(
+            start_for(TOWER_CAPTURE, 5_000),
+            "Tower Capture is not ranged: a timed wire cast opens the bar"
+        );
+        assert!(
+            !start_for(TOWER_CAPTURE, 0),
+            "an instant wire cast never bars: the gate reads the wire time, not the DBC row"
+        );
+        assert!(
+            !start_for(99_999, 5_000),
+            "a spell with no Spell.dbc record is skipped, as the reference null-checks it"
         );
     }
 }

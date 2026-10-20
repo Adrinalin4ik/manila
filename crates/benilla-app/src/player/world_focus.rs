@@ -107,6 +107,7 @@ pub(super) fn release_post_snap_hold(
     time: Res<Time>,
     mut last_counters: Local<Option<[usize; 6]>>,
     net_cmds: Option<Res<crate::net::NetCommands>>,
+    self_guid: Option<Res<crate::net::SelfGuid>>,
 ) {
     let Some(p) = progress else { return };
     // Residency counts only for the tile under the body. On a mismatch (the teleport's snap frame,
@@ -140,12 +141,40 @@ pub(super) fn release_post_snap_hold(
     // stream advances, so only a stream with no progress for the whole budget times out.
     let now = time.elapsed_secs();
     let alive = player.world_stale || progressed || p.assets_in_flight;
+    let was_settling = player.settling;
     if p.presentable() && !player.world_stale && focus_matches {
         player.end_settle(true, now);
     } else if alive {
         player.settle_deadline = now + SETTLE_TIMEOUT;
     } else if now >= player.settle_deadline {
         player.end_settle(false, now);
+    }
+    // Once per settle, and only on the frame it ends: what still holds WASD, or `none`. Without
+    // this a character that comes out of a worldport unable to walk is a story, because nothing
+    // else in the log says whether the hold is the settle, a lost mover, or a pending reseat.
+    if was_settling && !player.settling {
+        let held = player.movement_suppressors();
+        info!("worldport: settle released — WASD held by: {held}");
+        // A transfer is a mover change, and the server's revoke belonged to the body on the map we
+        // left: vmangos takes control for the teleport (`SetClientControl(player, 0)`) and does not
+        // promise the restore. Left set, `control_lost` parks the body for the rest of the session,
+        // because nothing else clears it — the worldport arm replaces the pose and the settle
+        // releases, and neither asks. Re-claim our own body here, at the transfer's completion and
+        // with the ack, the way login does; the reference's `SetActiveMover` reset (`wire_in.rs`)
+        // is the same teardown. A possession is left alone: there the lock is the point.
+        if player.control_lost && player.foreign_mover.is_none() {
+            if let (Some(net), Some(guid)) =
+                (net_cmds.as_deref(), self_guid.as_deref().and_then(|g| g.0))
+            {
+                player.control_lost = false;
+                player.reseat = true;
+                super::move_trace::mover_claim("WORLDPORT", guid);
+                let _ = net
+                    .0
+                    .send(crate::net::ClientCommand::SetActiveMover { guid });
+                info!("worldport: re-claimed our own body after the transfer");
+            }
+        }
     }
     // **Pay the worldport ack when the hold ends, or when its budget is spent — whichever is
     // first** (decision 1340, amended here). This is the real client's post-load `0xDC`

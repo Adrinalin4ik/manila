@@ -133,6 +133,8 @@ pub(crate) struct Model {
     pub(crate) addons_chain_reader: Option<super::addon::SharedChainReader>,
     /// wenilla carry: the host's saved-variables reader; `std::fs` without one.
     pub(crate) addons_saved_reader: Option<super::addon::SharedSavedReader>,
+    /// wenilla carry: the host's reader for `LoadAddOn`'s folder files; `std::fs` without one.
+    pub(crate) addons_dir_reader: Option<super::addon::SharedDirReader>,
     /// The host's font engine, so a metric answers inside the asking call, not a frame later.
     pub(crate) measurer: Option<super::measure::SharedMeasurer>,
     /// The tooltip sizer's measures by key ([`super::tooltip`]): the clear's width reset and the
@@ -1456,6 +1458,7 @@ impl Model {
             addons_root: None,
             addons_chain_reader: None,
             addons_saved_reader: None,
+            addons_dir_reader: None,
             measurer: None,
             tooltip_measures: HashMap::new(),
             texture_probe: None,
