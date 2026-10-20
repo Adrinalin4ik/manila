@@ -20,6 +20,9 @@ pub(crate) use cast_lines::{CastFailLines, CastFailRedisplays};
 mod drain;
 // A `UseAction` press, applied in call order by `crate::script_calls`.
 pub(crate) use drain::{attack_nearest_probe, use_action, ActionPress, AttackPress, UseOutcome};
+// The bar's drain of the VM's queued writes, which the macro migration's test runs end to end.
+#[cfg(test)]
+pub(crate) use drain::drain_action_sets;
 // The right-click casts' drain, which the click's tests run after the click.
 #[cfg(test)]
 pub(crate) use drain::drain_click_casts;
@@ -33,6 +36,8 @@ pub(crate) use feed::{spell_action_icon, MISSING_ITEM_ICON};
 mod feed_tests;
 mod net;
 mod ranks;
+// The rank pass, which the macro load orders itself ahead of: it rewrites a bar word, too.
+pub(crate) use ranks::normalize_action_ranks;
 mod reactive;
 #[cfg(test)]
 mod reactive_tests;
@@ -364,11 +369,13 @@ impl Plugin for UiActionPlugin {
                     // A seat: the world-enter events' handlers read the slots' state, which the
                     // reference's arrival stores before its enter cascade (`0x5deafc`, `0x5deb60`).
                     // After the bag feed, so each `BAG_UPDATE`'s cache refresh (`0x4f9374`) lands
-                    // in its own frame.
+                    // in its own frame. After the pet's old-target clear, which writes the bar a
+                    // macro bound to a pet spell reads the guid and history of.
                     state::feed_action_state
                         .in_set(UnitFeed)
                         .in_set(crate::ui_unit::WorldEnterSeats)
                         .after(crate::player::ControlRestore)
+                        .after(crate::ui_pet::pet_stop_on_old_target_clear)
                         .after(crate::ui_items::feed::feed_containers)
                         .after(feed::feed_actions),
                     // After the unit snapshots, which its handlers read (the target stored at

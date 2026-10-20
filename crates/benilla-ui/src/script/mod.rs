@@ -208,7 +208,10 @@ mod worn_display;
 pub(crate) mod xml_layout;
 mod zone_text;
 
-pub use action::{ActionSlot, ActionState, ActionUse, CastView, OpenProfessions, Profession};
+pub use action::{
+    macro_slot_id, macro_slot_word, ActionSlot, ActionState, ActionUse, CastView, OpenProfessions,
+    Profession,
+};
 pub use addon::{addon_load_context, AddOnInfo, AddonLoad, AddonReply, AddonSecurity};
 pub use addon_enable::{AddonStateFiles, EnableHash, EnableStore};
 pub use addon_message::{AddonDistribution, AddonSend};
@@ -307,7 +310,10 @@ pub use layout_cache::{AnchorLayout, FrameLayout, LayoutPoint};
 pub use lock_check::{check_lock, LockCheck, LockOpener, LockOpeners, LockSlotView};
 pub use loot::{LootRow, LootState, LOOT_PORTRAIT_UNIT};
 pub use loot_roll::{LootRollEntry, LootRollsState};
-pub use macros::{MacroBinding, MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME};
+pub use macros::{
+    MacroBinding, MacroState, MacroView, CHARACTER_ID_BASE, MAX_MACROS, MAX_MACRO_BODY,
+    MAX_MACRO_NAME,
+};
 pub use mail::{
     MailInboxRow, MailInvoice, MailSendRequest, MailState, PackageView, StationeryView,
 };
@@ -346,7 +352,8 @@ pub use skills::{SkillEntry, SkillsState};
 pub use social::{FriendInfo, SocialRequest, SocialState, WhoInfo};
 pub use sound::{MusicRequest, SoundRequest};
 pub use spellbook::{
-    resolve_spell_by_name, PetBookState, SpellBookState, SpellSlotView, SpellTabName, SpellTabView,
+    resolve_spell_by_name, resolve_spell_in_books, NamedSpell, PetBookState, SpellBookState,
+    SpellSlotView, SpellTabName, SpellTabView,
 };
 pub use stable::{StableIntent, StablePetSlot, StableState, NUM_STABLE_SLOTS};
 pub use summon::SummonConfirmUiState;
