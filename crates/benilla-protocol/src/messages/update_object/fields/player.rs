@@ -55,6 +55,12 @@ impl ObjectFields {
             .map(|id| id as i32)
             .filter(|&id| id != 0)
     }
+    /// `ITEM_FIELD_ENCHANTMENT + 1` (field 23): a charter's signature count, in slot 0's duration
+    /// dword beside the petition id; the tooltip reads it at `flds+0x44` (`0x52ba51`). vmangos
+    /// leaves the write out (`PetitionsHandler.cpp:307`), so it reads 0 there.
+    pub fn item_petition_signatures(&self) -> u32 {
+        self.get_u32(FIELD_ITEM_ENCHANTMENT + 1).unwrap_or(0)
+    }
     /// `ITEM_FIELD_ENCHANTMENT + 3*slot + 2`: charges left, shown as `" (N Charges)"` if nonzero.
     /// The tooltip skips the duration; a countdown comes from `SMSG_ITEM_ENCHANT_TIME_UPDATE`.
     pub fn item_enchant_charges(&self, slot: u8) -> u32 {
@@ -312,6 +318,11 @@ impl ObjectFields {
     pub fn player_self_res_spell(&self) -> Option<u32> {
         self.get_u32(FIELD_PLAYER_SELF_RES_SPELL)
             .filter(|&s| s != 0)
+    }
+    /// `PLAYER_FIELD_PVP_MEDALS` (player block `+0x1034`): medal `n` is bit `n - 1`, which the item
+    /// tooltip (`0x52d70a`) and the usable gate (`0x5eaa89`) test.
+    pub fn player_pvp_medals(&self) -> Option<u32> {
+        self.get_u32(FIELD_PLAYER_PVP_MEDALS)
     }
     /// `PLAYER_BYTES`: skinColor, faceType, hairStyle and hairColor, bytes 0 to 3.
     pub fn player_bytes(&self) -> Option<u32> {
