@@ -598,6 +598,9 @@ pub(crate) struct GlueMgr {
     park_out: Vec<ParkRequest>,
     /// Asks of the login engine the per-frame arms made, sent with the verbs' own.
     login_out: Vec<GlueLogin>,
+    /// The agreements' flag cells (`[0xb41df8]`-`[0xb41e14]`), read off their CVars once, when the
+    /// first glue VM comes up (`0x46a400`), and seated in each VM after it.
+    pub(super) notices: Option<benilla_ui::script::GlueNotices>,
     /// The server alert's fetch while it runs (`alertPending`, `[0xb41e28]`), started once per
     /// process at the glue init.
     alert_fetch: Option<crossbeam_channel::Receiver<Option<Vec<u8>>>>,
@@ -1773,6 +1776,8 @@ pub(crate) struct GlueAsks<'w> {
     pick: Option<Res<'w, crate::net::CharPick>>,
     /// The engine-side CVar table `EnterWorld` writes and saves.
     cvars: Option<ResMut<'w, crate::cvars::Cvars>>,
+    /// What a new character's entry reads for its intro eye.
+    eyes: crate::glue_session::roster::IntroEyes<'w>,
 }
 
 /// The four agreements' states off the CVar registry: the read `0x46a400` makes at `0x402b36`,
@@ -2157,7 +2162,7 @@ fn send_asks(mgr: &mut GlueMgr, asks: &mut GlueAsks) {
                     if let (Some(roster), Some(pick)) =
                         (asks.roster.as_deref_mut(), asks.pick.as_deref())
                     {
-                        crate::glue_session::roster::send_pick(roster, pick, *guid);
+                        crate::glue_session::roster::send_pick(roster, pick, *guid, &asks.eyes);
                     }
                     continue;
                 }
