@@ -363,40 +363,26 @@ pub(super) fn build_view(
     // wenilla carry: the tools line (`SPELL_TOTEMS`, "Tools: %s"), built as the reagents are, a
     // missing tool red: the reference prints it for a totem and shaman addons read the element
     // off it (CallOfElements' totem scan reads `TextLeft4`).
-    let totems = {
-        let mut parts: Vec<String> = Vec::new();
-        for entry in d.totems.iter().copied().filter(|&e| e != 0) {
-            deps.borrow_mut().reagent(entry);
-            let Some(name) = vctx
-                .items
-                .template(entry, 0, Ask::Event(vctx.commands))
-                .map(|t| t.name.clone())
-            else {
-                names_pending = true;
-                continue;
-            };
-            let short = vctx.store.is_some_and(|s| {
-                find_item(&s.0, vctx.objects, entry, ItemSearch::default()).is_none()
-            });
-            parts.push(if short {
-                format!("|cffff2020{name}|r")
-            } else {
-                name
-            });
+    // The tools: each named item; whether it is carried is the renderer's, read off the bags at
+    // the call (`benilla_ui` `carries_item`).
+    let mut totem_items: Vec<(u32, String)> = Vec::new();
+    for entry in d.totems.iter().copied().filter(|&e| e != 0) {
+        deps.borrow_mut().reagent(entry);
+        match vctx
+            .items
+            .template(entry, 0, Ask::Event(vctx.commands))
+            .map(|t| t.name.clone())
+        {
+            Some(name) => totem_items.push((entry, name)),
+            None => names_pending = true,
         }
-        (!parts.is_empty()).then(|| {
-            let list = parts.join(", ");
-            // 1.12's `SPELL_TOTEMS` is the bare prefix "Tools: ", the names appended after it,
-            // as `SPELL_REAGENTS` is "Reagents: " (filled as a template it answered "Tools: "
-            // alone - the owner's diagnostic, 2026-10-20). A chain whose string carries a `%s`
-            // is filled.
-            match (vctx.get)("SPELL_TOTEMS") {
-                Some(t) if t.contains('%') => keyed(vctx.get, "SPELL_TOTEMS", &[Arg::S(&list)])
-                    .unwrap_or_else(|| format!("Tools: {list}")),
-                Some(prefix) => format!("{prefix}{list}"),
-                None => format!("Tools: {list}"),
-            }
-        })
+    }
+    // 1.12's `SPELL_TOTEMS` is the bare prefix "Tools: ", the names appended after it, as
+    // `SPELL_REAGENTS` is "Reagents: " (filled as a template it answered "Tools: " alone - the
+    // owner's diagnostic, 2026-10-20). A chain whose string carries a `%s` keeps what precedes it.
+    let totems_prefix = match (vctx.get)("SPELL_TOTEMS") {
+        Some(t) => t.split('%').next().unwrap_or_default().to_string(),
+        None => "Tools: ".to_string(),
     };
     let view = benilla_ui::script::SpellTooltipView {
         name: d.name.clone(),
@@ -413,7 +399,8 @@ pub(super) fn build_view(
         requires_form,
         form_met,
         chance,
-        totems,
+        totems_prefix,
+        totem_items,
         names_pending,
         reagents,
         description: d

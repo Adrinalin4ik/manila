@@ -58,10 +58,14 @@ pub struct SpellTooltipView {
     pub requires_form: Option<String>,
     /// The current shapeshift form matches the mask; the app re-pushes on a form change.
     pub form_met: bool,
-    /// wenilla carry: "Tools: Earth Totem" (`SPELL_TOTEMS`, the two `Totem` columns), written
-    /// like the reagents, a missing tool behind the inline `|cffff2020` escape. Shaman addons read
-    /// the totem's element off it: CallOfElements builds its whole totem bar from this line.
-    pub totems: Option<String>,
+    /// wenilla carry: "Tools: Earth Totem" (`SPELL_TOTEMS`, the two `Totem` columns): the line's
+    /// prefix and each tool's `(item entry, name)`. Shaman addons read the totem's element off it
+    /// (CallOfElements builds its totem bar from this line) and whether the tool is carried, a
+    /// missing one behind the inline `|cffff2020` escape. That test runs at the render, against
+    /// the bags as they stand ([`carries_item`]): an addon re-reads it inside `BAG_UPDATE`, a frame
+    /// before a view pushed on the bag change would land.
+    pub totems_prefix: String,
+    pub totem_items: Vec<(u32, String)>,
     /// wenilla carry: a tool or reagent named by the spell had no streamed item name when this
     /// view was built, so its line is short; the app re-pushes the view when the name lands.
     /// The world-enter wait reads it (`book_spell_views_ready`).
@@ -453,8 +457,23 @@ fn render_spell(
             append_line(lua, this, (req.clone(), color), None, false)?;
         }
         // The tools then the reagents, white and wrapped, both dropped under altCaster.
-        if let Some(totems) = v.totems.as_ref().filter(|_| !alt_caster) {
-            append_line(lua, this, (totems.clone(), WHITE), None, true)?;
+        if !v.totem_items.is_empty() && !alt_caster {
+            let line = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let names: Vec<String> = v
+                    .totem_items
+                    .iter()
+                    .map(|(entry, name)| {
+                        if carries_item(&model, *entry) {
+                            name.clone()
+                        } else {
+                            format!("|cffff2020{name}|r")
+                        }
+                    })
+                    .collect();
+                format!("{}{}", v.totems_prefix, names.join(", "))
+            };
+            append_line(lua, this, (line, WHITE), None, true)?;
         }
         if let Some(reagents) = v.reagents.as_ref().filter(|_| !alt_caster) {
             append_line(lua, this, (reagents.clone(), WHITE), None, true)?;
@@ -635,6 +654,17 @@ fn fill_spell(
     };
     super::tooltip::show_or_hide_empty(lua, h);
     Ok(live)
+}
+
+/// wenilla carry: whether the player carries `entry` in the backpack, a worn bag or the keyring,
+/// as the bag snapshot stands now (the totem line's test, see `SpellTooltipView::totem_items`).
+fn carries_item(model: &Model, entry: u32) -> bool {
+    [-2i64, 0, 1, 2, 3, 4].iter().any(|bag| {
+        model
+            .containers
+            .get(bag)
+            .is_some_and(|c| c.slots.values().any(|s| s.item_id == entry))
+    })
 }
 
 /// Register the spell and aura content methods on the GameTooltip method table.
