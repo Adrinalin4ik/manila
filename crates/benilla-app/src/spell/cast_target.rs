@@ -6,9 +6,9 @@
 //!   target from the spell's implicit targeting.
 //! - `Attributes & 0x200`: the candidate is the equipped main hand (`0x6e5361`), bound as an item
 //!   with no cursor; an empty hand refuses with "Your weapon hand is empty" (`0x6e504b`).
-//! - otherwise the selection meets `BindTarget`'s gates ([`bind_gates`]), then each bit is cleared
-//!   by its relation check; then the player behind `autoSelfCast` (`0x6e53d7`) does the same. Only a
-//!   fully cleared word commits, as a unit guid.
+//! - otherwise the selection meets `BindTarget`'s gates ([`bind_gates`]), then its relation arms,
+//!   the first that holds clearing its bit; then the player behind `autoSelfCast` (`0x6e53d7`) does
+//!   the same. Only a word the arm leaves empty commits, as a unit guid.
 //! - a word with item, lock, GameObject or location bits enters the targeting cursor carrying
 //!   the whole word: its location (`0x6e6320`, `& 0x60`), item (`0x6e6330`, `& 0x4010`),
 //!   GameObject (`0x6e62d0`, `& 0x4800`) and unit (`0x6e6460`) predicates can hold at once, and
@@ -220,6 +220,17 @@ pub(crate) struct CastContext<'a> {
     /// The caster's movement flags (the client's `[unit+0x9e8]`), read by the requirement
     /// validator's moving gate.
     pub(crate) self_move_flags: u32,
+    /// The caster's stand state as `GetStandState 0x5ed570` reads it for the active player, the
+    /// validator's standing rung's input (`0x609cad`).
+    pub(crate) self_stand_state: u8,
+    /// The caster's sheathe state `[unit+0xd40]`, the validator's unsheathed rung's input
+    /// (`0x609ba9`).
+    pub(crate) self_sheathe_state: u8,
+    /// `IsDaytime 0x60a050` on the game clock, the validator's day and night rungs' input.
+    pub(crate) daytime: bool,
+    /// `0x612cc0`, the caster's answer to the entity outdoors test `0x6706f0`, the validator's
+    /// place rungs' input.
+    pub(crate) self_outdoors: bool,
     /// `[0xb4b3e4]` is clear: the start of melee the cast's tail makes returns at it
     /// (`0x5ecbc0`).
     pub(crate) self_control_lost: bool,
@@ -309,6 +320,13 @@ pub(crate) struct CastTargeting<'w, 's> {
     own_control: Option<Res<'w, crate::player::OwnControlLost>>,
     /// The caster's and the selection's reach and motion, for the range gate.
     range_units: super::RangeUnits<'w, 's>,
+    /// The caster's animation driver, which keeps its sheathe state.
+    self_driver: Query<'w, 's, &'static crate::creature_anim::AnimDriver, With<SelfPlayer>>,
+    /// The game clock the day and night rungs read; absent in a harness without one.
+    clock: Option<Res<'w, crate::net::ServerTime>>,
+    /// The player's answer to the entity outdoors test, which the place rungs read; absent
+    /// outside the world.
+    outdoors: Option<Res<'w, crate::player::PlayerOutdoors>>,
 }
 
 impl CastTargeting<'_, '_> {
@@ -368,6 +386,21 @@ impl CastTargeting<'_, '_> {
                 .and_then(|s| s.0.player_inv_slot(EQUIPMENT_SLOT_MAINHAND))
                 .filter(|&g| g != 0),
             self_move_flags: self.player.as_deref().map_or(0, |p| p.move_flags()),
+            self_stand_state: {
+                let byte = self_store.map_or(0, |s| s.0.unit_stand_state());
+                self.player.as_deref().map_or(byte, |p| p.stand_state(byte))
+            },
+            // The cached state, seeded from `UNIT_FIELD_BYTES_2` byte 0 and moved by the local
+            // setter `0x611cf0` ahead of its echo; the descriptor's byte until it is driven.
+            self_sheathe_state: self
+                .self_driver
+                .iter()
+                .next()
+                .and_then(|d| d.sheath_state())
+                .or_else(|| self_store.and_then(|s| s.0.unit_sheath_state()))
+                .unwrap_or(0),
+            daytime: self.clock.as_deref().is_some_and(|c| c.0.is_daytime()),
+            self_outdoors: self.outdoors.as_deref().is_none_or(|o| o.0),
             self_control_lost: self.own_control.as_deref().is_some_and(|c| c.0),
         }
     }
@@ -408,52 +441,74 @@ pub(crate) fn cast_target_mask(def: &SpellDisplay) -> u16 {
     word
 }
 
-/// `BindTarget 0x6e5b40`'s unit branch past the gates: clear every flag-word bit the candidate
-/// satisfies.
+/// `UNIT_FIELD_FLAGS & 0x100` (vmangos `UNIT_FLAG_IMMUNE_TO_PLAYER`, `UnitDefines.h:553`), which
+/// refuses the `0x2` arm (`0x6e5df2`-`0x6e5e03`).
+const UNIT_FLAG_IMMUNE_TO_PLAYER: u32 = 0x0000_0100;
+
+/// `BindTarget 0x6e5b40`'s unit branch past the gates, one else-if chain (`0x6e5cad`-`0x6e5ee7`)
+/// that `SpellCanTargetObject 0x6e6460` asks in the same order (`0x6e65b1`-`0x6e66dc`). The first
+/// arm whose test holds clears its own bit, and on a dead unit `0x400`, or `0x8600` for the `0x2`
+/// arm, and the word left is returned; `None` when no arm holds, and when the `0x8000` arm's
+/// `CanAssist` refuses, which ends the walk (`0x6e5e7f`).
 ///
-/// The assist bit asks `CanAssist 0x6066f0`: selectable, friendly or better, and an NPC's owner
-/// (or the NPC itself) PvP-enabled. This keeps friendly ambient NPCs and critters unbindable.
-/// The enemy bit asks `CanAttack` (`0x606980`). The party bit needs `0x606c20` and then `CanAssist`
-/// (`6e5cad`-`6e5cec`): the player, a member of his party, or a unit that answers to one. The raid
-/// bit needs `0x606d20` and `CanAssist` (`6e5cf1`-`6e5d2f`): the same, with the raid roster
-/// counting as well as the party slots. The corpse check (`0x6067d0`) is assistable with health 0
-/// here.
-fn clear_satisfied_bits(word: u16, is_self: bool, rel: &TargetRelations) -> u16 {
-    let mut word = word;
-    let assist = rel.assistable(is_self);
-    let dead = rel.target_store.is_some_and(|s| !unit_alive(&s.0));
-    if word & TF_UNIT_PARTY != 0 && assist && rel.in_party(is_self) {
-        word &= !TF_UNIT_PARTY;
+/// | order | bit | the arm's test |
+/// |---|---|---|
+/// | 1 | `0x8` | `0x606c20`, then `CanAssist 0x6066f0` |
+/// | 2 | `0x4` | `0x606d20`, then `CanAssist` |
+/// | 3 | `0x100` | `CanAssist` |
+/// | 4 | `0x80` | `CanAttack 0x606980` |
+/// | 5 | `0x2` | [`UNIT_FLAG_IMMUNE_TO_PLAYER`] clear |
+/// | 6 | `0x8000` | dead, and a player or `UNIT_FIELD_PETNUMBER` set; then `CanAssist` |
+/// | 7 | `0x200` | dead, a player, and `CanAssist` refused |
+///
+/// `CanAssist` asks selectable, friendly or better, and an NPC's owner (or the NPC itself)
+/// PvP-enabled, which keeps friendly ambient NPCs and critters unbindable. The party test is the
+/// player, a member of his party or a unit that answers to one; the raid test counts the raid
+/// roster as well as the party slots. A unit with no streamed descriptor reads alive, no player
+/// and no flags.
+fn bind_arm(word: u16, is_self: bool, rel: &TargetRelations) -> Option<u16> {
+    let fields = rel.target_store.map(|s| &s.0);
+    let dead = fields.is_some_and(|f| !unit_alive(f));
+    let player = fields
+        .is_some_and(|f| f.object_type() == Some(benilla_protocol::messages::ObjectType::Player));
+    let pet = fields.is_some_and(|f| f.unit_pet_number() != 0);
+    let flags = fields.map_or(0, |f| f.unit_flags());
+    // Arms 1 to 4 clear `0x400` beside their bit on a dead unit (`0x6e5ddb`, `0x6e5d89`).
+    let bind = |bit: u16| Some(word & !(if dead { bit | TF_EXPLICIT_GATE } else { bit }));
+    if word & TF_UNIT_PARTY != 0 && rel.in_party(is_self) && rel.assistable(is_self) {
+        return bind(TF_UNIT_PARTY);
     }
-    if word & TF_UNIT_RAID != 0 && assist && rel.in_group(is_self) {
-        word &= !TF_UNIT_RAID;
+    if word & TF_UNIT_RAID != 0 && rel.in_group(is_self) && rel.assistable(is_self) {
+        return bind(TF_UNIT_RAID);
     }
-    if word & TF_UNIT_ASSIST != 0 && assist {
-        word &= !TF_UNIT_ASSIST;
+    if word & TF_UNIT_ASSIST != 0 && rel.assistable(is_self) {
+        return bind(TF_UNIT_ASSIST);
     }
     if word & TF_UNIT_ENEMY != 0 && rel.attackable(is_self) {
-        word &= !TF_UNIT_ENEMY;
+        return bind(TF_UNIT_ENEMY);
     }
-    // Bit 1 has no relation check: any unit binds. A dead unit's bind clears bit 10 (`6e5d89`,
-    // `6e5ddb`); the gate refuses a living unit under that word before it gets here.
-    if word & TF_UNIT != 0 {
-        word &= !TF_UNIT;
+    if word & TF_UNIT != 0 && flags & UNIT_FLAG_IMMUNE_TO_PLAYER == 0 {
+        return Some(
+            word & !(if dead {
+                TF_UNIT | CORPSE_WORD_BITS
+            } else {
+                TF_UNIT
+            }),
+        );
     }
-    if word & TF_EXPLICIT_GATE != 0 && dead {
-        word &= !TF_EXPLICIT_GATE;
+    if word & TF_CORPSE_ALLY != 0 && dead && (player || pet) {
+        return rel.assistable(is_self).then_some(word & !TF_CORPSE_ALLY);
     }
-    if word & TF_CORPSE_ALLY != 0 && assist && dead {
-        word &= !TF_CORPSE_ALLY;
+    if word & TF_CORPSE_ENEMY != 0 && dead && player && !rel.assistable(is_self) {
+        return Some(word & !TF_CORPSE_ENEMY);
     }
-    if word & TF_CORPSE_ENEMY != 0 && !is_self && dead {
-        word &= !TF_CORPSE_ENEMY;
-    }
-    word
+    None
 }
 
-/// Whether the unit arm's relation checks clear the whole standing word for this unit.
+/// Whether an arm binds this unit and leaves the standing word empty, which commits the cast
+/// (`0x6e60c1`).
 fn unit_word_binds(word: u16, is_self: bool, rel: &TargetRelations) -> bool {
-    word & UNIT_BITS != 0 && clear_satisfied_bits(word, is_self, rel) == 0
+    word & UNIT_BITS != 0 && bind_arm(word, is_self, rel) == Some(0)
 }
 
 /// Whether `BindTarget 0x6e5b40`'s unit branch binds this unit under the standing word: the gates
@@ -914,6 +969,122 @@ mod tests {
                 "a living unit keeps the bit, self {is_self}"
             );
         }
+    }
+
+    /// The validator's caster reads: the stand state through `GetStandState 0x5ed570`, which with no
+    /// local state is the descriptor's byte; the sheathe state `[unit+0xd40]` (`0x609ba9`), the
+    /// descriptor's until the driver holds one; and `IsDaytime 0x60a050`, night with no clock.
+    #[test]
+    fn the_context_reads_the_posture_the_sheathe_and_the_clock() {
+        use bevy::ecs::system::RunSystemOnce;
+        let read = |stand: u32, sheathe: u32, hour: Option<i32>| {
+            let mut world = World::new();
+            world.init_resource::<crate::spell::AutoSelfCast>();
+            world.insert_resource(Reputations::default());
+            world.insert_resource(SelfGuid(Some(7)));
+            world.insert_resource(Selection::default());
+            if let Some(hour) = hour {
+                let mut clock = crate::net::GameTime::new(0);
+                let time = benilla_protocol::WowTime {
+                    minute: 0,
+                    hour,
+                    weekday: 0,
+                    day: 17,
+                    month: 9,
+                    year: 26,
+                    spare: 0,
+                };
+                clock.set(time, 0);
+                world.insert_resource(crate::net::ServerTime(clock));
+            }
+            // `UNIT_FIELD_BYTES_1` (138) byte 0 and `UNIT_FIELD_BYTES_2` (164) byte 0.
+            let fields =
+                benilla_protocol::ObjectFields::from_pairs(&[(138, stand), (164, sheathe)]);
+            world.spawn((SelfPlayer, ObjectStore(fields)));
+            world
+                .run_system_once(|targeting: CastTargeting| {
+                    let c = targeting.context();
+                    (c.self_stand_state, c.self_sheathe_state, c.daytime)
+                })
+                .expect("the context builds")
+        };
+        assert_eq!(read(1, 0, Some(12)), (1, 0, true));
+        assert_eq!(read(0, 2, Some(3)), (0, 2, false));
+        assert_eq!(read(8, 1, None), (8, 1, false), "no clock reads night");
+    }
+
+    /// The place rungs' input is the player's answer to `0x6706f0`
+    /// ([`crate::player::PlayerOutdoors`]); a world without it reads outdoors, as a null entity
+    /// does (`0x6706fa`).
+    #[test]
+    fn the_context_reads_the_players_outdoors_answer() {
+        use bevy::ecs::system::RunSystemOnce;
+        let read = |outdoors: Option<bool>| {
+            let mut world = World::new();
+            world.init_resource::<crate::spell::AutoSelfCast>();
+            world.insert_resource(Reputations::default());
+            world.insert_resource(SelfGuid(Some(7)));
+            world.insert_resource(Selection::default());
+            if let Some(o) = outdoors {
+                world.insert_resource(crate::player::PlayerOutdoors(o));
+            }
+            world.spawn((SelfPlayer, ObjectStore(Default::default())));
+            world
+                .run_system_once(|targeting: CastTargeting| targeting.context().self_outdoors)
+                .expect("the context builds")
+        };
+        assert!(!read(Some(false)));
+        assert!(read(Some(true)));
+        assert!(read(None));
+    }
+
+    /// `BindTarget`'s unit branch is one else-if chain (`0x6e5cad`-`0x6e5ee7`): the first arm whose
+    /// test holds clears its own bit, and on a dead unit `0x400`, or `0x8600` for the `0x2` arm;
+    /// with none holding the unit binds nothing (`0x6e60dc`).
+    #[test]
+    fn the_unit_branch_binds_through_the_first_arm_that_holds() {
+        use benilla_protocol::ObjectFields;
+        // Fields 2 `OBJECT_FIELD_TYPE` (0x19, a player), 22 health, 46 `UNIT_FIELD_FLAGS`, 139
+        // `UNIT_FIELD_PETNUMBER`.
+        let unit = |pairs: &[(u16, u32)]| ObjectStore(ObjectFields::from_pairs(pairs));
+        let rel = |target| TargetRelations {
+            target_store: Some(target),
+            ..rel_none()
+        };
+        // The 0x2 arm: `UNIT_FLAG_IMMUNE_TO_PLAYER` refuses it (`0x6e5e03`), Dispel Magic at a
+        // companion pet.
+        let immune = unit(&[(22, 100), (46, 0x100)]);
+        let plain = unit(&[(22, 100)]);
+        assert!(!unit_word_binds(0x2, false, &rel(&immune)));
+        assert!(unit_word_binds(0x2, false, &rel(&plain)));
+        // Its dead leg clears 0x8600 (`0x6e5e33`): Revive's 0x8002 on a corpse nobody assists.
+        let corpse = unit(&[(22, 0)]);
+        assert!(unit_word_binds(0x8002, false, &rel(&corpse)));
+        // A bare 0x400 has no arm.
+        assert!(!unit_word_binds(0x400, false, &rel(&corpse)));
+        // 0x8000: dead, and a player or a pet (`0x6e5e5c`-`0x6e5e72`), then `CanAssist`, so
+        // Resurrection binds no dead guard.
+        let dead_player = unit(&[(2, 0x19), (22, 0)]);
+        let dead_pet = unit(&[(22, 0), (139, 3)]);
+        assert!(!unit_word_binds(0x8000, true, &rel(&corpse)), "a creature");
+        assert!(unit_word_binds(0x8000, true, &rel(&dead_player)));
+        assert!(unit_word_binds(0x8000, true, &rel(&dead_pet)));
+        // 0x200: dead, a player, and `CanAssist` refused (`0x6e5ead`-`0x6e5ee7`).
+        assert!(unit_word_binds(0x200, false, &rel(&dead_player)));
+        assert!(
+            !unit_word_binds(0x200, false, &rel(&corpse)),
+            "not a player"
+        );
+        assert!(
+            !unit_word_binds(0x200, true, &rel(&dead_player)),
+            "assistable"
+        );
+        // The 0x8000 arm's refusal ends the walk before 0x200 (`0x6e5e7f`).
+        assert!(!unit_word_binds(0x8200, false, &rel(&dead_player)));
+        // The first arm wins: the assist arm binds and leaves 0x2 standing, so nothing commits.
+        let me = unit(&[(2, 0x19), (22, 100)]);
+        assert_eq!(bind_arm(0x0102, true, &rel(&me)), Some(0x0002));
+        assert!(!unit_word_binds(0x0102, true, &rel(&me)));
     }
 
     fn rel_none() -> TargetRelations<'static> {

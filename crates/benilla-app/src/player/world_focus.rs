@@ -1,7 +1,8 @@
 //! What the game tells the world, and what it does with what the world publishes back:
-//! [`publish_view_focus`] says where to stream from, ahead of the stream stage, and
-//! [`release_post_snap_hold`] ends the mover's settle hold on the residency the world publishes.
-//! The hold ends on residency, never on ground contact, the same way for every mover mode.
+//! [`publish_view_focus`] says where to stream from, ahead of the stream stage,
+//! [`release_post_snap_hold`] ends the mover's settle hold on the residency the world publishes,
+//! and [`publish_player_outdoors`] asks the world whether the body stands outdoors. The hold ends
+//! on residency, never on ground contact, the same way for every mover mode.
 
 use bevy::prelude::*;
 
@@ -154,6 +155,38 @@ pub(super) fn release_post_snap_hold(
             let _ = net.0.send(crate::net::ClientCommand::WorldportAck);
             info!("worldport: ack sent at settle release");
         }
+    }
+}
+
+/// The active player's answer to `CWorld::IsEntityOutdoors 0x6706f0`, which the spell validator
+/// asks through `0x612cc0` for its place rungs; true with no body, as for a null entity
+/// (`0x6706fa`).
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct PlayerOutdoors(pub(crate) bool);
+
+impl Default for PlayerOutdoors {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+/// Asks [`PlayerOutdoors`] of the world where our own body stands, after this frame's re-place:
+/// free-fly freezes it in place, so it still answers.
+pub(crate) fn publish_player_outdoors(
+    test: benilla_world::wmo_portal::EntityOutdoors,
+    player: Option<Res<Player>>,
+    mut outdoors: ResMut<PlayerOutdoors>,
+) {
+    let now = match player.as_deref() {
+        // `pos` is another unit's while we drive it, and still the last mover's until the new
+        // one's pose is adopted (`reseat`): our own body's answer holds.
+        Some(p) if p.active && (p.foreign_mover.is_some() || p.reseat) => return,
+        Some(p) if p.active => test.at(p.pos),
+        // No body: a null entity reads outdoors (`0x6706fa`).
+        _ => true,
+    };
+    if outdoors.0 != now {
+        outdoors.0 = now;
     }
 }
 
@@ -471,6 +504,133 @@ mod tests {
         assert!(
             matches!(sent[..], [crate::net::ClientCommand::WorldportAck]),
             "the timeout release must still ack the transfer, got {sent:?}"
+        );
+    }
+
+    /// The outdoors answer is `0x6706f0` asked where our own body stands: indoors in a room's
+    /// interior group, outdoors in an `EXTERIOR` (0x8) group or off the building, and outdoors
+    /// with no body, as for a null entity (`0x6706fa`). The body answers in free-fly, which
+    /// freezes it and publishes no viewer, and wherever the viewer is. While we drive another
+    /// unit, or have not yet adopted our own body's pose after one, `pos` is not our body's, so
+    /// the last answer holds.
+    #[test]
+    fn the_outdoors_answer_is_asked_where_the_body_stands() {
+        use benilla_assets::coords::wow_to_bevy;
+        use benilla_assets::{AdtTile, WmoGroupNav, WmoModel};
+        use benilla_world::terrain_stream::TerrainStreamer;
+        use benilla_world::wmo_portal::WmoPortalInstance;
+        use bevy::math::Affine3A;
+
+        // One group: a 10-yd floor at WoW z 30 around the model's origin, placed at the world's.
+        let room = |flags: u32| {
+            let floor = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| {
+                [[a[0], a[1], 30.0], [b[0], b[1], 30.0], [c[0], c[1], 30.0]]
+            };
+            let tris = vec![vec![
+                floor([-5.0, -5.0], [5.0, -5.0], [5.0, 5.0]),
+                floor([-5.0, -5.0], [5.0, 5.0], [-5.0, 5.0]),
+            ]];
+            let (bounds, all) = benilla_assets::collision_tri_bounds(&tris);
+            WmoModel {
+                group_nav: vec![WmoGroupNav {
+                    flags,
+                    bbox_min: [-5.0, -5.0, 30.0],
+                    bbox_max: [5.0, 5.0, 34.0],
+                    ref_start: 0,
+                    ref_count: 0,
+                    area_table_id: 0,
+                    fog_indices: [0; 4],
+                    group_liquid: benilla_formats::NO_GROUP_LIQUID,
+                }],
+                group_collision_grids: benilla_assets::collision_tri_grids(&tris),
+                group_collision_tris: tris,
+                group_collision_bounds: bounds,
+                collision_bounds: all,
+                ..WmoModel::default()
+            }
+        };
+        // One frame of the system over that room, from the answer `last`.
+        let ask = |flags: u32, player: Player, viewer: Viewer, last: bool| {
+            let mut app = App::new();
+            let mut wmos = Assets::<WmoModel>::default();
+            let handle = wmos.add(room(flags));
+            app.insert_resource(wmos)
+                .init_resource::<Assets<AdtTile>>()
+                .init_resource::<TerrainStreamer>()
+                .insert_resource(player)
+                .insert_resource(viewer)
+                .insert_resource(PlayerOutdoors(last))
+                .add_systems(Update, publish_player_outdoors);
+            app.world_mut().spawn(WmoPortalInstance {
+                handle,
+                world_from_local: Affine3A::IDENTITY,
+                name_set: 0,
+                visible: vec![true],
+                interior_fog: vec![false],
+                liquid_visited: vec![false],
+                flooded: vec![None],
+            });
+            app.update();
+            app.world().resource::<PlayerOutdoors>().0
+        };
+        let (inside, outside) = (
+            wow_to_bevy([1.0, 2.0, 30.0]),
+            wow_to_bevy([40.0, 2.0, 30.0]),
+        );
+        let body = |pos: Vec3| Player {
+            active: true,
+            pos,
+            ..Player::default()
+        };
+        // `publish_viewer`'s body: our position, unless free-flying.
+        let seen = |pos: Vec3| Viewer {
+            at: Some(pos),
+            ..Viewer::default()
+        };
+
+        assert!(
+            !ask(0, body(inside), seen(inside), true),
+            "an interior group"
+        );
+        assert!(
+            ask(0x8, body(inside), seen(inside), false),
+            "an exterior group"
+        );
+        assert!(
+            ask(0, body(outside), seen(outside), false),
+            "off the building"
+        );
+        assert!(
+            ask(0, Player::default(), Viewer::default(), false),
+            "no body"
+        );
+        let flying = Player {
+            detached: true,
+            ..body(inside)
+        };
+        assert!(
+            !ask(0, flying, Viewer::default(), true),
+            "free-fly: the frozen body, with no viewer"
+        );
+        assert!(
+            !ask(0, body(inside), seen(outside), true),
+            "the body, not the viewer"
+        );
+        let driving = Player {
+            foreign_mover: Some(0xF130_0000_0000_0043),
+            ..body(outside)
+        };
+        assert!(
+            !ask(0, driving, seen(outside), false),
+            "driving another unit holds the answer"
+        );
+        let reseating = Player {
+            reseat: true,
+            ..body(outside)
+        };
+        assert!(
+            !ask(0, reseating, seen(outside), false),
+            "so does the frame before our own body's pose is adopted"
         );
     }
 }
