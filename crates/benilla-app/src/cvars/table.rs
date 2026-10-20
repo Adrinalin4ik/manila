@@ -187,6 +187,7 @@ pub(crate) const SESSION_ONLY: &[&str] = &[
     "feedGateTrace",
     "auraTrace",
     "gpuMs",
+    "uiMatEvict",
     "skinComposite",
     "matKeyOrder",
     "dumpSchedule",
@@ -1458,6 +1459,11 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "gpuMs",
         "0",
         "benilla's own - the whole-frame GPU meter, unreachable from a browser until now",
+    ),
+    ours(
+        "uiMatEvict",
+        "1",
+        "benilla's own - 0 restores the UI material cache's clear-whole policy, for one-session A/B",
     ),
     ours(
         "auraTrace",

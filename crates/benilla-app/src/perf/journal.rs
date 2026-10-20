@@ -78,7 +78,7 @@ const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,ma
                               skins_new,skin_us,tex_hit,tex_dec,\
                               rcpu_ms,rcpu_opaque,rcpu_static,rcpu_transp,rcpu_glow,rcpu_post,rcpu_ui,rcpu_other,sched_us,s_first,s_pre,s_upd,s_post,s_last,\
                               u_net,u_input,u_stream,p_pre,p_xform,p_cull,p_vis,moved,\
-                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,px_feedunits,gate_n,gate_open,rigs_live,rigs_park,arch,ent_alloc,px_vmtick,skf_n,skf_us,px_input,px_asstrk,px_uiload,px_auras,px_attach,px_drive,aev,wix_us,ui_ex_us,fu_us,fu_open,au_us,flat_us\n";
+                              t_stream,t_furnish,t_mfurnish,t_spawn,t_collider,rig_wr,rig_sk,rapp,r_extract,r_assets,r_queue,r_sort,r_prepare,r_render,r_clean,drop_chat,drop_other,tex_big,rd_hit,rd_miss,rd_kb,rd_big,r_between,r_xsched,mesh_vis,mesh_all,r_postcl,px_anim,px_asset,px_prop,px_bounds,px_check,px_uifeed,px_unitfeed,px_uiinput,px_feedunits,gate_n,gate_open,rigs_live,rigs_park,arch,ent_alloc,px_vmtick,skf_n,skf_us,px_input,px_asstrk,px_uiload,px_auras,px_attach,px_drive,aev,wix_us,ui_ex_us,fu_us,fu_open,au_us,flat_us,uimat_new,uimat_clr,uimat_live\n";
 
 /// The FPS journal switch's change callback (2008, 2303): a flag, the client's int-parse +
 /// `!= 0`. The journal system reads the knob every frame, so the file opens on the next second
@@ -185,6 +185,11 @@ pub(crate) fn on_cvar(
         let on = ev.flag();
         crate::perf::gpu::set_enabled(on);
         info!("gpu meter: {on} (takes effect on the next pipeline build)");
+    }
+    if ev.is("uiMatEvict") {
+        let on = ev.flag();
+        UI_MAT_EVICT.store(on, std::sync::atomic::Ordering::Relaxed);
+        info!("ui material cache: {}", if on { "evicts stale keys" } else { "clears whole past 256 (old)" });
     }
     if ev.is("auraTrace") {
         let on = ev.flag();
@@ -1376,6 +1381,25 @@ pub(crate) static FU_US: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 pub(crate) static FU_OPEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub(crate) static AU_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// **`uimat_new`/`uimat_clr`/`uimat_live`: the UI pass's material cache.** Two battle traces put
+/// the freeze in Chrome's GPU process (0.4-1.4 s tasks, the page idle, `gpu_ms` 4-7 ms) while
+/// `R:UiQuadMaterial>>` - preparing UI materials - read 4.7 ms a frame against 0.5 calm, with no
+/// asset count moving. `rebuild_ui_mesh` cleared its whole key cache past 256 entries, after which
+/// every run mints a fresh material: new uniform buffers and a bind group each, which is what the
+/// page-side profile showed. These say whether that is what happens: materials added per second,
+/// cache clears per second, and the cache's size at the last rebuild.
+pub(crate) static UI_MAT_NEW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static UI_MAT_CLEAR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static UI_MAT_LIVE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// **`/console uiMatEvict 0`** - the old clear-everything policy back, for the one-session A/B.
+static UI_MAT_EVICT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Whether the UI material cache evicts stale keys (on) or clears whole (off). See `UI_MAT_NEW`.
+pub(crate) fn ui_mat_evict() -> bool {
+    UI_MAT_EVICT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Adds its own lifetime to a counter on drop, so every early return is timed too.
 pub(crate) struct SpanGuard(
     &'static std::sync::atomic::AtomicU64,
@@ -2088,6 +2112,14 @@ vm {:.1}   ui {:.1}",
         let _ = write!(line, ",{}", benilla_world::rig_flat::take_micros() / per);
         #[cfg(target_os = "macos")]
         line.push(',');
+        // `uimat_new`, `uimat_clr` per second, `uimat_live` as last seen (see `UI_MAT_NEW`).
+        let _ = write!(
+            line,
+            ",{},{},{}",
+            UI_MAT_NEW.swap(0, Relaxed),
+            UI_MAT_CLEAR.swap(0, Relaxed),
+            UI_MAT_LIVE.load(Relaxed)
+        );
     }
     // **Every `#` line goes AFTER the last column, not before it.** Both blocks below used to sit
     // above the trailing columns, which was invisible while the systems one stayed empty and split

@@ -688,6 +688,10 @@ struct BatchPools {
     /// `Mesh3d` in the scene.
     offsets: Vec<Vec2>,
     materials: std::collections::HashMap<MatKey, Handle<UiQuadMaterial>>,
+    /// wenilla carry: the rebuild each cached key was last used on, and the rebuild count, so the
+    /// cache drops stale keys instead of all of them (see `perf::journal::UI_MAT_NEW`).
+    used_at: std::collections::HashMap<MatKey, u64>,
+    rebuilds: u64,
     /// Per slot: the material the batch entity carries.
     bound: Vec<Option<AssetId<UiQuadMaterial>>>,
     /// Per slot: the batch entity's [`MeshTag`], the run's one colour ([`tint_tag`]).
@@ -765,6 +769,9 @@ type MatKey = (
     [u32; 4],
     bool,
 );
+
+/// wenilla carry: rebuilds a cached UI material key may go unused before the cache drops it.
+const UI_MAT_STALE: u64 = 120;
 
 /// The [`UiQuadMaterial::uv_clamp`] that clamps neither axis: `min > max` turns an axis off.
 const UV_CLAMP_OFF: Vec4 = Vec4::new(1.0, 1.0, 0.0, 0.0);
@@ -1024,9 +1031,32 @@ fn rebuild_ui_mesh(
     let run_count = runs.len().max(1) as f32;
     // The key set is unbounded (a resize moves every mask rect), so it resets; live batches keep
     // their materials through their own handles, which re-enter on the next miss.
+    // wenilla carry: past the cap, drop only keys unused for `UI_MAT_STALE` rebuilds. Clearing
+    // whole made a UI with more than 256 live keys - a crowded battle - mint every run's material
+    // again on each rebuild, and on WebGPU each one is new buffers and a bind group in the GPU
+    // process. Past 4x the cap with every key fresh it still clears whole, so an unbounded key set
+    // (a mask rect moving every rebuild) cannot grow without limit.
+    pools.rebuilds += 1;
     if pools.materials.len() > 256 {
-        pools.materials.clear();
+        let evict = crate::perf::journal::ui_mat_evict();
+        let p = &mut *pools;
+        if evict {
+            let (now, used_at) = (p.rebuilds, &p.used_at);
+            p.materials.retain(|k, _| {
+                used_at.get(k).is_some_and(|&at| now - at <= UI_MAT_STALE)
+            });
+        }
+        if !evict || p.materials.len() > 1024 {
+            p.materials.clear();
+            crate::perf::journal::UI_MAT_CLEAR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let materials = &p.materials;
+        p.used_at.retain(|k, _| materials.contains_key(k));
     }
+    crate::perf::journal::UI_MAT_LIVE.store(
+        pools.materials.len() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let mut used = 0usize;
     let mut n_rewrites = 0usize;
     for (i, run) in runs.into_iter().enumerate() {
@@ -1098,6 +1128,7 @@ fn rebuild_ui_mesh(
             .materials
             .entry(key)
             .or_insert_with(|| {
+                crate::perf::journal::UI_MAT_NEW.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 materials.add(UiQuadMaterial {
                     blend: run.blend as u32,
                     texture: Some(run.texture.clone()),
@@ -1113,6 +1144,8 @@ fn rebuild_ui_mesh(
                 })
             })
             .clone();
+        let at = pools.rebuilds;
+        pools.used_at.insert(key, at);
         // The pan gate: a run matching its slot's base up to one XY delta moves on the entity's
         // `Transform`, with no mesh write; the unchanged case, `Some(ZERO)`, writes it only to
         // undo an earlier pan. A changed material or tag is one component write.
