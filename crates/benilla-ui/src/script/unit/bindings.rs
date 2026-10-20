@@ -927,7 +927,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                         request: SelectionRequest::Unit(token),
                         may_cast,
                     },
-                );
+                )?;
             }
             Ok(())
         })?,
@@ -949,7 +949,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                         request: SelectionRequest::Assist(token),
                         may_cast,
                     },
-                );
+                )?;
             }
             Ok(())
         })?,
@@ -967,7 +967,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                     request: SelectionRequest::LastEnemy,
                     may_cast,
                 },
-            );
+            )?;
             Ok(())
         })?,
     )?;
@@ -981,8 +981,8 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // shows `0x127` ERR_UNIT_NOT_FOUND, or `0xb8` ERR_GENERIC_NO_TARGET for an empty name
     // (`0x489dbd`, `0x489dcf`), from the app's commit. The pick is shown as `"target"` at once,
     // from the app's candidates (`by_name`), so `UnitName("target")` on the next line names it,
-    // unless it is not selectable and `SetSelection` returns (`0x4935ee`); the queued call still
-    // commits it.
+    // unless it is not selectable and `SetSelection` returns (`0x4935ee`); the call still commits
+    // it.
     g.set(
         "TargetByName",
         lua.create_function(|lua, (name, exact): (Value, Option<Value>)| {
@@ -1009,7 +1009,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                     exact,
                     may_cast,
                 },
-            );
+            )?;
             Ok(())
         })?,
     )?;
@@ -1058,7 +1058,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(());
             }
             check_unit_token(&Some(token.clone()))?;
-            submit(lua, ScriptCall::SpellTargetUnit(token));
+            submit(lua, ScriptCall::SpellTargetUnit(token))?;
             Ok(())
         })?,
     )?;
@@ -1080,7 +1080,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 }
                 had
             };
-            submit(lua, ScriptCall::ClearTarget);
+            submit(lua, ScriptCall::ClearTarget)?;
             Ok(flag(had))
         })?,
     )?;

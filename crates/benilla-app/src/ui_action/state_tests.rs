@@ -3,6 +3,7 @@
 use super::*;
 use crate::target::Selection;
 use benilla_formats::SpellDisplay;
+use benilla_ui::script::UiScript;
 
 /// A player (`OBJECT_FIELD_TYPE` 0x19) under its own control (`UNIT_FIELD_FLAGS` 0x8), alive, with
 /// mana: the relation functions' attacker.
@@ -179,6 +180,8 @@ fn the_feed_pushes_a_bare_macro_as_usable() {
         .init_resource::<crate::spell::SpellModifiers>()
         .init_resource::<crate::ui_script::UiClock>()
         .init_resource::<AutoRepeatActive>()
+        .init_resource::<crate::creature_anim::UnitEdits>()
+        .add_message::<crate::player::StandStateRequest>()
         .init_resource::<crate::spell::PendingCast>()
         .init_resource::<crate::spell::QueuedMeleeSpell>()
         .init_resource::<crate::spell::ActiveChannel>()
@@ -273,6 +276,8 @@ fn a_ranged_button_pads_its_range_by_the_selected_target_alone() {
             .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_script::UiClock>()
             .init_resource::<AutoRepeatActive>()
+            .init_resource::<crate::creature_anim::UnitEdits>()
+            .add_message::<crate::player::StandStateRequest>()
             .init_resource::<crate::spell::PendingCast>()
             .init_resource::<crate::spell::QueuedMeleeSpell>()
             .init_resource::<crate::spell::ActiveChannel>()
@@ -392,6 +397,8 @@ fn a_melee_button_reaches_the_moving_bonus_while_both_units_run() {
             .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_script::UiClock>()
             .init_resource::<AutoRepeatActive>()
+            .init_resource::<crate::creature_anim::UnitEdits>()
+            .add_message::<crate::player::StandStateRequest>()
             .init_resource::<crate::spell::PendingCast>()
             .init_resource::<crate::spell::QueuedMeleeSpell>()
             .init_resource::<crate::spell::ActiveChannel>()
@@ -527,6 +534,8 @@ fn food_on_the_bar_greys_while_the_player_is_in_combat() {
             .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_script::UiClock>()
             .init_resource::<AutoRepeatActive>()
+            .init_resource::<crate::creature_anim::UnitEdits>()
+            .add_message::<crate::player::StandStateRequest>()
             .init_resource::<crate::spell::PendingCast>()
             .init_resource::<crate::spell::QueuedMeleeSpell>()
             .init_resource::<crate::spell::ActiveChannel>()
@@ -621,6 +630,8 @@ fn an_item_slot_is_held_by_its_stored_count_not_the_bags() {
             .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_script::UiClock>()
             .init_resource::<AutoRepeatActive>()
+            .init_resource::<crate::creature_anim::UnitEdits>()
+            .add_message::<crate::player::StandStateRequest>()
             .init_resource::<crate::spell::PendingCast>()
             .init_resource::<crate::spell::QueuedMeleeSpell>()
             .init_resource::<crate::spell::ActiveChannel>()
@@ -707,6 +718,8 @@ fn a_broken_worn_weapon_draws_no_equipped_border() {
             .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_script::UiClock>()
             .init_resource::<AutoRepeatActive>()
+            .init_resource::<crate::creature_anim::UnitEdits>()
+            .add_message::<crate::player::StandStateRequest>()
             .init_resource::<crate::spell::PendingCast>()
             .init_resource::<crate::spell::QueuedMeleeSpell>()
             .init_resource::<crate::spell::ActiveChannel>()
@@ -824,6 +837,8 @@ fn lost_control_greys_the_bar_but_the_immunity_spell() {
         .init_resource::<crate::spell::SpellModifiers>()
         .init_resource::<crate::ui_script::UiClock>()
         .init_resource::<AutoRepeatActive>()
+        .init_resource::<crate::creature_anim::UnitEdits>()
+        .add_message::<crate::player::StandStateRequest>()
         .init_resource::<crate::spell::PendingCast>()
         .init_resource::<crate::spell::QueuedMeleeSpell>()
         .init_resource::<crate::spell::ActiveChannel>()
@@ -939,6 +954,8 @@ fn a_held_action_polls_answer_their_own_now() {
         .init_resource::<crate::spell::SpellModifiers>()
         .init_resource::<crate::ui_script::UiClock>()
         .init_resource::<AutoRepeatActive>()
+        .init_resource::<crate::creature_anim::UnitEdits>()
+        .add_message::<crate::player::StandStateRequest>()
         .init_resource::<crate::spell::PendingCast>()
         .init_resource::<crate::spell::QueuedMeleeSpell>()
         .init_resource::<crate::spell::ActiveChannel>()
@@ -1008,6 +1025,8 @@ fn feed_app(buttons: &[(u8, u32, u8)], spells: Spells, x: f32) -> App {
         .init_resource::<crate::spell::SpellModifiers>()
         .init_resource::<crate::ui_script::UiClock>()
         .init_resource::<AutoRepeatActive>()
+        .init_resource::<crate::creature_anim::UnitEdits>()
+        .add_message::<crate::player::StandStateRequest>()
         .init_resource::<crate::spell::PendingCast>()
         .init_resource::<crate::spell::QueuedMeleeSpell>()
         .init_resource::<crate::spell::ActiveChannel>()

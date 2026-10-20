@@ -77,9 +77,9 @@ fn on_swing_refusal(In(ev): In<SessionEvent>, mut edges: MessageWriter<SwingRefu
     }
 }
 
-fn on_feign_death_resisted(In(ev): In<SessionEvent>, mut errors: ResMut<UiErrorKeys>) {
+fn on_feign_death_resisted(In(ev): In<SessionEvent>, errors: Res<UiErrorKeys>) {
     if let SessionEvent::FeignDeathResisted = ev {
-        feign_death_resisted(&mut errors);
+        feign_death_resisted(&errors);
     }
 }
 
@@ -98,7 +98,7 @@ fn on_text_emote(
     In(ev): In<SessionEvent>,
     index: Res<GuidIndex>,
     mut out: MessageWriter<EmoteMessage>,
-    mut chat_log: ResMut<crate::ui_chat::ChatLog>,
+    chat_log: Res<crate::ui_chat::ChatLog>,
 ) {
     if let SessionEvent::TextEmote {
         guid,
@@ -106,14 +106,7 @@ fn on_text_emote(
         target_name,
     } = ev
     {
-        self::text_emote(
-            guid,
-            text_emote,
-            target_name,
-            &index,
-            &mut out,
-            &mut chat_log,
-        );
+        self::text_emote(guid, text_emote, target_name, &index, &mut out, &chat_log);
     }
 }
 
@@ -216,9 +209,9 @@ fn cancel_combat(edges: &mut MessageWriter<SwingRefusalEdge>) {
 /// `SMSG_FEIGN_DEATH_RESISTED`: one red "Resisted" line and nothing else. The reference's handler
 /// `0x6e9800` is a bare `DisplayError(421)` (`0x496720`), with no latch and no state. vmangos sends
 /// it together with `SMSG_CANCEL_COMBAT` (`Unit.cpp:9469-9470`).
-fn feign_death_resisted(errors: &mut UiErrorKeys) {
+fn feign_death_resisted(errors: &UiErrorKeys) {
     debug!("net: feign death resisted");
-    errors.0.push(UiError::key("ERR_FEIGN_DEATH_RESISTED"));
+    errors.push(UiError::key("ERR_FEIGN_DEATH_RESISTED"));
 }
 
 /// A creature flared aggro or a stealth pre-aggro alert (`SMSG_AI_REACTION`).
@@ -319,7 +312,7 @@ fn text_emote(
     target_name: String,
     index: &GuidIndex,
     out: &mut MessageWriter<EmoteMessage>,
-    chat_log: &mut crate::ui_chat::ChatLog,
+    chat_log: &crate::ui_chat::ChatLog,
 ) {
     out.write(EmoteMessage {
         guid,

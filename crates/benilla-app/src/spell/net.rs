@@ -89,6 +89,10 @@ pub(crate) struct Scene<'w, 's> {
     sheaths: MessageWriter<'w, crate::creature_anim::SheathRequest>,
     /// `[0xb4b3e4]`, for the GO-deferred swing's gate.
     own_control: Option<Res<'w, crate::player::OwnControlLost>>,
+    /// The stand-up the GO-deferred attack start asks (`0x5ecc9b`).
+    stand: MessageWriter<'w, crate::player::StandStateRequest>,
+    /// The auto-repeat clear, applied after this handler.
+    edits: Res<'w, crate::creature_anim::UnitEdits>,
 }
 
 /// `SMSG_INITIAL_SPELLS`, once at login, into the action store the UI feed reads.
@@ -108,29 +112,25 @@ fn on_action_buttons(In(ev): In<SessionEvent>, mut l: Lifecycle) {
     }
 }
 
-fn on_spell_learned(In(ev): In<SessionEvent>, mut l: Lifecycle, mut errors: ResMut<UiErrorKeys>) {
+fn on_spell_learned(In(ev): In<SessionEvent>, mut l: Lifecycle, errors: Res<UiErrorKeys>) {
     if let SessionEvent::SpellLearned { spell_id } = ev {
         learned_spell(
             spell_id,
             &mut l.actions,
             l.spells.as_deref(),
-            &mut errors,
+            &errors,
             &mut l.learned_in_tab,
         );
     }
 }
 
-fn on_spell_removed(In(ev): In<SessionEvent>, mut l: Lifecycle, mut errors: ResMut<UiErrorKeys>) {
+fn on_spell_removed(In(ev): In<SessionEvent>, mut l: Lifecycle, errors: Res<UiErrorKeys>) {
     if let SessionEvent::SpellRemoved { spell_id } = ev {
-        removed_spell(spell_id, &mut l.actions, l.spells.as_deref(), &mut errors);
+        removed_spell(spell_id, &mut l.actions, l.spells.as_deref(), &errors);
     }
 }
 
-fn on_spell_superceded(
-    In(ev): In<SessionEvent>,
-    mut l: Lifecycle,
-    mut errors: ResMut<UiErrorKeys>,
-) {
+fn on_spell_superceded(In(ev): In<SessionEvent>, mut l: Lifecycle, errors: Res<UiErrorKeys>) {
     if let SessionEvent::SpellSuperceded {
         old_spell_id,
         new_spell_id,
@@ -141,7 +141,7 @@ fn on_spell_superceded(
             new_spell_id,
             &mut l.actions,
             l.spells.as_deref(),
-            &mut errors,
+            &errors,
             &mut l.learned_in_tab,
         );
     }
@@ -190,7 +190,7 @@ fn on_cast_result(
             success,
             reason,
             arg,
-            &mut ladder.ecs,
+            &ladder.edits,
             &r.self_guid,
             &r.index,
             &r.casting,
@@ -292,7 +292,14 @@ fn on_spell_go(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
                 &mut l.pet_bar,
                 &l.spell_mods,
             ),
-            (&mut l.auto_repeat, &mut sc.sheaths, engaged, start_gate),
+            (
+                &mut l.auto_repeat,
+                &mut sc.sheaths,
+                &mut sc.stand,
+                &sc.edits,
+                engaged,
+                start_gate,
+            ),
             l.play_seq.next(),
         );
     }
@@ -336,13 +343,13 @@ fn on_spell_delayed(In(ev): In<SessionEvent>, mut l: Lifecycle) {
     }
 }
 
-fn on_cancel_auto_repeat(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
+fn on_cancel_auto_repeat(In(ev): In<SessionEvent>, mut l: Lifecycle, sc: Scene) {
     if let SessionEvent::CancelAutoRepeat = ev {
         cancel_auto_repeat(
             &mut l.auto_repeat,
             &l.self_guid,
             &l.index,
-            &mut sc.commands,
+            &sc.edits,
             &l.net,
         );
     }
@@ -484,7 +491,7 @@ fn learned_spell(
     spell_id: u32,
     actions: &mut PlayerActions,
     spells: Option<&Spells>,
-    errors: &mut UiErrorKeys,
+    errors: &UiErrorKeys,
     tab_flash: &mut LearnedInTab,
 ) {
     debug!("net: learned spell {spell_id}");
@@ -500,7 +507,7 @@ fn learned_spell(
 /// [`benilla_formats::SpellDisplay::learn_announcement`]'s. Ids `0x37`/`0x38`/`0x39` are chat
 /// type 10 rows, so all three land on the system channel. An unknown id says nothing, the
 /// registrar's bail at `0x4b25c6`/`0x4b25d2`/`0x4b25e0`.
-fn announce_learn(spell_id: u32, spells: Option<&Spells>, errors: &mut UiErrorKeys) {
+fn announce_learn(spell_id: u32, spells: Option<&Spells>, errors: &UiErrorKeys) {
     let Some(display) = spells.and_then(|s| s.catalog.get(spell_id)) else {
         return;
     };
@@ -513,7 +520,7 @@ fn announce_learn(spell_id: u32, spells: Option<&Spells>, errors: &mut UiErrorKe
         // The recipe arm pushes the bare name: it returns before the rank composer.
         LearnAnnouncement::Recipe => ("ERR_LEARN_RECIPE_S", display.name.clone()),
     };
-    errors.0.push(UiError::s(key, arg));
+    errors.push(UiError::s(key, arg));
 }
 
 /// `SMSG_REMOVED_SPELL`: the spell leaves the book. A talent wipe arrives as these (vmangos
@@ -530,7 +537,7 @@ fn removed_spell(
     spell_id: u32,
     actions: &mut PlayerActions,
     spells: Option<&Spells>,
-    errors: &mut UiErrorKeys,
+    errors: &UiErrorKeys,
 ) {
     debug!("net: removed spell {spell_id}");
     if actions.spells.remove(&spell_id) {
@@ -542,16 +549,14 @@ fn removed_spell(
 /// `ERR_SPELL_UNLEARNED_S` (`0x5ea2ab push 0x14a`) with the bare name: `0x5ea2a3` pushes
 /// `SpellRec+0x1e0` and this path has no rank composer. Which spells say it is
 /// [`benilla_formats::SpellDisplay::announces_unlearn`]'s.
-fn announce_unlearn(spell_id: u32, spells: Option<&Spells>, errors: &mut UiErrorKeys) {
+fn announce_unlearn(spell_id: u32, spells: Option<&Spells>, errors: &UiErrorKeys) {
     let Some(display) = spells.and_then(|s| s.catalog.get(spell_id)) else {
         return;
     };
     if !display.announces_unlearn() {
         return;
     }
-    errors
-        .0
-        .push(UiError::s("ERR_SPELL_UNLEARNED_S", display.name.clone()));
+    errors.push(UiError::s("ERR_SPELL_UNLEARNED_S", display.name.clone()));
 }
 
 /// `SMSG_SUPERCEDED_SPELL`: the new rank replaces the old in the book. The bar follows from the
@@ -562,7 +567,7 @@ fn superceded_spell(
     new_spell_id: u32,
     actions: &mut PlayerActions,
     spells: Option<&Spells>,
-    errors: &mut UiErrorKeys,
+    errors: &UiErrorKeys,
     tab_flash: &mut LearnedInTab,
 ) {
     debug!("net: superceded spell {old_spell_id} -> {new_spell_id}");
@@ -588,7 +593,7 @@ fn cast_result(
     success: bool,
     reason: Option<u8>,
     arg: Option<u32>,
-    commands: &mut Commands,
+    edits: &crate::creature_anim::UnitEdits,
     self_guid: &SelfGuid,
     index: &GuidIndex,
     casting: &Query<&Casting>,
@@ -617,7 +622,7 @@ fn cast_result(
         let dont_report = reason == Some(0x17);
         let self_e = self_guid.0.and_then(|g| index.0.get(&g)).copied();
         if auto_repeat.0 == Some(spell_id) && !dont_report {
-            crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, commands, net);
+            crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, edits, net);
         }
         if !dont_report {
             cooldowns.clear_gcd(spell_id, now);
@@ -651,7 +656,10 @@ fn cast_result(
         // state and precast hold, keyed by spell id.
         if let Some(e) = self_e {
             if casting.get(e).is_ok_and(|c| c.spell_id == spell_id) {
-                commands.entity(e).remove::<Casting>();
+                edits.push(crate::creature_anim::UnitEdit::ReapCasting {
+                    entity: e,
+                    spell_id,
+                });
             }
             cast_events.write(CastEvent {
                 entity: e,
@@ -859,6 +867,8 @@ fn spell_go(
     attack_ctx: (
         &mut crate::spell::AutoRepeatActive,
         &mut MessageWriter<crate::creature_anim::SheathRequest>,
+        &mut MessageWriter<crate::player::StandStateRequest>,
+        &crate::creature_anim::UnitEdits,
         bool,
         crate::creature_anim::StartGate,
     ),
@@ -891,7 +901,7 @@ fn spell_go(
         go_lid.write(crate::go_anim::GoLidOpen { go_guid, spell_id });
     }
     let (cooldowns, spells, items, net_commands, pet_bar, spell_mods) = cooldown_ctx;
-    let (auto_repeat, sheath, engaged, start_gate) = attack_ctx;
+    let (auto_repeat, sheath, stand, edits, engaged, start_gate) = attack_ctx;
     let now = Instant::now();
     let display = spells.and_then(|s| s.catalog.get(spell_id));
     // A chest becomes the loot target at this packet, not at the loot response: `HandleSpellGo
@@ -946,7 +956,8 @@ fn spell_go(
                     start_gate,
                     auto_repeat,
                     sheath,
-                    commands,
+                    stand,
+                    edits,
                     net_commands,
                 );
             }
@@ -1145,13 +1156,13 @@ fn cancel_auto_repeat(
     auto_repeat: &mut AutoRepeatActive,
     self_guid: &SelfGuid,
     index: &GuidIndex,
-    commands: &mut Commands,
+    edits: &crate::creature_anim::UnitEdits,
     net: &crate::net::NetCommands,
 ) {
     debug!("net: cancel auto-repeat");
     // The same cancel `0x6ea080` as every local trigger, its unconditional CMSG ack included.
     let self_e = self_guid.0.and_then(|g| index.0.get(&g)).copied();
-    crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, commands, net);
+    crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, edits, net);
 }
 
 /// Whether this `SMSG_SPELL_GO` arms the pet's cooldown bank (`0x6e857a`–`0x6e85ad`). The GO
@@ -1409,13 +1420,13 @@ mod tests {
             },
         );
         let mut actions = PlayerActions::default();
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         let mut flash = LearnedInTab::default();
-        learned_spell(78, &mut actions, Some(&spells), &mut errors, &mut flash);
+        learned_spell(78, &mut actions, Some(&spells), &errors, &mut flash);
 
-        assert_eq!(errors.0.len(), 1, "one line, once");
-        assert_eq!(errors.0[0].key, "ERR_LEARN_ABILITY_S");
-        assert_eq!(errors.0[0].arg_s(), Some("Heroic Strike (Rank 1)"));
+        assert_eq!(errors.len(), 1, "one line, once");
+        assert_eq!(errors.snapshot()[0].key, "ERR_LEARN_ABILITY_S");
+        assert_eq!(errors.snapshot()[0].arg_s(), Some("Heroic Strike (Rank 1)"));
         // The same live-learn flag gates the tab flash.
         assert_eq!(flash.0, vec![78], "queued for LEARNED_SPELL_IN_TAB");
     }
@@ -1433,16 +1444,16 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         learned_spell(
             133,
             &mut PlayerActions::default(),
             Some(&spells),
-            &mut errors,
+            &errors,
             &mut LearnedInTab::default(),
         );
-        assert_eq!(errors.0[0].key, "ERR_LEARN_SPELL_S");
-        assert_eq!(errors.0[0].arg_s(), Some("Fireball (Rank 1)"));
+        assert_eq!(errors.snapshot()[0].key, "ERR_LEARN_SPELL_S");
+        assert_eq!(errors.snapshot()[0].arg_s(), Some("Fireball (Rank 1)"));
 
         let spells = catalog_with(
             2550,
@@ -1453,17 +1464,17 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         learned_spell(
             2550,
             &mut PlayerActions::default(),
             Some(&spells),
-            &mut errors,
+            &errors,
             &mut LearnedInTab::default(),
         );
-        assert_eq!(errors.0[0].key, "ERR_LEARN_RECIPE_S");
+        assert_eq!(errors.snapshot()[0].key, "ERR_LEARN_RECIPE_S");
         assert_eq!(
-            errors.0[0].arg_s(),
+            errors.snapshot()[0].arg_s(),
             Some("Cooking"),
             "the recipe arm pushes the bare name"
         );
@@ -1500,25 +1511,18 @@ mod tests {
         );
         let mut actions = PlayerActions::default();
         actions.spells.insert(78);
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         let mut flash = LearnedInTab::default();
-        superceded_spell(
-            78,
-            284,
-            &mut actions,
-            Some(&spells),
-            &mut errors,
-            &mut flash,
-        );
+        superceded_spell(78, 284, &mut actions, Some(&spells), &errors, &mut flash);
 
-        assert_eq!(errors.0.len(), 1, "one line for a rank-up, not two");
+        assert_eq!(errors.len(), 1, "one line for a rank-up, not two");
         assert_eq!(
             flash.0,
             vec![284],
             "the NEW rank's tab flashes, not the old one's"
         );
-        assert_eq!(errors.0[0].key, "ERR_LEARN_ABILITY_S");
-        assert_eq!(errors.0[0].arg_s(), Some("Heroic Strike (Rank 2)"));
+        assert_eq!(errors.snapshot()[0].key, "ERR_LEARN_ABILITY_S");
+        assert_eq!(errors.snapshot()[0].arg_s(), Some("Heroic Strike (Rank 2)"));
     }
 
     /// A `DO_NOT_DISPLAY` row (languages, weapon proficiencies) and an unknown id are silent.
@@ -1532,23 +1536,23 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         learned_spell(
             668,
             &mut PlayerActions::default(),
             Some(&spells),
-            &mut errors,
+            &errors,
             &mut LearnedInTab::default(),
         );
         learned_spell(
             99999,
             &mut PlayerActions::default(),
             Some(&spells),
-            &mut errors,
+            &errors,
             &mut LearnedInTab::default(),
         );
         assert!(
-            errors.0.is_empty(),
+            errors.is_empty(),
             "PASSIVE|DO_NOT_DISPLAY is silent, and so is an id with no record"
         );
     }
@@ -1556,12 +1560,12 @@ mod tests {
     #[test]
     fn learned_spell_adds_to_the_book_once() {
         let mut actions = PlayerActions::default();
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         learned_spell(
             6603,
             &mut actions,
             None,
-            &mut errors,
+            &errors,
             &mut LearnedInTab::default(),
         );
         assert!(actions.spells.contains(&6603));
@@ -1572,7 +1576,7 @@ mod tests {
             6603,
             &mut actions,
             None,
-            &mut errors,
+            &errors,
             &mut LearnedInTab::default(),
         );
         assert!(
@@ -1600,7 +1604,7 @@ mod tests {
             284,
             &mut actions,
             None,
-            &mut UiErrorKeys::default(),
+            &UiErrorKeys::default(),
             &mut LearnedInTab::default(),
         );
 
@@ -1651,6 +1655,7 @@ mod tests {
                 .init_resource::<super::super::SpellTargeting>()
                 .init_resource::<ActiveChannel>()
                 .init_resource::<AutoRepeatActive>()
+                .init_resource::<crate::creature_anim::UnitEdits>()
                 .init_resource::<Cooldowns>()
                 .init_resource::<crate::spell::SpellModifiers>()
                 .init_resource::<crate::ui_pet::PetBar>()
@@ -1749,7 +1754,7 @@ mod tests {
             self.app
                 .world_mut()
                 .run_system_once(
-                    move |mut commands: Commands,
+                    move |edits: Res<crate::creature_anim::UnitEdits>,
                           self_guid: Res<SelfGuid>,
                           index: Res<GuidIndex>,
                           casting: Query<&Casting>,
@@ -1764,7 +1769,7 @@ mod tests {
                             fail.is_none(),
                             fail,
                             None,
-                            &mut commands,
+                            &edits,
                             &self_guid,
                             &index,
                             &casting,
@@ -1780,6 +1785,7 @@ mod tests {
                     },
                 )
                 .unwrap();
+            crate::creature_anim::apply_unit_edits(self.app.world_mut());
         }
 
         /// `SMSG_SPELL_FAILED_OTHER` for our own spell.
@@ -1824,7 +1830,9 @@ mod tests {
                           mut cooldowns: ResMut<Cooldowns>,
                           mut pet_bar: ResMut<crate::ui_pet::PetBar>,
                           mut items: ResMut<crate::items::Items>,
-                          mut sheath: MessageWriter<crate::creature_anim::SheathRequest>| {
+                          mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
+                          mut stand: MessageWriter<crate::player::StandStateRequest>,
+                          edits: Res<crate::creature_anim::UnitEdits>| {
                         let net_commands = crate::net::NetCommands(tx.clone());
                         spell_go(
                             Self::SELF,
@@ -1857,6 +1865,8 @@ mod tests {
                             (
                                 &mut crate::spell::AutoRepeatActive::default(),
                                 &mut sheath,
+                                &mut stand,
+                                &edits,
                                 false,
                                 crate::creature_anim::StartGate::default(),
                             ),
@@ -1865,6 +1875,7 @@ mod tests {
                     },
                 )
                 .unwrap();
+            crate::creature_anim::apply_unit_edits(self.app.world_mut());
         }
 
         /// `MSG_CHANNEL_START`, or `MSG_CHANNEL_UPDATE` with `start` false.
@@ -2444,6 +2455,7 @@ mod tests {
             .add_message::<GoLidOpen>()
             .add_message::<crate::creature_anim::SheathRequest>()
             .add_message::<crate::player::StandStateRequest>()
+            .init_resource::<crate::creature_anim::UnitEdits>()
             .init_resource::<GuidIndex>()
             .init_resource::<SelfGuid>()
             .init_resource::<CastReports>()
@@ -2492,7 +2504,9 @@ mod tests {
                       mut cooldowns: ResMut<Cooldowns>,
                       mut pet_bar: ResMut<crate::ui_pet::PetBar>,
                       mut items: ResMut<crate::items::Items>,
-                      mut sheath: MessageWriter<crate::creature_anim::SheathRequest>| {
+                      mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
+                      mut stand: MessageWriter<crate::player::StandStateRequest>,
+                      edits: Res<crate::creature_anim::UnitEdits>| {
                     let net_commands = crate::net::NetCommands(tx.clone());
                     spell_go(
                         caster,
@@ -2525,6 +2539,8 @@ mod tests {
                         (
                             &mut crate::spell::AutoRepeatActive::default(),
                             &mut sheath,
+                            &mut stand,
+                            &edits,
                             false,
                             crate::creature_anim::StartGate::default(),
                         ),
@@ -2533,6 +2549,7 @@ mod tests {
                 },
             )
             .unwrap();
+        crate::creature_anim::apply_unit_edits(app.world_mut());
         let now = Instant::now();
         let armed = |c: &Cooldowns| c.info(SPELL, 0, Some(&display()), now).duration_ms;
         let world = app.world();
@@ -2645,6 +2662,7 @@ mod tests {
             .add_message::<GoLidOpen>()
             .add_message::<crate::creature_anim::SheathRequest>()
             .add_message::<crate::player::StandStateRequest>()
+            .init_resource::<crate::creature_anim::UnitEdits>()
             .init_resource::<GuidIndex>()
             .init_resource::<SelfGuid>()
             .init_resource::<CastReports>()
@@ -2692,7 +2710,9 @@ mod tests {
                       mut cooldowns: ResMut<Cooldowns>,
                       mut pet_bar: ResMut<crate::ui_pet::PetBar>,
                       mut items: ResMut<crate::items::Items>,
-                      mut sheath: MessageWriter<crate::creature_anim::SheathRequest>| {
+                      mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
+                      mut stand: MessageWriter<crate::player::StandStateRequest>,
+                      edits: Res<crate::creature_anim::UnitEdits>| {
                     let net_commands = crate::net::NetCommands(tx.clone());
                     spell_go(
                         10,
@@ -2725,6 +2745,8 @@ mod tests {
                         (
                             &mut crate::spell::AutoRepeatActive::default(),
                             &mut sheath,
+                            &mut stand,
+                            &edits,
                             false,
                             crate::creature_anim::StartGate::default(),
                         ),
@@ -2733,6 +2755,7 @@ mod tests {
                 },
             )
             .unwrap();
+        crate::creature_anim::apply_unit_edits(app.world_mut());
         assert_eq!(
             hops(&app),
             Some(vec![t1, t2]),
@@ -2772,7 +2795,9 @@ mod tests {
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
             .init_resource::<crate::spell::SpellModifiers>()
-            .init_resource::<AutoRepeatActive>();
+            .init_resource::<AutoRepeatActive>()
+            .add_message::<crate::player::StandStateRequest>()
+            .init_resource::<crate::creature_anim::UnitEdits>();
 
         let self_e = app
             .world_mut()
@@ -2795,7 +2820,7 @@ mod tests {
             let tx = tx.clone();
             app.world_mut()
                 .run_system_once(
-                    move |mut commands: Commands,
+                    move |edits: Res<crate::creature_anim::UnitEdits>,
                           self_guid: Res<SelfGuid>,
                           index: Res<GuidIndex>,
                           casting: Query<&Casting>,
@@ -2809,7 +2834,7 @@ mod tests {
                             false,
                             Some(reason),
                             None,
-                            &mut commands,
+                            &edits,
                             &self_guid,
                             &index,
                             &casting,
@@ -2825,6 +2850,7 @@ mod tests {
                     },
                 )
                 .unwrap();
+            crate::creature_anim::apply_unit_edits(app.world_mut());
         };
 
         // Reason 0x17 is the one skip (`6e1ce1 cmp cl,0x17; je`): armed stays armed.
@@ -2872,13 +2898,13 @@ mod tests {
         let mut actions = PlayerActions::default();
         actions.spells.extend([14522, 14788, 14789]);
 
-        let mut errors = UiErrorKeys::default();
-        removed_spell(14788, &mut actions, None, &mut errors);
+        let errors = UiErrorKeys::default();
+        removed_spell(14788, &mut actions, None, &errors);
         assert!(!actions.spells.contains(&14788));
         assert!(actions.dirty);
 
         actions.dirty = false;
-        removed_spell(14788, &mut actions, None, &mut errors);
+        removed_spell(14788, &mut actions, None, &errors);
         assert!(!actions.dirty, "a spell we never knew is not a repaint");
     }
 
@@ -2893,17 +2919,17 @@ mod tests {
             ..Default::default()
         };
 
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         removed_spell(
             11069,
             &mut PlayerActions::default(),
             Some(&catalog_with(11069, row(0, 0))),
-            &mut errors,
+            &errors,
         );
-        assert_eq!(errors.0.len(), 1);
-        assert_eq!(errors.0[0].key, "ERR_SPELL_UNLEARNED_S");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors.snapshot()[0].key, "ERR_SPELL_UNLEARNED_S");
         assert_eq!(
-            errors.0[0].arg_s(),
+            errors.snapshot()[0].arg_s(),
             Some("Improved Fireball"),
             "no rank on the unlearn path"
         );
@@ -2922,25 +2948,25 @@ mod tests {
             ),
             (0x80, 0, "DO_NOT_DISPLAY — the sign test at 0x5ea29b"),
         ] {
-            let mut errors = UiErrorKeys::default();
+            let errors = UiErrorKeys::default();
             removed_spell(
                 11069,
                 &mut PlayerActions::default(),
                 Some(&catalog_with(11069, row(attributes, cast_ui))),
-                &mut errors,
+                &errors,
             );
-            assert!(errors.0.is_empty(), "{why}");
+            assert!(errors.is_empty(), "{why}");
         }
 
         // An unknown id says nothing, like every other display path here.
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         removed_spell(
             99999,
             &mut PlayerActions::default(),
             Some(&catalog_with(11069, row(0, 0))),
-            &mut errors,
+            &errors,
         );
-        assert!(errors.0.is_empty());
+        assert!(errors.is_empty());
     }
 
     /// `castUI` gates the unlearn line but not the learn line, which reads it only afterwards, at
@@ -2956,25 +2982,20 @@ mod tests {
             },
         );
 
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         learned_spell(
             1234,
             &mut PlayerActions::default(),
             Some(&spells),
-            &mut errors,
+            &errors,
             &mut LearnedInTab::default(),
         );
-        assert_eq!(errors.0.len(), 1, "the learn block never reads castUI");
-        assert_eq!(errors.0[0].key, "ERR_LEARN_SPELL_S");
+        assert_eq!(errors.len(), 1, "the learn block never reads castUI");
+        assert_eq!(errors.snapshot()[0].key, "ERR_LEARN_SPELL_S");
 
-        let mut errors = UiErrorKeys::default();
-        removed_spell(
-            1234,
-            &mut PlayerActions::default(),
-            Some(&spells),
-            &mut errors,
-        );
-        assert!(errors.0.is_empty(), "…but the unlearn block does");
+        let errors = UiErrorKeys::default();
+        removed_spell(1234, &mut PlayerActions::default(), Some(&spells), &errors);
+        assert!(errors.is_empty(), "…but the unlearn block does");
     }
     /// The GO-deferred auto-attack start (`0x6e83c0`):
     /// - an Ex2 bit-20 spell's own GO swings at its first hit target (`0x6e83e9`);
@@ -3027,6 +3048,7 @@ mod tests {
                 .add_message::<GoLidOpen>()
                 .add_message::<crate::creature_anim::SheathRequest>()
                 .add_message::<crate::player::StandStateRequest>()
+                .init_resource::<crate::creature_anim::UnitEdits>()
                 .init_resource::<GuidIndex>()
                 .init_resource::<SelfGuid>()
                 .init_resource::<CastReports>()
@@ -3069,7 +3091,9 @@ mod tests {
                           mut cooldowns: ResMut<Cooldowns>,
                           mut pet_bar: ResMut<crate::ui_pet::PetBar>,
                           mut items: ResMut<crate::items::Items>,
-                          mut sheath: MessageWriter<crate::creature_anim::SheathRequest>| {
+                          mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
+                          mut stand: MessageWriter<crate::player::StandStateRequest>,
+                          edits: Res<crate::creature_anim::UnitEdits>| {
                         let net_commands = crate::net::NetCommands(tx.clone());
                         spell_go(
                             caster,
@@ -3103,6 +3127,8 @@ mod tests {
                             (
                                 &mut crate::spell::AutoRepeatActive::default(),
                                 &mut sheath,
+                                &mut stand,
+                                &edits,
                                 engaged,
                                 gate,
                             ),
@@ -3111,6 +3137,7 @@ mod tests {
                     },
                 )
                 .unwrap();
+            crate::creature_anim::apply_unit_edits(app.world_mut());
             rx.try_iter().collect()
         };
 
@@ -3269,7 +3296,9 @@ mod tests {
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
                 .init_resource::<crate::spell::SpellModifiers>()
-                .init_resource::<AutoRepeatActive>();
+                .init_resource::<AutoRepeatActive>()
+                .add_message::<crate::player::StandStateRequest>()
+                .init_resource::<crate::creature_anim::UnitEdits>();
             let self_e = app.world_mut().spawn((Guid(10), SelfPlayer)).id();
             app.world_mut()
                 .resource_mut::<GuidIndex>()
@@ -3297,7 +3326,7 @@ mod tests {
             let chained = app
                 .world_mut()
                 .run_system_once(
-                    move |mut commands: Commands,
+                    move |edits: Res<crate::creature_anim::UnitEdits>,
                           self_guid: Res<SelfGuid>,
                           index: Res<GuidIndex>,
                           casting: Query<&Casting>,
@@ -3311,7 +3340,7 @@ mod tests {
                             r.fail.is_none(),
                             r.fail,
                             r.arg,
-                            &mut commands,
+                            &edits,
                             &self_guid,
                             &index,
                             &casting,
@@ -3327,6 +3356,7 @@ mod tests {
                     },
                 )
                 .unwrap();
+            crate::creature_anim::apply_unit_edits(app.world_mut());
             let armed = app.world().resource::<PendingCast>().in_flight();
             let queued = app.world().resource::<QueuedMeleeSpell>().current();
             (chained, armed, queued)
