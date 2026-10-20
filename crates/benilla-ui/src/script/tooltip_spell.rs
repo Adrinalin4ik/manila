@@ -62,6 +62,10 @@ pub struct SpellTooltipView {
     /// like the reagents, a missing tool behind the inline `|cffff2020` escape. Shaman addons read
     /// the totem's element off it: CallOfElements builds its whole totem bar from this line.
     pub totems: Option<String>,
+    /// wenilla carry: a tool or reagent named by the spell had no streamed item name when this
+    /// view was built, so its line is short; the app re-pushes the view when the name lands.
+    /// The world-enter wait reads it (`book_spell_views_ready`).
+    pub names_pending: bool,
     /// "Reagents: Light Feather" (`SPELL_REAGENTS 0x854e54` and the eight reagent slots); the app
     /// writes a missing reagent's inline `|cffff2020` escape.
     pub reagents: Option<String>,
@@ -94,7 +98,13 @@ impl super::UiScript {
             .spellbook
             .slots
             .iter()
-            .all(|s| s.spell_id == 0 || model.spell_tooltips.contains_key(&s.spell_id))
+            .all(|s| {
+                s.spell_id == 0
+                    || model
+                        .spell_tooltips
+                        .get(&s.spell_id)
+                        .is_some_and(|v| !v.names_pending)
+            })
     }
 
     /// Store or replace a spell's view built against the player's pet, the one the builder's unit

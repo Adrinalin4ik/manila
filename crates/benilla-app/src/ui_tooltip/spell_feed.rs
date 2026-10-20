@@ -328,6 +328,8 @@ pub(super) fn build_view(
     // Reagents (`SPELL_REAGENTS`, `0x854e54`), red when short; one whose template has not
     // streamed is absent until `feed_spell_tooltips` re-pushes on its arrival. A build is the
     // reference's, which looks each reagent up with a callback (`0x52f3f4`).
+    // wenilla carry: whether a tool or reagent line is short a name still streaming.
+    let mut names_pending = false;
     let reagents = {
         let mut parts: Vec<String> = Vec::new();
         for (entry, count) in d.reagents.iter().copied().filter(|&(e, _)| e != 0) {
@@ -337,6 +339,7 @@ pub(super) fn build_view(
                 .template(entry, 0, Ask::Event(vctx.commands))
                 .map(|t| t.name.clone())
             else {
+                names_pending = true;
                 continue;
             };
             let text = if count > 1 {
@@ -369,6 +372,7 @@ pub(super) fn build_view(
                 .template(entry, 0, Ask::Event(vctx.commands))
                 .map(|t| t.name.clone())
             else {
+                names_pending = true;
                 continue;
             };
             let short = vctx.store.is_some_and(|s| {
@@ -402,6 +406,7 @@ pub(super) fn build_view(
         form_met,
         chance,
         totems,
+        names_pending,
         reagents,
         description: d
             .description
