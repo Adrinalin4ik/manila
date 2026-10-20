@@ -151,8 +151,9 @@ pub(super) fn attacker_state(
 /// the packet's `victim`, who wears the shield; `attacker` struck it and takes the damage
 /// (`DAMAGESHIELDSELFOTHER` is "You reflect %d %s damage to %s."). The chat type is a two-way on
 /// the bearer: `0x62c140` returns `0x3f` `SPELL_DAMAGESHIELDS_ON_SELF` for class 0 or 1, else
-/// `0x40` `…ON_OTHERS`. After the line (`0x5e8552`), `UNIT_COMBAT` `WOUND` on the attacker, with
-/// no flags and no gate (`0x5e858c`).
+/// `0x40` `…ON_OTHERS`. The line (`0x62ca20`, from `0x5e8552`) is worded `DAMAGE_SHIELD` with the
+/// damage when the struck unit is you (`0x62cb5d`-`0x62cb6b`), and written for no damage not at all
+/// (`0x62ca50`). Then `UNIT_COMBAT` `WOUND` on the attacker, with no flags and no gate (`0x5e858c`).
 pub(super) fn damage_shield(
     s: DamageShield,
     ctx: &ChatCtx,
@@ -160,24 +161,27 @@ pub(super) fn damage_shield(
     poses: &impl Poses,
     log: &mut ChatLog,
 ) {
-    let bearer = ctx.classify(s.victim, stores);
-    let struck = ctx.classify(s.attacker, stores);
-    let kind = combat::damage_shield_kind(bearer);
-    let fills = Fills {
-        school: u8::try_from(s.school).ok(),
-        amount: i64::from(s.damage),
-        ..Default::default()
-    };
-    queue(
-        log,
-        ctx,
-        poses,
-        kind,
-        combat::DAMAGESHIELD,
-        (s.victim, bearer),
-        (s.attacker, struck),
-        fills,
-    );
+    if s.damage != 0 {
+        let bearer = ctx.classify(s.victim, stores);
+        let struck = ctx.classify(s.attacker, stores);
+        let kind = combat::damage_shield_kind(bearer);
+        let fills = Fills {
+            school: u8::try_from(s.school).ok(),
+            amount: i64::from(s.damage),
+            ..Default::default()
+        };
+        queue_worded(
+            log,
+            ctx,
+            poses,
+            kind,
+            combat::DAMAGESHIELD,
+            (s.victim, bearer),
+            (s.attacker, struck),
+            fills,
+            to_me(struck, LineWord::with("DAMAGE_SHIELD", s.damage)),
+        );
+    }
     super::feedback::wound(log, s.attacker, s.damage, 0, s.school);
 }
 
@@ -242,7 +246,9 @@ pub(super) fn spell_insta_kill_log(
 }
 
 /// `SMSG_PROCRESIST` ("%s resists %s's %s.") and `SMSG_SPELLORDAMAGE_IMMUNE` ("%s is immune to
-/// %s's %s."), both worded target first and typed off the (caster, target) pair.
+/// %s's %s."), both worded target first and typed off the (caster, target) pair. When the target,
+/// the second unit, is you, each line raises its word with the spell's name: `PROC_RESISTED`
+/// (`0x628b8a`-`0x628b96`) or `SPELL_IMMUNE` (`0x62d3ab`-`0x62d3b9`).
 ///
 /// `IMMUNESPELL`'s `log_format` byte is the periodic flag: `0x62d25f` in `0x62d240` gates that
 /// formatter alone on `CombatLogPeriodicSpells` when the byte is set; `PROCRESIST` is ungated.
@@ -269,28 +275,32 @@ pub(super) fn spell_outcome_log(
     let Some(kind) = combat::spell_kind(caster, target, buff) else {
         return;
     };
-    queue(
+    let (family, word) = if immune {
+        (combat::IMMUNESPELL, "SPELL_IMMUNE")
+    } else {
+        (combat::PROCRESIST, "PROC_RESISTED")
+    };
+    let word = to_me(target, LineWord::with(word, &spell));
+    queue_worded(
         log,
         ctx,
         poses,
         kind,
-        if immune {
-            combat::IMMUNESPELL
-        } else {
-            combat::PROCRESIST
-        },
+        family,
         (s.caster, caster),
         (s.target, target),
         Fills {
             spell,
             ..Default::default()
         },
+        word,
     );
 }
 
 /// `SMSG_SPELLDISPELLOG`: "Your %s is removed." or "%s's %s is removed.", one line per aura. The
 /// chat type is the literal `0x45` `SPELL_BREAK_AURA` (`0x62d480`); the dispeller is classified
-/// only for the range gate.
+/// only for the range gate. An `AURADISPELSELF` line raises `SPELL_DISPELLED` with the spell's name
+/// (`0x62d5ce`-`0x62d5e8`).
 pub(super) fn spell_dispel_log(
     s: &SpellDispelLog,
     ctx: &ChatCtx,
@@ -304,7 +314,8 @@ pub(super) fn spell_dispel_log(
         let Some(spell) = ctx.spell_name(spell_id) else {
             continue;
         };
-        queue(
+        let word = to_me(bearer, LineWord::with("SPELL_DISPELLED", &spell));
+        queue_worded(
             log,
             ctx,
             poses,
@@ -316,12 +327,15 @@ pub(super) fn spell_dispel_log(
                 spell,
                 ..Default::default()
             },
+            word,
         );
     }
 }
 
 /// `SMSG_DISPEL_FAILED`: "You fail to dispel %s's %s.", one line per aura. The format variant is
 /// picked once per packet (`0x628c20`); the chat type per line, since `0x627d30` asks the spell.
+/// When the second unit is you, each line raises `DISPEL_FAILED` with its spell's name
+/// (`0x628daa`-`0x628db8`).
 pub(super) fn dispel_failed(
     s: &DispelFailed,
     ctx: &ChatCtx,
@@ -339,7 +353,8 @@ pub(super) fn dispel_failed(
         let Some(kind) = combat::spell_kind(caster, victim, !ctx.spell_harmful(spell_id)) else {
             continue;
         };
-        queue(
+        let word = to_me(victim, LineWord::with("DISPEL_FAILED", &spell));
+        queue_worded(
             log,
             ctx,
             poses,
@@ -351,6 +366,7 @@ pub(super) fn dispel_failed(
                 spell,
                 ..Default::default()
             },
+            word,
         );
     }
 }
@@ -489,14 +505,18 @@ pub(super) fn spell_log_execute(
                     );
                 }
                 // Effect 19 ADD_EXTRA_ATTACKS: no caster in the sentence (`0x62d9f0`), only the
-                // unit that gained the attacks.
+                // unit that gained the attacks, worded `EXTRA_ATTACKS` with the count when that is
+                // you (`0x62db7d`-`0x62dba9`); a count of 0 writes neither (`0x62da2a`).
                 E::ExtraAttacks { target, count } => {
+                    if count == 0 {
+                        continue;
+                    }
                     let Some(spell) = spell() else { continue };
                     let victim = ctx.classify(target, stores);
                     let Some(kind) = combat::spell_kind(victim, victim, false) else {
                         continue;
                     };
-                    queue(
+                    queue_worded(
                         log,
                         ctx,
                         poses,
@@ -513,6 +533,7 @@ pub(super) fn spell_log_execute(
                             amount: i64::from(count),
                             ..Default::default()
                         },
+                        to_me(victim, LineWord::with("EXTRA_ATTACKS", count)),
                     );
                 }
                 // Effect 24 CREATE_ITEM: the tradeskill line, literal type `0x3e`, split on the
@@ -541,7 +562,8 @@ pub(super) fn spell_log_execute(
                     combat::Named::Item(item_entry),
                 ),
                 // Effect 68 INTERRUPT_CAST: the sentence names the interrupted spell, off the row,
-                // not the packet's own.
+                // not the packet's own, and so does the `INTERRUPT` word when the interrupted unit
+                // is you (`0x626b53`-`0x626b69`).
                 E::InterruptCast { target, spell_id } => {
                     let victim = ctx.classify(target, stores);
                     let Some(interrupted) = ctx.spell_name(spell_id) else {
@@ -550,7 +572,8 @@ pub(super) fn spell_log_execute(
                     let Some(kind) = combat::spell_kind(caster, victim, false) else {
                         continue;
                     };
-                    queue(
+                    let word = to_me(victim, LineWord::with("INTERRUPT", &interrupted));
+                    queue_worded(
                         log,
                         ctx,
                         poses,
@@ -562,6 +585,7 @@ pub(super) fn spell_log_execute(
                             spell: interrupted,
                             ..Default::default()
                         },
+                        word,
                     );
                 }
                 // Effect 111 DURABILITY_DAMAGE: both fields `-1` is the "all items" form.
@@ -755,11 +779,14 @@ fn spell_cast_line(
     }
 }
 
-/// `SMSG_ENVIRONMENTALDAMAGELOG`: "You fall and lose %d health." and its five siblings.
-/// `0x62aac0` builds the key from a six-entry damage-type table and SELF/OTHER, and calls the
-/// melee HITS selector with the victim's class in both positions, so a party member's fall types
-/// as `HOSTILEPLAYER_HITS` through the selector's tgt<=3 override, as in the reference. It takes
-/// absorb and resist trailers.
+/// `SMSG_ENVIRONMENTALDAMAGELOG`'s handler `0x624f30`, which writes and signals nothing for a hit
+/// of all zeros (`0x624f4c`-`0x624f60`). The line, "You fall and lose %d health." and its five
+/// siblings: `0x62aac0` builds the key from a six-entry damage-type table and SELF/OTHER, and calls
+/// the melee HITS selector with the victim's class in both positions, so a party member's fall
+/// types as `HOSTILEPLAYER_HITS` through the selector's tgt<=3 override, as in the reference. It
+/// takes absorb and resist trailers, and on you raises [`combat::damage_word`] (`0x62ac74`). Then,
+/// for the active player (`0x624f83`), `UNIT_COMBAT` `WOUND` in the type's school, marked `0x20`
+/// for an absorb and `0x40` for a resist (`0x624f8c`-`0x624fc4`).
 pub(super) fn environmental_damage_log(
     e: EnvironmentalDamageLog,
     ctx: &ChatCtx,
@@ -767,34 +794,46 @@ pub(super) fn environmental_damage_log(
     poses: &impl Poses,
     log: &mut ChatLog,
 ) {
+    if e.damage == 0 && e.absorb == 0 && e.resist == 0 {
+        return;
+    }
     let victim = ctx.classify(e.victim, stores);
-    let Some(family) = combat::env_family(e.damage_type) else {
-        return;
-    };
-    let Some(kind) = combat::combat_kind(victim, victim, false) else {
-        return;
-    };
-    queue(
-        log,
-        ctx,
-        poses,
-        kind,
-        family,
-        (e.victim, victim),
-        (e.victim, victim),
-        Fills {
-            amount: i64::from(e.damage),
-            trailers: Some(combat::Trailers {
-                absorbed: e.absorb,
-                resisted: e.resist,
-                // The environmental call site passes zero for both.
-                blocked: 0,
-                hit_info: 0,
-            }),
-            ..Default::default()
-        },
-    );
+    let kind = combat::combat_kind(victim, victim, false);
+    if let (Some(family), Some(kind)) = (combat::env_family(e.damage_type), kind) {
+        queue_worded(
+            log,
+            ctx,
+            poses,
+            kind,
+            family,
+            (e.victim, victim),
+            (e.victim, victim),
+            Fills {
+                amount: i64::from(e.damage),
+                trailers: Some(combat::Trailers {
+                    absorbed: e.absorb,
+                    resisted: e.resist,
+                    // The environmental call site passes zero for both.
+                    blocked: 0,
+                    hit_info: 0,
+                }),
+                ..Default::default()
+            },
+            to_me(victim, combat::damage_word(e.damage, e.absorb, e.resist)),
+        );
+    }
+    let school = ENV_DAMAGE_SCHOOLS.get(usize::from(e.damage_type));
+    if let (Some(&school), true) = (school, ctx.self_guid.0 == Some(e.victim)) {
+        let marks = super::feedback::hit_flags(false, e.absorb, e.resist, 0);
+        super::feedback::wound(log, e.victim, e.damage, marks, school);
+    }
 }
+
+/// The school of each environmental damage type 0 to 5, the table `0x809274` that `0x624fb3`
+/// indexes: fatigue, drowning and falling physical, lava and fire fire, slime nature. The index has
+/// no bound; a type past it, which no server sends (vmangos maps its void fall to 2,
+/// `Objects/Unit.cpp:5396`), signals nothing here.
+const ENV_DAMAGE_SCHOOLS: [u32; 6] = [0, 0, 0, 2, 3, 2];
 
 /// `SMSG_SET_FACTION_STANDING`: "Your %s reputation has increased by %d.". The wire carries the
 /// new total and the sentence the delta, so this runs before the store is overwritten, and an
@@ -802,7 +841,9 @@ pub(super) fn environmental_damage_log(
 /// its faction is not `HIDDEN`: the handler passes `0x4d6330` its print argument as
 /// `index == 0 && !(flags & 4)` (`0x4d57dd`-`0x4d57ea`), so the spill-over entries of one kill
 /// update silently. No range gate or classifier: the chat type is the literal `0x55`
-/// `COMBAT_FACTION_CHANGE`. The wire's list id is `Faction.dbc`'s `rep_index`.
+/// `COMBAT_FACTION_CHANGE`. The wire's list id is `Faction.dbc`'s `rep_index`. The line
+/// (`0x62c5f0`) raises `FACTION` with the faction's name and the signed change, whoever's line it
+/// is (`0x62c661`-`0x62c667`).
 pub(crate) fn faction_standing(
     deltas: &[(u32, i32)],
     reputations: &Reputations,
@@ -853,7 +894,7 @@ pub(crate) fn faction_standing(
             },
             named: combat::Named::Ready,
             tries: 0,
-            word: None,
+            word: Some(LineWord::text_number("FACTION", name, delta)),
         });
     }
 }
