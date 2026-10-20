@@ -1529,3 +1529,35 @@ fn a_wait_replaced_by_an_earlier_re_render_is_not_replayed() {
     );
     assert!(s.take_errors().is_empty());
 }
+
+/// A scan plate owned once keeps scanning past an aura miss: CallOfElements ends every debuff
+/// scan on one (`COE_TotemLogic.lua:280`) and reads its later `SetSpell` lines from the same
+/// plate, owned only in `OnLoad` (`CallOfElements.xml:25`).
+#[test]
+fn an_aura_miss_keeps_the_scan_plate_owned() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_spell_tooltip(133, fireball());
+    s.set_spellbook(SpellBookState {
+        tabs: Vec::new(),
+        slots: vec![SpellSlotView {
+            spell_id: 133,
+            name: "Fireball".into(),
+            ..Default::default()
+        }],
+    });
+    s.run(
+        r#"
+        local host = CreateFrame("Frame", "ScanHost")
+        local tt = CreateFrame("GameTooltip", "ScanTT", nil, "TestTooltipTemplate")
+        tt:SetOwner(host, "ANCHOR_NONE")
+        tt:SetUnitDebuff("player", 1)
+        assert(tt:NumLines() == 0 and not tt:IsShown(), "the miss draws nothing")
+        assert(tt:IsOwned(host), "and keeps the owner")
+        tt:SetSpell(1, "spell")
+        assert(ScanTTTextLeft1:GetText() == "Fireball", "the next scan still reads")
+    "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty());
+}
