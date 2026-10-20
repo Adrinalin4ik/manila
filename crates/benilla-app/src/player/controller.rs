@@ -5,6 +5,9 @@
 
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 /// Free-flies until the server places us, then drives the avatar and streams its movement as the
 /// mover; the dev chord with `F` toggles free fly.
 #[allow(clippy::type_complexity)]
@@ -81,11 +84,13 @@ pub(super) fn control(
         Local<Option<camera::PressGesture>>,
         Local<Option<camera::PressGesture>>,
     ),
-    // The liquid query, the transports, and the parent chain from a deck collider to its transport.
+    // The liquid query, the transports, the parent chain from a deck collider to its transport,
+    // and the active mover `0xc4da98`, as whether it is our own character.
     world_q: (
         benilla_world::world_point::WorldPoint,
         TransportQuery,
         Query<&ChildOf>,
+        Query<Has<crate::net::SelfPlayer>, With<crate::net::ActiveMover>>,
     ),
 ) {
     let (world, transports, child_of) = (&world_q.0, &world_q.1, &world_q.2);
@@ -306,6 +311,25 @@ pub(super) fn control(
     ride::carry(&mut player, &mut cam, transports);
 
     if player.active && !player.detached {
+        // The cast bar's self-cancel, at the command press ([`input::cancels_cast`]) and ahead of
+        // the mover: between the press `0x5150a7` and the cancel `0x51512a` stands only the taint
+        // test `0x494a50`, so it runs whoever drives the body. It reads the commands, never the
+        // streamed word, which a root empties of direction bits. The cast cancel tests no mover
+        // (`0x5150f2`); the channel's compares the player with the active mover
+        // (`0x51517b`-`0x515191`), which possession sets to the creature and lost control zeroes
+        // (`0x5fa600`), so steering a possessed creature, or pressing while feared, ends a cast but
+        // not a channel.
+        let active_mover = world_q.3.iter().next();
+        let autorun_on = input::toggle_autorun(binds, &mut player);
+        if input::cancels_cast(
+            binds,
+            autorun_on,
+            input::both_engaged(binds, &rig, both_buttons),
+            active_mover.is_some(),
+        ) {
+            net.7.pressed = true;
+            net.7.mover_is_player = active_mover == Some(true);
+        }
         // Not driving, while the camera stays on the body and input, physics and the stream yield:
         // - `server_riding`: a server spline (Charge, knockback, taxi, a flee path) owns the body;
         //   `drive_self_ride` has mirrored it into `Player`, reporting FORWARD on purpose.
@@ -315,6 +339,13 @@ pub(super) fn control(
         //   carry no guid, so driving would write one body's pose onto another.
         // Possession is none of these: it runs the ordinary path below, on the creature.
         if player.server_riding || player.control_lost || player.reseat {
+            // The latch outlives the yield: lost control and an unresolved reseat leave the tick
+            // no unit (`0x51466e`), but a ride keeps the mover and fails `0x5144e0`, so the tick
+            // the ride's monster move runs (`0x602053`), and each press's, clears the bit
+            // (`0x514748`).
+            if player.server_riding && active_mover.is_some() {
+                player.autorun = false;
+            }
             // The moving body's transform is the truth; without this the camera stays behind
             // during a fear. Not while reseating, when `Player` still holds the body let go.
             if player.control_lost && !player.reseat {
@@ -379,7 +410,6 @@ pub(super) fn control(
             mouselook,
             turning,
             translating,
-            autorun_armed,
             turn_left,
             turn_right,
             ..
@@ -746,19 +776,7 @@ pub(super) fn control(
             &dynamics,
         );
 
-        // The cast bar's self-cancel: a new directional start, a jump, or autorun's on edge (the
-        // interrupt mask `0x10f0` at `0x5150ce` is forward, back, strafe and autorun, and a clear
-        // edge returns early at `0x5150c8`); turning and pitch never cancel. Only our own
-        // character's moves count: vmangos breaks a channel on the caster's own movement
-        // (`Spell::update`), so a possessed creature's steps must not end Mind Control.
         let steering_ourselves = player.foreign_mover.is_none();
-        if steering_ourselves
-            && (move_flags_now & move_flags::ANY_MOVE & !player.move_flags != 0
-                || jumped
-                || autorun_armed)
-        {
-            net.7 .0 = true;
-        }
         // The loot window's walk-away, the movement-start guard `0x60e990`: forward, back, strafe,
         // keyboard turn, pitch and jump close it, mouse-look facing does not, and only for our
         // own character.

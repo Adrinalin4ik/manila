@@ -381,10 +381,18 @@ pub(crate) struct AutoRepeatActive(pub Option<u32>);
 pub(crate) const SPELL_INTERRUPT_MOVEMENT: u32 = 0x1; // SpellRec+0x54 InterruptFlags (SPELL_INTERRUPT_FLAG_MOVEMENT)
 const CHANNEL_INTERRUPT_MOVING: u32 = 0x8; // SpellRec+0x5c ChannelInterruptFlags (AURA_INTERRUPT_MOVING_CANCELS)
 
-/// A directional move start or a jump happened this frame (the `0x10f0` mask; there is no
-/// autorun yet). Set by `player::control`, consumed by [`local_self_cancel`].
+/// This frame's cancelling press, set by `player::control` and consumed by
+/// [`local_self_cancel`]: a press that newly set forward, back, strafe or autorun (the mask
+/// `0x10f0`, `0x5150ce`), the press that completed both mouse bits (`0x5150e2`), or the Jump
+/// command (`0x513c43`).
 #[derive(Resource, Default)]
-pub(crate) struct LocalMoveStart(pub(crate) bool);
+pub(crate) struct LocalMoveStart {
+    pub(crate) pressed: bool,
+    /// The player is the active mover `0xc4da98`, which possession hands to the creature and lost
+    /// control zeroes: the channel cancel's one extra test (`0x515180`, `0x513c99`); the cast
+    /// cancel tests no mover.
+    pub(crate) mover_is_player: bool,
+}
 
 /// The client's local cancel on a move, jump or Esc mid-cast (`AbortCast 0x6e4940`):
 ///
@@ -393,9 +401,10 @@ pub(crate) struct LocalMoveStart(pub(crate) bool);
 /// - The cast: `CMSG_CANCEL_CAST`, the self `Casting` reaped with a `Fail` cast event, and the
 ///   `Stop` bar edge the cancel's own event fires ([`super::CastCore::cancel`]). Movement tests
 ///   the spell's `InterruptFlags`; Esc does not.
-/// - The channel, on movement only: `CMSG_CANCEL_CHANNELLING` (`0x6e9b70`) and nothing local;
-///   the bar and [`ActiveChannel`] close on `MSG_CHANNEL_UPDATE(0)` (`0x6e75f0`). Esc cannot
-///   stop a channel: `0x6e6e80` never calls `0x6e9b70`, and the inflight id is 0 mid-channel.
+/// - The channel, on movement only and only while the player is the mover (`0x515180`):
+///   `CMSG_CANCEL_CHANNELLING` (`0x6e9b70`) and nothing local; the bar and [`ActiveChannel`] close
+///   on `MSG_CHANNEL_UPDATE(0)` (`0x6e75f0`). Esc cannot stop a channel: `0x6e6e80` never calls
+///   `0x6e9b70`, and the inflight id is 0 mid-channel.
 ///
 /// vmangos answers the cancel with `SMSG_SPELL_FAILED_OTHER` and a failing `SMSG_CAST_RESULT`
 /// 0x23, whose report finds nothing in flight and fires `SPELLCAST_INTERRUPTED` itself
@@ -404,8 +413,8 @@ pub(crate) struct LocalMoveStart(pub(crate) bool);
 /// `CastingBarFrame.lua:132-139` steps the flash once per OnUpdate after the 1 s hold, followed
 /// by the fade.
 pub(super) fn local_self_cancel(mut moved: ResMut<LocalMoveStart>, mut cancel: SelfCancel) {
-    if std::mem::take(&mut moved.0) {
-        cancel.cancel(false, true);
+    if std::mem::take(&mut moved.pressed) {
+        cancel.cancel(false, true, moved.mover_is_player);
     }
 }
 
@@ -438,7 +447,7 @@ pub(crate) struct SelfCancel<'w> {
 impl SelfCancel<'_> {
     /// `SpellStopCasting()` (`0x6e6e80`), the ESC chain's cast rung.
     pub(crate) fn stop_casting(&mut self) {
-        self.cancel(true, false);
+        self.cancel(true, false, false);
     }
 
     /// `CancelCast(1, 1, 0x1c)` (`0x6e4940`) as `UseSoulstone`'s item leg calls it (`0x48ae6b`),
@@ -504,7 +513,7 @@ impl SelfCancel<'_> {
         }
     }
 
-    fn cancel(&mut self, esc: bool, moved: bool) {
+    fn cancel(&mut self, esc: bool, moved: bool, mover_is_player: bool) {
         let now = Instant::now();
         let self_e = self.self_entity();
         // Esc stops one thing, auto-repeat first (`0x6e6e80`).
@@ -528,11 +537,12 @@ impl SelfCancel<'_> {
         let flags_open = |spells: &Option<Res<Spells>>,
                           pick: fn(&benilla_formats::SpellDisplay) -> bool,
                           spell_id: u32| {
-            // An uncataloged spell cancels, as the server interrupts any ordinary cast.
+            // A spell with no record is spared: both tests leave on a null record (`0x51511a`,
+            // `0x515171`; `Script::Jump`'s `0x513c34`, `0x513c8c`).
             spells
                 .as_ref()
                 .and_then(|s| s.catalog.get(spell_id))
-                .is_none_or(pick)
+                .is_some_and(pick)
         };
         // `AbortCast` treats a cast and a queued strike alike; only the local teardown differs.
         if let Some(slot) = inflight(&self.pending, &self.queued_melee, &self.ground) {
@@ -552,8 +562,9 @@ impl SelfCancel<'_> {
                 self.cancel_inflight(false, if esc { "esc" } else { "moved" });
             }
         }
-        // The channel: movement only, and the send only (`0x6e9b70`).
-        if moved {
+        // The channel: movement only, with the player as the mover, and the send only
+        // (`0x6e9b70`).
+        if moved && mover_is_player {
             if let Some(spell_id) = self.channel.current(now) {
                 if flags_open(
                     &self.spells,
@@ -963,7 +974,15 @@ mod tests {
         }
 
         fn run(app: &mut App, moved: bool) {
-            app.world_mut().resource_mut::<LocalMoveStart>().0 = moved;
+            run_as(app, moved, true);
+        }
+
+        /// A press this frame or none, the player the mover or not.
+        fn run_as(app: &mut App, pressed: bool, mover_is_player: bool) {
+            *app.world_mut().resource_mut::<LocalMoveStart>() = LocalMoveStart {
+                pressed,
+                mover_is_player,
+            };
             app.world_mut().run_system_once(local_self_cancel).unwrap();
             // The pass's end.
             crate::creature_anim::apply_unit_edits(app.world_mut());
@@ -1030,7 +1049,7 @@ mod tests {
                  CAST_RESULT) finds nothing to repaint"
             );
             assert!(
-                !app.world().resource::<LocalMoveStart>().0,
+                !app.world().resource::<LocalMoveStart>().pressed,
                 "the edge is consumed"
             );
         }
@@ -1059,21 +1078,81 @@ mod tests {
             assert!(app.world().resource::<CastReports>().0.is_empty());
         }
 
+        /// A spell with no record is no cancel's: the cast test leaves on a null record
+        /// (`0x51511a`, `Script::Jump`'s `0x513c34`), the channel test likewise (`0x515171`).
         #[test]
-        fn an_uncataloged_spell_fails_open() {
+        fn an_uncataloged_spell_is_not_cancelled() {
             let (mut app, rx) = harness(HashMap::new());
             app.world_mut()
                 .resource_mut::<PendingCast>()
                 .push(FIREBALL, None, Instant::now());
+            app.world_mut().resource_mut::<ActiveChannel>().start(
+                ARCANE_MISSILES,
+                5_000,
+                Instant::now(),
+            );
 
             run(&mut app, true);
 
-            assert!(
-                matches!(
-                    rx.try_recv(),
-                    Ok(crate::net::ClientCommand::CancelCast { spell_id: FIREBALL })
+            assert!(rx.try_recv().is_err(), "no cancel goes out");
+            assert!(app.world().resource::<PendingCast>().in_flight());
+        }
+
+        /// The cast cancel tests no mover (`0x5150f2`-`0x51512a`); the channel cancel needs the
+        /// player to be the mover (`0x515180`, `0x51518b`), so moving a possessed unit ends a cast
+        /// but not the Mind Control channel that holds it.
+        #[test]
+        fn only_the_channel_cancel_needs_the_player_as_mover() {
+            const MIND_CONTROL: u32 = 605;
+            let (mut app, rx) = harness(HashMap::from([
+                (
+                    FIREBALL,
+                    SpellDisplay {
+                        interrupt_flags: 0xf,
+                        ..Default::default()
+                    },
                 ),
-                "an unknown spell's cast still cancels on movement"
+                (
+                    MIND_CONTROL,
+                    SpellDisplay {
+                        channel_interrupt_flags: 0x8,
+                        ..Default::default()
+                    },
+                ),
+            ]));
+            let start = |app: &mut App| {
+                app.world_mut()
+                    .resource_mut::<PendingCast>()
+                    .push(FIREBALL, None, Instant::now());
+                app.world_mut().resource_mut::<ActiveChannel>().start(
+                    MIND_CONTROL,
+                    60_000,
+                    Instant::now(),
+                );
+            };
+            let sent = |rx: &crossbeam_channel::Receiver<crate::net::ClientCommand>| {
+                rx.try_iter()
+                    .filter_map(|c| match c {
+                        crate::net::ClientCommand::CancelCast { spell_id } => {
+                            Some(("cast", spell_id))
+                        }
+                        crate::net::ClientCommand::CancelChannelling { spell_id } => {
+                            Some(("channel", spell_id))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            start(&mut app);
+            run_as(&mut app, true, false);
+            assert_eq!(sent(&rx), vec![("cast", FIREBALL)]);
+
+            start(&mut app);
+            run_as(&mut app, true, true);
+            assert_eq!(
+                sent(&rx),
+                vec![("cast", FIREBALL), ("channel", MIND_CONTROL)]
             );
         }
 
