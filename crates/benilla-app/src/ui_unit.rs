@@ -43,11 +43,14 @@ pub(crate) struct UnitSnapshots;
 /// One `UNIT_COMBAT` over a unit, the portrait hit indicator's feed. The emitter `0x494600` fires
 /// `(token, action, descriptor, amount, type)` once per token naming the unit, with no
 /// self-suppression and no CVar gate; `type` is the school on the melee and spell-damage paths, 0
-/// from the miss and heal wrappers, and the 1.12 binary never emits `ENERGIZE`. The melee victim
-/// event waits for the impact keyframe (`0x6243e0`, reached only from `0x624530`).
-#[derive(Message, Clone, Copy)]
+/// from the miss and heal wrappers, and the 1.12 binary never emits `ENERGIZE`. Each rides the chat
+/// drain's queue ([`crate::ui_chat::ChatLog::push_unit_combat`]), so it reaches Lua at its place
+/// among the combat-log lines raised beside it. A melee victim's comes from `0x6243e0`
+/// ([`melee_unit_combat`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct UnitCombatFeedback {
-    pub(crate) unit: Entity,
+    /// The unit, by the guid `0x494600` is handed.
+    pub(crate) guid: u64,
     /// `arg2`, the action word (`WOUND`, `MISS`, `DODGE`, `PARRY`, `BLOCK`, `HEAL`, …).
     pub(crate) action: &'static str,
     /// `arg3`, the descriptor: `CRITICAL`/`CRUSHING`/`GLANCING`/`ABSORB`/`BLOCK`/`RESIST`, or `""`.
@@ -56,17 +59,6 @@ pub(crate) struct UnitCombatFeedback {
     pub(crate) amount: u32,
     /// `arg5`, the school (0 physical); stock draws a `type > 0` number spell-yellow.
     pub(crate) school: u32,
-}
-
-/// One `COMBAT_TEXT_UPDATE` (event `0x21E`, via `0x703f50`), fired at packet parse by every
-/// producer, melee included (`0x6255b0` → `0x629d30`); `data`/`extra` are `arg2`/`arg3`. Fired only
-/// when the unit the line is about is the player: each emitter tests that unit's class (`0x5efea0`)
-/// for 0 before its helper (`0x629ef1`, `0x62d046`, `0x62834b`).
-#[derive(Message, Clone)]
-pub(crate) struct CombatTextEvent {
-    pub(crate) message_type: &'static str,
-    pub(crate) data: Option<String>,
-    pub(crate) extra: Option<String>,
 }
 
 /// The feed's change-tracking memory: what we last told the VM, plus one server-side log-once.
@@ -120,8 +112,7 @@ impl Plugin for UiUnitPlugin {
         // A UI-only harness has no sound or net stack, and a missing resource or message is a
         // system-validation panic; declaring twice is idempotent.
         .init_resource::<crate::sound::MessageSounds>()
-        .add_message::<UnitCombatFeedback>()
-        .add_message::<CombatTextEvent>()
+        .init_resource::<crate::ui_chat::ChatLog>()
         .add_message::<crate::net::WorldportMessage>()
         .add_message::<crate::field_watch::FieldNotice>()
         .init_world_leave_sweep()
@@ -157,9 +148,6 @@ impl Plugin for UiUnitPlugin {
                 // After the control edge, whose flag the exemption is asked for.
                 control_gate::feed_control_bypass,
                 feed_farsight_focus,
-                melee_unit_combat,
-                fire_unit_combat,
-                fire_combat_text,
             )
                 .chain()
                 .in_set(UnitFeed),
@@ -423,7 +411,7 @@ fn melee_feedback(hit_info: u32, victim_state: u32, damage: u32) -> (&'static st
             } else if hit_info & 0x20 != 0 {
                 ("WOUND", "ABSORB")
             } else if hit_info & 0x800 != 0 {
-                ("WOUND", "BLOCK") // a full block the parse did not already make state 5
+                ("WOUND", "BLOCK") // a full block `0x625e20` did not mark
             } else if hit_info & 0x40 != 0 {
                 ("WOUND", "RESIST")
             } else {
@@ -433,76 +421,81 @@ fn melee_feedback(hit_info: u32, victim_state: u32, damage: u32) -> (&'static st
     }
 }
 
-/// The melee `UNIT_COMBAT` producer, on the swing's impact keyframe, `text_only` flushes included;
-/// the center combat text is not here, as the reference fires it at packet parse.
-fn melee_unit_combat(
-    mut impacts: MessageReader<crate::creature_anim::SwingImpact>,
-    mut out: MessageWriter<UnitCombatFeedback>,
+/// A swing's `UNIT_COMBAT` on its victim, as `FloatSwingResult 0x6243e0` raises it (`0x4946d0`, at
+/// `0x6244bf` and `0x624518`), queued in the chat drain where its caller stands: for a displayed
+/// swing only (`0x625e40`, which returns at `0x624414` past both the number and the event), on a
+/// victim held as a unit (each caller's `0x468460`, mask 8; `victim` is its guid and store). The
+/// callers are the impact key (`0x6249bb` → `0x624530`), an unheld attacker's swing at receive
+/// (`0x625a6d` → `0x624530`), and the flushes of a superseded (`0x625893`) or stopped (`0x624ea7`)
+/// record. The swing's `COMBAT_TEXT_UPDATE` rides its combat-log line instead.
+pub(crate) fn melee_unit_combat(
+    log: &mut crate::ui_chat::ChatLog,
+    s: &crate::creature_anim::SwingMessage,
+    victim: Option<(u64, &crate::net::ObjectStore)>,
 ) {
-    for crate::creature_anim::SwingImpact { swing: s, .. } in impacts.read() {
-        let Some(victim) = s.victim else { continue };
-        let (action, flags) = melee_feedback(s.hit_info, s.victim_state, s.damage);
-        out.write(UnitCombatFeedback {
-            unit: victim,
-            action,
-            flags,
-            amount: s.damage,
-            school: 0, // the reference passes sub-damage 0's school (`0x4946fc`), not carried here
-        });
+    if !s.displayed {
+        return;
     }
-}
-
-/// Drain [`CombatTextEvent`] into `COMBAT_TEXT_UPDATE(messageType, data, extra)`.
-fn fire_combat_text(
-    script: Option<NonSendMut<UiScript>>,
-    mut events: MessageReader<CombatTextEvent>,
-) {
-    let Some(mut script) = script else {
+    let Some((guid, _)) = victim.filter(|(_, store)| crate::ui_chat::combat::is_unit(store)) else {
         return;
     };
-    for ev in events.read() {
-        let arg = |v: &Option<String>| v.clone().map_or(ScriptValue::Nil, ScriptValue::Str);
+    let (action, flags) = melee_feedback(s.hit_info, s.victim_state, s.damage);
+    log.push_unit_combat(UnitCombatFeedback {
+        guid,
+        action,
+        flags,
+        amount: s.damage,
+        school: 0, // the reference passes sub-damage 0's school (`0x4946fc`), not carried here
+    });
+}
+
+/// `COMBAT_TEXT_UPDATE(messageType, data, extra)` (event `0x21e`, through the five helpers
+/// `0x626890`-`0x6269d0`): `data` and `extra` are `arg2` and `arg3`, nil when absent. Each combat-log
+/// formatter raises it right after its line, so the line's drain fires it.
+pub(crate) fn fire_combat_text(
+    script: &mut UiScript,
+    message_type: &str,
+    data: Option<String>,
+    extra: Option<String>,
+) {
+    let arg = |v: Option<String>| v.map_or(ScriptValue::Nil, ScriptValue::Str);
+    script.fire_event(
+        "COMBAT_TEXT_UPDATE",
+        vec![
+            ScriptValue::Str(message_type.to_string()),
+            arg(data),
+            arg(extra),
+        ],
+    );
+}
+
+/// Fire one [`UnitCombatFeedback`] as `UNIT_COMBAT` for `"player"` and `"target"` only, the tokens
+/// `is_self` and `is_target` say name its unit; the reference fires once per token naming the
+/// unit, and stock `PetFrame.lua:13` listens for `"pet"`. The chat drain calls it at the event's
+/// place in its queue.
+pub(crate) fn fire_unit_combat(
+    script: &mut UiScript,
+    ev: &UnitCombatFeedback,
+    is_self: bool,
+    is_target: bool,
+) {
+    let mut fire = |token: &str| {
         script.fire_event(
-            "COMBAT_TEXT_UPDATE",
+            "UNIT_COMBAT",
             vec![
-                ScriptValue::Str(ev.message_type.to_string()),
-                arg(&ev.data),
-                arg(&ev.extra),
+                ScriptValue::Str(token.to_string()),
+                ScriptValue::Str(ev.action.to_string()),
+                ScriptValue::Str(ev.flags.to_string()),
+                ScriptValue::Int(i64::from(ev.amount)),
+                ScriptValue::Int(i64::from(ev.school)),
             ],
         );
-    }
-}
-
-/// Drain [`UnitCombatFeedback`] into `UNIT_COMBAT` for `"player"` and `"target"` only; the
-/// reference fires once per token naming the unit, and stock `PetFrame.lua:13` listens for `"pet"`.
-fn fire_unit_combat(
-    script: Option<NonSendMut<UiScript>>,
-    mut events: MessageReader<UnitCombatFeedback>,
-    self_q: Query<(), With<SelfPlayer>>,
-    selection: Res<Selection>,
-) {
-    let Some(mut script) = script else {
-        return;
     };
-    for ev in events.read() {
-        let mut fire = |token: &str| {
-            script.fire_event(
-                "UNIT_COMBAT",
-                vec![
-                    ScriptValue::Str(token.to_string()),
-                    ScriptValue::Str(ev.action.to_string()),
-                    ScriptValue::Str(ev.flags.to_string()),
-                    ScriptValue::Int(i64::from(ev.amount)),
-                    ScriptValue::Int(i64::from(ev.school)),
-                ],
-            );
-        };
-        if self_q.contains(ev.unit) {
-            fire("player");
-        }
-        if selection.target == Some(ev.unit) {
-            fire("target");
-        }
+    if is_self {
+        fire("player");
+    }
+    if is_target {
+        fire("target");
     }
 }
 
@@ -1720,6 +1713,41 @@ pub(crate) fn add_unit_feed(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `0x6243e0` raises `UNIT_COMBAT` for a displayed swing on a victim held as a unit, and
+    /// returns past it for a swing `0x625e40` hides (`0x624414`).
+    #[test]
+    fn a_swing_flashes_only_a_unit_and_only_when_displayed() {
+        let mut log = crate::ui_chat::ChatLog::default();
+        let swing = |displayed| crate::creature_anim::SwingMessage {
+            attacker: Entity::PLACEHOLDER,
+            victim: None,
+            hit_info: 0x80,
+            victim_state: 1,
+            damage: 40,
+            displayed,
+            seq: 0,
+        };
+        let store = |kind| {
+            crate::net::ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(2, kind)]))
+        };
+        let (player, object) = (store(0x19), store(0x21));
+        melee_unit_combat(&mut log, &swing(false), Some((1, &player)));
+        melee_unit_combat(&mut log, &swing(true), Some((1, &object)));
+        melee_unit_combat(&mut log, &swing(true), None);
+        assert!(log.pending_unit_combat().is_empty());
+        melee_unit_combat(&mut log, &swing(true), Some((1, &player)));
+        assert_eq!(
+            log.pending_unit_combat(),
+            [UnitCombatFeedback {
+                guid: 1,
+                action: "WOUND",
+                flags: "CRITICAL",
+                amount: 40,
+                school: 0,
+            }]
+        );
+    }
 
     /// `"mouseover"` resolves through the pick the tooltip publishes: the hovered unit, until a
     /// nearer GameObject wins it and the resolver rejects the GameObject's guid (`0x515bd9 je`).
