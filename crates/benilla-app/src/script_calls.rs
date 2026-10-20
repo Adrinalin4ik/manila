@@ -794,6 +794,25 @@ mod tests {
         );
     }
 
+    /// `TargetByName` (`0x489d60`) on a miss leaves the target alone and shows message `0x127`
+    /// (`ERR_UNIT_NOT_FOUND`) for a name given (`0x489dbd`, tested on the raw string's first byte,
+    /// so blanks count) or `0xb8` (`ERR_GENERIC_NO_TARGET`) for an empty one (`0x489dcf`), inside
+    /// the call.
+    #[test]
+    fn target_by_name_that_finds_nobody_shows_the_references_line() {
+        for (name, line) in [
+            ("Nobody", "ERR_UNIT_NOT_FOUND"),
+            ("   ", "ERR_UNIT_NOT_FOUND"),
+            ("", "ERR_GENERIC_NO_TARGET"),
+        ] {
+            let mut f = frame(true);
+            run(&mut f, &format!("TargetByName(\"{name}\")"));
+            assert_eq!(errors(&f), vec![line], "{name:?}");
+            assert_eq!(selected(&f), Some(OLD), "{name:?}: the target stays");
+            assert_eq!(f.rx.try_iter().count(), 0, "{name:?}: nothing is sent");
+        }
+    }
+
     /// Two namesakes: the ranking decides, and the chunk shows the one the commit then selects --
     /// the nearer, and of two at one distance the lower guid, whatever order either side walks.
     #[test]
@@ -1105,6 +1124,67 @@ mod tests {
                 errors(&f),
                 refused.into_iter().collect::<Vec<_>>(),
                 "health {health}"
+            );
+        }
+    }
+
+    /// `0x6131a0` stops a running attack only with `[0xb4b3e4]` set (`0x6131ce`); without control
+    /// it falls to the start (`0x5ecb70`), which returns at the same flag (`0x5ecbc0`) before the
+    /// stand, the swing and the sheath: the press neither stops nor swings.
+    #[test]
+    fn attack_without_control_neither_stops_nor_swings() {
+        for engaged in [true, false] {
+            let mut f = frame(true);
+            with_factions(&mut f, FOE, &[(HEALTH, 100)]);
+            let world = f.app.world_mut();
+            world.init_resource::<crate::player::Player>();
+            world.resource_mut::<crate::player::OwnControlLost>().0 = true;
+            if engaged {
+                let me = world.resource::<GuidIndex>().0[&ME];
+                world
+                    .entity_mut(me)
+                    .insert(crate::creature_anim::Engaged(OLD));
+            }
+            run(&mut f, "AttackTarget()");
+            assert_eq!(swings(&f), (vec![], false), "engaged {engaged}");
+        }
+    }
+
+    /// TryCast's tail starts the swing of a cast that initiates combat through `0x6131a0`
+    /// (`0x6e51b5`), whose start returns at a clear `[0xb4b3e4]`: the cast goes out, the swing
+    /// does not.
+    #[test]
+    fn an_on_next_swing_cast_without_control_sends_no_swing() {
+        const STRIKE: u32 = 78;
+        for lost in [false, true] {
+            let mut f = frame(true);
+            with_factions(&mut f, FOE, &[(HEALTH, 100)]);
+            with_book_spell(
+                &mut f,
+                STRIKE,
+                "Strike",
+                benilla_formats::SpellDisplay {
+                    targets: 0x2,
+                    attributes: 0x404,
+                    ..Default::default()
+                },
+            );
+            let world = f.app.world_mut();
+            world.init_resource::<crate::player::Player>();
+            world.resource_mut::<crate::player::OwnControlLost>().0 = lost;
+            run(&mut f, r#"CastSpellByName("Strike")"#);
+            let sent: Vec<_> = f.rx.try_iter().collect();
+            assert!(
+                sent.iter().any(
+                    |c| matches!(c, ClientCommand::CastSpell { spell_id, .. } if *spell_id == STRIKE)
+                ),
+                "lost {lost}: the cast goes out: {sent:?}"
+            );
+            assert_eq!(
+                sent.iter()
+                    .any(|c| matches!(c, ClientCommand::AttackSwing { guid } if *guid == OLD)),
+                !lost,
+                "lost {lost}: {sent:?}"
             );
         }
     }
