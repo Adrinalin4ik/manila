@@ -107,6 +107,9 @@ pub struct Stage1 {
     pub texture: Handle<Image>,
     /// The combine preset 0-5.
     pub combine: u8,
+    /// tortoise: the stage reads the mesh's UV set B (its own UV set 0 or 1, `TextureStage::uvs`)
+    /// instead of the generated coordinate.
+    pub uv_set: bool,
 }
 
 /// Bake a [`RenderSubmesh`] to a Bevy-space [`Mesh`]: authored normals, else flat ones.
@@ -124,6 +127,15 @@ fn build_submesh_mesh(sub: &RenderSubmesh, usages: RenderAssetUsages) -> Mesh {
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, usages);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, sub.uvs.clone());
+    // MONKEY (skybox): a second stage on its own UV set reads it as UV set B, for a lane that
+    // binds that stage (the sky's, the glue scenes').
+    if let Some(st) = sub
+        .stage1
+        .as_ref()
+        .filter(|s| !s.env_map && s.uvs.len() == sub.positions.len())
+    {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, st.uvs.clone());
+    }
     mesh.insert_indices(Indices::U32(sub.indices.clone()));
     if sub.vertex_colors.len() == sub.positions.len() {
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, sub.vertex_colors.clone());

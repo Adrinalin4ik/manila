@@ -31,6 +31,12 @@ const NOT_YET_ASSERTED: &[(&str, usize, &str)] = &[
         "wenilla carry: the reference answers nothing (0x488af0, xor eax,eax); this one answers \
          a health line for StatsFrame (benilla-ui script/client.rs), on purpose",
     ),
+    (
+        "GetAuctionSellItemInfo",
+        6,
+        "tortoise: Turtle's patched Blizzard_AuctionUI.lua reads maxStack and the link past the \
+         stock six",
+    ),
 ];
 
 /// The query verbs the negative-index rule reads: a verb that acts on its index (`PickupAction`)

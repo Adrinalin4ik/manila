@@ -814,6 +814,15 @@ fn entry_prepare(
     // so that table was built from two empty lists and every icon placement afterwards indexed a
     // nil zone. Same shape as the four seeds above, and the reference has no timing here at all.
     crate::ui_world_map::seed_world_map_catalog(world, script);
+    // The auction house's category tree, the other static DBC data the reference holds from load:
+    // `Blizzard_AuctionUI.lua` reads `GetAuctionItemClasses()` at file scope, and addons such as
+    // Tmog build their item-type tables from `GetAuctionItemSubClasses` there, before any session.
+    // `feed_auction` recreates it per open; a nil `cloth` from an empty tree fails such a load.
+    {
+        let classes = world.get_resource::<crate::ui_items::ItemClasses>();
+        let subclasses = world.get_resource::<crate::ui_items::ItemSubClasses>();
+        script.set_auction_item_classes(crate::ui_auction::categories(classes, subclasses));
+    }
     // **The raster seam — the screen size and the font engine — before the first `<OnLoad>` runs**
     // (decisions 2242 and 2028). The screen size is 2242's: a fresh VM starts at 1024×768 and the
     // feed that corrects it is an `Update` system, so every OnLoad that *computes* from
