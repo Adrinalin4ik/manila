@@ -222,3 +222,30 @@ fn disable_all_writes_rows_for_the_visible_addons_only() {
         Some(vec![("Probe".to_string(), false)])
     );
 }
+
+/// wenilla carry: a seated folder reader serves `LoadAddOn` where `std::fs` cannot, as in the
+/// browser, so a LoadOnDemand addon's files run and its frame exists after the load.
+#[test]
+fn load_addon_reads_a_folder_addon_through_the_seated_reader() {
+    let mut s = UiScript::new().unwrap();
+    s.set_addon_dir_reader(Box::new(|path| {
+        (path == "Lazy/Lazy.lua").then(|| b"LazyLoaded = 1".to_vec())
+    }));
+    s.register_addons(
+        vec![AddOnInfo {
+            name: "Lazy".into(),
+            interface: 11200,
+            load_on_demand: true,
+            files: vec!["Lazy.lua".into()],
+            enabled: true,
+            ..Default::default()
+        }],
+        Some(std::path::PathBuf::from("/no/such/AddOns")),
+        None,
+        None,
+    );
+    assert_eq!(
+        s.eval::<Option<i64>>("LoadAddOn('Lazy') return LazyLoaded").ok(),
+        Some(Some(1))
+    );
+}
