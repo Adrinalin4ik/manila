@@ -318,6 +318,7 @@ pub(crate) fn feed_party(
                 m,
                 group.stats.get(&m.guid),
                 index.0.get(&m.guid).and_then(|e| stores.get(*e).ok()),
+                names.player_traits(m.guid),
                 &group,
                 own_group.clone(),
                 chr,
@@ -387,6 +388,7 @@ pub(crate) fn feed_party(
                     m,
                     group.stats.get(guid),
                     index.0.get(guid).and_then(|e| stores.get(*e).ok()),
+                    names.player_traits(*guid),
                     &group,
                     own_group.clone(),
                     chr,
@@ -684,7 +686,14 @@ fn raid_roster(
         let online = m.status & member_status::ONLINE != 0;
         roster.push(row(
             m.guid,
-            m.name.clone(),
+            // The name cache's, never the wire's: a miss answers the binding's nil tuple
+            // (`0x4bb5f8`), as for us above. The roster edge below can fire `RAID_ROSTER_UPDATE`
+            // while a new member's query is out, and `LootFrame_UpdateRoster` then indexes its
+            // table by the nil class of every row `GetRaidRosterInfo` answers.
+            names
+                .resolve_player(m.guid, Ask::Read)
+                .unwrap_or_default()
+                .to_string(),
             m.flags,
             stats.and_then(|s| s.level).map_or(0, u32::from),
             stats
@@ -706,10 +715,13 @@ fn member_unit_state(
     stats: Option<&PartyMemberStatsInfo>,
     // Their live descriptor while the object manager holds them (the reference's `0x468460`).
     store: Option<&ObjectStore>,
+    // The name cache's `(race, class, gender)` for them, which `UnitRace` and `UnitClass` read when
+    // no object is held (below).
+    traits: Option<(u8, u8, u8)>,
     group: &GroupState,
     own_group: Option<String>,
-    // `ChrRaces.dbc` and `ChrClasses.dbc`: the names and the relic slot, which only the live leg
-    // has a class byte to key by, so an unstreamed paladin reads no relic slot.
+    // `ChrRaces.dbc` and `ChrClasses.dbc`: the names on both legs, and the relic slot, which only
+    // the live leg resolves, so an unstreamed paladin reads no relic slot.
     classes: crate::ui_unit::UnitNames<'_>,
     // The creature type resolves from the live descriptor alone, so an unstreamed member has none.
     types: CreatureTypeSources<'_>,
@@ -747,6 +759,19 @@ fn member_unit_state(
             ..Default::default()
         },
     };
+    // `UnitRace` and `UnitClass` fall back to the name cache when `0x468460` finds no object
+    // (`0x5182d0` reads the record's race at `+0x138`, `0x518420` its class at `+0x140`), so an
+    // unstreamed member still has both; `LootFrame_UpdateRoster` keys its roster table by the
+    // class token of every `raidN` and raises on a nil one.
+    if store.is_none() {
+        let (race, class, _) = traits.unwrap_or_default();
+        let race = classes.race(race);
+        let class = classes.class(class);
+        s.race = race.map(|(n, _)| n.to_string());
+        s.race_file = race.map(|(_, f)| f.to_string());
+        s.class = class.map(|(n, _)| n.to_string());
+        s.class_file = class.map(|(_, f)| f.to_string());
+    }
     s.is_player = true;
     // A party member is always a same-faction friendly player: the popup's `UnitCanCooperate`
     // gate reads the reaction, which neither leg resolves for a party token.
@@ -1406,6 +1431,7 @@ mod tests {
             &m,
             Some(&record),
             None,
+            None,
             &GroupState::default(),
             None,
             Default::default(),
@@ -1429,6 +1455,7 @@ mod tests {
             &m,
             None,
             None,
+            None,
             &GroupState::default(),
             None,
             Default::default(),
@@ -1436,6 +1463,34 @@ mod tests {
         );
         assert_eq!((bare.health, bare.max_health, bare.power), (0, 0, 0));
         assert!(bare.exists);
+    }
+
+    /// `UnitClass("raidN")` on a member out of range answers from the name cache (`0x518420`), the
+    /// token `LootFrame_UpdateRoster` indexes its roster with.
+    #[test]
+    fn an_out_of_range_member_reads_race_and_class_from_the_name_cache() {
+        let m = GroupMemberEntry {
+            name: "Brisca".into(),
+            guid: 0x1234,
+            status: member_status::ONLINE,
+            flags: 0,
+        };
+        let tables = crate::ui_unit::TestNames::english();
+        let s = member_unit_state(
+            &m,
+            Some(&PartyMemberStatsInfo::placeholder(true)),
+            None,
+            Some((6, 1, 0)),
+            &GroupState::default(),
+            None,
+            tables.names(),
+            Default::default(),
+        );
+        assert_eq!(
+            (s.class.as_deref(), s.class_file.as_deref()),
+            (Some("Warrior"), Some("WARRIOR"))
+        );
+        assert_eq!(s.race_file.as_deref(), Some("Tauren"));
     }
 
     /// vmangos re-sends a member's status on join, login and the AFK, DND, PvP, FFA and ghost
@@ -1457,6 +1512,7 @@ mod tests {
             &m,
             Some(&dead),
             None,
+            None,
             &GroupState::default(),
             None,
             Default::default(),
@@ -1476,6 +1532,7 @@ mod tests {
             &m,
             Some(&ghost),
             None,
+            None,
             &GroupState::default(),
             None,
             Default::default(),
@@ -1492,6 +1549,7 @@ mod tests {
         let s = member_unit_state(
             &stale,
             Some(&PartyMemberStatsInfo::placeholder(true)),
+            None,
             None,
             &GroupState::default(),
             None,
@@ -2095,6 +2153,12 @@ mod tests {
         assert!(!roster[2].ninth, "0x4 without 0x1 is not the arm");
         assert_eq!(roster[2].class, None);
         assert_eq!(roster[2].zone, None, "no stats packet, no zone");
+
+        // A member whose name query is still out answers the miss tuple, whatever the wire named.
+        group.members.push(member(0xCA, "Cara", member_status::ONLINE, 0));
+        let roster = raid_roster(&group, Some(&me), &names, korean.names(), &zone);
+        assert_eq!(roster[3].name, "", "a name-cache miss is the nil arm");
+        group.members.pop();
 
         // A party is not a raid: the list is empty, so `GetNumRaidMembers()` answers 0, while
         // `IsRaidLeader()` still answers 1.

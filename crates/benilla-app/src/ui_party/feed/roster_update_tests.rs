@@ -45,7 +45,14 @@ fn send(app: &mut App, group_type: u8, statuses: &[u8], names_pending: bool) {
             status,
             flags: 0,
         })
-        .collect();
+        .collect::<Vec<GroupMemberEntry>>();
+    // No name pending means the cache holds every member's: `GetRaidRosterInfo` reads it there.
+    if !names_pending {
+        let mut names = app.world_mut().resource_mut::<NameCache>();
+        for m in &list {
+            names.insert_player(m.guid, m.name.clone(), Some((1, 1, 0)));
+        }
+    }
     app.world_mut()
         .resource_mut::<GroupState>()
         .apply_list_awaiting(group_type, 0, list, ME, None, Some(ME), names_pending);
