@@ -42,7 +42,7 @@ mod state;
 pub(crate) mod toggle;
 mod weapon_icon;
 
-/// Every feed that pushes cooldown triples runs `.before` this set: [`state::feed_action_state`]
+/// Every feed that pushes cooldown triples runs `.before` this set: [`state::fire_action_events`]
 /// fires the cooldown events synchronously, so a triple pushed later goes unread until the next
 /// cooldown change. The pet list's flush, `ui_pet::bar::fire_pet_cooldown_events`, runs `.after`
 /// it on the same rule.
@@ -327,6 +327,8 @@ impl Plugin for UiActionPlugin {
         net::register(app);
         // A UI-only harness has no net stack; declaring a message twice is idempotent.
         app.add_message::<crate::item_watch::ItemNotice>()
+            .add_message::<crate::net::FieldChanged>()
+            .init_resource::<state::ActionEvents>()
             .add_message::<crate::net::WorldEnterCascadeMessage>()
             .init_resource::<PlayerActions>()
             .init_resource::<LearnedAbilities>()
@@ -359,11 +361,28 @@ impl Plugin for UiActionPlugin {
                     feed::feed_actions
                         .in_set(UnitFeed)
                         .before(crate::ui_aura::AuraEvents),
+                    // A seat: the world-enter events' handlers read the slots' state, which the
+                    // reference's arrival stores before its enter cascade (`0x5deafc`, `0x5deb60`).
+                    // After the bag feed, so each `BAG_UPDATE`'s cache refresh (`0x4f9374`) lands
+                    // in its own frame.
                     state::feed_action_state
                         .in_set(UnitFeed)
-                        .in_set(CooldownEvents)
+                        .in_set(crate::ui_unit::WorldEnterSeats)
                         .after(crate::player::ControlRestore)
+                        .after(crate::ui_items::feed::feed_containers)
                         .after(feed::feed_actions),
+                    // After the unit snapshots, which its handlers read (the target stored at
+                    // `0x4936e2`, a watched field written before its watch runs), and ahead of the
+                    // events its producers precede: the select's `PLAYER_TARGET_CHANGED` and the
+                    // combo points' event (the unit events), the watched fields' own events (the
+                    // field notices) and the form's cast change (the cast reports).
+                    state::fire_action_events
+                        .in_set(UnitFeed)
+                        .in_set(CooldownEvents)
+                        .after(state::feed_action_state)
+                        .after(crate::ui_unit::UnitSnapshots)
+                        .before(crate::ui_unit::field_events::fire_field_notices)
+                        .before(crate::ui_cast::feed_cast_reports),
                     drain::drain_action_sets.after(UiInput),
                     // The target chain queues the right-click casts earlier in the frame.
                     drain::drain_click_casts
