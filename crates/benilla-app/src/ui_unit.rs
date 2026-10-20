@@ -678,9 +678,9 @@ pub(crate) fn race_faction_group(race: u8) -> Option<&'static str> {
 /// answers Horde and race 10 (Blood Elf, 1610, mask 3) Alliance.
 pub(crate) fn race_pvp_team(race: u8) -> i8 {
     // wenilla carry: the chain's own `ChrRaces` -> `FactionTemplate` answer where it loaded, the
-    // reference's own read; a custom chain's added races (TurtleWoW's Goblin, its High Elf) then
-    // take the side its data gives them, where this frozen copy knows stock 1.12's nine rows only
-    // (ported in spirit from benilla-octo d6fe1180, which hard-coded the Turtle sides).
+    // reference's own read, so every chain answers from its own data - stock 1.12 (race 9 Goblin
+    // Alliance) and TurtleWoW (Goblin Horde, High Elf Alliance) alike. The frozen copy below, which
+    // answers Turtle's rows, is only the fallback for a data-less build.
     if let Some(teams) = RACE_TEAMS.get() {
         return teams.get(&race).copied().unwrap_or(-1);
     }
