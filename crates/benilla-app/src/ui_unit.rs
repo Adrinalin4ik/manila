@@ -139,10 +139,12 @@ impl Plugin for UiUnitPlugin {
                 held::feed_chain_units.after(crate::ui_aura::AuraEvents),
                 // After every snapshot above is pushed, so a handler reads the new reaction.
                 fire_faction_on_forced_table.after(crate::ui_aura::AuraEvents),
-                // After the pushes its handlers read and the token seat it fans out over.
+                // After the pushes its handlers read and the token seat it fans out over, and after
+                // the tutorial banks' frame, whose fire-once bank a watcher's tutorial tests.
                 field_events::fire_field_notices
                     .after(field_events::FieldEventPushes)
-                    .after(crate::ui_aura::AuraEvents),
+                    .after(crate::ui_aura::AuraEvents)
+                    .after(crate::tutorial::TutorialFeed),
                 held::feed_name_candidates,
                 feed_player_control.after(crate::player::ControlRestore),
                 // After the control edge, whose flag the exemption is asked for.
@@ -1087,6 +1089,8 @@ pub(crate) fn snapshot(
         } else {
             Default::default()
         },
+        // `PLAYER_GUILDID`, the cache key of `GetGuildInfo` (`0x4c93a9`).
+        guild_id: store.0.player_guild_id(),
         // `is_player` and the creature-record fields come from [`enrich_unit`].
         ..Default::default()
     }
