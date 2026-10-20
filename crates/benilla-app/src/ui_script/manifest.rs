@@ -298,6 +298,7 @@ pub(crate) fn default_bindings() -> Vec<benilla_ui::script::keybind::KeyBinding>
                 &String::from_utf8_lossy(&bytes),
             );
             with_back_button_autorun(&mut binds);
+            with_ctrl_z_toggleui(&mut binds);
             binds
         }
         None => {
@@ -326,6 +327,18 @@ fn with_back_button_autorun(binds: &mut Vec<benilla_ui::script::keybind::KeyBind
         return;
     }
     binds.push(("BUTTON5".to_owned(), "TOGGLEAUTORUN".to_owned()));
+}
+
+/// **Ours: `CTRL-Z` hides the interface too, for clean screenshots.**
+///
+/// The chain binds `ALT-Z TOGGLEUI` (the stock `Bindings.xml` body: `CloseAllWindows()` and
+/// `UIParent:Hide()`); the owner asked for `CTRL-Z` as well. Like [`with_back_button_autorun`], a
+/// default in set 0 and not a forced bind, skipped when the chain already binds `CTRL-Z`.
+fn with_ctrl_z_toggleui(binds: &mut Vec<benilla_ui::script::keybind::KeyBinding>) {
+    if binds.iter().any(|(key, _)| key.eq_ignore_ascii_case("CTRL-Z")) {
+        return;
+    }
+    binds.push(("CTRL-Z".to_owned(), "TOGGLEUI".to_owned()));
 }
 
 /// The chain's `Bindings.xml` text, for the tests that hold benilla against it.
