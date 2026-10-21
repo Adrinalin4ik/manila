@@ -14,13 +14,17 @@ use bevy::prelude::*;
 
 use crate::ui_script::UiFeed;
 
+#[cfg(test)]
+mod call_tests;
+mod calls;
 mod feed;
 pub(crate) mod net;
 mod pets;
 mod records;
+pub(crate) use calls::PartyCalls;
 pub(crate) use feed::{
-    drain_party, raid_row_guid, raid_row_guids, synthetic_raid, synthetic_roster, GROUPTYPE_RAID,
-    GROUP_MEMBER_SUBGROUP,
+    drain_party, fold_dying_vm_ready_check, raid_row_guid, raid_row_guids, seed_reloaded_vm,
+    seed_vm_ready_check, synthetic_raid, synthetic_roster, GROUPTYPE_RAID, GROUP_MEMBER_SUBGROUP,
 };
 #[cfg(test)]
 pub(crate) use feed::{feed_party, PARTY_PET_TOKENS};
@@ -34,6 +38,7 @@ impl Plugin for UiPartyPlugin {
         // A UI-only harness has no sound stack; the list handler queues the join chime, the stats
         // handler the unit events of a record.
         app.init_resource::<GroupState>()
+            .init_resource::<calls::GroupEdits>()
             .init_resource::<crate::sound::MessageSounds>()
             .add_message::<crate::field_watch::FieldNotice>()
             .add_systems(
@@ -80,24 +85,14 @@ pub struct GroupState {
     pub listed: bool,
     /// The group events the handlers signalled, in the order they signalled them.
     pub(crate) signals: SignalLog,
-    /// The name lookups the party seats left waiting, one per seat whose name the cache missed:
-    /// each list seats its slots through `AddPartyMember`, whose lookup (`0x4e8477`) registers
-    /// the callback `0x4e8490` with no dedupe, and nothing cancels one. An answer runs every one
-    /// its guid holds.
-    pub(crate) party_name_waits: Vec<u64>,
+    /// The name lookups the group's handlers left waiting, in the order they were added: the name
+    /// cache keeps one callback list per name, links each at its tail (`0x55f177`, `0x55f2ac`,
+    /// into `0x56d137`) and runs it from the head on the answer (`0x55f426`-`0x55f452`), so the
+    /// waits on one guid run in this order whatever their kind ([`NameWait`]).
+    pub(crate) name_waits: Vec<NameWait>,
     /// The raid roster's pending names (`[0xb713f0]`): the rows of the last rebuild whose lookup
     /// missed (`0x4ba9d0`), which each answer counts down (`0x4bad90`).
     pub(crate) raid_names_pending: u32,
-    /// The lookups those rows left waiting, one per miss (`0x4ba1b0`, registered at `0x4ba9ba`).
-    /// A rebuild with names pending cancels every one the old rows hold (`0x4ba631`-`0x4ba64b`,
-    /// `0x55f870`) before it counts afresh (`0x4ba89e`); a roster that a list that is not a raid
-    /// drops keeps its own (`0x4ba550` touches neither), so their answers still count down.
-    pub(crate) raid_name_waits: Vec<u64>,
-    /// The roster notices a rebuild left waiting on a name, in the order it asked: an arrival's
-    /// lookup with the callback `0x4bacd0` (`0x4ba744`) or a departure's with `0x4bad30`
-    /// (`0x4ba7e3`) that missed, each with its message. Nothing cancels one (`0x4ba631` cancels
-    /// only `0x4ba1b0`), and an answer runs every one its guid holds.
-    pub(crate) raid_notice_waits: Vec<(u64, &'static str)>,
     /// The leave ack, `SMSG_GROUP_UNINVITE` and `SMSG_GROUP_DESTROYED` empty the reference's party
     /// slots and leader (`0x4e84a0`, `0x4e8250(0)`) and keep its raid roster: from then
     /// [`Self::party_slots`] is empty, and the next list finds no slot held.
@@ -117,7 +112,8 @@ pub struct GroupState {
     /// `0xbc7610`): the last tail a list carried, which the next one is compared against. Nothing
     /// in the reference clears them, neither the end of a group nor a new login.
     pub loot_stored: GroupLootInfo,
-    /// The inviter's name while the invite popup is up.
+    /// The last invite's inviter, for the partner probe to take (`capture::probe_partner`); the
+    /// interface hears each invite as its signal ([`GroupSignal::InviteRequest`]).
     pub pending_invite: Option<String>,
     /// Each member's record by guid, seated at 1/1, patched by `SMSG_PARTY_MEMBER_STATS`, and given
     /// its online bit again by each `SMSG_GROUP_LIST` that lists the member.
@@ -143,6 +139,32 @@ pub struct GroupState {
     /// raised, in its order, for the handler to resolve against the objects held
     /// ([`Self::take_released`]).
     pub(crate) released: Vec<RosterRelease>,
+}
+
+/// One name lookup a group handler left waiting on the name cache ([`GroupState::name_waits`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NameWait {
+    /// A party seat's: each list seats its slots through `AddPartyMember`, whose lookup
+    /// (`0x4e8477`) registers the callback `0x4e8490` with no dedupe, and nothing cancels one.
+    Seat(u64),
+    /// A roster notice's, with its message: an arrival's lookup with the callback `0x4bacd0`
+    /// (`0x4ba744`) or a departure's with `0x4bad30` (`0x4ba7e3`). Nothing cancels one
+    /// (`0x4ba631` cancels only `0x4ba1b0`).
+    Notice(u64, &'static str),
+    /// A raid row's (`0x4ba1b0`, registered at `0x4ba9ba`). A rebuild with names pending cancels
+    /// every one the old rows hold (`0x4ba631`-`0x4ba64b`, `0x55f870`) before it counts afresh
+    /// (`0x4ba89e`); a roster that a list that is not a raid drops keeps its own (`0x4ba550`
+    /// touches neither), so their answers still count down.
+    Row(u64),
+}
+
+impl NameWait {
+    /// The guid whose name it waits on.
+    fn guid(self) -> u64 {
+        match self {
+            NameWait::Seat(guid) | NameWait::Notice(guid, _) | NameWait::Row(guid) => guid,
+        }
+    }
 }
 
 /// A selection teardown the roster raises; the handler that applied it resolves which guid it
@@ -171,9 +193,9 @@ pub struct ListOutcome {
     pub ask_raid_targets: bool,
 }
 
-/// A group event as a packet's handler signals it; none of the five carries an argument
+/// A group event as a packet's handler signals it; only the invite carries an argument
 /// (benilla-re `tables/event_args.tsv`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GroupSignal {
     /// `PARTY_MEMBERS_CHANGED`: every list (`0x5e6c66`), a party seat's name answer (`0x4e8495`),
     /// the raid's last pending name (`0x4badb0`) and every ending (`0x4e85c5`).
@@ -188,6 +210,10 @@ pub enum GroupSignal {
     /// `RAID_TARGET_UPDATE`: every `MSG_RAID_TARGET_UPDATE` (`0x4ba348`) and every list that
     /// clears the board (`0x4ba5db`).
     RaidTargetUpdate,
+    /// `PARTY_INVITE_REQUEST` with the inviter: every `SMSG_GROUP_INVITE` (`0x5e6747` →
+    /// `0x48f420`, event `0x118`). Its partner `PARTY_INVITE_CANCEL` is `SMSG_GROUP_CANCEL`'s
+    /// alone (`0x5e6784` → `0x48f440`), which vmangos never sends and benilla does not read.
+    InviteRequest(String),
 }
 
 /// The group events signalled, oldest first. The reference signals each inside its packet's
@@ -347,11 +373,12 @@ impl GroupState {
             .take(4)
             .collect();
         // Each seat's name lookup, whose callback signals when the answer lands.
-        self.party_name_waits.extend(
+        self.name_waits.extend(
             seated
                 .iter()
                 .map(|m| m.guid)
-                .filter(|&g| g != 0 && missed(g)),
+                .filter(|&g| g != 0 && missed(g))
+                .map(NameWait::Seat),
         );
         for m in &seated {
             if !held {
@@ -401,7 +428,8 @@ impl GroupState {
             // `0x4ba5f0`: with names pending, the old rows' lookups are cancelled first.
             if self.raid_names_pending != 0 {
                 let old: Vec<u64> = self.raid_rows().collect();
-                self.raid_name_waits.retain(|g| !old.contains(g));
+                self.name_waits
+                    .retain(|w| !matches!(w, NameWait::Row(g) if old.contains(g)));
             }
             // The rows this rebuild writes: the members, then ours once any is listed
             // (`0x5e6e6f`-`0x5e6e9c`).
@@ -434,7 +462,7 @@ impl GroupState {
                     .collect();
                 for (guid, key) in notices {
                     match lookup(guid) {
-                        None => self.raid_notice_waits.push((guid, key)),
+                        None => self.name_waits.push(NameWait::Notice(guid, key)),
                         Some(name) if key == ADDED || self_guid.is_some() => {
                             out.lines.push(UiError::s(key, name));
                         }
@@ -454,7 +482,7 @@ impl GroupState {
                 .filter(|&g| g != 0 && missed(g))
                 .collect();
             self.raid_names_pending = waits.len() as u32;
-            self.raid_name_waits.extend(waits);
+            self.name_waits.extend(waits.into_iter().map(NameWait::Row));
             if self.raid_names_pending == 0 {
                 self.signal(GroupSignal::RaidRosterUpdate);
             }
@@ -570,37 +598,31 @@ impl GroupState {
     /// `PARTY_MEMBERS_CHANGED` (`0x4bad90`-`0x4badb0`); these read no status. Each roster
     /// notice's tests the answer's found byte (`0x4bad46`), then shows its line under the record
     /// the cache filed, `filed` (`0x4bad6b`-`0x4bad75`), and nothing for a refusal. The cache runs
-    /// a node's callbacks in the order they were added, each linked at the tail (`0x55f177`,
+    /// a name's callbacks in the order they were added, each linked at the tail (`0x55f177`,
     /// `0x55f2ac`, into `0x56d137`) and walked from the head (`0x55f426`-`0x55f452`, refused
-    /// `0x55f788`-`0x55f7b9`): each kind's run here in that order, and the kinds in the order one
-    /// list adds them, its seats', its notices', then its rows' (`0x4e8477`, `0x4ba744`,
-    /// `0x4ba7e3`, `0x4ba9c7`).
+    /// `0x55f788`-`0x55f7b9`), so the waits on `guid` run here in [`Self::name_waits`]' order,
+    /// across kinds and lists.
     pub fn apply_player_name(&mut self, guid: u64, filed: Option<&str>) -> Vec<UiError> {
-        let taken = |waits: &mut Vec<u64>| {
-            let before = waits.len();
-            waits.retain(|&g| g != guid);
-            (before - waits.len()) as u32
-        };
-        for _ in 0..taken(&mut self.party_name_waits) {
-            self.signal(GroupSignal::MembersChanged);
-        }
+        let (run, kept): (Vec<NameWait>, Vec<NameWait>) = std::mem::take(&mut self.name_waits)
+            .into_iter()
+            .partition(|w| w.guid() == guid);
+        self.name_waits = kept;
         let mut lines = Vec::new();
-        self.raid_notice_waits.retain(|&(g, key)| {
-            if g != guid {
-                return true;
-            }
-            lines.extend(filed.map(|name| UiError::s(key, name)));
-            false
-        });
-        for _ in 0..taken(&mut self.raid_name_waits) {
-            if self.raid_names_pending != 0 {
-                self.raid_names_pending -= 1;
-                if self.raid_names_pending != 0 {
-                    continue;
+        for wait in run {
+            match wait {
+                NameWait::Seat(_) => self.signal(GroupSignal::MembersChanged),
+                NameWait::Notice(_, key) => lines.extend(filed.map(|name| UiError::s(key, name))),
+                NameWait::Row(_) => {
+                    if self.raid_names_pending != 0 {
+                        self.raid_names_pending -= 1;
+                        if self.raid_names_pending != 0 {
+                            continue;
+                        }
+                    }
+                    self.signal(GroupSignal::RaidRosterUpdate);
+                    self.signal(GroupSignal::MembersChanged);
                 }
             }
-            self.signal(GroupSignal::RaidRosterUpdate);
-            self.signal(GroupSignal::MembersChanged);
         }
         lines
     }
@@ -673,10 +695,11 @@ impl GroupState {
         std::mem::take(&mut self.released)
     }
 
-    /// `SMSG_GROUP_INVITE`: the popup plus a chat line, as the reference's `0x5e6730` does.
-    pub fn apply_invited(&mut self, inviter: &str) -> Vec<UiError> {
+    /// `SMSG_GROUP_INVITE` (`0x5e6730`): the invite's signal, which the feed fires as
+    /// `PARTY_INVITE_REQUEST` (`0x5e6747`) and follows with `ERR_INVITED_TO_GROUP_S` (`0x5e6752`).
+    pub fn apply_invited(&mut self, inviter: &str) {
         self.pending_invite = Some(inviter.to_string());
-        vec![UiError::s("ERR_INVITED_TO_GROUP_S", inviter)]
+        self.signal(GroupSignal::InviteRequest(inviter.to_string()));
     }
 
     /// `SMSG_GROUP_DECLINE`: our invitee said no; only the inviter gets it.
@@ -858,10 +881,8 @@ impl GroupState {
             listed: _,
             signals: _,
             // The name cache's callbacks, which no list ending touches (`0x4ba550`).
-            party_name_waits: _,
+            name_waits: _,
             raid_names_pending: _,
-            raid_name_waits: _,
-            raid_notice_waits: _,
             saved_instances: _,
             saved_instances_answers: _,
             ready_check: _,
@@ -1288,6 +1309,43 @@ mod tests {
             g.signals.take(),
             [MembersChanged],
             "the group's end leaves the lookup"
+        );
+    }
+
+    /// The name cache keeps one callback list per name: each wait is linked at its tail
+    /// (`0x55f177`, `0x55f2ac`, into `0x56d137`) and an answer walks it from the head
+    /// (`0x55f426`-`0x55f452`). A raid list seats Alice (`0x4e8477`) and waits on her row
+    /// (`0x4ba9c7`), then a party list seats her again while the dropped roster's row still waits
+    /// (`0x4ba550` cancels nothing): her answer runs seat, row, seat, across the two lists.
+    #[test]
+    fn a_name_answer_runs_every_wait_in_the_order_it_was_added() {
+        use GroupSignal::*;
+        let mut g = GroupState::default();
+        let list = |g: &mut GroupState, group_type: u8| {
+            g.apply_list_awaiting(
+                group_type,
+                0,
+                vec![member("Alice", 1)],
+                1,
+                None,
+                Some(ME),
+                &|guid| (guid != 1).then(String::new),
+                &|_| Some(String::new()),
+            );
+        };
+        list(&mut g, 1);
+        list(&mut g, 0);
+        g.signals.take();
+        let _ = g.apply_player_name(1, None);
+        assert_eq!(
+            g.signals.take(),
+            [
+                MembersChanged,
+                RaidRosterUpdate,
+                MembersChanged,
+                MembersChanged
+            ],
+            "the raid list's seat, its row, then the party list's seat"
         );
     }
 
@@ -1802,11 +1860,13 @@ mod tests {
     #[test]
     fn invite_lines() {
         let mut g = GroupState::default();
-        assert_eq!(
-            g.apply_invited("Bob"),
-            vec![UiError::s("ERR_INVITED_TO_GROUP_S", "Bob")]
-        );
+        g.apply_invited("Bob");
         assert_eq!(g.pending_invite.as_deref(), Some("Bob"));
+        assert_eq!(
+            g.signals.since(0),
+            [GroupSignal::InviteRequest("Bob".into())],
+            "the feed shows its line after the event"
+        );
         assert_eq!(
             g.apply_command_result(party_operation::INVITE, "Carol", party_result::OK),
             Some(UiError::s("ERR_INVITE_PLAYER_S", "Carol"))
@@ -2138,7 +2198,8 @@ mod tests {
                     .lines,
             );
         }
-        lines.extend(g.apply_invited("Bob"));
+        // The invite's, which the feed shows after `PARTY_INVITE_REQUEST`.
+        lines.push(UiError::s("ERR_INVITED_TO_GROUP_S", "Bob"));
         lines.extend(g.apply_declined("Carol"));
         lines.extend(g.apply_leader_changed("Alice", Some("Us")));
         lines.extend(g.apply_leader_changed("Us", Some("Us")));
