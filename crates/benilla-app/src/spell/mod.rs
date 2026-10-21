@@ -7,7 +7,6 @@
 
 use bevy::prelude::*;
 
-use crate::client_state::ClientState;
 use crate::ui_script::UiFeed;
 use crate::ui_unit::UnitFeed;
 
@@ -93,8 +92,7 @@ impl Plugin for SpellPlugin {
             .add_systems(
                 Update,
                 (
-                    (inflight::reap_lapsed_cast, inflight::local_self_cancel)
-                        .chain()
+                    inflight::local_self_cancel
                         .in_set(UnitFeed)
                         .in_set(LocalCancel),
                     mods::track_class_family
@@ -124,8 +122,7 @@ impl Plugin for SpellPlugin {
                         .in_set(UiFeed)
                         .before(UnitFeed),
                 ),
-            )
-            .add_systems(OnEnter(ClientState::InWorld), mods::clear_on_world_enter);
+            );
         net::register(app);
     }
 }
