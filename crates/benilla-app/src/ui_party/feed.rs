@@ -39,6 +39,8 @@ pub(crate) struct FedParty {
     /// defeat its `is_changed`) and the area under us (our raid row's zone).
     names_generation: gate::Watch,
     area: gate::Watch,
+    /// The guild cache's generation, every held member's guild leg.
+    guild_generation: gate::Watch,
     raid_units: Vec<Option<UnitState>>,
     /// `partypet1..4` and `raidpet1..40` (see [`pets`]).
     pets: pets::FedPets,
@@ -130,6 +132,8 @@ pub(crate) fn feed_party(
     map_catalog: Option<Res<benilla_assets::MapCatalogRes>>,
     mut fed: Local<crate::ui_script::VmMemo<FedParty>>,
     chat: Res<crate::ui_chat::ChatLog>,
+    // The guild cache, every held member's guild leg.
+    guild: Res<crate::ui_guild::GuildState>,
 ) {
     hosted_vm.run(|script| {
         let Some(script) = script else {
@@ -149,6 +153,7 @@ pub(crate) fn feed_party(
         // The gate also opens on a despawn, which `Changed` misses. Solo, it almost always stays
         // shut.
         let names_moved = fed.names_generation.moved(names.generation());
+        let guild_moved = fed.guild_generation.moved(guild.identity_generation());
         let area_moved = fed.area.moved(here.area().map_or(u64::MAX, u64::from));
         let group_changed = group.is_changed();
         let index_changed = index.is_changed();
@@ -187,6 +192,7 @@ pub(crate) fn feed_party(
             &[
                 ("vm_reset", vm_reset),
                 ("names", names_moved),
+                ("guild", guild_moved),
                 ("area", area_moved),
                 ("group", group_changed),
                 ("index", index_changed),
@@ -200,6 +206,7 @@ pub(crate) fn feed_party(
         let gate = gate::Gate::new(
             vm_reset
                 || names_moved
+                || guild_moved
                 || area_moved
                 || group_changed
                 || index_changed
@@ -318,6 +325,8 @@ pub(crate) fn feed_party(
                     index.0.get(&m.guid).and_then(|e| stores.get(*e).ok()),
                     &group,
                     own_group.clone(),
+                    &names,
+                    &guild,
                     chr,
                     types,
                 );
@@ -376,18 +385,24 @@ pub(crate) fn feed_party(
                         .map(str::to_string);
                     let mut s = match self_pair.filter(|(_, g, _)| g.0 == *guid) {
                         Some((_, _, store)) => {
-                            crate::ui_unit::snapshot(store, *guid, name, 0, chr, types)
+                            let mut s = crate::ui_unit::snapshot(store, *guid, name, 0, chr, types);
+                            s.guild = crate::ui_guild::cached_unit_guild(&store.0, &guild);
+                            s
                         }
                         // No object of ours, as across a worldport: the row's guid still names us,
                         // through the roster (`0x491900`), the name cache (`0x5171eb`) and the row
                         // the list wrote online (`0x5e6e94`).
-                        None => UnitState {
-                            exists: true,
-                            guid: *guid,
-                            name,
-                            is_connected: true,
-                            ..Default::default()
-                        },
+                        None => {
+                            let mut s = UnitState {
+                                exists: true,
+                                guid: *guid,
+                                name,
+                                is_connected: true,
+                                ..Default::default()
+                            };
+                            crate::ui_unit::traits_from_name_cache(&mut s, &names, *guid, chr);
+                            s
+                        }
                     };
                     s.is_player = true;
                     s.raid_target = group.raid_target_index(*guid);
@@ -401,6 +416,8 @@ pub(crate) fn feed_party(
                         index.0.get(guid).and_then(|e| stores.get(*e).ok()),
                         &group,
                         own_group.clone(),
+                        &names,
+                        &guild,
                         chr,
                         types,
                     );
@@ -716,6 +733,10 @@ fn member_unit_state(
     store: Option<&ObjectStore>,
     group: &GroupState,
     own_group: Option<String>,
+    // The name cache, whose record answers race, class and sex for a member with no object.
+    names: &NameCache,
+    // The guild cache, which a held member's guild leg reads without asking.
+    guild: &crate::ui_guild::GuildState,
     // `ChrRaces.dbc` and `ChrClasses.dbc`: the names and the relic slot, which only the live leg
     // has a class byte to key by, so an unstreamed paladin reads no relic slot.
     classes: crate::ui_unit::UnitNames<'_>,
@@ -724,7 +745,11 @@ fn member_unit_state(
 ) -> UnitState {
     let mut s = match store {
         Some(store) => {
-            crate::ui_unit::snapshot(store, m.guid, Some(m.name.clone()), 0, classes, types)
+            let mut s =
+                crate::ui_unit::snapshot(store, m.guid, Some(m.name.clone()), 0, classes, types);
+            // `GetGuildInfo` reads any token's object (`0x4c9382`), its guild from the cache.
+            s.guild = crate::ui_guild::cached_unit_guild(&store.0, guild);
+            s
         }
         // Unstreamed: the roster record, snapshotted from the descriptor at despawn (`0x5f0880`),
         // seated at 1/1 for a member never seen (`0x4e82d0`) and patched by the wire. The
@@ -760,6 +785,9 @@ fn member_unit_state(
             ..Default::default()
         },
     };
+    if store.is_none() {
+        crate::ui_unit::traits_from_name_cache(&mut s, names, m.guid, classes);
+    }
     s.is_player = true;
     s.raid_target = group.raid_target_index(m.guid);
     s.faction_group = own_group;
@@ -1526,6 +1554,8 @@ mod tests {
             None,
             &GroupState::default(),
             None,
+            &NameCache::default(),
+            &crate::ui_guild::GuildState::default(),
             Default::default(),
             Default::default(),
         );
@@ -1549,11 +1579,67 @@ mod tests {
             None,
             &GroupState::default(),
             None,
+            &NameCache::default(),
+            &crate::ui_guild::GuildState::default(),
             Default::default(),
             Default::default(),
         );
         assert_eq!((bare.health, bare.max_health, bare.power), (0, 0, 0));
         assert!(bare.exists);
+    }
+
+    /// A member out of view answers race, class and sex from the name cache record of its guid,
+    /// read with no callback (`UnitRace` `0x5182bc`-`0x5182d9`, `+0x138`; `UnitClass` `0x518429`,
+    /// `+0x140`; `UnitSex` `0x517f80`, `+0x13c` through `{2, 3, 1, 6}` at `0x808be4`); a miss
+    /// leaves them unset, nil and `UnitSex` 2 (`0x517f95`). A held member reads its descriptor.
+    #[test]
+    fn an_out_of_view_member_reads_race_class_and_sex_from_the_name_cache() {
+        let m = GroupMemberEntry {
+            name: "Brisca".into(),
+            guid: 0x1234,
+            status: member_status::ONLINE,
+            flags: 0,
+        };
+        let tables = crate::ui_unit::TestNames::english();
+        let mut names = NameCache::default();
+        let state = |names: &NameCache, store: Option<&ObjectStore>| {
+            member_unit_state(
+                &m,
+                None,
+                store,
+                &GroupState::default(),
+                None,
+                names,
+                &crate::ui_guild::GuildState::default(),
+                tables.names(),
+                Default::default(),
+            )
+        };
+        let s = state(&names, None);
+        assert_eq!((s.race, s.class, s.sex), (None, None, 0), "no record");
+        // Night Elf (4) Priest (5), female (1).
+        names.insert_player(0x1234, "Brisca".into(), Some((4, 5, 1)));
+        let s = state(&names, None);
+        assert_eq!(
+            (s.race.as_deref(), s.race_file.as_deref()),
+            (Some("Night Elf"), Some("NightElf"))
+        );
+        assert_eq!(
+            (s.class.as_deref(), s.class_file.as_deref()),
+            (Some("Priest"), Some("PRIEST"))
+        );
+        assert_eq!(s.sex, 3, "female");
+        // Held, a Human (1) Warrior (1), male: the descriptor's, not the cache's.
+        const BYTES_0: u16 = 36;
+        let held = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(
+            BYTES_0,
+            1 | (1 << 8),
+        )]));
+        let s = state(&names, Some(&held));
+        assert_eq!(
+            (s.race.as_deref(), s.class.as_deref(), s.sex),
+            (Some("Human"), Some("Warrior"), 2)
+        );
     }
 
     /// The tooltip's group record (`0x496400`): the party's for a member of our own slots, else the
@@ -1612,6 +1698,8 @@ mod tests {
             None,
             &GroupState::default(),
             None,
+            &NameCache::default(),
+            &crate::ui_guild::GuildState::default(),
             Default::default(),
             Default::default(),
         );
@@ -1631,6 +1719,8 @@ mod tests {
             None,
             &GroupState::default(),
             None,
+            &NameCache::default(),
+            &crate::ui_guild::GuildState::default(),
             Default::default(),
             Default::default(),
         );
@@ -1653,6 +1743,8 @@ mod tests {
             None,
             &GroupState::default(),
             None,
+            &NameCache::default(),
+            &crate::ui_guild::GuildState::default(),
             Default::default(),
             Default::default(),
         );
@@ -1672,6 +1764,8 @@ mod tests {
             None,
             &GroupState::default(),
             None,
+            &NameCache::default(),
+            &crate::ui_guild::GuildState::default(),
             Default::default(),
             Default::default(),
         );
@@ -1724,6 +1818,43 @@ mod tests {
             seat(&mut app, group_type, member_status::ONLINE);
             frame(&mut app);
             assert_eq!(predicates(&mut app, token), [Some(1.0); 5], "{token}");
+        }
+    }
+
+    /// `GetGuildInfo` (`0x4c9330`) resolves any token (`0x4c9382`) and reads the object's guild
+    /// from the cache (`0x4c93d2`), so a held member answers through `partyN` and `raidN` as the
+    /// player does, from the frame the record lands.
+    #[test]
+    fn a_held_members_guild_answers_through_its_party_and_raid_tokens() {
+        /// `PLAYER_GUILDID` and `PLAYER_GUILDRANK`.
+        const GUILD_ID: u16 = 191;
+        const GUILD_RANK: u16 = 192;
+        for group_type in [0, GROUPTYPE_RAID] {
+            let token = if group_type == 0 { "party1" } else { "raid1" };
+            let mut app = app();
+            party(&mut app, 1, true);
+            stream(&mut app, member(1), &[(GUILD_ID, 7), (GUILD_RANK, 2)]);
+            seat(&mut app, group_type, member_status::ONLINE);
+            frame(&mut app);
+            let info = |app: &mut App| -> (Option<String>, i64) {
+                app.world_mut()
+                    .non_send_resource::<UiScript>()
+                    .eval::<(Option<String>, Option<String>, i64)>(&format!(
+                        "return GetGuildInfo({token:?})"
+                    ))
+                    .map(|(name, _, rank)| (name, rank))
+                    .unwrap()
+            };
+            assert_eq!(info(&mut app), (None, 0), "{token}: not cached");
+            app.world_mut()
+                .resource_mut::<crate::ui_guild::GuildState>()
+                .land_for_test(7, "Probe Guild");
+            frame(&mut app);
+            assert_eq!(
+                info(&mut app),
+                (Some("Probe Guild".to_string()), 2),
+                "{token}"
+            );
         }
     }
 

@@ -570,7 +570,7 @@ fn get_money_reads_the_pushed_purse() {
 }
 
 #[test]
-fn unit_xp_reads_the_player_globals_only_for_the_player_token() {
+fn unit_xp_reads_the_player_globals() {
     let mut s = UiScript::new().unwrap();
     assert_eq!(s.eval::<i64>(r#"return UnitXP("player")"#).unwrap(), 0);
     assert_eq!(s.eval::<i64>(r#"return UnitXPMax("player")"#).unwrap(), 0);
@@ -582,6 +582,45 @@ fn unit_xp_reads_the_player_globals_only_for_the_player_token() {
     );
     assert_eq!(s.eval::<i64>(r#"return UnitXP("target")"#).unwrap(), 0);
     assert_eq!(s.eval::<i64>(r#"return UnitXPMax("target")"#).unwrap(), 0);
+}
+
+/// `UnitXP` and `UnitXPMax` resolve their token (`0x51738e`) and answer for the active player's
+/// object by whatever token names it (`0x5173ad`-`0x5173c9`): `"target"` on yourself and
+/// `"PLAYER"` read the experience, another unit 0, and a token the resolver does not know raises
+/// (`0x515c14`).
+#[test]
+fn unit_xp_answers_any_token_naming_the_active_player() {
+    const ME: u64 = 0x10;
+    const OTHER: u64 = 0x20;
+    let mut s = UiScript::new().unwrap();
+    s.set_player_xp(4200, 6000);
+    let seat = |s: &mut UiScript, target: u64| {
+        s.set_unit_guids(&UnitGuids {
+            player: ME,
+            target,
+            held: [(ME, 0), (OTHER, 0)].into_iter().collect(),
+            ..Default::default()
+        });
+    };
+    seat(&mut s, ME);
+    for token in ["target", "PLAYER"] {
+        assert_eq!(
+            s.eval::<(i64, i64)>(&format!("return UnitXP({token:?}), UnitXPMax({token:?})"))
+                .unwrap(),
+            (4200, 6000),
+            "{token}"
+        );
+    }
+    seat(&mut s, OTHER);
+    assert_eq!(
+        s.eval::<(i64, i64)>(r#"return UnitXP("target"), UnitXPMax("target")"#)
+            .unwrap(),
+        (0, 0)
+    );
+    for call in [r#"UnitXP("bogus")"#, r#"UnitXPMax("npctarget")"#] {
+        let err = s.run(call).unwrap_err().to_string();
+        assert!(err.contains("Unknown unit name"), "{call}: {err}");
+    }
 }
 
 #[test]
@@ -1986,9 +2025,10 @@ fn every_unit_predicate_is_one_or_nil_and_never_a_boolean() {
                 ..Default::default()
             },
         ),
+        // The GUID leg: the mouseover, seated on both legs, shares the live target's GUID.
         (
             "UnitIsUnit",
-            r#"UnitIsUnit("target", "target")"#,
+            r#"UnitIsUnit("target", "mouseover")"#,
             UnitState {
                 exists: true,
                 guid: 42,
@@ -1997,9 +2037,15 @@ fn every_unit_predicate_is_one_or_nil_and_never_a_boolean() {
         ),
     ];
 
+    let mouseover = || UnitState {
+        exists: true,
+        guid: 42,
+        ..Default::default()
+    };
     for (name, call, live) in table {
         let mut s = UiScript::new().unwrap();
         s.set_unit("player", Some(player()));
+        s.set_unit("mouseover", Some(mouseover()));
         s.set_unit("target", Some(live));
 
         assert_eq!(
@@ -2029,6 +2075,7 @@ fn every_unit_predicate_is_one_or_nil_and_never_a_boolean() {
         // The false leg: nil, one value. Clearing the token also covers the absent-unit arm.
         let mut s = UiScript::new().unwrap();
         s.set_unit("player", Some(player()));
+        s.set_unit("mouseover", Some(mouseover()));
         s.set_unit("target", None);
 
         assert!(

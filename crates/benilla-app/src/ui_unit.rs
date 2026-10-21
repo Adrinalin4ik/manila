@@ -25,6 +25,8 @@ mod held;
 mod relations;
 pub(crate) mod tooltip_facts;
 
+pub(crate) use held::{traits_from_name_cache, unit_reach};
+
 /// The unit-feed pass, gated so none of its login one-shots or per-VM memos runs before the in-game
 /// interface exists; the demo override orders itself after it.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -40,6 +42,11 @@ pub(crate) struct WorldEnterSeats;
 /// feed's `RAID_TARGET_UPDATE`, whose TargetFrame handler asks `GetRaidTargetIndex("target")`.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UnitSnapshots;
+
+/// [`fire_unit_events`]' signals, `PLAYER_TARGET_CHANGED` and `PLAYER_COMBO_POINTS`: a feed whose
+/// state their handlers read runs `.before(UnitEvents)`.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct UnitEvents;
 
 /// One `UNIT_COMBAT` over a unit, the portrait hit indicator's feed. The emitter `0x494600` fires
 /// `(token, action, descriptor, amount, type)` once per token naming the unit, with no
@@ -149,11 +156,15 @@ impl Plugin for UiUnitPlugin {
                 feed_player_control
                     .after(crate::player::ControlRestore)
                     .before(crate::ui_action::CooldownEvents),
-                // After the action feed, whose usable refresh precedes these events.
-                fire_unit_events.after(crate::ui_action::CooldownEvents),
-                // After the aura feed, whose resolver inputs it measures.
+                // After the aura feed, whose resolver inputs it measures, and ahead of the unit
+                // events, whose `PLAYER_TARGET_CHANGED` handlers ask the new target's range
+                // (`CanInspect`, `0x48a1b0`).
                 feed_unit_reach.after(crate::ui_aura::AuraEvents),
-                // After the same feed, whose guids it covers.
+                // After the action feed, whose usable refresh precedes these events.
+                fire_unit_events
+                    .in_set(UnitEvents)
+                    .after(crate::ui_action::CooldownEvents),
+                // After the aura feed, whose guids it covers.
                 held::feed_chain_units.after(crate::ui_aura::AuraEvents),
                 // After every snapshot above is pushed, so a handler reads the new reaction.
                 fire_faction_on_forced_table.after(crate::ui_aura::AuraEvents),
@@ -888,12 +899,8 @@ fn feed_farsight_focus(
     })
 }
 
-/// Feed the unit reach map: per held unit a token can name, its squared distance and whether it
-/// passes `0x4944a0`'s other legs, the one `CanInspect` answers by (`0x48a2a1`): a player unit
-/// (`0x4944d8`) that is the active player (`0x4944dd`) or one it can cooperate with (`0x4944e4`).
-/// Cooperation is the faction group, not attackability: an unflagged enemy-faction player is not
-/// inspectable, a same-faction duel opponent is. The guids are the resolver's own inputs, which
-/// the aura feed pushes each frame
+/// Feed the unit reach map: per held unit a token can name, its [`held::unit_reach`]. The guids
+/// are the resolver's own inputs, which the aura feed pushes each frame
 /// ([`UiScript::held_unit_guids`], so this runs after it): the bases and each unit a `target`
 /// chain reaches, and the VM resolves a verb's token to one of them or to a guid with no entry. Ungated: distances move every
 /// frame, and no event keys off the map.
@@ -908,7 +915,6 @@ fn feed_unit_reach(
             return;
         };
         let mut reach = HashMap::new();
-        let (rel, me) = (world.get(), world.me());
         if let Some((self_tf, _)) = self_q.iter().next() {
             for guid in script.held_unit_guids() {
                 let Some((entity, _)) = tokens.held(guid) else {
@@ -917,20 +923,10 @@ fn feed_unit_reach(
                 let Ok(tf) = transforms.get(entity) else {
                     continue;
                 };
-                let unit = tokens
-                    .stores
-                    .get(entity)
-                    .ok()
-                    .map(|s| world.unit_of(guid, s));
-                let inspectable = unit.zip(me.as_ref()).is_some_and(|(unit, me)| {
-                    unit.is_player && (unit.guid == me.guid || rel.can_cooperate(me, &unit))
-                });
+                let store = tokens.stores.get(entity).ok();
                 reach.insert(
                     guid,
-                    benilla_ui::script::UnitReach {
-                        dist_sq: dist_sq(tf.translation, self_tf.translation),
-                        inspectable,
-                    },
+                    held::unit_reach(&world, guid, store, tf.translation, self_tf.translation),
                 );
             }
         }
@@ -1122,6 +1118,10 @@ pub(crate) fn snapshot(
         guild_id: store.0.player_guild_id(),
         // `PLAYER_BYTES_3` byte 1; a creature has no PLAYER block and reads 0.
         drunk: store.0.player_drunk_byte().unwrap_or(0),
+        // What the stat getters read of any unit but the active player (`0x515940`, then the
+        // object's fields), and the SUMMONEDBY their summon gate compares (`0x519272`).
+        combat: crate::ui_char::unit_combat_stats(store),
+        summoned_by: store.0.unit_summoned_by().unwrap_or(0),
         tooltip: benilla_ui::script::UnitTooltipFacts {
             // The builder's raw read (`0x52a89f`), not `UnitHealth`'s feign-death zero. The facts
             // that read beyond the descriptor are [`tooltip_facts`]'.
@@ -1512,18 +1512,16 @@ fn feed_units(
                 object: &object,
                 study: tables.study(),
             },
+            guild: &guild,
         };
-        let target = selection.target.zip(selection.guid).and_then(|(e, guid)| {
-            let store = stores.all.get(e).ok()?;
-            let mut s = held.state(store, guid);
-            s.guild = crate::ui_guild::unit_guild(&store.0, &mut guild, &commands);
-            Some(s)
-        });
+        let target = selection
+            .target
+            .zip(selection.guid)
+            .and_then(|(e, guid)| Some(held.state(stores.all.get(e).ok()?, guid)));
 
         // `"targettarget"`: one hop off the target's `UNIT_FIELD_TARGET`, streamed guids only, for
         // the stock frame's poll (`TargetofTarget_OnUpdate`, `TargetFrame.lua:494-538`): no unit
-        // event carries the hop, whose token is none of `0x515c50`'s. No guild leg: nothing asks it
-        // for one, and a lazy-cache miss sends a query.
+        // event carries the hop, whose token is none of `0x515c50`'s.
         let tot = selection
             .target
             .and_then(|e| stores.all.get(e).ok())
@@ -1563,8 +1561,7 @@ fn feed_units(
         }
 
         // `"npc"`: the interaction NPC, the reference's `[0xb4e2d0]` that
-        // `CGGameUI::SetInteractNPC` (`0x4930d0`) writes, which `InteractNpc` models. No guild leg,
-        // as for `"targettarget"`.
+        // `CGGameUI::SetInteractNPC` (`0x4930d0`) writes, which `InteractNpc` models.
         let npc = interact
             .as_deref()
             .and_then(|i| Some((i.0?, i.1?)))
@@ -2589,7 +2586,6 @@ mod tests {
             ("party1targettargettarget", 4, false),
             ("party2target", 4, false),
             ("party1foo", 4, false),
-            ("npctarget", 4, false),
         ] {
             assert_eq!(
                 answers(
@@ -2600,6 +2596,16 @@ mod tests {
                 "CheckInteractDistance({token}, {kind})"
             );
         }
+        // A token the resolver does not know raises (`0x515c14`): `npc` is one exact compare with
+        // no chain, so it knows no `npctarget`; a bad suffix after a known prefix is GUID 0.
+        let call = r#"CheckInteractDistance("npctarget", 4)"#;
+        assert!(
+            app.world()
+                .non_send_resource::<UiScript>()
+                .run(call)
+                .is_err(),
+            "{call}"
+        );
         // `CanInspect`: a player within 10 yards, so `B` and not the mob 20 yards off.
         for (token, want) in [
             ("party1targettarget", true),

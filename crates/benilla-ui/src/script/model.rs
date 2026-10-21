@@ -5,11 +5,11 @@ use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
     auction, backdrop, bank, bind_confirm, camera_view, char_stats, chat_window, colorselect,
-    container, craft, cursor, death, duel, follow, gossip, guild, inspect, item_text, loot,
-    loot_roll, macros, mail, merchant, parse_unit_token, party, petition, pvp, quest, quest_log,
-    reputation, session, simplehtml, skills, slider, social, spellbook, stable, taxi, trade,
-    tradeskill, trainer, weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView,
-    MusicRequest, PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState, UnitTokenParse,
+    container, craft, cursor, death, duel, follow, gossip, guild, item_text, loot, loot_roll,
+    macros, mail, merchant, parse_unit_token, party, petition, pvp, quest, quest_log, reputation,
+    session, simplehtml, skills, slider, social, spellbook, stable, taxi, trade, tradeskill,
+    trainer, weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView, MusicRequest,
+    PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState, UnitTokenParse,
 };
 
 // ── The Rust-side model ──
@@ -763,7 +763,7 @@ pub(crate) struct Model {
     pub(crate) container_cooldowns: HashMap<(i64, u32), (f64, f64, bool)>,
     /// The same triple for a worn item, by live-API slot id (1..=19); the cooldown query is keyed
     /// by the item's entry (`0x6e2ed0`), so a worn trinket answers as a bagged one does. Kept off
-    /// the doll snapshot, whose change fires `UNIT_INVENTORY_CHANGED`.
+    /// the doll snapshot, which is pushed on change.
     pub(crate) worn_cooldowns: HashMap<usize, (f64, f64, bool)>,
     /// The entries whose record `GetContainerItemCooldown`, `SetBagItem` or `SetInventoryItem`
     /// found missing, which their query asks with the callback `0x6e2f70`
@@ -1186,8 +1186,10 @@ pub(crate) struct Model {
 
     /// The paper doll's combat stats, `None` until the first push.
     pub(crate) player_combat_stats: Option<char_stats::UnitCombatStats>,
-    /// The pet's combat stats, which the reference's pet sheet reads as `UnitStat("pet", …)`.
-    pub(crate) pet_combat_stats: Option<char_stats::UnitCombatStats>,
+    /// The ammunition entry each `GetInventoryItemTexture` or `GetInventoryItemQuality` call on
+    /// the ammo slot looked up and missed, one callback `0x4c84f0` per call (`0x4c83bc`,
+    /// `0x4c89cf`), for the host to register with the item cache.
+    pub(crate) ammo_record_asks: Vec<u32>,
     pub(crate) inventory_slots: char_stats::InventorySlots,
     /// The six bank-bag slots, ids 64..=69, fed from the player descriptor's guids.
     pub(crate) bank_bag_slots: char_stats::BankBagSlots,
@@ -1198,8 +1200,10 @@ pub(crate) struct Model {
     /// Main- and off-hand temporary enchants in `GetWeaponEnchantInfo`'s order, pushed each frame.
     pub(crate) weapon_enchants: [Option<weapon_enchant::WeaponEnchant>; 2],
 
-    /// The inspected unit's gear, from its public `PLAYER_VISIBLE_ITEM_*` fields.
-    pub(crate) inspect: Option<inspect::InspectView>,
+    /// Another player's visible items by guid, from its public `PLAYER_VISIBLE_ITEM_*` fields,
+    /// slots 1..=19 as the doll numbers them: the slot getters' other-unit leg (`0x4c8420` →
+    /// `0x5f0d60`).
+    pub(crate) visible_equipment: HashMap<u64, char_stats::InventorySlots>,
     /// `NotifyInspect` unit tokens, sent as `CMSG_INSPECT`.
     pub(crate) inspect_notifies: Vec<String>,
     /// `ClearInspectPlayer` ran; the app drops its inspect target.
@@ -1938,13 +1942,13 @@ impl Model {
             .into_iter()
             .collect(),
             player_combat_stats: None,
-            pet_combat_stats: None,
+            ammo_record_asks: Vec::new(),
             inventory_slots: Default::default(),
             bank_bag_slots: Default::default(),
             inventory_alerts: [0; 12],
             inventory_repairs: Vec::new(),
             weapon_enchants: [None; 2],
-            inspect: None,
+            visible_equipment: HashMap::new(),
             inspect_notifies: Vec::new(),
             inspect_clear: false,
             dressup_intents: Vec::new(),
