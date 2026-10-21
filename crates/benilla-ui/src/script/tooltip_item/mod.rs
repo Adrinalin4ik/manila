@@ -484,6 +484,18 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                         Ok(t) => std::mem::take(&mut t.equipped_header_armed),
                         Err(_) => false,
                     };
+                    // The player's item object answers the cooldown query, which asks a missing
+                    // record with the callback `0x6e2f70` (`0x533188` → `0x5331ec`, `0x6e2efb`);
+                    // the ammo slot passes an entry and queries nothing (`0x53307d`).
+                    if slot0 != -1 && unit.eq_ignore_ascii_case("player") {
+                        if let Some(entry) = model
+                            .inv_slot("player", slot)
+                            .filter(|s| s.record_pending())
+                            .map(|s| s.item_id)
+                        {
+                            model.cooldown_record_asks.push(entry);
+                        }
+                    }
                     let view = model
                         .inv_slot(&unit, slot)
                         .filter(|s| s.item_id != 0)
@@ -598,7 +610,18 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let bag = i64::from(crate::script::binding_abi::ftol(bag));
             let slot = crate::script::binding_abi::ftol(slot) as u32;
             let (item_id, count, link, quality, inst, repair_cost) = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                // The cooldown query asks a missing record with the callback `0x6e2f70`
+                // (`0x53483a`, `0x6e2efb`).
+                if let Some(entry) = model
+                    .containers
+                    .get(&bag)
+                    .and_then(|c| c.slots.get(&slot))
+                    .filter(|s| s.record_pending())
+                    .map(|s| s.item_id)
+                {
+                    model.cooldown_record_asks.push(entry);
+                }
                 let cost = model.repair_costs.bags.get(&(bag, slot)).copied();
                 match model
                     .containers

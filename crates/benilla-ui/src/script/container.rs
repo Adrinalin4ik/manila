@@ -44,7 +44,7 @@ pub struct ContainerSlot {
     /// The template's class (`[rec+0x0]`, read by `0x5d9f30`), `None` while unresolved: a
     /// projectile (6) auto-equips by entry and unlocks as it goes (`0x5e1704`).
     pub item_class: Option<u32>,
-    /// The item's template entry; 0 while unresolved.
+    /// The item object's template entry, 0 until the object carries one.
     pub item_id: u32,
     /// An `|Hitem:…|h[Name]|h` link once the name is known.
     pub link: Option<String>,
@@ -107,6 +107,13 @@ pub struct ContainerSlot {
 }
 
 impl ContainerSlot {
+    /// An item object whose record the cache does not hold yet, which the feed pushes with its
+    /// entry and no quality: a cooldown query on it asks the record with the callback `0x6e2f70`
+    /// (`0x6e2efb`), whose arrival runs it.
+    pub fn record_pending(&self) -> bool {
+        self.item_id != 0 && self.quality.is_none()
+    }
+
     /// The whole stack of this slot as a cursor payload, as a pickup sets it.
     pub(crate) fn cursor_item(&self, bag: i64, slot: u32) -> CursorItem {
         CursorItem {
@@ -345,6 +352,12 @@ impl super::UiScript {
     /// question: the app files the pending record and the event, the item staying held.
     pub fn take_container_equip_asks(&mut self) -> Vec<(i64, u32, u64)> {
         std::mem::take(&mut self.model_mut().container_equip_asks)
+    }
+
+    /// Drain the item entries whose record a cooldown query found missing since the last call, each
+    /// asked with the callback `0x6e2f70`.
+    pub fn take_cooldown_record_asks(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.model_mut().cooldown_record_asks)
     }
 
     /// Drain the `(bag, slot)` clicks repair mode queued, for `CMSG_REPAIR_ITEM`.
@@ -919,13 +932,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 slot,
                 "Usage: GetContainerItemCooldown(index, slot)",
             )?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let held = key.is_some_and(|k| {
-                model
-                    .containers
-                    .get(&k.0)
-                    .is_some_and(|c| c.slots.contains_key(&k.1))
-            });
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let slot = key.and_then(|k| model.containers.get(&k.0)?.slots.get(&k.1));
+            let held = slot.is_some();
+            // The query asks a missing record with the callback `0x6e2f70` (`0x6e2efb`).
+            if let Some(entry) = slot.filter(|s| s.record_pending()).map(|s| s.item_id) {
+                model.cooldown_record_asks.push(entry);
+            }
             Ok(if held {
                 item_cooldown_triple(
                     key.and_then(|k| model.container_cooldowns.get(&k).copied()),

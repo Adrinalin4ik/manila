@@ -46,6 +46,7 @@ pub(super) fn register(app: &mut App) {
         .net_handler(K::ClearCooldown, on_cooldown_packet)
         .net_handler(K::CooldownCheat, on_cooldown_packet)
         .net_handler(K::ItemCooldown, on_item_cooldown)
+        .net_handler(K::ItemTemplate, on_item_record)
         .net_handler(K::ChannelStart, on_channel)
         .net_handler(K::ChannelUpdate, on_channel)
         .net_handler(K::AuraDuration, on_aura_duration)
@@ -103,14 +104,35 @@ pub(crate) struct Scene<'w, 's> {
 }
 
 /// `SMSG_INITIAL_SPELLS`, once at login, into the action store the UI feed reads.
-fn on_spell_book(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+fn on_spell_book(In(ev): In<SessionEvent>, mut l: Lifecycle, sc: Scene) {
     if let SessionEvent::SpellBook {
         spell_ids,
         cooldowns,
     } = ev
     {
-        spell_book(spell_ids, cooldowns, &mut l.actions, &mut l.cooldowns);
+        let player = active_player(&l.self_guid, &l.index, &sc.stores);
+        let pad = crate::spell::CategoryPad::for_list(false, player);
+        spell_book(
+            spell_ids,
+            cooldowns,
+            &mut l.actions,
+            &mut l.cooldowns,
+            (l.spells.as_deref(), &sc.items, &l.spell_mods, pad),
+        );
     }
+}
+
+/// The active player's object (`0x468460` with type mask `0x10` on `0x468550`'s guid), when
+/// streamed.
+fn active_player<'a>(
+    self_guid: &SelfGuid,
+    index: &GuidIndex,
+    stores: &'a Query<&mut ObjectStore>,
+) -> Option<&'a ObjectStore> {
+    self_guid
+        .0
+        .and_then(|g| index.0.get(&g))
+        .and_then(|&e| stores.get(e).ok())
 }
 
 fn on_action_buttons(In(ev): In<SessionEvent>, mut l: Lifecycle) {
@@ -385,12 +407,14 @@ fn on_cancel_auto_repeat(In(ev): In<SessionEvent>, mut l: Lifecycle, sc: Scene) 
 }
 
 /// The four cooldown packets, each routed through [`addressed_store`] by the caster guid.
-fn on_cooldown_packet(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+fn on_cooldown_packet(In(ev): In<SessionEvent>, mut l: Lifecycle, sc: Scene) {
+    let player = active_player(&l.self_guid, &l.index, &sc.stores);
     let Lifecycle {
         self_guid,
         spells,
         cooldowns,
         pet_bar,
+        spell_mods,
         ..
     } = &mut l;
     match ev {
@@ -398,8 +422,10 @@ fn on_cooldown_packet(In(ev): In<SessionEvent>, mut l: Lifecycle) {
             caster,
             cooldowns: pairs,
         } => {
+            let pet = self_guid.0 != Some(caster);
             if let Some(store) = addressed_store(caster, self_guid, cooldowns, pet_bar) {
-                spell_cooldowns(caster, pairs, spells.as_deref(), store);
+                let pad = crate::spell::CategoryPad::for_list(pet, player);
+                spell_cooldowns(caster, pairs, spells.as_deref(), store, spell_mods, pad);
             }
         }
         SessionEvent::CooldownEvent { spell_id, caster } => {
@@ -418,6 +444,16 @@ fn on_cooldown_packet(In(ev): In<SessionEvent>, mut l: Lifecycle) {
             }
         }
         _ => {}
+    }
+}
+
+/// `SMSG_ITEM_QUERY_SINGLE_RESPONSE`, the item cache's callbacks of the cooldown list: a held
+/// item cooldown's `0x6e8830`.
+fn on_item_record(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+    if let SessionEvent::ItemTemplate { entry, info } = ev {
+        let spells = l.spells.as_deref();
+        l.cooldowns
+            .item_record_landed(entry, info.as_deref(), |id| spells?.catalog.get(id));
     }
 }
 
@@ -486,12 +522,19 @@ fn addressed_store<'a>(
 }
 
 /// `SMSG_INITIAL_SPELLS`: the book into the action store, and the active cooldowns, whose wire
-/// value is remaining ms, into the cooldown store ([`Cooldowns::seed_initial`]).
+/// value is remaining ms, into the cooldown store ([`Cooldowns::seed_initial`]). `seed` is what
+/// the seed reads: the catalog, the item cache, the modifiers and the category pad.
 fn spell_book(
     spell_ids: Vec<u32>,
     initial_cooldowns: Vec<SpellCooldown>,
     actions: &mut PlayerActions,
     cooldowns: &mut Cooldowns,
+    seed: (
+        Option<&Spells>,
+        &crate::items::Items,
+        &crate::spell::SpellModifiers,
+        crate::spell::CategoryPad,
+    ),
 ) {
     debug!(
         "net: spell book — {} spells, {} active cooldown(s)",
@@ -500,9 +543,17 @@ fn spell_book(
     );
     actions.spells = spell_ids.into_iter().collect();
     actions.dirty = true;
+    let (spells, items, mods, pad) = seed;
     let now = Instant::now();
     for cd in &initial_cooldowns {
-        cooldowns.seed_initial(cd, now);
+        let spell_id = u32::from(cd.spell_id);
+        let spell = spells.and_then(|s| s.catalog.get(spell_id));
+        // `0x6e2c60` reads the item's record with no callback (`0x6e2ce0`) and takes its first
+        // slot naming the spell (`0x6e2cf4`).
+        let block = items
+            .template(u32::from(cd.item_id), 0, Ask::Read)
+            .and_then(|t| t.spells.iter().find(|b| b.spell_id == spell_id));
+        cooldowns.seed_initial(cd, spell, block, mods, pad, now);
     }
 }
 
@@ -650,6 +701,16 @@ fn cast_result(
         // spell still in flight. vmangos sends 0x17 for real aborts.
         let dont_report = reason == Some(0x17);
         let self_e = self_guid.0.and_then(|g| index.0.get(&g)).copied();
+        // NOT_READY with a first dword of 0, the server holding no cooldown of its own
+        // (`0x6e1af1`): a held record of the spell on our list (`0x6e1690`, `0x6e1b02`) goes with
+        // all its records (`0x6e3050(spell, 0, 0, 1)`, `0x6e1b13`). An absent dword reads -1.
+        if reason == Some(0x3c) && arg == Some(0) {
+            if let Some(d) = spells.and_then(|s| s.catalog.get(spell_id)) {
+                if cooldowns.has_on_hold_record(spell_id, 0, d.category) {
+                    cooldowns.clear_spell(spell_id);
+                }
+            }
+        }
         if auto_repeat.0 == Some(spell_id) && !dont_report {
             crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, edits, net);
         }
@@ -955,6 +1016,8 @@ fn spell_go(
         go_lid.write(crate::go_anim::GoLidOpen { go_guid, spell_id });
     }
     let (cooldowns, spells, items, pet_bar, spell_mods) = cooldown_ctx;
+    // The item leg held the cooldown for its record ([`item_go_cooldown`]).
+    let mut pended = false;
     let (auto_repeat, sheath, stand, edits, engaged, start_gate, core) = attack_ctx;
     let now = Instant::now();
     let display = spells.and_then(|s| s.catalog.get(spell_id));
@@ -1019,12 +1082,11 @@ fn spell_go(
         }
 
         // Our launch starts the cast's cooldown here, at the GO receive time. The self-insert
-        // forks on itemCaster == caster: the spell leg (`0x6e8498`: RecoveryTime, Category,
-        // CategoryRecoveryTime, on-hold from Attributes bit 25) or the item leg (`0x6e8566`,
-        // per-slot values with SpellRec fallbacks; a non-resident row pends via `0x6e8660` →
-        // `0x6e8830`). `SMSG_SPELL_COOLDOWN` is the server's override; vmangos sends none for a
-        // plain cast. A ranged-slot cast folds `UNIT_FIELD_RANGEDATTACKTIME` into the category
-        // recovery (`0x6e2b60`).
+        // forks on the first guid against the caster's (`0x6e8441`): the spell leg
+        // (`0x6e8498`: RecoveryTime, Category, CategoryRecoveryTime, on-hold from Attributes bit
+        // 25) or the item leg ([`item_go_cooldown`]). `SMSG_SPELL_COOLDOWN` is the server's
+        // override; vmangos sends none for a plain cast. A ranged-slot cast folds
+        // `UNIT_FIELD_RANGEDATTACKTIME` into the category recovery (`0x6e2b60`).
         let ranged_ms = display
             .filter(|d| d.ranged_speed_cooldown())
             .and_then(|_| {
@@ -1032,26 +1094,11 @@ fn spell_go(
                 stores.get(*e).ok()?.0.unit_ranged_attack_time()
             })
             .unwrap_or(0);
-        // The item's entry, off its own store.
-        match item_caster.and_then(|g| stores.get(*index.0.get(&g)?).ok()?.0.object_entry()) {
-            Some(entry) => {
-                // The item's record, which its create asked.
-                let use_spell = items
-                    .template(entry, 0, Ask::Read)
-                    .and_then(|t| t.use_spell)
-                    .filter(|u| u.spell_id == spell_id);
-                match use_spell {
-                    Some(u) => cooldowns.start_item(entry, &u, display, now),
-                    // Template not streamed, or naming another spell: the spell-keyed record,
-                    // unmodified, as the item leg never applies op 11 (`0x6e8566`, `0x6e8830`).
-                    None => {
-                        if let Some(d) = display {
-                            cooldowns.start_spell(spell_id, d, ranged_ms, now, None);
-                        }
-                    }
-                }
-                // The item leg's pair, with or without an insert (`0x6e8500`, `0x6e856b`).
-                cooldowns.flush_item_leg();
+        match item_caster {
+            Some(item) => {
+                pended = item_go_cooldown(
+                    item, spell_id, display, now, index, stores, items, core.net, cooldowns,
+                );
             }
             None => {
                 if let Some(d) = display {
@@ -1072,17 +1119,20 @@ fn spell_go(
             }
         }
     }
-    // The pet leg of the same insert: an independent `if`, not an else.
-    if let Some(d) = display.filter(|_| pet_go_cooldown(caster, self_guid, index, stores)) {
+    // The pet leg of the same insert: an independent `if`, not an else, which a held item cooldown
+    // skips, as it ends the handler (`0x6e84dd`).
+    if let Some(d) =
+        display.filter(|_| !pended && pet_go_cooldown(caster, self_guid, index, stores))
+    {
         // No ranged pad: `0x6e2b60` is called on the self leg only (`0x6e845d`). Op 11 still
         // applies to both columns (`0x6e85c5`, `0x6e85d1`) off the player's tables, which gate
         // on the spell's family and never the caster (`0x6e6b30`).
         pet_bar
             .cooldowns
             .start_spell(spell_id, d, 0, now, Some(spell_mods));
-        // The flush that follows (`0x6e85fc` `0x4b31b0`, `0x6e8601` `0x4bce90`) fires off the
-        // list's generation, which the insert bumped: `ACTIONBAR_UPDATE_COOLDOWN`,
-        // `SPELL_UPDATE_COOLDOWN`, `PET_BAR_UPDATE_COOLDOWN`, and no `PET_BAR_UPDATE`.
+        // Its flush follows, inserted or not (`0x6e85fc` `0x4b31b0`, `0x6e8601` `0x4bce90`):
+        // `ACTIONBAR_UPDATE_COOLDOWN`, `SPELL_UPDATE_COOLDOWN`, `PET_BAR_UPDATE_COOLDOWN`, and no
+        // `PET_BAR_UPDATE`.
         if benilla_assets::trace::enabled() {
             let (recovery_ms, category_ms) = spell_mods.spell_cooldowns(d, 0);
             benilla_assets::trace::line(
@@ -1236,6 +1286,55 @@ fn cancel_auto_repeat(
     crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, edits, net);
 }
 
+/// The go's item leg, for a cast whose first guid is not the caster's: the item's entry off its
+/// object (`0x6e8425`, type mask 2), with none inserting and flushing nothing (`0x6e84a9`); then its
+/// record, asked with the callback `0x6e8830` (`0x6e84c2`).
+/// - Not cached: the cooldown is held for the record ([`Cooldowns::pend_item`], `0x6e84d8`) and
+///   the handler ends (`0x6e84dd`); returns `true`.
+/// - Cached: the spell is searched among all five blocks, whatever their trigger (`0x6e84f0`). The
+///   block naming it inserts, keyed by the item ([`Cooldowns::start_item`]); none inserts nothing
+///   and flushes the pair and the bags (`0x6e84fd`-`0x6e8505`).
+fn item_go_cooldown(
+    item: u64,
+    spell_id: u32,
+    display: Option<&benilla_formats::SpellDisplay>,
+    now: Instant,
+    index: &GuidIndex,
+    stores: &Query<&mut ObjectStore>,
+    items: &crate::items::Items,
+    net: &crate::net::NetCommands,
+    cooldowns: &mut Cooldowns,
+) -> bool {
+    let entry = index
+        .0
+        .get(&item)
+        .and_then(|&e| stores.get(e).ok())
+        .filter(|s| s.0.is_item())
+        .and_then(|s| s.0.object_entry())
+        .filter(|&entry| entry != 0);
+    let Some(entry) = entry else {
+        return false;
+    };
+    let Some(record) = items.template(entry, item, Ask::Event(net)) else {
+        let on_hold = display.is_some_and(|d| d.cooldown_on_event());
+        cooldowns.pend_item(entry, spell_id, now, on_hold);
+        return true;
+    };
+    match record.spells.iter().find(|b| b.spell_id == spell_id) {
+        Some(block) => {
+            let block = benilla_protocol::messages::ItemUseSpell {
+                spell_id,
+                cooldown_ms: block.cooldown_ms,
+                category: block.category,
+                category_cooldown_ms: block.category_cooldown_ms,
+            };
+            cooldowns.start_item(entry, &block, display, now);
+        }
+        None => cooldowns.flush_item_leg(),
+    }
+    false
+}
+
 /// Whether this `SMSG_SPELL_GO` arms the pet's cooldown bank (`0x6e857a`–`0x6e85ad`). The GO
 /// handler inserts into two banks (`0x6e2ea0`'s `bankHead = 0xcecaec + 24*bank`): the self leg
 /// bank 0 (`0x6e8493`), this leg bank 1 (`0x6e85f2 mov ecx, 0xcecb04`), which `SMSG_PET_SPELLS`
@@ -1271,16 +1370,17 @@ fn spell_cooldowns(
     pairs: Vec<(u32, u32)>,
     spells: Option<&Spells>,
     cooldowns: &mut Cooldowns,
+    mods: &crate::spell::SpellModifiers,
+    pad: crate::spell::CategoryPad,
 ) {
     debug!(
         "net: spell cooldowns for {caster:#x} — {} pair(s)",
         pairs.len()
     );
-    let now = Instant::now();
-    for (spell_id, cooldown_ms) in pairs {
-        let display = spells.and_then(|s| s.catalog.get(spell_id));
-        cooldowns.apply_wire_cooldown(spell_id, cooldown_ms, display, now);
-    }
+    let pairs = pairs
+        .into_iter()
+        .map(|(id, ms)| (id, ms, spells.and_then(|s| s.catalog.get(id))));
+    cooldowns.apply_spell_cooldowns(pairs, mods, pad, Instant::now());
 }
 
 /// `SMSG_ITEM_COOLDOWN` (`0x6e95d0`): the fixed 30 s use cooldown, keyed on the item instance's
@@ -1410,6 +1510,8 @@ mod tests {
     use super::*;
     use crate::spell::QueuedMeleeSpell;
     use benilla_protocol::messages::ACTION_KIND_SPELL;
+
+    mod cooldown_sites;
 
     /// `SMSG_COOLDOWN_EVENT` (`0x6e9670`): the event moves the held record's one start, which the
     /// GCD leg reads (`0x6e15d8`), so the global cooldown runs again from the packet.
@@ -2817,7 +2919,7 @@ mod tests {
                         None,
                         None,
                         None,
-                        item_caster.or(Some(caster)),
+                        item_caster,
                         &mut commands,
                         &index,
                         &casting,
@@ -2917,10 +3019,9 @@ mod tests {
     }
 
     /// Op 11 on the GO insert: the self leg (`0x6e846f`, and `0x6e2b60`'s tail) and the pet leg
-    /// (`0x6e85c5`) apply the player's table; the item leg inserts the DBC values (`0x6e8566`),
-    /// here through its not-streamed fallback.
+    /// (`0x6e85c5`) apply the player's table.
     #[test]
-    fn op_11_shortens_the_self_and_pet_inserts_and_never_the_item_one() {
+    fn op_11_shortens_the_self_and_pet_inserts() {
         fn display() -> benilla_formats::SpellDisplay {
             benilla_formats::SpellDisplay {
                 spell_family: 9,
@@ -2938,15 +3039,6 @@ mod tests {
         assert_eq!(go_cooldowns(10, own, None, display, mods()).0, 3000);
         let pet = go_cooldowns(20, owned(SUMMONEDBY, 10), None, display, mods());
         assert_eq!(pet.1, 3000, "the pet leg takes the player's op 11");
-        let item = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(3, 6948)]));
-        let used = go_cooldowns(
-            10,
-            ObjectStore::default(),
-            Some((50, item)),
-            display,
-            mods(),
-        );
-        assert_eq!(used.0, 5000, "the item leg applies no modifier");
     }
 
     /// Both producers of the chain-hop array, the GO's hit list and the 816 packet, drop the
