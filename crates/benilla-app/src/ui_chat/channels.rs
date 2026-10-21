@@ -86,7 +86,7 @@ pub(super) fn seed_channels(
             return;
         };
         if seeded.claim(script) {
-            script.set_joined_channels(channels.names());
+            channels.mirror_into(script);
         }
     })
 }
@@ -299,9 +299,26 @@ pub(crate) fn plan_walk(
     steps
 }
 
-/// Apply a plan in order; answers whether a slot name moved, the VM mirror's cue.
-fn apply_walk(steps: &[WalkStep], channels: &mut ChannelState, commands: &NetCommands) -> bool {
-    let mut names_moved = false;
+/// One walk for a player in `zone_name`: the plan, applied, then every slot it renamed,
+/// registered, suspended or confirmed pushed into the VM's mirror, so `GetChannelName(n)` and a
+/// `SendChatMessage` to a number read the new slots from this frame on.
+pub(super) fn walk_zone(
+    channels: &mut ChannelState,
+    zone_name: &str,
+    in_city: bool,
+    city_word: Option<&str>,
+    commands: &NetCommands,
+    script: Option<&mut benilla_ui::script::UiScript>,
+) {
+    let steps = plan_walk(channels, zone_name, in_city, city_word);
+    apply_walk(&steps, channels, commands);
+    if let (false, Some(script)) = (steps.is_empty(), script) {
+        channels.mirror_into(script);
+    }
+}
+
+/// Apply a plan in order.
+fn apply_walk(steps: &[WalkStep], channels: &mut ChannelState, commands: &NetCommands) {
     for step in steps {
         match step {
             WalkStep::Leave(name) => {
@@ -320,14 +337,10 @@ fn apply_walk(steps: &[WalkStep], channels: &mut ChannelState, commands: &NetCom
             WalkStep::Rename { old, new } => {
                 if let Some(n) = channels.rename_slot(old, new) {
                     debug!("chat: zone channel slot {n} renamed {old:?} → {new:?}");
-                    names_moved = true;
                 }
             }
             WalkStep::Register(name) => match channels.claim_slot(name) {
-                Some(n) => {
-                    debug!("chat: zone channel {name:?} registered as slot {n}");
-                    names_moved = true;
-                }
+                Some(n) => debug!("chat: zone channel {name:?} registered as slot {n}"),
                 None => warn!(
                     "chat: no free slot for zone channel {name:?} — all {} are taken",
                     super::edit::MAX_CHANNELS
@@ -341,7 +354,6 @@ fn apply_walk(steps: &[WalkStep], channels: &mut ChannelState, commands: &NetCom
             WalkStep::Confirm(name) => channels.confirm_slot(name),
         }
     }
-    names_moved
 }
 
 /// Whether the zone under the player is final: an active avatar done settling, benilla's stand-in
@@ -433,13 +445,14 @@ pub(super) fn auto_join_zone_channels(
             return; // same zone as last frame
         }
 
-        let steps = plan_walk(&channels, &zone_name, in_city, city_word(&areas.0));
-        if apply_walk(&steps, &mut channels, &commands) {
-            if let Some(script) = script.as_mut() {
-                // `GetChannelName(n)` answers the new name from this frame on, as in the reference.
-                script.set_joined_channels(channels.names());
-            }
-        }
+        walk_zone(
+            &mut channels,
+            &zone_name,
+            in_city,
+            city_word(&areas.0),
+            &commands,
+            script,
+        );
         walk.at = Some(zone_id);
     })
 }

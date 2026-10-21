@@ -427,6 +427,8 @@ pub(crate) struct Model {
     /// A harness's VM keeps the calls made with no host lent here
     /// ([`super::UiScript::keep_calls`]); `None` refuses them.
     pub(crate) kept_calls: Option<Vec<super::ScriptCall>>,
+    /// What the host raised in its calls' verbs ([`super::UiScript::raise_in_call`]).
+    pub(crate) call_raises: super::calls::CallRaises,
     /// The binding functions' queue and mouselook state.
     pub(crate) input: super::input_verbs::InputState,
     /// The selection change a script call made and the input events it ran under, for the event
@@ -437,8 +439,8 @@ pub(crate) struct Model {
     /// `DropItemOnUnit` tokens (`0x48d960`), gated by the app; a refusal silently keeps the item.
     pub(crate) drop_item_on_unit: Vec<String>,
 
-    /// Channels the server confirmed, in join order: the numbers `GetChannelName` answers.
-    pub(crate) joined_channels: Vec<Option<String>>,
+    /// The joined channels, in join order: the numbers `GetChannelName` answers.
+    pub(crate) joined_channels: Vec<Option<super::channel::JoinedChannel>>,
     /// The party or raid roster the app pushes; the default is not in a group.
     pub(crate) party: party::PartyState,
     /// Party and loot-method calls (`AcceptGroup`, `InviteToParty`, `SetLootMethod`, …) queued.
@@ -510,8 +512,6 @@ pub(crate) struct Model {
     pub(crate) guild_recruitment_changed: bool,
     /// `DoEmote` calls queued.
     pub(crate) emote_requests: Vec<super::chat_misc::EmoteRequest>,
-    /// `RandomRoll` calls queued.
-    pub(crate) roll_requests: Vec<(u32, u32)>,
     /// `UninviteByName` calls queued.
     pub(crate) uninvite_requests: Vec<String>,
     /// `ConsoleExec` lines that were not CVar writes.
@@ -1290,8 +1290,6 @@ pub(crate) struct Model {
     /// The world points our own `Minimap:PingLocation` calls pinged, for the host's wire send
     /// (`0x1d5`, `0x4eef72`) and its process-wide copy of the ping.
     pub(crate) minimap_pings_sent: Vec<(f32, f32)>,
-    /// `SendChatMessage` lines, apart from chat-box input, whose drain runs the slash grammar.
-    pub(crate) chat_sends: Vec<super::chat_send::ChatSend>,
     /// `SendAddonMessage` broadcasts: `LANG_ADDON`, four distributions, `prefix` TAB `message`.
     pub(crate) addon_sends: Vec<super::addon_message::AddonSend>,
     /// `RequestTimePlayed()` calls, one empty `CMSG_PLAYED_TIME` each.
@@ -1558,6 +1556,7 @@ impl Model {
             script_calls: Vec::new(),
             call_depth: 0,
             kept_calls: None,
+            call_raises: Default::default(),
             input: Default::default(),
             protected: Default::default(),
             selection_cause: None,
@@ -1599,7 +1598,6 @@ impl Model {
             guild_recruitment_runs: Vec::new(),
             guild_recruitment_changed: false,
             emote_requests: Vec::new(),
-            roll_requests: Vec::new(),
             uninvite_requests: Vec::new(),
             console_lines: Vec::new(),
             logging_chat: false,
@@ -1899,7 +1897,6 @@ impl Model {
             cursor_pos: (0.0, 0.0),
             minimap: crate::widget::MinimapStatics::default(),
             minimap_pings_sent: Vec::new(),
-            chat_sends: Vec::new(),
             addon_sends: Vec::new(),
             played_time_asks: 0,
             opening_cinematic_asks: 0,

@@ -102,13 +102,18 @@ pub(crate) enum CastWireTarget {
 }
 
 /// Where `ArmCast 0x6e5250` takes its candidate guid from (`0x6e5361`-`0x6e539f`). The main hand
-/// is taken instead of the selection, never before it; `caster` is the separate `autoSelfCast`
+/// is taken instead of the selection, never before it; `auto_self` is the separate `autoSelfCast`
 /// fallback (`0x6e53d7`).
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct CastCandidates {
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CastCandidates<'a> {
     /// The current selection (the client's `0xb4e2d8`); benilla never passes an explicit guid.
     pub(crate) selection: Option<u64>,
+    /// The caster, which a gate tests the candidate against.
     pub(crate) caster: Option<u64>,
+    /// The `autoSelfCast` fallback's candidate, the active player whoever casts (`0x6e53e3`-
+    /// `0x6e5400`: `0x468550`, typemask `0x10`), and its store, `None` until it streams.
+    pub(crate) auto_self: Option<u64>,
+    pub(crate) auto_self_store: Option<&'a ObjectStore>,
     /// The equipped main hand's item guid (`[player+0x1d3c][15]`), only when it resolves to a
     /// streamed item object (`0x468460` at `0x6e53bc`).
     pub(crate) main_hand_item: Option<u64>,
@@ -327,6 +332,9 @@ pub(crate) struct CastTargeting<'w, 's> {
     /// The player's answer to the entity outdoors test, which the place rungs read; absent
     /// outside the world.
     outdoors: Option<Res<'w, crate::player::PlayerOutdoors>>,
+    /// The pet bar's unit's answer, which a unit caster's place rungs read; absent outside the
+    /// world.
+    bar_unit_outdoors: Option<Res<'w, crate::player::BarUnitOutdoors>>,
 }
 
 impl CastTargeting<'_, '_> {
@@ -343,6 +351,79 @@ impl CastTargeting<'_, '_> {
     /// enemy bit.
     pub(crate) fn context_at(&self, entity: Entity, guid: u64) -> CastContext<'_> {
         self.context_on(Some(entity), Some(guid))
+    }
+
+    /// The context for an attempt whose caster is a unit other than the active player, the pet
+    /// bar's client-targeted and possessed presses (`0x4bd385`: `0x6e4b60(unit, spell, 0, guid)`),
+    /// at `guid`, the press's target. The attempt reads that caster wherever it reads one: the dead
+    /// rung (`0x6e4c49`), the range test (`0x6e4f26` → `0x6e4440`), the relations the bind asks
+    /// (`CanAssist 0x6066f0`, `CanAttack 0x606980`) and the validator's state rungs (`0x6094f0`,
+    /// called on the caster at `0x6e4f3b`), its place rungs asking where that caster stands. A
+    /// unit caster has no main hand to bind (`0x6e5361`), and its movement is its own unit's.
+    /// `None` while the caster is not streamed.
+    pub(crate) fn context_for_caster(
+        &self,
+        caster_guid: u64,
+        guid: Option<u64>,
+    ) -> Option<CastContext<'_>> {
+        let index = self.index.as_deref()?;
+        let caster = *index.0.get(&caster_guid)?;
+        let self_store = self.stores.get(caster).ok()?;
+        let target = guid.and_then(|g| index.0.get(&g).copied());
+        let target_store = target.and_then(|e| self.stores.get(e).ok());
+        let owner_store = |store| owner_store(store, Some(index), &self.stores);
+        let caster_unit = self.range_units.unit(caster);
+        Some(CastContext {
+            selection_guid: guid,
+            self_guid: Some(caster_guid),
+            auto_self_cast: self.auto_self_cast.0,
+            rel: TargetRelations {
+                target_store,
+                target_owner_store: owner_store(target_store),
+                self_store: Some(self_store),
+                factions: self.factions.as_deref(),
+                reputations: &self.reputations,
+                types: CreatureTypeSources {
+                    names: self.names.as_deref(),
+                    forms: self.spells.as_deref().map(|s| &s.forms),
+                    ..Default::default()
+                },
+                group: GroupInputs {
+                    self_guid: Some(caster_guid),
+                    target_guid: guid,
+                    self_owner_store: owner_store(Some(self_store)),
+                    roster: self.roster.as_deref(),
+                },
+            },
+            range: RangeInputs {
+                self_pos: self.transforms.get(caster).ok().map(|t| t.translation),
+                target_pos: target
+                    .and_then(|e| self.transforms.get(e).ok())
+                    .map(|t| t.translation),
+                caster: caster_unit
+                    .unwrap_or(benilla_formats::RangeUnit::still(super::DEFAULT_REACH)),
+                target: target.and_then(|e| self.range_units.unit(e)),
+            },
+            main_hand_item: None,
+            self_move_flags: caster_unit.map_or(0, |u| u.motion.flags),
+            // A unit's `GetStandState`, its vtable slot 41 (`0x60be50`), reads its descriptor's
+            // `UNIT_FIELD_BYTES_1` byte 0; only the active player's (`0x5ed570`) keeps a local state.
+            self_stand_state: self_store.0.unit_stand_state(),
+            // `[unit+0xd40]`, which only the active player's setter `0x611cf0` moves ahead of the
+            // echo: a unit's is its descriptor's `UNIT_FIELD_BYTES_2` byte 0.
+            self_sheathe_state: self_store.0.unit_sheath_state().unwrap_or(0),
+            daytime: self.clock.as_deref().is_some_and(|c| c.0.is_daytime()),
+            // `0x612cc0` asks the caster's own node (`[unit+0xe0]` → `0x6706f0`), never the
+            // player's; with no answer for it, it reads outdoors, as a null entity does
+            // (`0x6706fa`).
+            self_outdoors: self
+                .bar_unit_outdoors
+                .as_deref()
+                .and_then(|o| o.0)
+                .filter(|&(guid, _)| guid == caster_guid)
+                .is_none_or(|(_, outdoors)| outdoors),
+            self_control_lost: self.own_control.as_deref().is_some_and(|c| c.0),
+        })
     }
 
     fn context_on(&self, target: Option<Entity>, guid: Option<u64>) -> CastContext<'_> {
@@ -528,7 +609,7 @@ pub(super) fn unit_binds(
 /// without one, and the server validates.
 pub(crate) fn resolve_cast_target(
     def: Option<&SpellDisplay>,
-    cand: &CastCandidates,
+    cand: &CastCandidates<'_>,
     auto_self_cast: bool,
     rel: &TargetRelations,
 ) -> CastWireTarget {
@@ -586,11 +667,12 @@ pub(crate) fn resolve_cast_target(
             return CastWireTarget::Unit(guid);
         }
     }
-    // The fallback: the active player (`0x6e53d7`), behind autoSelfCast, through the same gates.
+    // The fallback: the active player (`0x6e53d7`), behind autoSelfCast, through the same gates,
+    // which test it against the caster: a unit caster's binds the player, not itself.
     if auto_self_cast {
-        if let Some(guid) = cand.caster {
+        if let Some(guid) = cand.auto_self {
             let self_rel = TargetRelations {
-                target_store: rel.self_store,
+                target_store: cand.auto_self_store,
                 target_owner_store: None,
                 group: GroupInputs {
                     target_guid: Some(guid),
@@ -598,7 +680,7 @@ pub(crate) fn resolve_cast_target(
                 },
                 ..*rel
             };
-            if unit_binds(Some(def), word, true, &self_rel) {
+            if unit_binds(Some(def), word, cand.caster == Some(guid), &self_rel) {
                 return CastWireTarget::Unit(guid);
             }
         }
@@ -621,11 +703,13 @@ pub(crate) fn resolve_cast_target(
 mod tests {
     use super::*;
 
-    /// Selection and caster candidates, with an empty main hand.
-    fn cands(selection: Option<u64>, caster: Option<u64>) -> CastCandidates {
+    /// Selection and caster candidates, the caster the active player, with an empty main hand.
+    fn cands(selection: Option<u64>, caster: Option<u64>) -> CastCandidates<'static> {
         CastCandidates {
             selection,
             caster,
+            auto_self: caster,
+            auto_self_store: None,
             main_hand_item: None,
         }
     }
@@ -898,9 +982,8 @@ mod tests {
         assert!(rockbiter.targets_main_hand_item());
         const WEAPON: u64 = 0xdead_beef;
         let armed = CastCandidates {
-            selection: Some(42),
-            caster: Some(1),
             main_hand_item: Some(WEAPON),
+            ..cands(Some(42), Some(1))
         };
         assert_eq!(
             resolve_cast_target(Some(&rockbiter), &armed, true, &rel_none()),
@@ -1036,6 +1119,88 @@ mod tests {
         assert!(!read(Some(false)));
         assert!(read(Some(true)));
         assert!(read(None));
+    }
+
+    /// A unit caster's context reads that caster, never the player: its stand and sheathe states
+    /// are its descriptor's bytes (its `GetStandState 0x60be50`), and the place rungs' `0x612cc0`
+    /// asks the node where it stands (`[unit+0xe0]` → `0x6706f0`), as the outdoors publisher
+    /// answers for the pet bar's unit. A pet in a room's interior group is indoors while the
+    /// player stands off the building, outdoors off it while the player is in the room, and
+    /// outdoors in an `EXTERIOR` (0x8) group.
+    #[test]
+    fn a_unit_casters_context_reads_its_own_posture_and_place() {
+        use benilla_assets::coords::wow_to_bevy;
+        use benilla_protocol::ObjectFields;
+        use bevy::ecs::system::RunSystemOnce;
+        const PET: u64 = 0x2a;
+        let (inside, outside) = (
+            wow_to_bevy([1.0, 2.0, 30.0]),
+            wow_to_bevy([40.0, 2.0, 30.0]),
+        );
+        let read = |flags: u32, player_at: Vec3, pet_at: Vec3| {
+            let mut world = World::new();
+            crate::player::insert_test_room(&mut world, flags);
+            world.init_resource::<crate::spell::AutoSelfCast>();
+            world.insert_resource(Reputations::default());
+            world.insert_resource(SelfGuid(Some(7)));
+            world.insert_resource(Selection::default());
+            let mut body = crate::player::Player::default();
+            (body.active, body.pos) = (true, player_at);
+            world.insert_resource(body);
+            world.init_resource::<crate::player::PlayerOutdoors>();
+            world.init_resource::<crate::player::BarUnitOutdoors>();
+            world.init_resource::<crate::ui_pet::PetBar>();
+            world
+                .resource_mut::<crate::ui_pet::PetBar>()
+                .spells
+                .pet_guid = PET;
+            // `UNIT_FIELD_BYTES_1` (138) byte 0 and `UNIT_FIELD_BYTES_2` (164) byte 0: the player
+            // sits with its weapon away, the pet stands with its drawn.
+            let me = ObjectFields::from_pairs(&[(138, 1), (164, 0)]);
+            world.spawn((SelfPlayer, ObjectStore(me)));
+            let pet = world
+                .spawn((
+                    ObjectStore(ObjectFields::from_pairs(&[(138, 0), (164, 1)])),
+                    Transform::from_translation(pet_at),
+                    GlobalTransform::from_translation(pet_at),
+                ))
+                .id();
+            world.insert_resource(GuidIndex([(PET, pet)].into()));
+            world
+                .run_system_once(crate::player::publish_caster_outdoors)
+                .expect("the answers publish");
+            world
+                .run_system_once(|targeting: CastTargeting| {
+                    let me = targeting.context();
+                    let pet = targeting
+                        .context_for_caster(PET, None)
+                        .expect("the pet is streamed");
+                    (
+                        (me.self_outdoors, me.self_stand_state, me.self_sheathe_state),
+                        (
+                            pet.self_outdoors,
+                            pet.self_stand_state,
+                            pet.self_sheathe_state,
+                        ),
+                    )
+                })
+                .expect("the context builds")
+        };
+        assert_eq!(
+            read(0, outside, inside),
+            ((true, 1, 0), (false, 0, 1)),
+            "the pet in the room"
+        );
+        assert_eq!(
+            read(0, inside, outside),
+            ((false, 1, 0), (true, 0, 1)),
+            "the player in the room"
+        );
+        assert_eq!(
+            read(0x8, outside, inside).1,
+            (true, 0, 1),
+            "the pet in an exterior group"
+        );
     }
 
     /// `BindTarget`'s unit branch is one else-if chain (`0x6e5cad`-`0x6e5ee7`): the first arm whose

@@ -229,13 +229,16 @@ pub use bind_confirm::PendingEquipAnswer;
 pub use binding_abi::{ftol, s_str_to_float, s_str_to_int};
 pub use calls::{NearestMode, QueuedCall, ScriptCall};
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
-pub use channel::{ChannelCommand, RecruitmentPlan, RecruitmentRun, ZoneChannelRow};
+pub use channel::{ChannelCommand, JoinedChannel, RecruitmentPlan, RecruitmentRun, ZoneChannelRow};
 pub use char_stats::{
     weapon_subclass_skill, BankBagSlots, InvSlotView, InventorySlots, UnitCombatStats,
     BANK_BAG_SLOT_COUNT, INVENTORY_SLOT_COUNT, SKILL_DEFENSE, SKILL_UNARMED,
 };
 pub use chat_misc::EmoteRequest;
-pub use chat_send::{ChatGroup, ChatSend, SEND_CHAT_TOKENS};
+pub use chat_send::{
+    expand_target_tokens, validate_escapes, ChatGroup, ChatSend, InvalidEscape, INVALID_ESCAPE,
+    SEND_CHAT_TOKENS,
+};
 pub use chat_types::ChatTypeColor;
 pub use chat_window::{message_group_index, ChatWindowLook, MESSAGE_GROUPS};
 pub use console_exec::s_str_tokenize;
@@ -352,8 +355,8 @@ pub use skills::{SkillEntry, SkillsState};
 pub use social::{FriendInfo, SocialRequest, SocialState, WhoInfo};
 pub use sound::{MusicRequest, SoundRequest};
 pub use spellbook::{
-    resolve_spell_by_name, resolve_spell_in_books, NamedSpell, PetBookState, SpellBookState,
-    SpellSlotView, SpellTabName, SpellTabView,
+    resolve_spell_in_books, NamedSpell, PetBookState, SpellBookState, SpellSlotView, SpellTabName,
+    SpellTabView,
 };
 pub use stable::{StableIntent, StablePetSlot, StableState, NUM_STABLE_SLOTS};
 pub use summon::SummonConfirmUiState;

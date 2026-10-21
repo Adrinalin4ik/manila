@@ -34,13 +34,18 @@ macro_rules! attack_in_order {
 }
 
 /// The pet bar's Attack (`0x4bd40d`) runs the same validator, so a cast it binds to a standing
-/// targeting cursor goes out ahead of the `CMSG_PET_ACTION` it validated.
+/// targeting cursor goes out ahead of the `CMSG_PET_ACTION` it validated. A spell press the bar
+/// hands to the attempt (`0x4bd385`) casts through the ladder instead.
 macro_rules! pet_in_order {
     ($appliers:expr, $begin:ident($arg:expr)) => {{
-        let send = $appliers.p6().$begin($arg);
+        let step = $appliers.p6().$begin($arg);
         $appliers.p1().bind_parked();
-        if let Some(send) = send {
-            $appliers.p6().finish_press(send);
+        match step {
+            Some(crate::ui_pet::PetStep::Order(send)) => $appliers.p6().finish_press(send),
+            Some(crate::ui_pet::PetStep::Cast(cast)) => {
+                crate::ui_pet::cast_pet_press(&mut $appliers.p3(), cast)
+            }
+            None => {}
         }
     }};
 }
@@ -67,7 +72,14 @@ pub(crate) struct ScriptCallHost<'w, 's> {
                 ),
             >,
             crate::spell::ScriptCast<'w, 's>,
-            crate::ui_action::ActionPress<'w, 's>,
+            ParamSet<
+                'w,
+                's,
+                (
+                    crate::ui_action::ActionPress<'w, 's>,
+                    crate::ui_chat::ChatSender<'w, 's>,
+                ),
+            >,
             crate::ui_items::ScriptItemUse<'w, 's>,
             crate::ui_pet::PetPress<'w, 's>,
             crate::ui_action::AttackPress<'w, 's>,
@@ -114,7 +126,7 @@ impl CallHost for ScriptCallHost<'_, '_> {
                 crate::ui_shapeshift::cast_form(&mut appliers.p3(), spell_id);
             }
             ScriptCall::UseAction(press) => {
-                match crate::ui_action::use_action(&mut appliers.p4(), script, press) {
+                match crate::ui_action::use_action(&mut appliers.p4().p0(), script, press) {
                     // The Attack slot is a cast, so the gate's tag 4 (the pick) is asked only
                     // after tag 2 passed, and so passes as well.
                     crate::ui_action::UseOutcome::Attack => attack_in_order!(appliers, true),
@@ -135,10 +147,22 @@ impl CallHost for ScriptCallHost<'_, '_> {
                 appliers.p5().use_inventory_item(script, slot, on_self)
             }
             ScriptCall::CastPetSpell { spell_id, on_self } => {
-                crate::ui_pet_book::cast_pet_spell(&mut appliers.p6(), spell_id, on_self);
+                let send =
+                    crate::ui_pet_book::begin_pet_book_cast(&mut appliers.p6(), spell_id, on_self);
+                if let Some(send) = send {
+                    // `GetTargetingSpellId 0x6e48e0` is this spell: the press lowers the cursor
+                    // and sends nothing (`0x4b3474`-`0x4b347d`).
+                    if appliers.p3().ladder.ground.spell() == Some(spell_id) {
+                        appliers.p3().ladder.stop_targeting();
+                    } else {
+                        crate::ui_pet_book::finish_pet_book_cast(&mut appliers.p6(), send);
+                    }
+                }
             }
             ScriptCall::PetAction(slot) => pet_in_order!(appliers, begin_slot(slot)),
             ScriptCall::PetOrder(packed) => pet_in_order!(appliers, begin_order(packed)),
+            ScriptCall::SendChat(send) => appliers.p4().p1().send_chat(script, send),
+            ScriptCall::RandomRoll { min, max } => appliers.p4().p1().random_roll(min, max),
         }
         // A selection this call made with the targeting cursor up was handed to the cast
         // (`SelectTarget`, `0x4935d5`) and is bound now, before the next call reads either.
@@ -147,11 +171,32 @@ impl CallHost for ScriptCallHost<'_, '_> {
         // there is picked and resumed before the next call reads the selection.
         if let Some(held) = appliers.p3().ladder.take_held() {
             // A held press passed tag 2 to be held, so the pick's tag 4 passes as well.
-            if appliers.p7().pick_for_cast(held) {
-                let mut cast = appliers.p3();
-                let ctx = cast.targeting.context();
-                cast.ladder.resume_after_pick(held, &ctx);
+            match held.unit {
+                None => {
+                    if appliers.p7().pick_for_cast(held) {
+                        let mut cast = appliers.p3();
+                        let ctx = cast.targeting.context();
+                        cast.ladder.resume_after_pick(held, &ctx);
+                    }
+                }
+                // The pet bar's unit as the pick's actor (`0x6e4ef4`), which settles the guid the
+                // attempt goes on with (`0x6e4ef7`).
+                Some(press) => {
+                    if let Some(guid) = appliers.p6().pick_for_unit_cast(press) {
+                        let mut cast = appliers.p3();
+                        if let Some(ctx) =
+                            cast.targeting.context_for_caster(press.caster, Some(guid))
+                        {
+                            cast.ladder.resume_after_pick(held, &ctx);
+                        }
+                    }
+                }
             }
+        }
+        // A unit caster's send owes its attack tail (`0x6e51de` → `0x6131a0`), which presses the
+        // pet bar's Attack before the attempt returns.
+        if let Some(owed) = appliers.p3().ladder.take_unit_attack() {
+            pet_in_order!(appliers, begin_attack_from_cast(owed));
         }
         // Whatever casts next is the engine's own, which asks no gate.
         appliers.p3().ladder.permit(true);
@@ -807,6 +852,43 @@ mod tests {
             );
             assert_eq!(selected(&f), Some(OLD), "{lua}");
         }
+    }
+
+    /// `0x4b3300` stops the targeting cursor when the book spell pressed is the one awaiting its
+    /// click (`0x4b3474` `GetTargetingSpellId`, `0x4b347d` `StopTargeting`), ahead of its pet fork,
+    /// so `CastSpell(slot, "pet")` on the pet's own armed spell lowers the cursor and sends no order.
+    #[test]
+    fn a_pet_book_cast_of_the_armed_spell_stops_targeting() {
+        let mut f = frame(true);
+        let world = f.app.world_mut();
+        world
+            .resource_mut::<crate::ui_pet::PetBar>()
+            .spells
+            .pet_guid = PET;
+        world
+            .non_send_resource_mut::<UiScript>()
+            .set_pet_book(PetBookState {
+                token: Some("PET".into()),
+                slots: vec![SpellSlotView {
+                    spell_id: GROWL,
+                    name: "Growl".into(),
+                    ..Default::default()
+                }],
+            });
+        world.resource_mut::<crate::spell::SpellTargeting>().enter(
+            GROWL,
+            crate::spell::CastCommit::Pet { caster: PET },
+            0x0002,
+        );
+        run(&mut f, r#"CastSpell(1, "pet")"#);
+        assert_eq!(pet_actions(&f), vec![], "no order");
+        assert!(
+            !f.app
+                .world()
+                .resource::<crate::spell::SpellTargeting>()
+                .active(),
+            "the cursor is down"
+        );
     }
 
     /// `/target` then `/cast`: `TargetUnit` commits through `SetSelection 0x493540` before it
