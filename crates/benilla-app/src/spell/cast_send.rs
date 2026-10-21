@@ -136,6 +136,8 @@ pub(crate) struct CastLadder<'w, 's> {
     pub(crate) stand: MessageWriter<'w, crate::player::StandStateRequest>,
     /// The auto-repeat arm and clear, applied after the pass.
     pub(crate) edits: Res<'w, crate::creature_anim::UnitEdits>,
+    /// Whether a send's spell resolves a visual, which its precast needs (`0x6ec220`).
+    pub(crate) precast_visuals: crate::creature_anim::PrecastVisuals<'w, 's>,
     pub(crate) pending: ResMut<'w, crate::spell::PendingCast>,
     pub(crate) queued_melee: ResMut<'w, crate::spell::QueuedMeleeSpell>,
     pub(crate) cooldowns: ResMut<'w, crate::spell::Cooldowns>,
@@ -306,7 +308,9 @@ impl CastLadder<'_, '_> {
         self.ground.clear();
         self.reports.changed();
         let _ = self.commands.0.send(cmd);
-        // The send's own signal (`0x6e589d`), ungated as the attempt's send is (#1583).
+        // The send's precast and own signal (`0x6e5898`, `0x6e589d`), as the attempt's send.
+        let me = self.self_player.single().ok().map(|(e, _)| e);
+        crate::creature_anim::precast_at_send(me, spell_id, &self.edits, &self.precast_visuals);
         self.reports.changed();
         let auto_repeat = self
             .spells
@@ -417,6 +421,7 @@ impl CastLadder<'_, '_> {
             &mut self.sheath,
             &mut self.stand,
             &self.edits,
+            &self.precast_visuals,
             &mut core,
             &mut self.cooldowns,
             &self.spell_mods,
@@ -526,6 +531,7 @@ fn send_spell_cast(
     sheath: &mut MessageWriter<crate::creature_anim::SheathRequest>,
     stand: &mut MessageWriter<crate::player::StandStateRequest>,
     edits: &crate::creature_anim::UnitEdits,
+    precast_visuals: &crate::creature_anim::PrecastVisuals,
     core: &mut CastCore,
     cooldowns: &mut crate::spell::Cooldowns,
     spell_mods: &crate::spell::SpellModifiers,
@@ -856,9 +862,10 @@ fn send_spell_cast(
             None => CastFail::local(spell_id, refusal.reason),
         });
     }
-    // Every rung passed: the attempt fills the pending record with the player as its caster
-    // (`0x6e4fb1`), ahead of the arm and whatever it decides.
+    // Every rung passed: the attempt fills the pending record with the spell (`0x6e4f88`) and the
+    // player as its caster (`0x6e4fb1`), ahead of the arm and whatever it decides.
     core.pending.fill_record();
+    core.pending.fill_record_spell(spell_id);
     // The push (`0x6e5026` → `0x6e4ad0`), which signals: the same spell bailed above, so the slot
     // never holds it here. The arm signals whatever it then decides (`0x6e5333`).
     let held = held(items, commit, def, pending_word.is_some());
@@ -945,10 +952,13 @@ fn send_spell_cast(
             },
         },
     });
-    // The send's own signal (`0x6e589d`), for the active player's send. The reference signals
-    // only beside the precast visual it starts there (`0x6e5898`), so not for a spell whose
-    // precast already plays (`0x6e588f`, the unit's `[+0xc8c]`, which `0x6ec220` sets through
-    // `0x60d020`); benilla starts no precast at the send (#1583), so it signals every send.
+    // The send's precast (`0x6e5898`) and own signal (`0x6e589d`), for the active player's send.
+    // The reference signals only beside the precast it starts, so not for a spell the unit
+    // already precasts (`0x6e588f`, its `[+0xc8c]`); that test reads the unit, which the edit
+    // applies after the pass, so benilla signals every send. The visual starts at the
+    // `SMSG_SPELL_START` (#1583).
+    let me = self_player.single().ok().map(|(e, _)| e);
+    crate::creature_anim::precast_at_send(me, spell_id, edits, precast_visuals);
     core.reports.changed();
     // The GCD arms at the send (`0x6e2de0` from `0x6e58fb`), after the packet; a failed cast
     // result clears it (`0x6e1630`).
@@ -1013,7 +1023,8 @@ fn send_spell_cast(
                         sheath,
                         stand,
                         edits,
-                        commands,
+                        spells,
+                        core,
                     );
                 }
             }
@@ -1184,6 +1195,92 @@ mod tests {
             !take(&mut world),
             "the empty weapon hand's report popped the spell and spent the word"
         );
+    }
+
+    /// The attempt records its spell (`0x6e4f88`); the send, the attempt's or a bind's, starts
+    /// the player's precast of a spell with a visual (`0x6e5898`).
+    #[test]
+    fn the_attempt_records_its_spell_and_the_send_starts_its_precast() {
+        const FIREBALL: u32 = 133;
+        const BLIZZARD: u32 = 10;
+        let (mut world, _rx) = world();
+        crate::creature_anim::install_visuals_for_tests(&mut world, &[FIREBALL, BLIZZARD], &[]);
+        let me = world.spawn(crate::net::SelfPlayer).id();
+        let precast = |world: &World| {
+            world
+                .get::<crate::creature_anim::Precast>(me)
+                .map(|p| p.spell_id)
+        };
+        send(&mut world, FIREBALL, CastCommit::Spell);
+        assert_eq!(
+            world.resource::<crate::spell::PendingCast>().record_spell(),
+            FIREBALL
+        );
+        crate::creature_anim::apply_unit_edits(&mut world);
+        assert_eq!(precast(&world), Some(FIREBALL), "the attempt's send");
+        world
+            .run_system_once(|mut ladder: CastLadder| {
+                ladder.commit_targeted(BLIZZARD, CastCommit::Spell, TargetedBind::Dest([0.0; 3]));
+            })
+            .expect("the ladder runs as a one-shot system");
+        crate::creature_anim::apply_unit_edits(&mut world);
+        assert_eq!(precast(&world), Some(BLIZZARD), "a bind's send");
+    }
+
+    /// TryCast's tail starts the attack after the send's precast (`0x6e5898`, then `0x6e51b5`),
+    /// so StartAttack reads the pressed spell: Slam, which initiates combat, has a visual, and
+    /// `InterruptFlags & 0x8`, returns before the swing (`0x5eccd4`).
+    #[test]
+    fn a_combat_spell_auto_attack_interrupts_starts_no_swing_from_its_own_send() {
+        use benilla_formats::{SpellCatalog, SpellDisplay, SpellVisualCatalog, VisualStages};
+        use std::collections::HashMap;
+        const SLAM: u32 = 1464;
+        const STRIKE: u32 = 1752;
+        const MOB: u64 = 0xF130_0000_0000_0042;
+        const VISUAL: u32 = 1165;
+        let swings = |spell_id: u32| {
+            let (mut world, rx) = world();
+            let combat = |interrupt_flags| SpellDisplay {
+                targets: 0x2,
+                attributes_ex: 0x200,
+                interrupt_flags,
+                visual: VISUAL,
+                ..Default::default()
+            };
+            world.insert_resource(Spells {
+                catalog: SpellCatalog::from_displays(HashMap::from([
+                    (SLAM, combat(0xf)),
+                    (STRIKE, combat(0)),
+                ])),
+                ..Spells::empty_for_tests()
+            });
+            world.insert_resource(crate::creature_anim::SpellVisuals(
+                SpellVisualCatalog::from_tables(
+                    HashMap::from([(VISUAL, VisualStages::default())]),
+                    HashMap::new(),
+                ),
+            ));
+            world.spawn(SelfPlayer);
+            world
+                .run_system_once(move |mut ladder: CastLadder| {
+                    let ctx = cast_target::CastContext {
+                        selection_guid: Some(MOB),
+                        ..ctx()
+                    };
+                    ladder.send(spell_id, &ctx, CastCommit::Spell);
+                })
+                .expect("the ladder runs as a one-shot system");
+            let sent: Vec<_> = rx.try_iter().collect();
+            assert!(
+                matches!(sent.first(), Some(ClientCommand::CastSpell { spell_id: s, .. }) if *s == spell_id),
+                "{spell_id} is sent: {sent:?}"
+            );
+            sent.iter()
+                .filter(|c| matches!(c, ClientCommand::AttackSwing { guid: MOB }))
+                .count()
+        };
+        assert_eq!(swings(SLAM), 0, "Slam's own precast");
+        assert_eq!(swings(STRIKE), 1, "a strike auto-attack does not interrupt");
     }
 
     /// The arm's refusal (`0x6e5045`-`0x6e50a9`) comes after the attempt's push (`0x6e5026`), so

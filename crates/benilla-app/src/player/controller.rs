@@ -69,6 +69,10 @@ pub(super) fn control(
         Res<crate::loading_screen::LoadingScreen>,
         // Our own `[0xb4b3e4]`, which a control verdict on our character writes.
         ResMut<super::OwnControlLost>,
+        // The body's precast spell, which the posture verbs refuse on.
+        Query<Has<crate::creature_anim::Precast>, (With<Embodied>, Without<FlyCam>)>,
+        // `ChrClasses.dbc`, whose relic flag the sheath toggle's ranged candidate reads.
+        Option<Res<crate::chr_classes::ChrClassTable>>,
     ),
     mut commands: Commands,
     mut player: ResMut<Player>,
@@ -284,7 +288,7 @@ pub(super) fn control(
 
     // The server's movement edges and their acks. Speed changes come back unacked while we drive,
     // for the movement stream to ack with the live pose.
-    let speed_acks = wire_in::apply_server_moves(
+    let server_moves = wire_in::apply_server_moves(
         &time,
         &mut commands,
         &mut player,
@@ -304,6 +308,10 @@ pub(super) fn control(
             .ok()
             .map(|(_, t, ..)| (t.translation, server_ride::yaw_of(t.rotation))),
     );
+    let speed_acks = server_moves.speed_acks;
+    if let (true, Ok((e, ..))) = (server_moves.precast_ended, body.single()) {
+        crate::creature_anim::end_precast(&mut commands, e, crate::creature_anim::PrecastTail::Run);
+    }
 
     let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z).normalize_or_zero();
 
@@ -484,14 +492,22 @@ pub(super) fn control(
         // mover reads `CMovement+0x40` after the input phase.
         walk::update(&mut player, &body, binds);
         // The stand state and the sheath toggle, which interlock; returns the committed stand.
+        let reads = posture::PlayerReads {
+            control_lost: speed_capsule.10 .0,
+            precast: speed_capsule.11.single().unwrap_or(false),
+        };
         let stand_now = posture::update(
             &mut player,
             &body,
             binds,
             &net.0,
+            &mut commands,
             &mut net.3,
+            &mut net.14,
             &mut net.10,
             &mut net.15,
+            reads,
+            speed_capsule.12.as_deref().map(|t| &t.0),
             moving,
             turned,
         );
@@ -800,7 +816,7 @@ pub(super) fn control(
             gated,
             mover: player.foreign_mover.or(self_guid),
         };
-        movement_net::stream_self_movement(
+        let precast_ended = movement_net::stream_self_movement(
             &net.0 .0,
             &mut player,
             move_flags_now,
@@ -821,6 +837,13 @@ pub(super) fn control(
             wire_transport,
             skip,
         );
+        if let (true, Ok((e, ..))) = (precast_ended, body.single()) {
+            crate::creature_anim::end_precast(
+                &mut commands,
+                e,
+                crate::creature_anim::PrecastTail::Run,
+            );
+        }
     } else {
         // Free fly. Park the mover first, so a detach mid-move leaves no stale flags for observers
         // to extrapolate; a no-op once stopped.
