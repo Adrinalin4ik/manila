@@ -1572,6 +1572,9 @@ pub(super) fn writer_loop(
                         spell_id,
                         item_guid,
                     } => w.cast_spell_item(spell_id, item_guid),
+                    ClientCommand::CastSpellTradeItem { spell_id, slot } => {
+                        w.cast_spell_trade_item(spell_id, slot)
+                    }
                     ClientCommand::LootMasterGive { guid, slot, target } => {
                         w.loot_master_give(guid, slot, target)
                     }
@@ -1708,7 +1711,7 @@ pub(super) fn writer_loop(
                     ClientCommand::BeginTrade => w.begin_trade(),
                     ClientCommand::BusyTrade => w.busy_trade(),
                     ClientCommand::IgnoreTrade => w.ignore_trade(),
-                    ClientCommand::AcceptTrade => w.accept_trade(),
+                    ClientCommand::AcceptTrade { flag } => w.accept_trade(flag),
                     ClientCommand::UnacceptTrade => w.unaccept_trade(),
                     ClientCommand::CancelTrade => w.cancel_trade(),
                     ClientCommand::SetTradeGold { copper } => w.set_trade_gold(copper),
