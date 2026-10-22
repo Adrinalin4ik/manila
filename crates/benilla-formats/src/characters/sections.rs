@@ -316,7 +316,24 @@ impl CharSections {
     /// The extra skin (`sectionType 0`, `TextureName[1]`), bound uncomposited to M2 texture type 8;
     /// only the fur races author it (tauren).
     pub fn skin_extra_texture(&self, race: u8, sex: u8, skin_color: u8) -> Option<&str> {
+        let skin_color = self.effective_skin(race, sex, skin_color);
         self.tex(race, sex, SECTION_SKIN, 0, skin_color, 1)
+    }
+
+    /// wenilla carry: the skin colour a body is drawn with, colour 0 when the race and sex have no
+    /// base skin row for `skin_color`. Unexplained, and not taken from the reference: a server can
+    /// send a colour the client's tables lack (Capybara: a female Blood Elf with skin 17, where
+    /// CharSections stops at 10 and no archive holds `BloodElfFemaleSkin00_17.blp`), and the owner
+    /// reports the original client never draws such a body white. Which row the reference falls
+    /// back to is not traced; colour 0 is our choice. A colour with its row is returned unchanged.
+    pub fn effective_skin(&self, race: u8, sex: u8, skin_color: u8) -> u8 {
+        if self.skin_texture(race, sex, skin_color).is_none()
+            && self.skin_texture(race, sex, 0).is_some()
+        {
+            0
+        } else {
+            skin_color
+        }
     }
 
     /// The hair row's `TextureName[0]`, colour baked in; meshes use [`Self::hair_mesh_texture`].
@@ -442,6 +459,8 @@ impl CharSections {
         emblem: Option<GuildEmblem>,
         tabard_preview: bool,
     ) -> Option<CompositePlan> {
+        // The face and underwear rows key on the skin colour too, so they follow the base's.
+        let skin = self.effective_skin(race, sex, skin);
         let base = self.skin_texture(race, sex, skin)?.to_owned();
         let mut layers = Vec::new();
         // The head overlays `(sectionType, variation, color, column, tile)` of `0x4782e0`, in order
@@ -938,6 +957,32 @@ mod tests {
             Some("Character\\Human\\Male\\HumanMaleSkin00_03.blp")
         );
         assert_eq!(cs.skin_texture(1, 0, 99), None, "absent color → no texture");
+    }
+
+    /// A colour with no base row composites on colour 0 rather than producing no plan (a white
+    /// body): Capybara's female Blood Elf with skin 17, whose table stops at 10.
+    #[test]
+    fn a_colour_without_its_row_composites_on_colour_0() {
+        let mut sections = HashMap::new();
+        sections.insert(
+            (10, 1, SECTION_SKIN, 0, 0),
+            [
+                "Character\\BloodElf\\Female\\BloodElfFemaleSkin00_00.blp".to_string(),
+                String::new(),
+                String::new(),
+            ],
+        );
+        let cs = CharSections {
+            sections,
+            decoded: std::sync::Mutex::new(DecodeCache::default()),
+        };
+        let plan = cs
+            .composite_plan(10, 1, 17, 0, 0, 0, 0, [None; 8], None, false)
+            .expect("a plan on colour 0");
+        assert_eq!(
+            plan.base,
+            "Character\\BloodElf\\Female\\BloodElfFemaleSkin00_00.blp"
+        );
     }
 
     fn worn(regions: [Option<&str>; 8], geoset_groups: [u32; 3]) -> ItemDisplay {
