@@ -1,15 +1,14 @@
-//! The social feed and drain: the snapshot the FriendsFrame reads, the list events, the `/who`
-//! lines, and the sends for the Lua-side `/who` and LFG [`SocialRequest`] intents. The reference
-//! resolves races, classes and zones engine-side too, before Lua sees a row (`0x5ae160`).
+//! The social feed: the snapshot the FriendsFrame reads, the list events and the `/who` lines. The
+//! reference resolves races, classes and zones engine-side too, before Lua sees a row (`0x5ae160`).
 
 use benilla_formats::AreaTableCatalog;
 use benilla_protocol::messages::WhoEntry;
-use benilla_ui::script::{FriendInfo, IgnoreInfo, SocialRequest, SocialState as VmSocial, WhoInfo};
+use benilla_ui::script::{FriendInfo, IgnoreInfo, SocialState as VmSocial, WhoInfo};
 use bevy::prelude::*;
 
 use crate::area::AreaTableRes;
 use crate::names::NameCache;
-use crate::net::{ClientCommand, NetCommands};
+use crate::net::NetCommands;
 use crate::script_calls::VmWith;
 use crate::ui_action::{show_now, ui_error_text, MessageSink, Shown};
 use crate::ui_unit::{NameTables, UnitNames};
@@ -30,7 +29,7 @@ const WHO_KEYS: [&str; 4] = [
 /// parser (`0x5adf60`) sends more than three rows to `WHO_LIST_UPDATE` and three or fewer to chat
 /// lines, with no event (`0x5adfca`); with `SetWhoToUI` set the event always fires. It compares the
 /// raw wire count, not the 50-capped copy (`0x5adf92`).
-const WHO_CHAT_MAX: usize = 3;
+const WHO_CHAT_MAX: u32 = 3;
 
 /// What the feed last announced, so the list events fire on edges.
 #[derive(Default)]
@@ -114,26 +113,39 @@ pub(super) fn feed_social(
             fires.post("IGNORELIST_UPDATE", Vec::new());
         }
         // `SMSG_WHO`'s two exits ([`WHO_CHAT_MAX`]); a sort fires its own event inside `SortWho`.
-        if social.who_dirty {
-            social.who_dirty = false;
-            if answer_goes_to_the_frame(social.who_to_ui, social.who.len()) {
+        if let Some(raw) = social.who_answer.as_ref().map(|a| a.raw) {
+            if answer_goes_to_the_frame(script.who_to_ui(), raw) {
                 fires.post("WHO_LIST_UPDATE", Vec::new());
             } else {
-                // In wire order: each line is composed inside the parse loop (`0x5ae0a1`), before
-                // the `qsort` at `0x5ae0e2` orders the array `GetWhoInfo` reads.
                 let printed = {
                     let get = |key: &str| script.lua().globals().get::<String>(key).ok();
-                    let wire_order: Vec<WhoInfo> = social
-                        .who
-                        .iter()
-                        .map(|e| who_row(e, areas, unit_names.get()))
-                        .collect();
-                    who_lines(&wire_order, social.who_total, &get)
+                    printed_lines(&social, areas, unit_names.get(), &get)
                 };
                 crate::ui_action::show_messages(script, &mut sink, "ui_social", printed);
             }
+            social.who_answer = None;
         }
     })
+}
+
+/// The chat lines the last `/who` answer prints when it goes to chat: in wire order, each composed
+/// inside the parse loop (`0x5ae0a1`) before the `qsort` at `0x5ae0e2` orders the array
+/// `GetWhoInfo` reads, then the count line with the raw count (`0x5ae0f1`).
+pub(super) fn printed_lines(
+    social: &SocialState,
+    areas: Option<&AreaTableCatalog>,
+    names: UnitNames<'_>,
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Vec<Shown> {
+    let Some(answer) = &social.who_answer else {
+        return Vec::new();
+    };
+    let wire_order: Vec<WhoInfo> = answer
+        .wire
+        .iter()
+        .map(|e| who_row(e, areas, names))
+        .collect();
+    who_lines(&wire_order, answer.raw, get)
 }
 
 /// The VM's snapshot of `lists`, with the selections as the engine holds them now and the `/who`
@@ -150,26 +162,37 @@ fn view(
         ignores: ignore_rows(lists),
         selected_ignore: row_of(lists.ignores.iter().copied(), social.selected_ignore),
         who: who_rows(social, areas, names),
+        // The slot `GetWhoInfo(count + 1)` reads; past the 50th there is none in the array.
+        who_next: social
+            .who_slots
+            .get(social.who_count as usize)
+            .map(|e| who_row(e, areas, names)),
         who_total: social.who_total,
         // The chain rides along: `SortWho` re-sorts inside the binding.
         who_sort: social.who_sort.clone(),
     }
 }
 
-/// Whether an `SMSG_WHO` answer fires `WHO_LIST_UPDATE` (true) or prints chat lines (false).
-fn answer_goes_to_the_frame(to_ui: bool, shown: usize) -> bool {
-    to_ui || shown > WHO_CHAT_MAX
+/// Whether an `SMSG_WHO` answer of `raw` records fires `WHO_LIST_UPDATE` (true) or prints chat
+/// lines (false).
+fn answer_goes_to_the_frame(to_ui: bool, raw: u32) -> bool {
+    to_ui || raw > WHO_CHAT_MAX
 }
 
-/// The chat-routed `/who` output: one line per row in the order given, then the total (`0x5ae0f1`).
-fn who_lines(rows: &[WhoInfo], total: u32, get: &dyn Fn(&str) -> Option<String>) -> Vec<Shown> {
+/// The chat-routed `/who` output: one line per row in the order given, then the count line
+/// (`0x5ae0f1`).
+fn who_lines(rows: &[WhoInfo], count: u32, get: &dyn Fn(&str) -> Option<String>) -> Vec<Shown> {
     use benilla_ui::strings::{fill, Arg};
 
     let chat = |text: String| {
         (!text.is_empty()).then(|| Shown::unkeyed(benilla_ui::messages::MsgKind::Chat, text))
     };
+    // The composer's name for an id with no row (`0x5ae199`, `0x5ae1d2`, `0x5ae20b`).
+    let unknown = get("UNKNOWN").unwrap_or_default();
+    let named = |name: &Option<String>| name.clone().unwrap_or_else(|| unknown.clone());
     let mut lines = Vec::with_capacity(rows.len() + 1);
     for row in rows {
+        let (race, class, zone) = (named(&row.race), named(&row.class), named(&row.zone));
         let key = if row.guild.is_empty() {
             WHO_KEYS[0]
         } else {
@@ -184,19 +207,20 @@ fn who_lines(rows: &[WhoInfo], total: u32, get: &dyn Fn(&str) -> Option<String>)
             Arg::S(&row.name),
             Arg::S(&row.name),
             Arg::D(i64::from(row.level)),
-            Arg::S(&row.race),
-            Arg::S(&row.class),
+            Arg::S(&race),
+            Arg::S(&class),
         ];
         if !row.guild.is_empty() {
             args.push(Arg::S(&row.guild));
         }
-        args.push(Arg::S(&row.zone));
+        args.push(Arg::S(&zone));
         lines.extend(chat(fill(&template, &args)));
     }
-    // `_P1` for any total but one, `GetText`'s plural rule, so zero reads "0 players total".
-    let total_key = if total == 1 { WHO_KEYS[2] } else { WHO_KEYS[3] };
-    if let Some(template) = get(total_key) {
-        lines.extend(chat(fill(&template, &[Arg::D(i64::from(total))])));
+    // `_P1` for any count but one, `GetText`'s plural rule on the count (`0x5ae0f1`), so zero
+    // reads "0 players total".
+    let count_key = if count == 1 { WHO_KEYS[2] } else { WHO_KEYS[3] };
+    if let Some(template) = get(count_key) {
+        lines.extend(chat(fill(&template, &[Arg::D(i64::from(count))])));
     }
     lines
 }
@@ -290,88 +314,48 @@ fn friend_row(
     }
 }
 
-/// The `/who` rows, resolved, then sorted by the chain as the reference sorts every answer
-/// (`0x5ae0e2`); the comparator compares resolved names, so the sort runs after [`who_row`].
+/// The kept `/who` records, resolved, in the array's order, which the chain sorted.
 fn who_rows(
     social: &SocialState,
     areas: Option<&AreaTableCatalog>,
     names: UnitNames<'_>,
 ) -> Vec<WhoInfo> {
-    let mut rows: Vec<WhoInfo> = social
-        .who
+    social.who_slots[..social.who_count as usize]
         .iter()
         .map(|e| who_row(e, areas, names))
-        .collect();
-    social.who_sort.sort(&mut rows);
-    rows
+        .collect()
 }
 
-/// One `/who` row, ids resolved; the wire carries class before race, the Lua API race first.
-fn who_row(entry: &WhoEntry, areas: Option<&AreaTableCatalog>, names: UnitNames<'_>) -> WhoInfo {
+/// One `/who` row, ids resolved, `None` for an id with no row; the wire carries class before
+/// race, the Lua API race first. Each id is bounded whole and signed (`0x5ad75d`, `0x5ad7a0`,
+/// `0x5ad7e3`), never by its low byte.
+pub(super) fn who_row(
+    entry: &WhoEntry,
+    areas: Option<&AreaTableCatalog>,
+    names: UnitNames<'_>,
+) -> WhoInfo {
+    let id = |v: u32| u8::try_from(v).ok();
     WhoInfo {
         name: entry.name.clone(),
         guild: entry.guild.clone(),
         level: entry.level,
-        race: names
-            .race(entry.race as u8)
-            .map(|(display, _)| display)
-            .unwrap_or_default()
-            .to_string(),
-        class: names
-            .class(entry.class as u8)
-            .map(|(display, _)| display)
-            .unwrap_or_default()
-            .to_string(),
+        race: id(entry.race)
+            .and_then(|r| names.race(r))
+            .map(|(display, _)| display.to_string()),
+        class: id(entry.class)
+            .and_then(|c| names.class(c))
+            .map(|(display, _)| display.to_string()),
         zone: areas
+            .filter(|_| (entry.zone as i32) >= 0)
             .and_then(|a| a.name(entry.zone))
-            .unwrap_or_default()
-            .to_string(),
+            .map(str::to_string),
     }
-}
-
-/// Turn the Lua API's `/who` and LFG intents into their sends; the friend and ignore verbs act in
-/// their calls ([`super::SocialSteps`]).
-pub(super) fn drain_social(
-    mut vm: VmWith<ResMut<'static, SocialState>>,
-    commands: Res<NetCommands>,
-    areas: Option<Res<AreaTableRes>>,
-    unit_names: NameTables,
-) {
-    vm.turn(|script, mut social| {
-        let Some(script) = script else {
-            return;
-        };
-        for request in script.take_social_requests() {
-            match request {
-                SocialRequest::SetLookingForGroup { slots, comment } => {
-                    let _ = commands
-                        .0
-                        .send(ClientCommand::SetLookingForGroup { slots, comment });
-                }
-                SocialRequest::LfgQuery { criterion, class } => {
-                    let _ = commands
-                        .0
-                        .send(ClientCommand::LfgQuery { criterion, class });
-                }
-                SocialRequest::Who(filter) => {
-                    let request =
-                        super::who_query(&filter, areas.as_deref().map(|a| &a.0), unit_names.get());
-                    let _ = commands.0.send(ClientCommand::Who {
-                        request: Box::new(request),
-                    });
-                }
-                // Mirror the click the binding applied to the VM's chain. No `who_dirty`: `SortWho`
-                // already fired `WHO_LIST_UPDATE`, once per click as the reference does.
-                SocialRequest::SortWho(sort_type) => social.who_sort.promote(&sort_type),
-                SocialRequest::SetWhoToUi(on) => social.who_to_ui = on,
-            }
-        }
-    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::ClientCommand;
     use benilla_protocol::messages::{friend_result, FriendEntry, FriendStatusUpdate, WhoResults};
     use benilla_ui::script::UiScript;
 
@@ -386,6 +370,10 @@ mod tests {
         }
     }
 
+    fn apply(social: &mut SocialState, results: WhoResults) {
+        social.apply_who(results, None, Default::default());
+    }
+
     fn names(rows: &[WhoInfo]) -> Vec<&str> {
         rows.iter().map(|r| r.name.as_str()).collect()
     }
@@ -395,15 +383,18 @@ mod tests {
     #[test]
     fn the_answer_is_presented_in_the_sort_chains_order() {
         let mut social = SocialState::default();
-        social.apply_who(WhoResults {
-            displayed: 3,
-            total: 3,
-            entries: vec![
-                entry("Galas", 60, ""),
-                entry("erdrin", 12, ""),
-                entry("Bruk", 60, ""),
-            ],
-        });
+        apply(
+            &mut social,
+            WhoResults {
+                displayed: 3,
+                total: 3,
+                entries: vec![
+                    entry("Galas", 60, ""),
+                    entry("erdrin", 12, ""),
+                    entry("Bruk", 60, ""),
+                ],
+            },
+        );
 
         // The seeded chain is zone → level → class → group → name → …: one zone and one class
         // here, so it resolves on level, then name.
@@ -415,6 +406,7 @@ mod tests {
 
         // A Name click: ascending and case-folded, so `erdrin` sorts among the capitals.
         social.who_sort.promote("name");
+        social.sort_who(None, Default::default());
         assert_eq!(
             names(&who_rows(&social, None, Default::default())),
             ["Bruk", "erdrin", "Galas"]
@@ -422,17 +414,21 @@ mod tests {
 
         // The same click again reverses.
         social.who_sort.promote("name");
+        social.sort_who(None, Default::default());
         assert_eq!(
             names(&who_rows(&social, None, Default::default())),
             ["Galas", "erdrin", "Bruk"]
         );
 
         // A fresh answer arrives into that same chain.
-        social.apply_who(WhoResults {
-            displayed: 2,
-            total: 2,
-            entries: vec![entry("Aaa", 1, ""), entry("Zzz", 1, "")],
-        });
+        apply(
+            &mut social,
+            WhoResults {
+                displayed: 2,
+                total: 2,
+                entries: vec![entry("Aaa", 1, ""), entry("Zzz", 1, "")],
+            },
+        );
         assert_eq!(
             names(&who_rows(&social, None, Default::default())),
             ["Zzz", "Aaa"]
@@ -453,24 +449,23 @@ mod tests {
     #[test]
     fn the_chat_lines_come_out_in_wire_order_with_the_total_last() {
         let mut social = SocialState::default();
-        social.apply_who(WhoResults {
-            displayed: 2,
-            total: 2,
-            entries: vec![entry("Zzz", 60, ""), entry("Aaa", 12, "")],
-        });
+        apply(
+            &mut social,
+            WhoResults {
+                displayed: 2,
+                total: 2,
+                entries: vec![entry("Zzz", 60, ""), entry("Aaa", 12, "")],
+            },
+        );
         // A chain that would order them the other way round, to prove it is not consulted.
         social.who_sort.promote("name");
+        social.sort_who(None, Default::default());
         assert_eq!(
             names(&who_rows(&social, None, Default::default())),
             ["Aaa", "Zzz"],
             "the frame's order"
         );
 
-        let wire: Vec<WhoInfo> = social
-            .who
-            .iter()
-            .map(|e| who_row(e, None, Default::default()))
-            .collect();
         // The shipped templates: FrameXML never names these keys, so a stub would echo a guess.
         let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
@@ -479,12 +474,11 @@ mod tests {
             .expect("GlobalStrings.lua in the chain");
         let vm = benilla_ui::script::UiScript::new().expect("VM");
         vm.run(&String::from_utf8_lossy(&src)).expect("runs clean");
-        let lines: Vec<String> = who_lines(&wire, social.who_total, &|key| {
-            vm.lua().globals().get::<String>(key).ok()
-        })
-        .iter()
-        .map(|s| s.text().to_string())
-        .collect();
+        let get = |key: &str| vm.lua().globals().get::<String>(key).ok();
+        let lines: Vec<String> = printed_lines(&social, None, Default::default(), &get)
+            .iter()
+            .map(|s| s.text().to_string())
+            .collect();
 
         assert_eq!(lines.len(), 3, "one per row plus the total: {lines:?}");
         assert!(
@@ -495,11 +489,10 @@ mod tests {
         assert_eq!(lines[2], "2 players total", "the summary comes last");
     }
 
-    /// The comparator ties on an unresolved name (`0x5adbb2`). The reference's `GetWhoInfo`
-    /// (`0x5ad6e0`) shows `UNKNOWN` where benilla shows an empty cell; adopting it must carry the
-    /// miss to the comparator some other way than the string.
+    /// The chat composer `0x5ae160` names an id with no row `UNKNOWN`: the race at `0x5ae199`, the
+    /// class at `0x5ae1d2`, the zone at `0x5ae20b`.
     #[test]
-    fn an_unresolvable_id_leaves_the_name_empty_for_the_comparator() {
+    fn a_chat_line_names_an_id_with_no_row_unknown() {
         let row = who_row(
             &WhoEntry {
                 name: "Nobody".into(),
@@ -512,10 +505,51 @@ mod tests {
             None,
             crate::ui_unit::TestNames::english().names(),
         );
+        let get = |key: &str| match key {
+            "WHO_LIST_FORMAT" => Some("|Hplayer:%s|h[%s]|h: Level %d %s %s - %s".to_string()),
+            "WHO_NUM_RESULTS" => Some("%d player total".to_string()),
+            "UNKNOWN" => Some("Unknown".to_string()),
+            _ => None,
+        };
+        let lines: Vec<String> = who_lines(&[row], 1, &get)
+            .iter()
+            .map(|s| s.text().to_string())
+            .collect();
         assert_eq!(
-            (row.class.as_str(), row.race.as_str(), row.zone.as_str()),
-            ("", "", "")
+            lines,
+            [
+                "|Hplayer:Nobody|h[Nobody]|h: Level 1 Unknown Unknown - Unknown",
+                "1 player total"
+            ]
         );
+    }
+
+    /// The same ids from a race or class wider than a byte: the reference bounds the whole dword
+    /// (`0x5ae176`, `0x5ae1af`), so race 0x101 is no race 1.
+    #[test]
+    fn a_wide_id_names_no_row() {
+        let row = who_row(
+            &WhoEntry {
+                name: "Wide".into(),
+                guild: String::new(),
+                level: 1,
+                class: 0x101,
+                race: 0x101,
+                zone: 0,
+            },
+            None,
+            crate::ui_unit::TestNames::english().names(),
+        );
+        let get = |key: &str| match key {
+            "WHO_LIST_FORMAT" => Some("%s %s %d %s %s - %s".to_string()),
+            "UNKNOWN" => Some("Unknown".to_string()),
+            _ => None,
+        };
+        let lines: Vec<String> = who_lines(&[row], 1, &get)
+            .iter()
+            .map(|s| s.text().to_string())
+            .collect();
+        assert_eq!(lines, ["Wide Wide 1 Unknown Unknown - Unknown"]);
     }
 
     /// Against the shipped strings: the guilded template takes a seventh fill.
@@ -535,9 +569,9 @@ mod tests {
                 name: name.into(),
                 level,
                 guild: guild.into(),
-                race: race.into(),
-                class: class.into(),
-                zone: zone.into(),
+                race: Some(race.into()),
+                class: Some(class.into()),
+                zone: Some(zone.into()),
             };
         let lines: Vec<String> = who_lines(
             &[
@@ -598,8 +632,8 @@ mod tests {
         let korean = crate::ui_unit::TestNames::korean();
         let row = who_row(&entry, None, korean.names());
         assert_eq!(
-            (row.race.as_str(), row.class.as_str()),
-            ("언데드", "마법사")
+            (row.race.as_deref(), row.class.as_deref()),
+            (Some("언데드"), Some("마법사"))
         );
     }
 

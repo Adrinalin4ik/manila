@@ -22,6 +22,8 @@ mod call_tests;
 mod feed;
 mod query;
 mod steps;
+#[cfg(test)]
+mod who_tests;
 mod whois;
 
 pub(crate) use query::parse as who_query;
@@ -31,6 +33,16 @@ pub(crate) use steps::SocialSteps;
 const FRIEND_SLOTS: usize = 50;
 /// The ignore slots (`0x19`), 8 bytes each from `+0x650`.
 const IGNORE_SLOTS: usize = 25;
+/// The `/who` array's slots (`0xc281b8`, stride `0xa0`; the cap at `0x5adf87`).
+const WHO_SLOTS: usize = 50;
+
+/// An `SMSG_WHO` answer the feed has not routed yet: the raw count (the first dword), which picks
+/// the exit (`0x5adfca`) and fills the count line (`0x5ae0f1`), and every record in wire order,
+/// which the chat exit prints as it reads them (`0x5ae0a1`).
+pub(super) struct WhoAnswer {
+    pub(super) raw: u32,
+    pub(super) wire: Vec<benilla_protocol::messages::WhoEntry>,
+}
 
 /// The name cache (`0xc0e228`) as the list's functions reach it, through `0x55f080`.
 pub(crate) trait Names {
@@ -134,19 +146,22 @@ pub(crate) struct SocialState {
     ignores_pending: u32,
     /// The selected ignore's guid (`+0x720`); 0 is none.
     selected_ignore: u64,
-    /// The last `/who` answer; `who_total` is the server's full match count.
-    who: Vec<benilla_protocol::messages::WhoEntry>,
-    who_total: u32,
+    /// The `/who` array (`0xc281b8`): 50 records, the first `who_count` in the chain's order. A
+    /// static the list never frees, so a slot past the count keeps what an earlier answer left.
+    pub(super) who_slots: Vec<benilla_protocol::messages::WhoEntry>,
+    /// The kept count (`0xc2a120`), the raw count capped at 50, and the server's total
+    /// (`0xc2a124`).
+    pub(super) who_count: u32,
+    pub(super) who_total: u32,
+    /// The answer the feed routes next.
+    pub(super) who_answer: Option<WhoAnswer>,
     /// The `/who` sort chain (`SortWho`'s seven `{key, dir}` slots at `0xc2817c`), pushed with the
     /// rows so the binding can re-sort synchronously.
     who_sort: benilla_ui::script::WhoSortChain,
-    /// `SetWhoToUI`, which the Who frame sets on show and clears on hide.
-    who_to_ui: bool,
     /// The lookups that missed, in the order made.
     waits: Vec<NameWait>,
     /// The list events and lines since the last feed, in order, each with the lists it left.
     pub(super) steps: Vec<Step>,
-    who_dirty: bool,
 }
 
 impl Default for SocialState {
@@ -158,24 +173,25 @@ impl Default for SocialState {
             ignores: vec![0; IGNORE_SLOTS],
             ignores_pending: 0,
             selected_ignore: 0,
-            who: Vec::new(),
+            who_slots: vec![Default::default(); WHO_SLOTS],
+            who_count: 0,
             who_total: 0,
+            who_answer: None,
             who_sort: Default::default(),
-            who_to_ui: false,
             waits: Vec::new(),
             steps: Vec::new(),
-            who_dirty: false,
         }
     }
 }
 
 impl SocialState {
     /// Drop the session's state, as the teardown frees the list (`0x5ae2d0`) and the next world
-    /// entry builds an empty one. The `/who` sort chain survives, since the reference initialises
-    /// it once per process (`0x5adc50`, from `0x401666`), never at login.
+    /// entry builds an empty one (`0x5adc50`, from `0x401666`), seeding the `/who` sort chain and
+    /// zeroing the `/who` counts with it (`0x5add04`-`0x5add1e`, only while the list `0xc28168` is
+    /// null). The `/who` array is a static nothing clears, so its records stay.
     pub(crate) fn clear_session(&mut self) {
         *self = Self {
-            who_sort: std::mem::take(&mut self.who_sort),
+            who_slots: std::mem::take(&mut self.who_slots),
             ..Self::default()
         };
     }
@@ -548,11 +564,44 @@ impl SocialState {
         row_of(self.ignores.iter().copied(), self.selected_ignore)
     }
 
-    /// `SMSG_WHO`: the answer to the last query.
-    fn apply_who(&mut self, results: benilla_protocol::messages::WhoResults) {
-        self.who = results.entries;
+    /// `SMSG_WHO` (`0x5adf60`): the kept count is the raw count capped at 50 (`0x5adf87`), the
+    /// first 50 records are stored over the array's first slots (`0x5ae045`), and the kept ones
+    /// are sorted by the chain (`0x5ae0e2`).
+    fn apply_who(
+        &mut self,
+        results: benilla_protocol::messages::WhoResults,
+        areas: Option<&benilla_formats::AreaTableCatalog>,
+        names: crate::ui_unit::UnitNames<'_>,
+    ) {
+        self.who_count = results.displayed.min(WHO_SLOTS as u32);
         self.who_total = results.total;
-        self.who_dirty = true;
+        for (slot, entry) in self.who_slots.iter_mut().zip(&results.entries) {
+            *slot = entry.clone();
+        }
+        self.sort_who(areas, names);
+        self.who_answer = Some(WhoAnswer {
+            raw: results.displayed,
+            wire: results.entries,
+        });
+    }
+
+    /// The `qsort` of the kept records with the chain's comparator `0x5ada00`, at an answer
+    /// (`0x5ae0e2`) and at a `SortWho` click (`0x5ad9d6`); the comparator compares the resolved
+    /// names.
+    pub(super) fn sort_who(
+        &mut self,
+        areas: Option<&benilla_formats::AreaTableCatalog>,
+        names: crate::ui_unit::UnitNames<'_>,
+    ) {
+        let kept = &mut self.who_slots[..self.who_count as usize];
+        let mut rows: Vec<_> = kept
+            .iter()
+            .map(|e| (feed::who_row(e, areas, names), e.clone()))
+            .collect();
+        rows.sort_by(|a, b| self.who_sort.compare(&a.0, &b.0));
+        for (slot, (_, entry)) in kept.iter_mut().zip(rows) {
+            *slot = entry;
+        }
     }
 }
 
@@ -759,15 +808,19 @@ pub(crate) mod net {
         }
     }
 
-    fn on_who(In(ev): In<SessionEvent>, mut social: ResMut<SocialState>) {
+    fn on_who(
+        In(ev): In<SessionEvent>,
+        mut social: ResMut<SocialState>,
+        areas: Option<Res<crate::area::AreaTableRes>>,
+        unit_names: crate::ui_unit::NameTables,
+    ) {
         if let SessionEvent::WhoResults(results) = ev {
-            who(&mut social, results);
+            social.apply_who(results, areas.as_deref().map(|a| &a.0), unit_names.get());
         }
     }
 
     /// The world's teardown `ClientDestroyGame` (`0x401ee0`) frees the list (`0x5ae2d0` at
-    /// `0x401fc6`), at a logout to the character list and a lost link alike. `clear_session`,
-    /// not `default()`, so the per-process sort chain survives.
+    /// `0x401fc6`), at a logout to the character list and a lost link alike.
     fn on_session_end(In(ev): In<SessionEvent>, mut social: ResMut<SocialState>) {
         if let SessionEvent::LoggedOut | SessionEvent::Disconnected { .. } = ev {
             social.clear_session();
@@ -787,14 +840,10 @@ pub(crate) mod net {
     pub(crate) fn ignore_list(social: &mut SocialState, guids: Vec<u64>, names: &dyn Names) {
         social.apply_ignore_list(&guids, names);
     }
-
-    /// `SMSG_WHO`.
-    pub(crate) fn who(social: &mut SocialState, results: benilla_protocol::messages::WhoResults) {
-        social.apply_who(results);
-    }
 }
 
-/// The social window's session: the wire mirror, the VM feed, and the outbound intents.
+/// The social window's session: the wire mirror and the VM feed; the verbs act in their calls
+/// ([`SocialSteps`]).
 pub(crate) struct UiSocialPlugin;
 
 impl Plugin for UiSocialPlugin {
@@ -812,13 +861,7 @@ impl Plugin for UiSocialPlugin {
                 Startup,
                 load_lfg_dungeons.after(benilla_assets::AssetSet::Open),
             )
-            .add_systems(
-                Update,
-                (
-                    feed::feed_social.in_set(UiFeed),
-                    feed::drain_social.in_set(crate::ui_script::UiDrain),
-                ),
-            );
+            .add_systems(Update, feed::feed_social.in_set(UiFeed));
     }
 }
 
@@ -1016,8 +1059,10 @@ mod tests {
         assert_eq!(compare_friends(&on_none, &on_none), 0);
     }
 
+    /// The teardown frees the list (`0x5ae2d0`) and the next world entry builds it again, the sort
+    /// chain seeded with it (`0x5adc50`, `0x5add04`).
     #[test]
-    fn a_logout_keeps_the_sort_chain_and_drops_everything_else() {
+    fn a_logout_drops_the_session_and_seeds_the_sort_chain_again() {
         let mut social = SocialState::default();
         social.apply_friend_list(
             &[FriendEntry {
@@ -1027,21 +1072,17 @@ mod tests {
             &Cached,
         );
         social.apply_ignore_list(&[9], &Cached);
-        social.who_to_ui = true;
         social.who_sort.promote("level");
         social.who_sort.promote("level"); // descending
-        let chain = social.who_sort.clone();
 
         social.clear_session();
         assert!(guids(&social).is_empty());
         assert!(!social.is_ignored(9));
-        assert!(social.who.is_empty());
-        assert!(!social.who_to_ui, "the frame is closed after a logout");
-        assert_eq!(social.who_sort, chain, "the sort chain is process state");
-        assert_ne!(
+        assert_eq!(social.who_count, 0);
+        assert_eq!(
             social.who_sort,
             benilla_ui::script::WhoSortChain::default(),
-            "and the assertion above only means something if it is not the seeded chain"
+            "the chain is the list's, seeded at each world entry"
         );
     }
 
