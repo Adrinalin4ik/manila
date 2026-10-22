@@ -641,7 +641,7 @@ pub(crate) mod schedule_tests {
     /// Does this build carry type names? Bevy has them only under its `debug` feature, which
     /// rides with `benilla-world`'s `dev`. Probed off the census, not a `cfg`, which belongs in
     /// `run_mode` alone; name-dependent tests skip without them.
-    fn type_names_available(c: &Census) -> bool {
+    pub(crate) fn type_names_available(c: &Census) -> bool {
         c.systems.values().any(|s| s.name.contains("benilla_app::"))
     }
 
@@ -933,12 +933,27 @@ pub(crate) mod schedule_tests {
     ///   `portrait::test_bake::sync_test_portraits`,
     ///   `sound::emitter_pool::pump_emitters`, `sound::liquid_loop::drive_liquid_loops` and
     ///   `quest_markers::bake_seat_scale`. It reads its two units' poses for the display range;
-    ///   those move booth, emitter and marker-seat entities, never a unit.
+    ///   those move booth, emitter and marker-seat entities, never a unit;
+    /// - the lanes' drain (`lanes::fire_in_order`), exclusive as the handler table's drain is,
+    ///   against the 80 world systems no declared order places against it, which bevy lists with
+    ///   no component. What they meet of the drain's (its lanes' firings, the VM with the call host,
+    ///   and the unit edits it applies in place: every component a change writes, the cast events,
+    ///   the precast tail's loot release) is the name cache alone, a pure cache, which the
+    ///   persisted-name load writes; `lanes::guard_tests` checks that it stays so, and that no
+    ///   exclusive system is among them. Commands a firing defers, which the drain applies after
+    ///   it, are outside that model;
+    /// - the coinage reflex's trade half (`ui_trade::trim_offer_to_purse`) against five systems
+    ///   that lend the call host, whose trade verbs hold `TradeSession`: `minimap::blips::
+    ///   drive_blip_tooltip`, `ui_auction::feed_auction`, `ui_mail::feed_mail`,
+    ///   `ui_merchant::feed_merchant` and `ui_script::demo_unit_feed`. They meet only when a
+    ///   script there edits the offer in the frame the purse moves, and no frame order is the
+    ///   reference's: its reflex trims inside the coinage field's watcher, at the packet
+    ///   (`0x5ddf30`).
     ///
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
     /// that commutes by construction belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 1_708;
+    const UPDATE_ACTIONABLE_CEILING: usize = 1_784;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -1248,7 +1263,11 @@ pub(crate) mod schedule_tests {
     /// Why a VM holder in `Update` ordered before the tick may stay out of
     /// [`crate::ui_script::UiFeed`], keyed by a suffix of the system's full name, with the
     /// reason.
-    const OUTSIDE_THE_FEED_PHASE: &[(&str, &str)] = &[];
+    const OUTSIDE_THE_FEED_PHASE: &[(&str, &str)] = &[(
+        "::ui_chat::frames::tee_shown_lines",
+        "in the lanes' set after their drain (`lanes::UiLanes`, after `UiFeed` and before the \
+         tick), so the log files take the lines the verbs showed after the drain's own",
+    )];
 
     /// The create's control restore (`player::regain_control_on_arrival`) is registered in the
     /// built client and ordered: after the self create it answers, before the controller and the
