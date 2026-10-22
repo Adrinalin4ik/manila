@@ -96,6 +96,9 @@ pub(crate) struct BindingsState {
     /// pass, so a window deactivate empties it and a key held across an alt-tab resumes, as in
     /// the reference. Keyboard only: mouse edges cannot repeat.
     down: KeyDownList,
+    /// wenilla: the latches a Press and Hold repeat has cast through, with the action it cast
+    /// ([`hold_cast`]). Their release drops its `UseAction`, or a tap would cast twice.
+    hold_fired: Vec<(KeyCode, String, u32)>,
 }
 
 /// The keys believed down, the reference's own list (`0x4248b3`): a press of a key on it is an
@@ -220,12 +223,13 @@ impl BindingsState {
 pub(crate) fn synth_press(
     state: &mut BindingsState,
     script: &mut Option<NonSendMut<UiScript>>,
+    host: &mut Option<crate::script_calls::ScriptCallHost>,
     command: &str,
 ) {
     if state.synth_held(command) {
         return;
     }
-    press(state, script, command, Held::Synth);
+    press(state, script, host, command, Held::Synth);
 }
 
 /// Drop this command's synthetic latch, running its up-half. A key's latch on the same command is
@@ -233,6 +237,7 @@ pub(crate) fn synth_press(
 pub(crate) fn synth_release(
     state: &mut BindingsState,
     script: &mut Option<NonSendMut<UiScript>>,
+    host: &mut Option<crate::script_calls::ScriptCallHost>,
     command: &str,
 ) {
     let mut i = 0;
@@ -241,7 +246,11 @@ pub(crate) fn synth_release(
         {
             let (_, command) = state.latched.remove(i);
             if let Some(s) = script.as_mut() {
-                if let Err(e) = s.execute_binding(&command, false) {
+                // Lent like a key's release, so the up-half's calls apply in the call.
+                let ran = crate::script_calls::lent(s, host.as_mut(), |s| {
+                    s.execute_binding(&command, false)
+                });
+                if let Err(e) = ran {
                     warn!("bindings({command}): {e}");
                 }
             }
@@ -255,8 +264,9 @@ pub(crate) fn synth_release(
 pub(crate) fn synth_release_all(
     state: &mut BindingsState,
     script: &mut Option<NonSendMut<UiScript>>,
+    host: &mut Option<crate::script_calls::ScriptCallHost>,
 ) {
-    release(state, script, Held::Synth);
+    release(state, script, host, Held::Synth);
 }
 
 /// Which files this session's bindings live in: written by [`seed_bindings_for_vm`], read by the
@@ -288,7 +298,7 @@ impl Plugin for BindingsPlugin {
                     // The key sets are seeded at the VM's birth, not here: `seed_bindings_for_vm`
                     // runs in `load_ingame_ui_on_world_entry`, before FrameXML and every addon;
                     // the commands come with the load. wenilla: the hold repeat reads this pass's
-                    // latches and queues ahead of `apply_script_calls`, which runs after UiInput.
+                    // latches, after the dispatch has run their halves.
                     (sync_dispatch, latch_and_dispatch, hold_cast::tick)
                         .chain()
                         .in_set(crate::ui_script::UiInput)
@@ -296,7 +306,7 @@ impl Plugin for BindingsPlugin {
                         .in_set(InWorldGated),
                     // After the tick: the requests are Lua's own (`SaveBindings`), queued by
                     // handlers the tick dispatched, and a save must not wait a frame.
-                    drain_binding_requests.after(crate::ui_script::UiInput),
+                    drain_binding_requests.in_set(crate::ui_script::UiDrain),
                 ),
             );
     }
@@ -369,31 +379,33 @@ fn read_diff(path: &Option<std::path::PathBuf>) -> Option<Vec<(String, Vec<Strin
 
 /// Drain the VM's binding requests: `SaveBindings` writes the set's diff; saving the account set
 /// deletes the character file.
-fn drain_binding_requests(script: Option<NonSendMut<UiScript>>, files: Res<BindingFiles>) {
-    let Some(mut script) = script else { return };
-    for req in script.take_keybind_requests() {
-        let KeybindRequest::Save(which) = req;
-        let text = store::to_diff(&script.keybind_snapshot(), &script.default_bindings());
-        let path = match which {
-            1 => &files.account,
-            2 => &files.character,
-            _ => continue,
-        };
-        if let Some(path) = path {
-            if let Err(e) = crate::local_state::write_atomic(path, &text) {
-                warn!("bindings: saving {}: {e}", path.display());
+fn drain_binding_requests(mut hosted_vm: crate::script_calls::HostedVm, files: Res<BindingFiles>) {
+    hosted_vm.run(|script| {
+        let Some(script) = script else { return };
+        for req in script.take_keybind_requests() {
+            let KeybindRequest::Save(which) = req;
+            let text = store::to_diff(&script.keybind_snapshot(), &script.default_bindings());
+            let path = match which {
+                1 => &files.account,
+                2 => &files.character,
+                _ => continue,
+            };
+            if let Some(path) = path {
+                if let Err(e) = crate::local_state::write_atomic(path, &text) {
+                    warn!("bindings: saving {}: {e}", path.display());
+                }
             }
-        }
-        if which == 1 {
-            if let Some(chr) = &files.character {
-                match crate::local_state::remove_file(chr) {
-                    Ok(()) => info!("bindings: character-specific set deleted"),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => warn!("bindings: deleting {}: {e}", chr.display()),
+            if which == 1 {
+                if let Some(chr) = &files.character {
+                    match crate::local_state::remove_file(chr) {
+                        Ok(()) => info!("bindings: character-specific set deleted"),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => warn!("bindings: deleting {}: {e}", chr.display()),
+                    }
                 }
             }
         }
-    }
+    })
 }
 
 /// Rebuild the dispatch map when the engine table moved (a rebind, a set switch, the seed, a
@@ -401,24 +413,29 @@ fn drain_binding_requests(script: Option<NonSendMut<UiScript>>, files: Res<Bindi
 /// consumers (the action bar's hotkey corners) repaint. The reference signals it from `SetBinding`
 /// (`0x4b805b`), which signals in place, and from the copy of a set into the live table
 /// (`0x4b649d`); reading a `Bindings.xml` (`0x4b6f70`) signals nothing.
-fn sync_dispatch(script: Option<NonSendMut<UiScript>>, mut dispatch: ResMut<BindingDispatch>) {
-    let Some(mut script) = script else { return };
-    let generation = script.keybinds_generation();
-    if *dispatch.seen_generation.get(&script) != Some(generation) {
-        *dispatch.seen_generation.get(&script) = Some(generation);
-        dispatch.map.clear();
-        for (key, command) in script.binding_keys() {
-            match Chord::parse(&key) {
-                Some(ch) => {
-                    dispatch.map.insert(ch, command);
+fn sync_dispatch(
+    mut hosted_vm: crate::script_calls::HostedVm,
+    mut dispatch: ResMut<BindingDispatch>,
+) {
+    hosted_vm.run(|script| {
+        let Some(script) = script else { return };
+        let generation = script.keybinds_generation();
+        if *dispatch.seen_generation.get(script) != Some(generation) {
+            *dispatch.seen_generation.get(script) = Some(generation);
+            dispatch.map.clear();
+            for (key, command) in script.binding_keys() {
+                match Chord::parse(&key) {
+                    Some(ch) => {
+                        dispatch.map.insert(ch, command);
+                    }
+                    None => warn!("bindings: {command}: unpressable chord '{key}' (unknown token)"),
                 }
-                None => warn!("bindings: {command}: unpressable chord '{key}' (unknown token)"),
             }
         }
-    }
-    if script.take_keybinds_signal_owed() {
-        script.fire_event("UPDATE_BINDINGS", vec![]);
-    }
+        if script.take_keybinds_signal_owed() {
+            script.fire_event("UPDATE_BINDINGS", vec![]);
+        }
+    })
 }
 
 /// A wheel delta in lines (notches), whatever unit the OS reported: a trackpad's `Pixel` deltas
@@ -533,6 +550,8 @@ fn latch_and_dispatch(
     mut same_vm: Local<crate::ui_script::VmMemo<bool>>,
     mut focus_lost: MessageReader<bevy::input::keyboard::KeyboardFocusLost>,
     cover: Option<Res<crate::loading_screen::LoadingScreen>>,
+    // Lent to the VM around each binding body, so the calls it makes apply in the call.
+    mut host: Option<crate::script_calls::ScriptCallHost>,
 ) {
     state.just.clear();
     state.fired.clear();
@@ -545,6 +564,7 @@ fn latch_and_dispatch(
     if let Some(script) = script.as_ref() {
         if same_vm.claim(script) {
             state.latched.clear();
+            state.hold_fired.clear();
             state.held.clear();
         }
     }
@@ -639,12 +659,12 @@ fn latch_and_dispatch(
                     if let Some(s) = script.as_mut() {
                         s.note_world_key(&name.to_string());
                     }
-                    press(&mut state, &mut script, command, Held::Key(key));
+                    press(&mut state, &mut script, &mut host, command, Held::Key(key));
                 }
             }
             ButtonState::Released => {
                 state.down.release(key);
-                release(&mut state, &mut script, Held::Key(key));
+                release(&mut state, &mut script, &mut host, Held::Key(key));
                 // The release, to the frame that took the press (`0x765fd0`), here and not in the
                 // key feed so it follows this key's press in event order: a binding's press has
                 // just made the world frame its consumer. PRINTSCREEN arrives as an up alone on
@@ -658,7 +678,8 @@ fn latch_and_dispatch(
                 let Some(s) = script.as_mut() else {
                     continue;
                 };
-                if s.key_up(&name) == KeyUp::Walked(KeyWalk::Declined) && !sup {
+                let up = crate::script_calls::lent(s, host.as_mut(), |s| s.key_up(&name));
+                if up == KeyUp::Walked(KeyWalk::Declined) && !sup {
                     if let Some(token) = chord::key_token(ev.key_code, &layout) {
                         let chord = Chord {
                             alt,
@@ -667,7 +688,7 @@ fn latch_and_dispatch(
                             key: BindKey::Key(token),
                         };
                         if let Some(command) = dispatch.resolve(chord, dev_plane) {
-                            press(&mut state, &mut script, command, Held::Key(key));
+                            press(&mut state, &mut script, &mut host, command, Held::Key(key));
                             state.latched.retain(|(k, _)| *k != Held::Key(key));
                         }
                     }
@@ -697,11 +718,11 @@ fn latch_and_dispatch(
                 key: BindKey::Mouse(b),
             };
             if let Some(command) = dispatch.resolve(chord, false) {
-                press(&mut state, &mut script, command, Held::Mouse(b));
+                press(&mut state, &mut script, &mut host, command, Held::Mouse(b));
             }
         }
         if buttons.just_released(b) {
-            release(&mut state, &mut script, Held::Mouse(b));
+            release(&mut state, &mut script, &mut host, Held::Mouse(b));
         }
     }
 
@@ -714,8 +735,8 @@ fn latch_and_dispatch(
         if let Some(chord) = wheel_chord(&keys, steps > 0) {
             if let Some(command) = dispatch.resolve(chord, false) {
                 for _ in 0..steps.unsigned_abs() {
-                    press(&mut state, &mut script, command, Held::Wheel);
-                    release(&mut state, &mut script, Held::Wheel);
+                    press(&mut state, &mut script, &mut host, command, Held::Wheel);
+                    release(&mut state, &mut script, &mut host, Held::Wheel);
                 }
             }
         }
@@ -732,7 +753,7 @@ fn latch_and_dispatch(
         }
     }
     for k in stuck {
-        release(&mut state, &mut script, k);
+        release(&mut state, &mut script, &mut host, k);
     }
 
     // The calls this pass's binding bodies made act this frame, as the reference's return from
@@ -741,6 +762,17 @@ fn latch_and_dispatch(
         let inputs = s.take_binding_input();
         state.apply_script_input(inputs);
     }
+}
+
+/// The bindings pass once, as the frame runs it, for a test over the whole client: the dispatch
+/// map from the VM's keys, then this frame's key messages, with the call host the world lends.
+#[cfg(test)]
+pub(crate) fn dispatch_once(world: &mut World) {
+    use bevy::ecs::system::RunSystemOnce;
+    world.run_system_once(sync_dispatch).expect("the map syncs");
+    world
+        .run_system_once(latch_and_dispatch)
+        .expect("the keys dispatch");
 }
 
 /// Is this input physically down, per bevy's button planes? The stuck-latch sweep and the
@@ -766,11 +798,13 @@ fn physically_down(
 fn press(
     state: &mut BindingsState,
     script: &mut Option<NonSendMut<UiScript>>,
+    host: &mut Option<crate::script_calls::ScriptCallHost>,
     command: &str,
     key: Held,
 ) {
     if let Some(s) = script.as_mut() {
-        if let Err(e) = s.execute_binding(command, true) {
+        let ran = crate::script_calls::lent(s, host.as_mut(), |s| s.execute_binding(command, true));
+        if let Err(e) = ran {
             warn!("bindings({command}): {e}");
         }
     }
@@ -779,13 +813,35 @@ fn press(
 
 /// A base key's release: drop its latch and run the command's `runOnUp` up-half, even while
 /// typing (the reference completes a pressed binding's release regardless of focus).
-fn release(state: &mut BindingsState, script: &mut Option<NonSendMut<UiScript>>, key: Held) {
+fn release(
+    state: &mut BindingsState,
+    script: &mut Option<NonSendMut<UiScript>>,
+    host: &mut Option<crate::script_calls::ScriptCallHost>,
+    key: Held,
+) {
     let mut i = 0;
     while i < state.latched.len() {
         if state.latched[i].0 == key {
             let (_, command) = state.latched.remove(i);
+            let fired = match key {
+                Held::Key(kc) => state
+                    .hold_fired
+                    .iter()
+                    .position(|(k, c, _)| *k == kc && *c == command)
+                    .map(|at| state.hold_fired.remove(at).2),
+                _ => None,
+            };
             if let Some(s) = script.as_mut() {
-                if let Err(e) = s.execute_binding(&command, false) {
+                let ran = match fired {
+                    // wenilla: a latch a hold repeat cast through drops its release's cast.
+                    Some(action) => hold_cast::release_dropping_use(s, host.as_mut(), action, |s| {
+                        s.execute_binding(&command, false)
+                    }),
+                    None => crate::script_calls::lent(s, host.as_mut(), |s| {
+                        s.execute_binding(&command, false)
+                    }),
+                };
+                if let Err(e) = ran {
                     warn!("bindings({command}): {e}");
                 }
             }
@@ -2254,13 +2310,15 @@ mod tests {
         {
             let world = app.world_mut();
             let mut state = world.remove_resource::<BindingsState>().expect("state");
-            let mut params =
-                bevy::ecs::system::SystemState::<Option<NonSendMut<UiScript>>>::new(world);
-            let mut script = params.get_mut(world);
-            synth_press(&mut state, &mut script, "MOVEFORWARD");
+            let mut params = bevy::ecs::system::SystemState::<(
+                Option<NonSendMut<UiScript>>,
+                Option<crate::script_calls::ScriptCallHost>,
+            )>::new(world);
+            let (mut script, mut host) = params.get_mut(world);
+            synth_press(&mut state, &mut script, &mut host, "MOVEFORWARD");
             assert!(state.synth_held("MOVEFORWARD"));
             // Idempotent within the frame: a second assert does not latch twice.
-            synth_press(&mut state, &mut script, "MOVEFORWARD");
+            synth_press(&mut state, &mut script, &mut host, "MOVEFORWARD");
             assert_eq!(
                 state
                     .latched
@@ -2269,7 +2327,7 @@ mod tests {
                     .count(),
                 1
             );
-            synth_release(&mut state, &mut script, "MOVEFORWARD");
+            synth_release(&mut state, &mut script, &mut host, "MOVEFORWARD");
             assert!(!state.synth_held("MOVEFORWARD"));
             world.insert_resource(state);
         }
@@ -2284,10 +2342,12 @@ mod tests {
         {
             let world = app.world_mut();
             let mut state = world.remove_resource::<BindingsState>().expect("state");
-            let mut params =
-                bevy::ecs::system::SystemState::<Option<NonSendMut<UiScript>>>::new(world);
-            let mut script = params.get_mut(world);
-            synth_press(&mut state, &mut script, "MOVEFORWARD");
+            let mut params = bevy::ecs::system::SystemState::<(
+                Option<NonSendMut<UiScript>>,
+                Option<crate::script_calls::ScriptCallHost>,
+            )>::new(world);
+            let (mut script, mut host) = params.get_mut(world);
+            synth_press(&mut state, &mut script, &mut host, "MOVEFORWARD");
             world.insert_resource(state);
         }
         press_key(&mut app, KeyCode::KeyW);

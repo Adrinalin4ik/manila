@@ -29,7 +29,7 @@ use bevy::input::keyboard::KeyCode;
 use bevy::prelude::*;
 
 use benilla_protocol::messages::ACTION_KIND_SPELL;
-use benilla_ui::script::{ActionUse, ScriptCall, UiScript};
+use benilla_ui::script::{ActionUse, CallHost, CallTail, ScriptCall, UiScript};
 
 use super::{BindingsState, Held};
 use crate::net::{ObjectStore, SelfPlayer};
@@ -66,8 +66,6 @@ pub(super) struct Hold {
     /// False once its body produced something other than one spell `UseAction`: it releases as
     /// stock and never repeats again.
     eligible: bool,
-    /// A repeat's `UseAction` was applied: the release must not cast again.
-    fired: bool,
     last: Option<Instant>,
 }
 
@@ -117,7 +115,7 @@ impl ReadyGate<'_, '_> {
     /// Gates that need no slot: a cursor up, a guarding cast in flight, a channel.
     fn busy(&self, now: Instant) -> bool {
         self.targeting.active()
-            || self.pending.in_flight(now)
+            || self.pending.current().is_some()
             || self.channel.current(now).is_some()
     }
 
@@ -154,34 +152,117 @@ impl ReadyGate<'_, '_> {
     }
 }
 
-/// After the dispatch pass and before the script calls are applied: forget released latches
-/// (dropping a cast release's `UseAction`), take up new ones, and repeat the ready.
+/// The host a hold lends around a binding body: each call is put to `pass` first, and only what
+/// it lets through reaches the world's host ([`crate::script_calls::ScriptCallHost`]). Since
+/// upstream's calls apply inside their verb (#2143), there is no queue left to pick a `UseAction`
+/// out of afterwards; the hold judges it in the call instead, with the input events its verb was
+/// made under still raised, so the protected-call gate reads the key press's as before.
+struct HoldHost<'h, F: FnMut(&mut UiScript, &ScriptCall) -> bool> {
+    inner: Option<&'h mut (dyn CallHost + 'h)>,
+    pass: F,
+}
+
+impl<F: FnMut(&mut UiScript, &ScriptCall) -> bool> CallHost for HoldHost<'_, F> {
+    fn apply(&mut self, script: &mut UiScript, call: ScriptCall) -> Option<CallTail> {
+        if !(self.pass)(script, &call) {
+            return None;
+        }
+        self.inner.as_mut()?.apply(script, call)
+    }
+}
+
+/// The host a repeat lends around its binding body: the body's one spell `UseAction` reaches the
+/// world's host if its slot is ready; any other call marks the hold ineligible and applies nothing.
+/// The verdict is read inside the call, so a page flip in the body is followed.
+struct RepeatHost<'a, 'w, 's> {
+    gated: &'a mut ParamSet<
+        'w,
+        's,
+        (
+            ReadyGate<'static, 'static>,
+            Option<crate::script_calls::ScriptCallHost<'static, 'static>>,
+        ),
+    >,
+    hold: &'a mut Hold,
+    now: Instant,
+    seen_use: bool,
+    cast: bool,
+}
+
+impl CallHost for RepeatHost<'_, '_, '_> {
+    fn apply(&mut self, script: &mut UiScript, call: ScriptCall) -> Option<CallTail> {
+        let ScriptCall::UseAction(u) = &call else {
+            self.hold.eligible = false;
+            return None;
+        };
+        if std::mem::replace(&mut self.seen_use, true) {
+            self.hold.eligible = false;
+            return None;
+        }
+        self.hold.action = Some(u.action);
+        match self.gated.p0().verdict(script, u.action, self.now) {
+            Verdict::Go => {}
+            Verdict::Wait => return None,
+            Verdict::Never => {
+                self.hold.eligible = false;
+                return None;
+            }
+        }
+        self.cast = true;
+        self.gated.p1().as_mut()?.apply(script, call)
+    }
+}
+
+/// A latch's release after a repeat has cast through it: its up-half runs as stock, less the
+/// first `UseAction` of `action`, the cast a tap would otherwise make twice.
+pub(super) fn release_dropping_use<R>(
+    script: &mut UiScript,
+    host: Option<&mut crate::script_calls::ScriptCallHost>,
+    action: u32,
+    f: impl FnOnce(&mut UiScript) -> R,
+) -> R {
+    let mut dropped = false;
+    let mut hold = HoldHost {
+        inner: host.map(|host| host as &mut dyn CallHost),
+        pass: |_: &mut UiScript, call: &ScriptCall| {
+            let ours = !dropped
+                && matches!(call, ScriptCall::UseAction(ActionUse { action: a, .. }) if *a == action);
+            dropped |= ours;
+            !ours
+        },
+    };
+    script.hosted(&mut hold, f)
+}
+
+/// After the dispatch pass: forget released latches, take up new ones, and repeat the ready.
 pub(super) fn tick(
     mut script: Option<NonSendMut<UiScript>>,
     setting: Res<PressAndHoldCasting>,
-    state: Res<BindingsState>,
+    mut state: ResMut<BindingsState>,
     capture: Res<UiKeyboardCapture>,
-    gate: ReadyGate,
+    // The gate reads what the host writes (the cooldowns, the in-flight slot), so they take turns.
+    mut gated: ParamSet<(
+        ReadyGate<'static, 'static>,
+        Option<crate::script_calls::ScriptCallHost<'static, 'static>>,
+    )>,
     mut holds: Local<crate::ui_script::VmMemo<Vec<Hold>>>,
 ) {
+    let state = &mut *state;
     let Some(script) = script.as_mut() else {
         holds.get_for(None).clear();
         return;
     };
     let holds = holds.get(script);
-    let held = |h: &Hold| {
-        state
-            .latched
+    let latched = &state.latched;
+    let held = |key: KeyCode, command: &str| {
+        latched
             .iter()
-            .any(|(k, c)| *k == Held::Key(h.key) && *c == h.command)
+            .any(|(k, c)| *k == Held::Key(key) && c == command)
     };
-    // Released this pass: its up-half has queued the stock cast, which a latch that cast drops.
-    for h in holds.iter().filter(|h| !held(h)) {
-        if let (true, Some(action)) = (h.fired, h.action) {
-            drop_one_use(script, action);
-        }
-    }
-    holds.retain(|h| held(h));
+    // A released latch's cast was dropped by its release (`bindings::release`); what is left
+    // names latches no longer held.
+    holds.retain(|h| held(h.key, &h.command));
+    state.hold_fired.retain(|(k, c, _)| held(*k, c));
     if !setting.0 {
         holds.clear();
         return;
@@ -196,7 +277,6 @@ pub(super) fn tick(
                 command: command.clone(),
                 action: None,
                 eligible: true,
-                fired: false,
                 last: None,
             });
         }
@@ -205,7 +285,7 @@ pub(super) fn tick(
         return;
     }
     let now = Instant::now();
-    if gate.busy(now) {
+    if gated.p0().busy(now) {
         return;
     }
     for h in holds.iter_mut().filter(|h| h.eligible) {
@@ -214,7 +294,7 @@ pub(super) fn tick(
         }
         // A known slot is asked before its body runs, so a held key on cooldown costs no Lua run.
         if let Some(action) = h.action {
-            match gate.verdict(script, action, now) {
+            match gated.p0().verdict(script, action, now) {
                 Verdict::Go => {}
                 Verdict::Wait => continue,
                 Verdict::Never => {
@@ -223,65 +303,41 @@ pub(super) fn tick(
                 }
             }
         }
-        let earlier = script.take_queued_calls();
-        for down in [false, true] {
-            if let Err(e) = script.execute_binding(&h.command, down) {
-                warn!("bindings({}): hold repeat: {e}", h.command);
-            }
-        }
-        // Taken with the input events each call was made under, which the protected-call gate
-        // reads, so a repeat keeps its key press's.
-        let made = script.take_queued_calls();
-        let used = match made.as_slice() {
-            [] => None,
-            // A press carries the item locks it read, so it is cloned, not copied.
-            [benilla_ui::script::QueuedCall {
-                call: ScriptCall::UseAction(u),
-                input,
-            }] => Some((u.clone(), *input)),
-            _ => {
-                h.eligible = false;
-                None
-            }
+        // The body's up-half then its down-half, as a release and a re-press. Its one spell
+        // `UseAction` applies if the slot it names is ready; anything else it makes (a macro's
+        // lines, a second use) marks it ineligible and applies nothing more.
+        let command = h.command.clone();
+        let mut repeat = RepeatHost {
+            gated: &mut gated,
+            hold: &mut *h,
+            now,
+            seen_use: false,
+            cast: false,
         };
-        let keep = used.filter(|(u, _)| {
-            h.action = Some(u.action);
-            match gate.verdict(script, u.action, now) {
-                Verdict::Go => true,
-                Verdict::Wait => false,
-                Verdict::Never => {
-                    h.eligible = false;
-                    false
+        script.hosted(&mut repeat, |script| {
+            for down in [false, true] {
+                if let Err(e) = script.execute_binding(&command, down) {
+                    warn!("bindings({command}): hold repeat: {e}");
                 }
             }
         });
-        // Queue order: what was waiting, then this repeat's cast.
-        let kept = keep.is_some();
-        if let Some((u, input)) = keep {
-            script.requeue_calls(vec![benilla_ui::script::QueuedCall {
-                call: ScriptCall::UseAction(u),
-                input,
-            }]);
-            h.fired = true;
+        let cast = repeat.cast;
+        if cast {
             h.last = Some(now);
-        }
-        script.requeue_calls(earlier);
-        if kept {
+            if let Some(action) = h.action {
+                match state
+                    .hold_fired
+                    .iter_mut()
+                    .find(|(k, c, _)| *k == h.key && *c == h.command)
+                {
+                    Some(entry) => entry.2 = action,
+                    None => state.hold_fired.push((h.key, h.command.clone(), action)),
+                }
+            }
             // One cast per pass: the next latch would only meet this one's in-flight guard.
             break;
         }
     }
-}
-
-/// Remove the first queued `UseAction` of `action`: a released latch's stock cast.
-fn drop_one_use(script: &mut UiScript, action: u32) {
-    let mut calls = script.take_queued_calls();
-    if let Some(i) = calls.iter().position(
-        |c| matches!(&c.call, ScriptCall::UseAction(ActionUse { action: a, .. }) if *a == action),
-    ) {
-        calls.remove(i);
-    }
-    script.requeue_calls(calls);
 }
 
 #[cfg(test)]

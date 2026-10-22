@@ -12,6 +12,7 @@ use super::test_ui::{bag_open, load_ui as load_xml, BAG_UI};
 /// with `extra` in its way and the layer's reshaping, each file once, in the production order.
 fn harness_with(extra: &[&str]) -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     const MENU: &[&str] = &[
         "Interface\\FrameXML\\GlobalStrings.lua",
@@ -246,12 +247,13 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
         "Interface\\FrameXML\\LootFrame.xml",
         "ScrollTemplates.xml",
     ]);
+    s.keep_calls();
     s.set_money(0);
     s.set_container(0, Some(backpack()));
     s.run("MainMenuBarBackpackButton:Click()").unwrap();
     s.set_loot(Some(LootState {
         source_unit: false,
-        fishing: false,
+        has_money: false,
         master_candidates: Vec::new(),
         rows: vec![Some(LootRow {
             item_id: 0,
@@ -710,6 +712,7 @@ fn backpack() -> ContainerState {
             use_fork: Default::default(),
             item_class: None,
             duration_ms: None,
+            field_duration: 0,
             petition: None,
             already_bound: false,
             occupied_seats: None,
@@ -735,6 +738,7 @@ fn backpack() -> ContainerState {
             flags: 0,
             enchants: Vec::new(),
             spell_0: false,
+            spell_charges: [0; 5],
         },
     );
     ContainerState {

@@ -744,6 +744,7 @@ dependencies = [
  "half",
  "image",
  "include_dir",
+ "indexmap",
  "js-sys",
  "kira",
  "libc",

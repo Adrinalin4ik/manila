@@ -83,6 +83,7 @@ fn roster() -> crate::glue_session::roster::Roster {
         class: 1, // Warrior
         gender: 0,
         level: 60,
+        new_character: false,
         skin: 0,
         face: 0,
         hair_style: 0,
@@ -125,6 +126,7 @@ fn descriptor_snapshot(seat: &benilla_ui::script::UnitState) -> benilla_ui::scri
 /// A session's VM: the whole interface, `INSTALLED` walked in dependency order, a real backpack.
 fn seat(root: &Path, seat: Seat) -> UiScript {
     let mut s = UiScript::new().expect("VM");
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
 
     let mut registry: Vec<AddOnInfo> = INSTALLED

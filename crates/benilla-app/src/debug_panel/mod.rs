@@ -148,7 +148,7 @@ impl Plugin for DebugPanelPlugin {
                 Update,
                 (inspect::toggle_inspect, inspect::update_mouseover)
                     .chain()
-                    .after(crate::ui_script::UiInput),
+                    .in_set(crate::ui_script::UiDrain),
             )
             // Always recording; messages persist two frames, so no ordering is needed.
             .add_systems(Update, journal::record_casts)
@@ -293,10 +293,12 @@ fn debug_panel_ui(
     ping: Res<crate::net::PingShared>,
     dropped: Res<crate::net::DroppedOpcodes>,
     mut weather_state: Option<ResMut<benilla_world::weather::WeatherState>>,
-    (mut world, video, mut script): (
+    // The VM with its call host: a CVar write fires `CVAR_UPDATE`, whose handlers' calls apply
+    // inside the verb (`script_calls`' guard).
+    (mut world, video, mut hosted_vm): (
         WorldReadout,
         Res<crate::video::VideoConfig>,
-        Option<NonSendMut<benilla_ui::script::UiScript>>,
+        crate::script_calls::HostedVm,
     ),
 ) -> Result {
     if !debug.open {
@@ -478,7 +480,7 @@ fn debug_panel_ui(
                     egui::CollapsingHeader::new("Lighting & shadows")
                         .default_open(false)
                         .show(ui, |ui| {
-                            lighting_controls::section(ui, &video, script.as_deref_mut());
+                            hosted_vm.run(|script| lighting_controls::section(ui, &video, script));
                         });
 
                     egui::CollapsingHeader::new("Weather")

@@ -1352,14 +1352,7 @@ mod tests {
 
         // Open gaps, each with the window and the click that reach it. The assertion below
         // refuses an entry whose gap has closed.
-        const KNOWN: &[(&str, &str, &str)] = &[
-            (
-                "StaticPopup.xml",
-                "ReplaceTradeEnchant",
-                "a registered 1.12 binding (`0x48d330`) whose body is not yet known; it is built \
-                 once it is. Reached by TRADE_REPLACE_ENCHANT's Accept, an event this engine does not fire yet.",
-            ),
-        ];
+        const KNOWN: &[(&str, &str, &str)] = &[];
 
         let mut missing: Vec<(String, String)> = Vec::new();
         for entry in &gated_chain_entries() {
@@ -1925,13 +1918,15 @@ mod tests {
                  `ShowFriends` too",
             ),
             (
+                "PARTY_INVITE_CANCEL",
+                "UIParent.lua — the invite popup's hide. Its one signal is `SMSG_GROUP_CANCEL`'s \
+                 handler (`0x5e6770`, opcode `0x71`, reads a string, then calls \
+                 `0x48f440`); benilla does not read that packet, and vmangos never sends it",
+            ),
+            (
                 "GOSSIP_ENTER_CODE",
                 "UIParent.lua — the code-entry gossip option (a door with a combination); \
                  benilla's gossip feed carries no code-entry option kind yet",
-            ),
-            (
-                "PLAYER_SKINNED",
-                "UIParent.lua — the corpse-skinned notice; benilla's loot feed does not derive it",
             ),
             (
                 "TRADE_REQUEST",
@@ -1941,11 +1936,6 @@ mod tests {
                  `0x11d`), so StaticPopupDialogs[\"TRADE\"] is \
                  dead code THERE too, and benilla leaves it unproduced: \
                  producing this would be a divergence, not a fix",
-            ),
-            (
-                "TRADE_REPLACE_ENCHANT",
-                "UIParent.lua — the enchant-replacement confirm inside a trade; benilla's trade \
-                 feed does not derive it",
             ),
             (
                 "CLOSE_WORLD_MAP",

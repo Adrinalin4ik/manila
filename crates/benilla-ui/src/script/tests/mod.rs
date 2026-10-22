@@ -93,6 +93,7 @@ mod tooltip_setter_flags;
 mod tooltip_size;
 mod tooltip_spell;
 mod tooltip_unit;
+mod tooltip_unit_status;
 mod toplevel;
 mod update_walk;
 mod usage_lines;
@@ -102,6 +103,7 @@ mod visibility;
 mod wheel;
 mod widget_args;
 mod widget_surface;
+mod world_press_hook;
 mod worldframe;
 mod worldmap;
 

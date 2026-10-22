@@ -33,12 +33,15 @@ const CATEGORIES: [&str; 9] = [
 /// A category id ([`CATEGORIES`]).
 pub(crate) type ConsoleCategory = u8;
 
-/// `debug`: ours, for `preset_dump`, a developer's instrument with no reference registration.
-const DEBUG: ConsoleCategory = 0;
+/// `debug`. Upstream registers its own commands there; ours puts `preset_dump` there too, a
+/// developer's instrument with no reference registration.
+pub(crate) const DEBUG: ConsoleCategory = 0;
 /// `graphics`.
 pub(crate) const GRAPHICS: ConsoleCategory = 1;
 /// `console`.
 const CONSOLE: ConsoleCategory = 2;
+/// `game`.
+pub(crate) const GAME: ConsoleCategory = 4;
 /// `default`.
 const DEFAULT: ConsoleCategory = 5;
 

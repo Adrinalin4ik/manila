@@ -11,8 +11,8 @@ use super::protected::{self, Tag};
 use super::Model;
 
 /// The petition lines an item tooltip prints under the name (`0x854d7c..0x854dd0`): the title and
-/// the creator, keyed `GUILD_CHARTER_*` for a charter, else `PETITION_*`. The signature-count line
-/// is not built: its source is untraced, and vmangos's write of the on-item count is commented out.
+/// the creator, keyed `GUILD_CHARTER_*` for a charter, else `PETITION_*`, then the signature
+/// count.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PetitionSlotView {
     /// The record's charter bit, also `GetPetitionInfo`'s first return.
@@ -21,6 +21,8 @@ pub struct PetitionSlotView {
     pub title: String,
     /// The owner's name from the name cache; `None`, and no line, while the query is in flight.
     pub owner: Option<String>,
+    /// The signatures, the item object's second enchantment dword (`flds+0x44`, `0x52ba51`).
+    pub signatures: u32,
 }
 
 /// One occupied bag slot, resolved by the app from the item object and its template.
@@ -42,7 +44,7 @@ pub struct ContainerSlot {
     /// The template's class (`[rec+0x0]`, read by `0x5d9f30`), `None` while unresolved: a
     /// projectile (6) auto-equips by entry and unlocks as it goes (`0x5e1704`).
     pub item_class: Option<u32>,
-    /// The item's template entry; 0 while unresolved.
+    /// The item object's template entry, 0 until the object carries one.
     pub item_id: u32,
     /// An `|Hitem:…|h[Name]|h` link once the name is known.
     pub link: Option<String>,
@@ -67,6 +69,10 @@ pub struct ContainerSlot {
     /// The template's block 0 names a spell (`+0x11c`, any trigger): `GetInventoryItemCooldown`
     /// runs no query without one (`0x4c8b47`).
     pub spell_0: bool,
+    /// `ITEM_FIELD_SPELL_CHARGES`, the charges left on each spell block (`flds+0x28`): the
+    /// tooltip's charges lines read them (`0x52d9e9`), and the merchant price scales by block 0's
+    /// (`0x52e43d`).
+    pub spell_charges: [i32; 5],
     /// The instance carries `ITEM_FIELD_ITEM_TEXT_ID` (a mail copy): `GetContainerItemInfo`'s
     /// `readable`, which shows the Inspect cursor (`ContainerFrame.lua:638`).
     pub readable: bool,
@@ -92,6 +98,9 @@ pub struct ContainerSlot {
     pub enchants: Vec<super::EnchantView>,
     /// A timed item's lifetime left in ms (`SMSG_ITEM_TIME_UPDATE`), floored to the second.
     pub duration_ms: Option<u64>,
+    /// `ITEM_FIELD_DURATION` as the object carries it (`[item+0x114]+0x24`), 0 for none: a
+    /// nonzero one refuses the auction sell slot (`0x4ce411`).
+    pub field_duration: u32,
     /// A signable charter's petition, printed between the name and the green `ITEM_SIGNABLE`
     /// line; `None` until the record the hover queries arrives.
     pub petition: Option<PetitionSlotView>,
@@ -101,6 +110,13 @@ pub struct ContainerSlot {
 }
 
 impl ContainerSlot {
+    /// An item object whose record the cache does not hold yet, which the feed pushes with its
+    /// entry and no quality: a cooldown query on it asks the record with the callback `0x6e2f70`
+    /// (`0x6e2efb`), whose arrival runs it.
+    pub fn record_pending(&self) -> bool {
+        self.item_id != 0 && self.quality.is_none()
+    }
+
     /// The whole stack of this slot as a cursor payload, as a pickup sets it.
     pub(crate) fn cursor_item(&self, bag: i64, slot: u32) -> CursorItem {
         CursorItem {
@@ -136,8 +152,9 @@ pub enum UseFork {
     Read,
     /// A mail letter, the instance's `ITEM_FIELD_ITEM_TEXT_ID`, opens the reader.
     Letter,
-    /// A lootable template sends `CMSG_OPEN_ITEM` (`0x5d8f7c`), locking the item first
-    /// (`0x5edcd9`).
+    /// A lootable template sends `CMSG_OPEN_ITEM` (`0x5d8f7c`) through `OpenItem`, which locks
+    /// the item (`0x5edcd9`) after its `SetAutoLoot` (`0x5edcb6`): the host's, as that store
+    /// sweeps an open window first.
     Open,
     /// The plain use, and a slot whose template is still in flight, which `0x5d9ff0` reads as
     /// not equippable.
@@ -160,7 +177,8 @@ pub enum UseArm {
 }
 
 /// One `UseContainerItem` call past its gates: the slot, the item it resolved (`0x4fa1a6`) and
-/// the arm it took, whose lock the call has already taken.
+/// the arm it took, whose lock the call has already taken, but the open arm's, which the host
+/// takes ([`UseFork::Open`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContainerUse {
     pub bag: i64,
@@ -341,6 +359,12 @@ impl super::UiScript {
         std::mem::take(&mut self.model_mut().container_equip_asks)
     }
 
+    /// Drain the item entries whose record a cooldown query found missing since the last call, each
+    /// asked with the callback `0x6e2f70`.
+    pub fn take_cooldown_record_asks(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.model_mut().cooldown_record_asks)
+    }
+
     /// Drain the `(bag, slot)` clicks repair mode queued, for `CMSG_REPAIR_ITEM`.
     pub fn take_container_repairs(&mut self) -> Vec<(i64, u32)> {
         std::mem::take(&mut self.model_mut().container_repairs)
@@ -467,13 +491,14 @@ fn custom_cursor(model: &mut super::Model, name: &str) -> bool {
 /// its lock here, in the call, so a later call reads it as the reference's does: the withdraw and
 /// deposit (`0x4fa312`, `0x4fa34b`), the sale (`0x4fa37f`), the open (`0x5edcd9`) and the wrap
 /// paper (`0x5edea0`). The equip arm is not done here: it returns its item, which the call puts on
-/// the cursor ([`use_equip_arm`]). The app sends each arm.
+/// the cursor ([`use_equip_arm`]). The app sends each arm, from the call left in `call`.
 fn use_cleared(
     model: &mut super::Model,
     bag: i64,
     slot: u32,
     on_self: bool,
     may_cast: bool,
+    call: &mut Option<super::ScriptCall>,
 ) -> Option<CursorItem> {
     let s = model
         .containers
@@ -516,7 +541,7 @@ fn use_cleared(
             return None;
         }
     }
-    model.queue_call(super::ScriptCall::UseContainerItem(ContainerUse {
+    *call = Some(super::ScriptCall::UseContainerItem(ContainerUse {
         bag,
         slot,
         guid,
@@ -526,9 +551,7 @@ fn use_cleared(
         may_cast,
     }));
     match arm {
-        UseArm::Withdraw | UseArm::Deposit | UseArm::Sell | UseArm::Item(UseFork::Open) => {
-            cursor::lock_item(model, guid);
-        }
+        UseArm::Withdraw | UseArm::Deposit | UseArm::Sell => cursor::lock_item(model, guid),
         UseArm::Item(UseFork::WrapPaper) => arm_gift_wrap(model, bag, slot),
         UseArm::Item(_) => {}
     }
@@ -539,17 +562,30 @@ fn use_cleared(
 /// `AutoEquipCursorItem` (`0x4fa3ff`), then the item locks unless it is a projectile
 /// (`0x4fa40b`, `0x4fa418`), whose clear unlocked it instead (`0x5e1711`). A bind-on-equip item
 /// sends nothing: it stays held and locked under the question.
-fn use_equip_arm(lua: &Lua, bag: i64, slot: u32, item: CursorItem, on_self: bool, may_cast: bool) {
+fn use_equip_arm(
+    lua: &Lua,
+    bag: i64,
+    slot: u32,
+    item: CursorItem,
+    on_self: bool,
+    may_cast: bool,
+) -> mlua::Result<()> {
     let guid = item.guid;
     let projectile = item.item_class == Some(cursor::ITEM_CLASS_PROJECTILE);
     let step = cursor::equip::auto_equip_from(lua, item, false);
     super::tick::verb(lua, |model| {
-        // An item the verb refused (in the trade window) sends nothing, but still locks (`0x4fa418`).
-        if matches!(
-            step,
-            cursor::equip::AutoEquip::Sent { .. } | cursor::equip::AutoEquip::Asked { .. }
-        ) {
-            model.queue_call(super::ScriptCall::UseContainerItem(ContainerUse {
+        if !projectile {
+            cursor::lock_item(model, guid);
+        }
+    });
+    // An item the verb refused (in the trade window) sends nothing, but still locks (`0x4fa418`).
+    if matches!(
+        step,
+        cursor::equip::AutoEquip::Sent { .. } | cursor::equip::AutoEquip::Asked { .. }
+    ) {
+        super::calls::submit(
+            lua,
+            super::ScriptCall::UseContainerItem(ContainerUse {
                 bag,
                 slot,
                 guid,
@@ -557,12 +593,10 @@ fn use_equip_arm(lua: &Lua, bag: i64, slot: u32, item: CursorItem, on_self: bool
                 asks: matches!(step, cursor::equip::AutoEquip::Asked { .. }),
                 on_self,
                 may_cast,
-            }));
-        }
-        if !projectile {
-            cursor::lock_item(model, guid);
-        }
-    });
+            }),
+        )?;
+    }
+    Ok(())
 }
 
 /// The wrap arm `0x5edea0`: the paper at `(bag, slot)` locks, the cursor takes mode 2 (the cast
@@ -588,14 +622,15 @@ fn arm_gift_wrap(model: &mut super::Model, bag: i64, slot: u32) {
 /// - a split carry places onto an empty or same-item slot, and stays held over another item;
 /// - a vendor row buys into the slot, and an item off the bar is cleared.
 ///
-/// Returns the item a pickup puts on the cursor, which the binding sets past this segment
-/// ([`cursor::pick_up_item`]), so the setter's inner clear signals on its own.
+/// Returns what the binding owes past this segment: the item a pickup puts on the cursor
+/// ([`cursor::pick_up_item`]), so the setter's inner clear signals on its own, or the armed
+/// spell's pick, which applies through the host inside the verb.
 fn pickup_container_item(
     model: &mut super::Model,
     bag: i64,
     slot: u32,
     may_cast: bool,
-) -> Option<CursorItem> {
+) -> ContainerClick {
     // An armed gift wrap completes here, before the cursor is read. `PickupContainerItem` is the
     // only caller of the wrap sender `0x5edfc0`, so an equipped item cannot be wrapped.
     if let Some(wrap) = model.pending_wrap {
@@ -606,7 +641,7 @@ fn pickup_container_item(
             .and_then(|c| c.slots.get(&slot))
             .is_some_and(|s| s.item_id != 0)
         {
-            return None;
+            return ContainerClick::Done;
         }
         // A vanished paper also bails, the wrap armed and the paper locked (`0x5edfef`).
         if !model
@@ -615,7 +650,7 @@ fn pickup_container_item(
             .and_then(|c| c.slots.get(&wrap.slot))
             .is_some_and(|s| s.item_id != 0)
         {
-            return None;
+            return ContainerClick::Done;
         }
         // No eligibility test: the server refuses with an `ERR_CANT_WRAP_*` reason
         // (`SMSG_INVENTORY_CHANGE_FAILURE` 43-48), and a local gate would eat that error line.
@@ -626,7 +661,7 @@ fn pickup_container_item(
         cursor::unlock_item(model, wrap.guid);
         model.ui_cursor = None;
         model.ui_cursor_dirty = true;
-        return None;
+        return ContainerClick::Done;
     }
     // Only a held item (`0x4f9c38`) or a held row, a vendor's or the bar's (`0x4f9c43`), takes the
     // click first. Past them an empty slot does nothing (`0x4f9c4e`), an armed item-targeting
@@ -644,7 +679,7 @@ fn pickup_container_item(
             .and_then(|c| c.slots.get(&slot))
             .is_some_and(|s| s.item_id != 0);
         if occupied && model.item_pick_armed {
-            model.item_picks.push(cursor::ItemPick {
+            return ContainerClick::Pick(cursor::ItemPick {
                 bag,
                 slot,
                 may_cast,
@@ -652,7 +687,7 @@ fn pickup_container_item(
         } else if occupied {
             model.container_repairs.push((bag, slot));
         }
-        return None;
+        return ContainerClick::Done;
     }
     match model.cursor.clone() {
         // The lock gate reads the item's own bit (`0x4f9dc4`), the app's or the client's.
@@ -668,11 +703,13 @@ fn pickup_container_item(
             .get(&bag)
             .and_then(|c| c.slots.get(&slot))
             .filter(|s| s.item_id != 0 && !cursor::item_locked(model, s.guid))
-            .map(|s| s.cursor_item(bag, slot)),
+            .map_or(ContainerClick::Done, |s| {
+                ContainerClick::PickUp(s.cursor_item(bag, slot))
+            }),
         // The cancel is `ClearCursor(1,1)` (`0x4f9e0e`): the unlock, then `CURSOR_UPDATE`.
         Some(CursorPayload::Item(held)) if held.bag == bag && held.slot == slot => {
             cursor::clear_cursor(model);
-            None
+            ContainerClick::Done
         }
         Some(CursorPayload::Item(held)) => {
             // Cloned so the moves below can borrow `model`; an unresolved slot reads as empty.
@@ -706,14 +743,14 @@ fn pickup_container_item(
                     cursor::clear(model, cursor::Clear::KEEP_LOCK);
                 }
             }
-            None
+            ContainerClick::Done
         }
         // Mode 5, a held vendor row, buys into this slot whatever it holds (`0x4f9efa` tests
         // `[0xb4d900] == 5`): `CMSG_BUY_ITEM_IN_SLOT` (0x1a3) with count 1, and the cursor clears
         // either way; with no vendor open the row stays held (`0x4f9f0f`). Deviation: a row that
         // no longer resolves is refused, as `0x4c7300` does, because this path dereferences it
         // unchecked (`0x4f9f35`), a latent null deref.
-        Some(CursorPayload::Merchant(_)) if model.merchant.is_none() => None,
+        Some(CursorPayload::Merchant(_)) if model.merchant.is_none() => ContainerClick::Done,
         Some(CursorPayload::Merchant(held)) => {
             let entry = model
                 .merchant
@@ -725,14 +762,24 @@ fn pickup_container_item(
                 model.merchant_slot_buys.push((bag, slot, entry));
             }
             cursor::clear_cursor(model);
-            None
+            ContainerClick::Done
         }
         // Mode 7, an item off the bar, is a held row too, and only cleared (`0x4f9f41`).
         Some(CursorPayload::Action(_)) => {
             cursor::clear_cursor(model);
-            None
+            ContainerClick::Done
         }
     }
+}
+
+/// What a bag click leaves its binding past the click's segment.
+enum ContainerClick {
+    /// Done inside the segment.
+    Done,
+    /// The item a pickup puts on the cursor.
+    PickUp(CursorItem),
+    /// The armed item-targeting spell's pick (`0x4f9c54`), a call for the host.
+    Pick(cursor::ItemPick),
 }
 
 /// Queue one move, the shared tail of every clearing branch above.
@@ -901,13 +948,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 slot,
                 "Usage: GetContainerItemCooldown(index, slot)",
             )?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let held = key.is_some_and(|k| {
-                model
-                    .containers
-                    .get(&k.0)
-                    .is_some_and(|c| c.slots.contains_key(&k.1))
-            });
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let slot = key.and_then(|k| model.containers.get(&k.0)?.slots.get(&k.1));
+            let held = slot.is_some();
+            // The query asks a missing record with the callback `0x6e2f70` (`0x6e2efb`).
+            if let Some(entry) = slot.filter(|s| s.record_pending()).map(|s| s.item_id) {
+                model.cooldown_record_asks.push(entry);
+            }
             Ok(if held {
                 item_cooldown_triple(
                     key.and_then(|k| model.container_cooldowns.get(&k).copied()),
@@ -1019,10 +1066,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             super::tick::verb(lua, cursor::clear_cursor);
             // The item's on-use spell casts through `TryCastSpell`, behind the gate's tag 2.
             let may_cast = protected::gate(lua, Tag::CAST);
-            if let Some(item) = super::tick::verb(lua, |model| {
-                use_cleared(model, bag, slot, on_self, may_cast)
-            }) {
-                use_equip_arm(lua, bag, slot, item, on_self, may_cast);
+            let mut call = None;
+            let equip = super::tick::verb(lua, |model| {
+                use_cleared(model, bag, slot, on_self, may_cast, &mut call)
+            });
+            if let Some(call) = call {
+                super::calls::submit(lua, call)?;
+            }
+            if let Some(item) = equip {
+                use_equip_arm(lua, bag, slot, item, on_self, may_cast)?;
             }
             Ok(())
         })?,
@@ -1045,10 +1097,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // An armed item-targeting spell binds the item through `BindSpellTargetObject`, behind
             // the gate's tag 2.
             let may_cast = protected::gate(lua, Tag::CAST);
-            if let Some(item) = super::tick::verb(lua, |model| {
+            match super::tick::verb(lua, |model| {
                 pickup_container_item(model, bag, slot, may_cast)
             }) {
-                cursor::pick_up_item(lua, item);
+                ContainerClick::Done => {}
+                ContainerClick::PickUp(item) => cursor::pick_up_item(lua, item),
+                ContainerClick::Pick(pick) => {
+                    super::calls::submit(lua, super::ScriptCall::PickItem(pick))?
+                }
             }
             Ok(())
         })?,
@@ -1260,6 +1316,7 @@ mod tests {
                 use_fork: Default::default(),
                 item_class: None,
                 duration_ms: None,
+                field_duration: 0,
                 petition: None,
                 already_bound: false,
                 occupied_seats: None,
@@ -1278,6 +1335,7 @@ mod tests {
                 equip_slots: Vec::new(),
                 cooldown: None,
                 spell_0: false,
+                spell_charges: [0; 5],
                 readable: false,
                 creator: None,
                 gift_creator: None,
@@ -1612,6 +1670,7 @@ mod tests {
                 .collect()
         };
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(backpack()));
         s.run("UseContainerItem(0, 1)").unwrap();
         s.run(r#"RunScript("UseContainerItem(0, 1)")"#).unwrap();
@@ -1629,9 +1688,12 @@ mod tests {
         s.run_binding(r#"RunScript("PickupContainerItem(0, 1)")"#)
             .unwrap();
         assert_eq!(
-            s.take_item_picks()
-                .iter()
-                .map(|p| (p.bag, p.slot, p.may_cast))
+            s.take_script_calls()
+                .into_iter()
+                .map(|c| match c {
+                    super::super::ScriptCall::PickItem(p) => (p.bag, p.slot, p.may_cast),
+                    other => panic!("not a pick: {other:?}"),
+                })
                 .collect::<Vec<_>>(),
             [(0, 1, true), (0, 1, false), (0, 1, true)]
         );
@@ -1640,6 +1702,7 @@ mod tests {
     #[test]
     fn use_container_item_queues_intents() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(backpack()));
         s.run("UseContainerItem(0, 1)").unwrap();
         s.run("UseContainerItem(0, 4, 'target')").unwrap();
@@ -1654,6 +1717,7 @@ mod tests {
     #[test]
     fn use_container_item_takes_its_arm_and_the_arms_lock_in_the_call() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let arm = |s: &mut UiScript, bag: i64| {
             s.run(&format!("UseContainerItem({bag}, 1)")).unwrap();
             let calls = s.take_script_calls();
@@ -1712,6 +1776,7 @@ mod tests {
     #[test]
     fn the_equip_arm_needs_control_or_a_taxi() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(forked_bag(super::UseFork::Equip)));
         s.set_player_control(false);
         s.run("UseContainerItem(0, 1)").unwrap();
@@ -1737,6 +1802,7 @@ mod tests {
     #[test]
     fn the_open_arm_runs_the_requirement_and_control_gates_before_its_lock() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(forked_bag(super::UseFork::Open)));
 
         s.set_player_control(false);
@@ -1766,13 +1832,14 @@ mod tests {
         assert_eq!(s.take_ui_errors(), vec!["ERR_CANT_USE_ITEM"]);
         assert!(!s.item_locked(0x11));
 
-        // Control back, the requirement met: the open locks and goes out.
+        // Control back, the requirement met: the open goes out, for the host to lock past its
+        // `SetAutoLoot` (`0x5edcb6`, `0x5edcd9`).
         s.set_player_control(true);
         s.set_item_template(871, template(0, 0, 5));
         s.run("UseContainerItem(0, 1)").unwrap();
         assert!(s.take_ui_errors().is_empty());
         assert_eq!(s.take_script_calls().len(), 1);
-        assert!(s.item_locked(0x11));
+        assert!(!s.item_locked(0x11));
     }
 
     /// The dispatcher's order (`0x5d8d00`): the gift, wrapping paper and quest-starter arms run
@@ -1784,6 +1851,7 @@ mod tests {
         use super::UseFork::{Equip, Letter, Open, Plain, Quest, Read, Unwrap, WrapPaper};
         let refusals = |fork, level_ok: bool, control: bool| {
             let mut s = UiScript::new().unwrap();
+            s.keep_calls();
             s.set_container(0, Some(forked_bag(fork)));
             s.set_player_control(control);
             s.set_player_req_state(crate::script::PlayerReqState {
@@ -1840,6 +1908,7 @@ mod tests {
         let mut slot = forked_bag(super::UseFork::Plain);
         slot.slots.get_mut(&1).unwrap().use_spell = 7744;
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(slot.clone()));
         s.set_player_control(false);
 
@@ -1899,6 +1968,7 @@ mod tests {
     #[test]
     fn use_container_item_skips_an_empty_slot_and_a_locked_item() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(backpack()));
         s.lock_item(0x10a); // slot 1, a send's lock
         s.run("UseContainerItem(0, 1) UseContainerItem(0, 3)")
@@ -1921,6 +1991,7 @@ mod tests {
     #[test]
     fn right_click_puts_a_held_item_back_then_uses_the_clicked_one() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(backpack()));
         s.run("PickupContainerItem(0, 1)").unwrap();
         assert!(s.cursor_item().is_some());
@@ -1941,6 +2012,7 @@ mod tests {
     #[test]
     fn right_click_cancels_an_armed_gift_wrap_then_uses_the_clicked_one() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(backpack()));
         s.arm_gift_wrap(0, 1);
         s.run("UseContainerItem(0, 4)").unwrap();
@@ -2002,6 +2074,7 @@ mod tests {
                 use_fork: Default::default(),
                 item_class: None,
                 duration_ms: None,
+                field_duration: 0,
                 petition: None,
                 already_bound: false,
                 occupied_seats: None,
@@ -2020,6 +2093,7 @@ mod tests {
                 equip_slots: Vec::new(),
                 cooldown: None,
                 spell_0: false,
+                spell_charges: [0; 5],
                 readable: false,
                 creator: None,
                 gift_creator: None,
@@ -2153,7 +2227,7 @@ mod tests {
         );
         s.set_container(0, Some(state));
 
-        assert!(split_container_item(&s.lua, 0, 1, 3));
+        assert!(split_container_item(&s.lua, 0, 1, 3).unwrap());
         let held = s.cursor_item().expect("the split carry");
         assert_eq!(
             (held.bag, held.slot, held.item_id, held.count),
@@ -2175,7 +2249,7 @@ mod tests {
 
         // The source stays locked until the server's answer, its stack-count write (`0x5d9400`).
         assert!(
-            !split_container_item(&s.lua, 0, 1, 3),
+            !split_container_item(&s.lua, 0, 1, 3).unwrap(),
             "locked for the answer"
         );
         s.unlock_item(0x10a);
@@ -2202,26 +2276,30 @@ mod tests {
     #[test]
     fn split_of_the_whole_stack_is_a_plain_pickup_and_an_oversized_count_is_refused() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(backpack())); // slot 1: a 5-stack
-        assert!(split_container_item(&s.lua, 0, 1, 5));
+        assert!(split_container_item(&s.lua, 0, 1, 5).unwrap());
         assert_eq!(s.cursor_item().unwrap().count, None);
         // A count above the stack, or below 1, is refused before the clear (`0x4fa06f`,
         // `0x4fa064`): a held macro stays held.
         s.run("ClearCursor()").unwrap();
         let macro_payload =
             crate::script::cursor::CursorPayload::Macro(crate::script::cursor::CursorMacro {
-                index: 1,
+                id: 1,
                 texture: None,
             });
         s.set_cursor_for_test(macro_payload.clone());
         for count in [6, 99, 0, -1] {
-            assert!(!split_container_item(&s.lua, 0, 1, count), "{count}");
+            assert!(
+                !split_container_item(&s.lua, 0, 1, count).unwrap(),
+                "{count}"
+            );
         }
         assert_eq!(s.cursor_payload(), Some(macro_payload));
         // Past the gates the split stops spell targeting (`0x4fa07d`).
         s.run("ClearCursor()").unwrap();
         s.set_spell_targeting(true);
-        assert!(split_container_item(&s.lua, 0, 1, 2));
+        assert!(split_container_item(&s.lua, 0, 1, 2).unwrap());
         assert!(s.take_stop_targeting());
     }
 
@@ -2602,5 +2680,29 @@ mod tests {
         let (start, _, _) = poll(&s);
         assert_eq!(start, s.eval::<f64>("return GetTime()").unwrap());
         assert!((start - 100.02).abs() < 1e-9);
+    }
+
+    /// `UseContainerItem`'s use and equip arms hand their call to the lent host inside the call.
+    #[test]
+    fn container_uses_apply_in_the_call_with_a_host_lent() {
+        use crate::script::ScriptCall;
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(backpack()));
+        let used =
+            crate::script::host::test_support::applied_in_call(&mut s, "UseContainerItem(0, 1)");
+        let used_slot = |u: &super::ContainerUse| (u.bag, u.slot) == (0, 1);
+        assert!(
+            matches!(used.as_slice(), [ScriptCall::UseContainerItem(u)] if used_slot(u)),
+            "{used:?}"
+        );
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(forked_bag(super::UseFork::Equip)));
+        let equipped =
+            crate::script::host::test_support::applied_in_call(&mut s, "UseContainerItem(0, 1)");
+        let equip_arm = super::UseArm::Item(super::UseFork::Equip);
+        assert!(
+            matches!(equipped.as_slice(), [ScriptCall::UseContainerItem(u)] if u.arm == equip_arm),
+            "{equipped:?}"
+        );
     }
 }

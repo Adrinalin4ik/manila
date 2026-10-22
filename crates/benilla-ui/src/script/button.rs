@@ -727,8 +727,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     "Usage: {who}:SetFontString(fontstring)"
                 )));
             };
-            // Two checks in the reference's order, a widget at all (`0x780b27`), then a FontString
-            // (`0x780b90`), so a Frame or a Texture gets the second message.
+            // Two checks in the reference's order, an object at all (`0x780b27`), then a FontString
+            // (`0x780b90`), so a Frame, a Texture or a Font object gets the second message.
             let rh = {
                 let not_an_object = || {
                     mlua::Error::runtime(format!(
@@ -737,9 +737,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 };
                 let id = super::object::decode_id(&fs).map_err(|_| not_an_object())?;
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                let known_widget =
-                    model.id_to_frame.contains_key(&id) || model.id_to_region.contains_key(&id);
-                if !known_widget {
+                let known_object = model.id_to_frame.contains_key(&id)
+                    || model.id_to_region.contains_key(&id)
+                    || model.fonts.of_handle(id).is_some();
+                if !known_object {
                     return Err(not_an_object());
                 }
                 match model.id_to_region.get(&id).copied() {
@@ -1208,13 +1209,15 @@ pub(super) fn click_button(lua: &Lua, id: u32, button: &str, down: bool, scripte
     if !down {
         super::nameplate::note_click(lua, id, button);
     }
-    // The take runs whatever the handler did (`0x4c1867`): a row whose `OnClick` errored still
-    // loots.
+    // The take runs whatever the handler did (`0x4c1867`), inside the click: a row whose `OnClick`
+    // errored still loots, and the click's next listener reads what the take did.
     if let Some(slot) = take_loot {
-        // The slot is 0-based; the take queue speaks the 1-based row.
-        lua.app_data_mut::<Model>()
-            .expect("model app_data")
-            .loot_picks
-            .push(slot + 1);
+        // The slot is 0-based; the call speaks the 1-based row.
+        let take = super::ScriptCall::Loot(super::loot::LootCall::Take(slot + 1));
+        if let Err(e) = super::calls::submit(lua, take) {
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .record_lua_error(&e);
+        }
     }
 }

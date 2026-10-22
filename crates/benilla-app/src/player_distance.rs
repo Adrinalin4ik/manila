@@ -1106,11 +1106,10 @@ fn sync_ghosts(
 /// hides on leaving it (the owner, 2026-10-19; the leave line kept it up 20% past the ring) -
 /// with the shard we see of it and its count.
 fn feed_shard_info(
-    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     shards: Res<PlayerShards>,
     player: Option<Res<crate::player::Player>>,
 ) {
-    let Some(mut script) = script else { return };
     let eye = player.as_deref().filter(|p| p.active).map(|p| p.pos);
     let keep2 = shards.radius * shards.radius;
     let area = eye.and_then(|eye| {
@@ -1128,7 +1127,13 @@ fn feed_shard_info(
         let k = a.counts.len().max(1);
         (shards.ours(k) as u32, k as u32)
     });
-    script.set_player_shard(shards.on, area);
+    // Held with the call host, as every VM writer is (`script_calls`' guard): a handler this
+    // write fires makes its calls inside the verb.
+    hosted_vm.run(|script| {
+        if let Some(script) = script {
+            script.set_player_shard(shards.on, area);
+        }
+    });
 }
 
 impl Plugin for PlayerDistancePlugin {
@@ -1153,7 +1158,8 @@ impl Plugin for PlayerDistancePlugin {
             PostUpdate,
             draw_shards.in_set(benilla_world::billboard::BillboardPlace),
         )
-        .add_systems(Update, sync_ghosts)
+        // After the lanes' drain, whose firings move units: a disc follows this frame's position.
+        .add_systems(Update, sync_ghosts.after(crate::lanes::fire_in_order))
         .add_systems(Update, feed_shard_info.in_set(crate::ui_script::UiFeed));
     }
 }

@@ -8,6 +8,7 @@ use benilla_ui::script::{
 
 fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     super::test_ui::load_social_ui(&mut s);
     s
@@ -17,6 +18,10 @@ fn visible(s: &UiScript, frame: &str) -> bool {
     s.eval::<bool>(&format!("return {frame}:IsVisible()"))
         .unwrap()
 }
+
+/// Our guid: the cell `IsRaidLeader` and `IsPartyLeader` compare the leader's with (`0x4bb8c0`,
+/// `0x4e9130`).
+const ME: u64 = 0x5E1F;
 
 fn text_of(s: &UiScript, region: &str) -> String {
     s.eval::<String>(&format!("return {region}:GetText() or \"\""))
@@ -50,8 +55,7 @@ fn row(
 
 /// Pushes a roster and fires its event, as `ui_party`'s `feed_party` does.
 fn push_raid(s: &mut UiScript, raid: Vec<RaidMemberInfo>) {
-    // `members` is our own subgroup's slice; non-empty, it makes `IsPartyLeader()` and
-    // `IsRaidLeader()` answer 1 for `leader_index` 0.
+    // `members` is our own subgroup's slice. We lead: the leader cell holds our guid.
     let members = raid
         .iter()
         .skip(1)
@@ -64,8 +68,8 @@ fn push_raid(s: &mut UiScript, raid: Vec<RaidMemberInfo>) {
     s.set_party(PartyState {
         members,
         leader_index: 0,
-        leader_guid: 0, // the player leads; their guid is unset in this fixture
-        own_guid: 0,
+        leader_guid: ME,
+        own_guid: ME,
         raid,
         loot_method: "group".into(),
         master_looter: None,
@@ -167,13 +171,15 @@ fn convert_to_raid_is_live_only_for_a_party_leader() {
     );
     assert!(!visible(&s, "RaidFrameAddMemberButton"));
 
-    // A party we lead: `leader_index == 0` with members.
+    // A party we lead: the leader cell holds our guid.
     s.set_party(PartyState {
         members: vec![PartyMemberInfo {
             name: "Alice".into(),
             guid: 0xA,
         }],
         leader_index: 0,
+        leader_guid: ME,
+        own_guid: ME,
         ..Default::default()
     });
     s.fire_event("PARTY_MEMBERS_CHANGED", Vec::new());
@@ -196,6 +202,8 @@ fn convert_to_raid_is_live_only_for_a_party_leader() {
             guid: 0xA,
         }],
         leader_index: 1,
+        leader_guid: 0xA,
+        own_guid: ME,
         ..Default::default()
     });
     s.fire_event("PARTY_LEADER_CHANGED", Vec::new());
@@ -358,6 +366,8 @@ fn a_units_health_and_level_repaint_only_that_row() {
             guid: raid[1].guid,
         }],
         leader_index: 0,
+        leader_guid: ME,
+        own_guid: ME,
         raid: raid.clone(),
         ..Default::default()
     });
@@ -418,6 +428,8 @@ fn ready_check_is_the_leaders_and_add_member_is_everyones() {
             guid: raid[1].guid,
         }],
         leader_index: 1,
+        leader_guid: raid[1].guid,
+        own_guid: ME,
         raid,
         ..Default::default()
     });
@@ -489,6 +501,8 @@ fn only_the_leader_may_drag() {
             guid: raid[1].guid,
         }],
         leader_index: 1,
+        leader_guid: raid[1].guid,
+        own_guid: ME,
         raid,
         ..Default::default()
     });
@@ -790,6 +804,8 @@ fn the_ready_check_popup_opens_and_answers() {
     push_raid(&mut s, twelve());
     assert!(!visible(&s, "ReadyCheckFrame"), "nothing to answer yet");
 
+    // The open form arms the deadline (`0x4ba535`) before it signals (`0x4ba53a`).
+    s.ready_check_request(false);
     s.fire_event("READY_CHECK", Vec::new());
     assert!(visible(&s, "ReadyCheckFrame"), "UIParent's arm opens it");
     assert!(
@@ -801,7 +817,7 @@ fn the_ready_check_popup_opens_and_answers() {
     s.run("ReadyCheckFrameYesButton:Click()").unwrap();
     assert_eq!(
         s.take_party_requests(),
-        vec![PartyRequest::ReadyCheckAnswer(true)]
+        vec![PartyRequest::ReadyCheckAnswer(1)]
     );
     assert!(!visible(&s, "ReadyCheckFrame"));
 
@@ -809,7 +825,7 @@ fn the_ready_check_popup_opens_and_answers() {
     s.run("ReadyCheckFrameNoButton:Click()").unwrap();
     assert_eq!(
         s.take_party_requests(),
-        vec![PartyRequest::ReadyCheckAnswer(false)],
+        vec![PartyRequest::ReadyCheckAnswer(0)],
         "No passes no argument at all, and absent must mean not-ready"
     );
 

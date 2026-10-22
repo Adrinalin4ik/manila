@@ -20,9 +20,9 @@ use crate::client_state::ClientState;
 use crate::creature_anim::select::{move_flags, MovementState};
 use crate::entities::mount::MountChild;
 use crate::names::NameCache;
-use crate::net::{Guid, NetEntity, NetStatus, ObjectStore, Reputations, SelfGuid, SelfPlayer};
+use crate::net::{Guid, NetEntity, NetStatus, ObjectStore, SelfGuid, SelfPlayer};
 use crate::player::Player;
-use crate::target::{ring_reaction, Factions, Hovered, Selection};
+use crate::target::{Hovered, RelationWorld, Selection};
 // Both moved from `ui_cast` into `spell::inflight` upstream (decision 2337's cast ladder) and are
 // re-exported from `spell`; `ui_cast`'s own import of them is private.
 use crate::spell::{ActiveChannel, PendingCast};
@@ -72,8 +72,9 @@ pub(crate) struct BridgeReadout<'w, 's> {
         Without<SelfPlayer>,
     >,
     names: Option<Res<'w, NameCache>>,
-    factions: Option<Res<'w, Factions>>,
-    reputations: Option<Res<'w, Reputations>>,
+    /// Upstream's relation model (`target::relations`, #2017), which replaced `ring_reaction`:
+    /// the unit's reaction toward the player, as the ring and the inspect card read it.
+    relations: RelationWorld<'w, 's>,
     /// `ChrClasses.dbc` and the creature-type resolver's form table, as one parameter:
     /// upstream bundles them because its feeders sit at Bevy's 16-parameter limit, and the
     /// bridge takes the same bundle so `snapshot`'s two table arguments come from one place.
@@ -163,9 +164,9 @@ impl BridgeReadout<'_, '_> {
                 u.push(("mounted".into(), PlainValue::Bool(mounted)));
                 u.push((
                     "casting".into(),
-                    self.pending_cast
-                        .as_ref()
-                        .and_then(|p| p.current(now))
+                    // The in-flight slot holds no timer since upstream's #2186: it is the spell
+                    // until the server's result clears it.
+                    self.pending_cast.as_ref().and_then(|p| p.current())
                         .map_or(PlainValue::Null, spell_payload),
                 ));
                 u.push((
@@ -262,7 +263,7 @@ impl BridgeReadout<'_, '_> {
         transform: &Transform,
         store: Option<&ObjectStore>,
         motion: Option<&MovementState>,
-        self_store: Option<&ObjectStore>,
+        _self_store: Option<&ObjectStore>,
         dist: f32,
         chr: crate::ui_unit::UnitNames<'_>,
         types: crate::creature_type::CreatureTypeSources<'_>,
@@ -270,12 +271,17 @@ impl BridgeReadout<'_, '_> {
         let name = self.peek_name(guid);
         let mut u = match store {
             Some(store) => {
-                let reaction = match (self.reputations.as_deref(), net.kind) {
-                    // `ring_reaction` returns the raw 0..7 rank, which is `UnitReaction − 1`; the
-                    // `+ 1` lands it on the Lua 1..8 scale every other caller uses (`ui_unit.rs`,
-                    // `ui_tooltip`) — and the one `unit_fields`' `hostile`/`friendly` classify on.
-                    (Some(reps), EntityKind::Player | EntityKind::Unit) => {
-                        ring_reaction(self.factions.as_deref(), reps, Some(store), self_store) + 1
+                let reaction = match net.kind {
+                    // `Relations::reaction` returns the raw 0..7 rank, which is `UnitReaction − 1`;
+                    // the `+ 1` lands it on the Lua 1..8 scale every other caller uses
+                    // (`ui_unit.rs`, `ui_tooltip`) — and the one `unit_fields`' `hostile`/`friendly`
+                    // classify on. No player object yet reads neutral (3), as the inspect card's.
+                    EntityKind::Player | EntityKind::Unit => {
+                        let unit = self.relations.unit_of(guid, store);
+                        self.relations
+                            .me()
+                            .map_or(3, |me| self.relations.get().reaction(&unit, &me))
+                            + 1
                     }
                     _ => 0,
                 };

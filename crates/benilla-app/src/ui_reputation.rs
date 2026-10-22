@@ -22,17 +22,17 @@
 
 use bevy::prelude::*;
 
-use benilla_ui::script::{FactionEntry, ReputationSend, ReputationState, UiScript};
+use benilla_ui::script::{FactionEntry, ReputationSend, ReputationState};
 
 use crate::net::{ClientCommand, NetCommands, ObjectStore, Reputations, SelfPlayer};
 use crate::target::Factions;
 use crate::ui_chat::ChatLog;
-use crate::ui_script::{UiFeed, UiInput};
+use crate::ui_script::UiFeed;
 
 /// Rank `r` spans `RANK_BOUNDS[r]..RANK_BOUNDS[r + 1]`, the client's table at `0x80928c`: vmangos's
 /// `PointsInRank` walked up from -42000 (`ReputationMgr.cpp:30`), the edges
 /// [`benilla_formats::reputation_rank`] ranks by. The Lua `standingID` is the rank plus one.
-const RANK_BOUNDS: [i32; 9] = [-42000, -6000, -3000, 0, 3000, 9000, 21000, 42000, 43000];
+pub(crate) const RANK_BOUNDS: [i32; 9] = [-42000, -6000, -3000, 0, 3000, 9000, 21000, 42000, 43000];
 
 /// The reputation pane's feed and outbound drain; the bindings are `benilla-ui`'s.
 pub(crate) struct UiReputationPlugin;
@@ -47,7 +47,7 @@ impl Plugin for UiReputationPlugin {
                     .in_set(UiFeed)
                     .in_set(crate::ui_unit::field_events::FieldEventPushes)
                     .in_set(crate::ui_unit::WorldEnterSeats),
-                drain_reputation_sends.after(UiInput),
+                drain_reputation_sends.in_set(crate::ui_script::UiDrain),
             ),
         );
     }
@@ -159,7 +159,7 @@ pub(crate) fn queue_standing_lines(
     lines: impl IntoIterator<Item = StandingLine>,
     catalog: &benilla_formats::FactionCatalog,
     female: bool,
-    chat: &mut ChatLog,
+    chat: &ChatLog,
 ) {
     for StandingLine { faction_id, rank } in lines {
         if let Some(name) = catalog.faction_name(faction_id) {
@@ -168,26 +168,19 @@ pub(crate) fn queue_standing_lines(
     }
 }
 
-/// `0x62c670`'s sentence: `FACTION_STANDING_CHANGED` filled with the rank label and the faction
-/// name. The label is `FACTION_STANDING_LABEL<rank + 1>` gendered by `0x612bf0`: a female player
-/// tries the `_FEMALE` twin and, when that is absent or empty, the bare key (`0x612c36`). A label
-/// absent altogether is an empty string, not a missing line: `0x703bf0` never returns NULL, and
-/// `0x62c670` prints with whatever it gave. Only a missing template prints nothing here, where the
-/// reference would send an empty string to the chat composer.
+/// `0x62c670`'s sentence: `FACTION_STANDING_CHANGED` filled with the
+/// [`benilla_ui::strings::standing_label`] and the
+/// faction name. An absent label is an empty one, not a missing line: `0x62c670` prints with
+/// whatever `0x703bf0` gave. Only a missing template prints nothing here, where the reference
+/// would send an empty string to the chat composer.
 pub(crate) fn standing_text(
     get: &dyn Fn(&str) -> Option<String>,
     rank: u8,
     female: bool,
     faction_name: &str,
 ) -> Option<String> {
-    let key = format!("FACTION_STANDING_LABEL{}", rank.min(7) + 1);
-    let defined = |k: &str| get(k).filter(|v| !v.is_empty());
-    let label = female
-        .then(|| defined(&format!("{key}_FEMALE")))
-        .flatten()
-        .or_else(|| defined(&key))
-        .unwrap_or_default();
-    let template = defined("FACTION_STANDING_CHANGED")?;
+    let label = benilla_ui::strings::standing_label(get, u32::from(rank.min(7)), female);
+    let template = get("FACTION_STANDING_CHANGED").filter(|v| !v.is_empty())?;
     Some(benilla_ui::strings::fill(
         &template,
         &[
@@ -245,67 +238,89 @@ type ReputationInputs = Option<(u8, u8, Option<u32>)>;
 /// the frame the world-enter cascade runs over it, whose rebuild signals with the player seated
 /// (`crate::ui_unit::WorldEnterSeats`).
 pub(crate) fn feed_reputation(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
     reputations: Res<Reputations>,
     factions: Option<Res<Factions>>,
     mut last: Local<crate::ui_script::VmMemo<Option<ReputationState>>>,
     mut last_inputs: Local<crate::ui_script::VmMemo<ReputationInputs>>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let last = last.get(&script);
-    let last_inputs = last_inputs.get(&script);
-    let (Ok(store), Some(factions_res)) = (self_store.single(), factions.as_ref()) else {
-        return;
-    };
-    let catalog = factions_res.catalog();
-    let (race, class) = (
-        store.0.unit_race().unwrap_or(0),
-        store.0.unit_class().unwrap_or(0),
-    );
-    let watched = store
-        .0
-        .player_watched_faction()
-        .and_then(|i| u32::try_from(i).ok());
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let last = last.get(script);
+        let last_inputs = last_inputs.get(script);
+        let (Ok(store), Some(factions_res)) = (self_store.single(), factions.as_ref()) else {
+            return;
+        };
+        let catalog = factions_res.catalog();
+        let (race, class) = (
+            store.0.unit_race().unwrap_or(0),
+            store.0.unit_class().unwrap_or(0),
+        );
+        let watched = store
+            .0
+            .player_watched_faction()
+            .and_then(|i| u32::try_from(i).ok());
 
-    let inputs = (race, class, watched);
-    let moved = reputations.is_changed()
-        || factions_res.is_changed()
-        || last_inputs.as_ref() != Some(&inputs)
-        || last.is_none();
-    if !moved {
-        return;
-    }
-    *last_inputs = Some(inputs);
-    script.set_faction_standings(faction_standings(catalog, &reputations, race, class));
-
-    let mut entries = Vec::new();
-    for (faction_id, info) in catalog.reputation_factions() {
-        // An uncovered slot reads `(0, 0)`, unmet, and its row stays: a header's name rides on it.
-        let (flags, wire) = usize::try_from(info.rep_index)
-            .ok()
-            .and_then(|i| reputations.slots.get(i))
-            .copied()
-            .unwrap_or((0, 0));
-        if let Some(row) = reputation_row(faction_id, info, catalog, flags, wire, race, class) {
-            entries.push(row);
+        let inputs = (race, class, watched);
+        let moved = reputations.is_changed()
+            || factions_res.is_changed()
+            || last_inputs.as_ref() != Some(&inputs)
+            || last.is_none();
+        if !moved {
+            return;
         }
-    }
-    // Sorted before the equality check, so a map reshuffle is not a change.
-    entries.sort_by_key(|e| e.faction_id);
+        *last_inputs = Some(inputs);
+        script.set_faction_standings(faction_standings(catalog, &reputations, race, class));
 
-    let fresh = ReputationState { entries, watched };
-    if last.as_ref() == Some(&fresh) {
-        return;
-    }
-    let bare = faction_fires(last.as_ref(), &fresh);
-    script.set_reputation(fresh.clone());
-    *last = Some(fresh);
-    for _ in 0..bare {
-        script.fire_event("UPDATE_FACTION", vec![]);
-    }
+        let mut entries = Vec::new();
+        for (faction_id, info) in catalog.reputation_factions() {
+            // An uncovered slot reads `(0, 0)`, unmet, and its row stays: a header's name rides on
+            // it.
+            let (flags, wire) = usize::try_from(info.rep_index)
+                .ok()
+                .and_then(|i| reputations.slots.get(i))
+                .copied()
+                .unwrap_or((0, 0));
+            if let Some(row) = reputation_row(faction_id, info, catalog, flags, wire, race, class) {
+                entries.push(row);
+            }
+        }
+        // Sorted before the equality check, so a map reshuffle is not a change.
+        entries.sort_by_key(|e| e.faction_id);
+
+        let fresh = ReputationState { entries, watched };
+        if last.as_ref() == Some(&fresh) {
+            return;
+        }
+        let bare = faction_fires(last.as_ref(), &fresh);
+        script.set_reputation(fresh.clone());
+        *last = Some(fresh);
+        for _ in 0..bare {
+            script.fire_event("UPDATE_FACTION", vec![]);
+        }
+    })
+}
+
+/// `GetFactionStanding 0x4d6370` for one faction: the base for `race`/`class` plus its wire slot,
+/// for a faction with a reputation index under 64 (`0x4d6379`), else 0 (`0x4d6390`).
+pub(crate) fn faction_standing(
+    catalog: &benilla_formats::FactionCatalog,
+    reputations: &Reputations,
+    race: u8,
+    class: u8,
+    faction_id: u32,
+) -> i32 {
+    catalog
+        .reputation_faction(faction_id)
+        .and_then(|info| {
+            let index = usize::try_from(info.rep_index).ok().filter(|&i| i < 64)?;
+            let wire = reputations.slots.get(index).map_or(0, |&(_, w)| w);
+            Some(info.base_for(race, class) + wire)
+        })
+        .unwrap_or(0)
 }
 
 /// Every faction with a reputation index under 64 (`0x4d6379`) at the base for `race`/`class` plus
@@ -343,40 +358,47 @@ fn faction_fires(prev: Option<&ReputationState>, fresh: &ReputationState) -> usi
 }
 
 /// Send the pane's queued verbs; none is acked, and the engine already holds its own copy.
-fn drain_reputation_sends(script: Option<NonSendMut<UiScript>>, commands: Res<NetCommands>) {
-    let Some(mut script) = script else {
-        return;
-    };
-    for send in script.take_reputation_sends() {
-        let cmd = match send {
-            ReputationSend::AtWar {
-                rep_list_id,
-                at_war,
-            } => ClientCommand::SetFactionAtWar {
-                rep_list_id,
-                at_war,
-            },
-            ReputationSend::Inactive {
-                rep_list_id,
-                inactive,
-            } => ClientCommand::SetFactionInactive {
-                rep_list_id,
-                inactive,
-            },
-            // No watch is -1 on the wire: slot 0 is the Bloodsail Buccaneers.
-            ReputationSend::Watch(slot) => ClientCommand::SetWatchedFaction {
-                rep_list_id: slot.map_or(benilla_protocol::messages::WATCHED_FACTION_NONE, |s| {
-                    s as i32
-                }),
-            },
+fn drain_reputation_sends(
+    mut hosted_vm: crate::script_calls::HostedVm,
+    commands: Res<NetCommands>,
+) {
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
         };
-        let _ = commands.0.send(cmd);
-    }
+        for send in script.take_reputation_sends() {
+            let cmd = match send {
+                ReputationSend::AtWar {
+                    rep_list_id,
+                    at_war,
+                } => ClientCommand::SetFactionAtWar {
+                    rep_list_id,
+                    at_war,
+                },
+                ReputationSend::Inactive {
+                    rep_list_id,
+                    inactive,
+                } => ClientCommand::SetFactionInactive {
+                    rep_list_id,
+                    inactive,
+                },
+                // No watch is -1 on the wire: slot 0 is the Bloodsail Buccaneers.
+                ReputationSend::Watch(slot) => ClientCommand::SetWatchedFaction {
+                    rep_list_id: slot
+                        .map_or(benilla_protocol::messages::WATCHED_FACTION_NONE, |s| {
+                            s as i32
+                        }),
+                },
+            };
+            let _ = commands.0.send(cmd);
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use benilla_ui::script::UiScript;
 
     /// A live feed over an empty catalog: the first push and a watched-index change are pushed
     /// with no signal, the world-enter rebuild's and the watch's to fire.

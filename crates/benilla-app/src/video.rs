@@ -12,10 +12,25 @@
 //!
 //! Uncapped is `AutoNoVsync`, never `Immediate`: on Metal `Immediate` takes ~1 s `nextDrawable`
 //! stalls ([`crate::capture::probe_uncap_mode`]).
+//!
+//! Deviation: on Windows, NVIDIA's Vulkan driver (610.88 seen) crashes inside `vkQueuePresentKHR`
+//! on the first present after any swapchain resize while the present mode is `Fifo`, `FifoRelaxed`
+//! or `AutoVsync` (a maximize is a resize). The fault is in the driver's own DXGI present
+//! (`d3d11.dll`): it stays with `VK_LAYER_NV_present` disabled, and the validation layer reports
+//! nothing before it. `Mailbox`, `AutoNoVsync` and DX12 survive, so there
+//! "vsync on" is `AutoNoVsync` paced to the monitor's refresh rate ([`present_choice`]), which
+//! keeps the synced look without the crash. `$WOW_PRESENT=fifo` restores plain `Fifo`.
 
 use benilla_ui::script::ScreenResolution;
 use bevy::prelude::*;
-use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode, WindowResolution};
+use bevy::render::renderer::RenderAdapterInfo;
+use bevy::window::{
+    Monitor, MonitorSelection, PresentMode, PrimaryWindow, WindowMode, WindowResolution,
+};
+// `bevy::platform::time::Instant`: `pace_to_refresh` is registered on wasm32 too, where std's
+// panics on first use. A plain alias for std's natively.
+use bevy::platform::time::Instant;
+use std::time::Duration;
 
 /// `$WOW_NOVSYNC=1`: uncap for this session only; it never reaches `config.toml` (the
 /// `session_owned` set in [`crate::cvars`]).
@@ -483,6 +498,101 @@ pub(crate) fn present_mode(vsync: bool) -> PresentMode {
     }
 }
 
+/// NVIDIA's PCI vendor id, as `wgpu::AdapterInfo::vendor` reports it.
+const VENDOR_NVIDIA: u32 = 0x10DE;
+
+/// `$WOW_PRESENT=fifo`: take plain `Fifo` for vsync on even where [`present_choice`] avoids it, to
+/// test a driver again.
+const PRESENT_ENV: &str = "WOW_PRESENT";
+
+/// What vsync on means on a given adapter: the present mode, and whether the main loop must be
+/// paced to the monitor's refresh rate because the mode itself no longer waits for it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct PresentChoice {
+    pub(crate) mode: PresentMode,
+    pub(crate) paced: bool,
+}
+
+/// The present mode for `vsync` on `adapter` (vendor id and backend; `None` before the renderer is
+/// up), on Windows or not, with `$WOW_PRESENT` as `env`. Vsync off is [`present_mode`] everywhere.
+/// Vsync on is `Fifo` ([`present_mode`]), except NVIDIA on Vulkan on Windows, where `Fifo` crashes
+/// the driver after a resize: there it is `AutoNoVsync` (`Mailbox` > `Immediate` > `Fifo`, which
+/// cannot fail validation), paced to the refresh rate so it still does not run flat out.
+pub(crate) fn present_choice(
+    vsync: bool,
+    adapter: Option<(u32, wgpu::Backend)>,
+    windows: bool,
+    env: Option<&str>,
+) -> PresentChoice {
+    let avoid_fifo = vsync
+        && windows
+        && adapter == Some((VENDOR_NVIDIA, wgpu::Backend::Vulkan))
+        && !env.is_some_and(|v| v.trim().eq_ignore_ascii_case("fifo"));
+    if avoid_fifo {
+        PresentChoice {
+            mode: PresentMode::AutoNoVsync,
+            paced: true,
+        }
+    } else {
+        PresentChoice {
+            mode: present_mode(vsync),
+            paced: false,
+        }
+    }
+}
+
+/// The frame period for the fastest of `refresh_millihertz` (a monitor each; `None` where the OS
+/// does not say). Fastest, since the window's monitor is not tracked: a cap never undershoots the
+/// screen it is on. 60 Hz when none says.
+pub(crate) fn refresh_period(
+    refresh_millihertz: impl IntoIterator<Item = Option<u32>>,
+) -> Duration {
+    let mhz = refresh_millihertz
+        .into_iter()
+        .flatten()
+        .filter(|&m| m > 0)
+        .max()
+        .unwrap_or(60_000);
+    Duration::from_secs_f64(1000.0 / f64::from(mhz))
+}
+
+/// How much longer the frame that began at `last` must wait to last a whole `period`.
+fn pace_wait(last: Option<Instant>, now: Instant, period: Duration) -> Duration {
+    last.map_or(Duration::ZERO, |last| {
+        period.saturating_sub(now.saturating_duration_since(last))
+    })
+}
+
+/// Whether [`pace_to_refresh`] holds the loop; set by [`apply_present_mode`].
+#[derive(Resource, Default, PartialEq, Eq, Debug)]
+pub(crate) struct RefreshPacing(pub(crate) bool);
+
+/// Sleep out the rest of the frame so a non-waiting present mode runs at the monitor's rate. A
+/// frame that overran starts the next period from now: no catch-up burst.
+fn pace_to_refresh(
+    pacing: Res<RefreshPacing>,
+    monitors: Query<&Monitor>,
+    mut last: Local<Option<Instant>>,
+) {
+    if !pacing.0 {
+        return;
+    }
+    let period = refresh_period(monitors.iter().map(|m| m.refresh_rate_millihertz));
+    let wait = pace_wait(*last, Instant::now(), period);
+    if !wait.is_zero() {
+        // A sleep overshoots by up to a timer tick, so the last millisecond spins.
+        const SPIN: Duration = Duration::from_millis(1);
+        let deadline = Instant::now() + wait;
+        if wait > SPIN {
+            std::thread::sleep(wait - SPIN);
+        }
+        while Instant::now() < deadline {
+            std::hint::spin_loop();
+        }
+    }
+    *last = Some(Instant::now());
+}
+
 pub(crate) struct VideoPlugin;
 
 /// The change callbacks of the reference's video-options registration block (`0x688470`); each
@@ -861,6 +971,8 @@ impl Plugin for VideoPlugin {
         );
         app.init_resource::<VideoConfig>()
             .init_resource::<GxRestarts>()
+            .init_resource::<RefreshPacing>()
+            .add_systems(Last, pace_to_refresh)
             .add_systems(Startup, (log_display_session, check_window_pinned).chain())
             .add_systems(
                 Update,
@@ -869,7 +981,7 @@ impl Plugin for VideoPlugin {
                     // row, then `RestartGx()`, so the staged rows are registered before the commit.
                     (drain_restart_gx, (apply_present_mode, apply_window_mode))
                         .chain()
-                        .after(crate::ui_script::UiInput)
+                        .in_set(crate::ui_script::UiDrain)
                         .after(crate::cvars::sync_cvars),
                     // A push the tick may read (`GetScreenResolutions`): the feed phase.
                     publish_display_modes.in_set(crate::ui_script::UiFeed),
@@ -887,27 +999,32 @@ pub(crate) struct GxRestarts(u32);
 /// where the reference's restart calls `CVar::Update` (`0x63e060`) on each; `GetCVar` answers the
 /// applied value until then.
 fn drain_restart_gx(
-    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     mut restarts: ResMut<GxRestarts>,
     mut cvars: ResMut<crate::cvars::Cvars>,
     mut commands: Commands,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let asks = script.take_restart_gx_asks();
-    if asks == 0 {
-        // A `ResMut` deref-mut is a change signal, so a quiet frame touches nothing.
-        return;
-    }
-    restarts.0 = restarts.0.wrapping_add(asks);
-    let committed = cvars.commit_latched();
-    if cvars.has_events() {
-        for event in cvars.take_events() {
-            commands.trigger(event);
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let asks = script.take_restart_gx_asks();
+        if asks == 0 {
+            // A `ResMut` deref-mut is a change signal, so a quiet frame touches nothing.
+            return;
         }
-    }
-    info!("video: RestartGx — {committed} staged setting(s) committed; re-asserting the display mode and present mode");
+        restarts.0 = restarts.0.wrapping_add(asks);
+        let committed = cvars.commit_latched();
+        if cvars.has_events() {
+            for event in cvars.take_events() {
+                commands.trigger(event);
+            }
+        }
+        info!(
+            "video: RestartGx — {committed} staged setting(s) committed; re-asserting the \
+               display mode and present mode"
+        );
+    })
 }
 
 /// The reference's three filters on the resolution list (`0x48bcfa` to `0x48bd18`): keep when
@@ -948,51 +1065,53 @@ type PublishedModes = Option<(Vec<ScreenResolution>, Option<ScreenResolution>)>;
 /// needs. Deviation: sizes are logical px, because `gxResolution` is a logical inner size here.
 /// The list is recomputed on change; the reference builds its list once and never invalidates it.
 fn publish_display_modes(
-    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     windows: Query<&Window, With<PrimaryWindow>>,
     monitors: Query<&bevy::window::Monitor>,
     mut last: Local<crate::ui_script::VmMemo<PublishedModes>>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    let res = &window.resolution;
-    let current = Some(ScreenResolution {
-        width: res.width() as u32,
-        height: res.height() as u32,
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let Ok(window) = windows.single() else {
+            return;
+        };
+        let res = &window.resolution;
+        let current = Some(ScreenResolution {
+            width: res.width() as u32,
+            height: res.height() as u32,
+        })
+        .filter(|r| r.width > 0 && r.height > 0);
+        let mut offered: Vec<ScreenResolution> = Vec::new();
+        for m in &monitors {
+            // The monitor's own scale, not the window's: these rows describe the panel.
+            let scale = if m.scale_factor > 0.0 {
+                m.scale_factor
+            } else {
+                1.0
+            };
+            let logical = |size: UVec2| ScreenResolution {
+                width: (size.x as f64 / scale).round() as u32,
+                height: (size.y as f64 / scale).round() as u32,
+            };
+            offered.push(logical(m.physical_size()));
+            offered.extend(m.video_modes.iter().map(|v| logical(v.physical_size)));
+        }
+        offered.retain(|r| offerable(*r));
+        if offered.is_empty() {
+            offered.extend(SCREEN_FALLBACK);
+        }
+        offered.sort_by_key(|r| (u64::from(r.width) * u64::from(r.height), r.width, r.height));
+        offered.dedup();
+        // Keyed by VM: a `ReloadUI` VM has been pushed nothing, so a plain `Local` would skip it.
+        let memo = last.get(script);
+        if memo.as_ref() == Some(&(offered.clone(), current)) {
+            return;
+        }
+        *memo = Some((offered.clone(), current));
+        script.set_screen_resolutions(offered, current);
     })
-    .filter(|r| r.width > 0 && r.height > 0);
-    let mut offered: Vec<ScreenResolution> = Vec::new();
-    for m in &monitors {
-        // The monitor's own scale, not the window's: these rows describe the panel.
-        let scale = if m.scale_factor > 0.0 {
-            m.scale_factor
-        } else {
-            1.0
-        };
-        let logical = |size: UVec2| ScreenResolution {
-            width: (size.x as f64 / scale).round() as u32,
-            height: (size.y as f64 / scale).round() as u32,
-        };
-        offered.push(logical(m.physical_size()));
-        offered.extend(m.video_modes.iter().map(|v| logical(v.physical_size)));
-    }
-    offered.retain(|r| offerable(*r));
-    if offered.is_empty() {
-        offered.extend(SCREEN_FALLBACK);
-    }
-    offered.sort_by_key(|r| (u64::from(r.width) * u64::from(r.height), r.width, r.height));
-    offered.dedup();
-    // Keyed by VM: a `ReloadUI` VM has been pushed nothing, so a plain `Local` would skip it.
-    let memo = last.get(&script);
-    if memo.as_ref() == Some(&(offered.clone(), current)) {
-        return;
-    }
-    *memo = Some((offered.clone(), current));
-    script.set_screen_resolutions(offered, current);
 }
 
 /// Check the window got the size `$WOW_WIN` asked for: the window manager may clamp it to the
@@ -1090,8 +1209,10 @@ fn display_session() -> String {
     String::new()
 }
 
-/// Push vsync to the window only when the setting moves or a `RestartGx()` asks: the capture
-/// probes write `present_mode` directly, and their override must stick.
+/// Push vsync to the window only when the setting moves, a `RestartGx()` asks or the render
+/// adapter first appears (the boot window is born before it is known, on plain `Fifo`, and a
+/// resize in the first moments is safe): the capture probes write `present_mode` directly, and
+/// their override must stick, so the adapter's arrival swaps the boot mode alone.
 ///
 /// MONKEY (lighting): the value compare on top of `is_changed()` stays. This branch hangs its
 /// lighting knobs off `VideoConfig` too, so a `SetCVar("interiorGain")` marks the resource
@@ -1099,25 +1220,48 @@ fn display_session() -> String {
 pub(crate) fn apply_present_mode(
     cfg: Res<VideoConfig>,
     restarts: Res<GxRestarts>,
+    adapter: Option<Res<RenderAdapterInfo>>,
+    mut pacing: ResMut<RefreshPacing>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mut last: Local<Option<bool>>,
     mut last_restart: Local<u32>,
 ) {
     // A `RestartGx()` re-asserts even when nothing moved.
     let forced = std::mem::replace(&mut *last_restart, restarts.0) != restarts.0;
-    if (!cfg.is_changed() || last.replace(cfg.vsync) == Some(cfg.vsync)) && !forced {
+    let adapter_arrived = adapter.as_ref().is_some_and(|a| a.is_added());
+    // MONKEY (lighting): "the setting moved" is `vsync`'s value, not the resource's change tick.
+    let vsync_moved = cfg.is_changed() && last.replace(cfg.vsync) != Some(cfg.vsync);
+    let asked = vsync_moved || forced;
+    if !asked && !adapter_arrived {
         return;
     }
-    let want = present_mode(cfg.vsync);
     let Ok(mut window) = windows.single_mut() else {
         return;
     };
+    if !asked && window.present_mode != present_mode(cfg.vsync) {
+        return;
+    }
+    let choice = present_choice(
+        cfg.vsync,
+        adapter.as_ref().map(|a| (a.vendor, a.backend)),
+        cfg!(windows),
+        std::env::var(PRESENT_ENV).ok().as_deref(),
+    );
+    if pacing.0 != choice.paced {
+        pacing.0 = choice.paced;
+    }
     // A spurious change to `Window` is a surface reconfigure.
-    if window.present_mode != want {
-        window.present_mode = want;
+    if window.present_mode != choice.mode {
+        window.present_mode = choice.mode;
         info!(
-            "video: vsync {} ({want:?})",
-            if cfg.vsync { "on" } else { "off" }
+            "video: vsync {} ({:?}{})",
+            if cfg.vsync { "on" } else { "off" },
+            choice.mode,
+            if choice.paced {
+                ", paced to the refresh rate: Fifo crashes NVIDIA Vulkan on Windows after a resize; WOW_PRESENT=fifo restores it"
+            } else {
+                ""
+            }
         );
     }
 }
@@ -1218,6 +1362,137 @@ mod tests {
     #[test]
     fn uncapped_is_autonovsync_not_immediate() {
         assert_eq!(present_mode(false), PresentMode::AutoNoVsync);
+    }
+
+    const NVIDIA: u32 = 0x10DE;
+    const AMD: u32 = 0x1002;
+    const INTEL: u32 = 0x8086;
+
+    /// NVIDIA's Vulkan driver crashes in `Fifo` after a resize; that pairing on Windows with vsync
+    /// on is the one that avoids it, and paces instead.
+    #[test]
+    fn nvidia_vulkan_on_windows_trades_fifo_for_a_paced_autonovsync() {
+        assert_eq!(
+            present_choice(true, Some((NVIDIA, wgpu::Backend::Vulkan)), true, None),
+            PresentChoice {
+                mode: PresentMode::AutoNoVsync,
+                paced: true
+            }
+        );
+    }
+
+    /// Every other vendor, backend and OS keeps `Fifo`.
+    #[test]
+    fn everything_else_keeps_fifo() {
+        let fifo = PresentChoice {
+            mode: PresentMode::Fifo,
+            paced: false,
+        };
+        for vendor in [AMD, INTEL, 0x106B, 0] {
+            assert_eq!(
+                present_choice(true, Some((vendor, wgpu::Backend::Vulkan)), true, None),
+                fifo,
+                "{vendor:#x}"
+            );
+        }
+        for backend in [
+            wgpu::Backend::Dx12,
+            wgpu::Backend::Metal,
+            wgpu::Backend::Gl,
+            wgpu::Backend::BrowserWebGpu,
+        ] {
+            assert_eq!(
+                present_choice(true, Some((NVIDIA, backend)), true, None),
+                fifo,
+                "{backend:?}"
+            );
+        }
+        // Linux and macOS NVIDIA Vulkan are not the Windows driver.
+        assert_eq!(
+            present_choice(true, Some((NVIDIA, wgpu::Backend::Vulkan)), false, None),
+            fifo
+        );
+        // Before the renderer is up the adapter is unknown: the boot window's `Fifo`.
+        assert_eq!(present_choice(true, None, true, None), fifo);
+    }
+
+    /// Vsync off is `AutoNoVsync` and unpaced on every adapter: the existing uncapped path.
+    #[test]
+    fn vsync_off_is_unchanged_everywhere() {
+        for (adapter, windows) in [
+            (Some((NVIDIA, wgpu::Backend::Vulkan)), true),
+            (Some((AMD, wgpu::Backend::Vulkan)), true),
+            (Some((NVIDIA, wgpu::Backend::Vulkan)), false),
+            (None, true),
+        ] {
+            assert_eq!(
+                present_choice(false, adapter, windows, None),
+                PresentChoice {
+                    mode: PresentMode::AutoNoVsync,
+                    paced: false
+                }
+            );
+        }
+    }
+
+    /// `$WOW_PRESENT=fifo` (any case, padded) restores `Fifo` on the avoided pairing; other values
+    /// change nothing.
+    #[test]
+    fn wow_present_fifo_overrides_the_avoidance() {
+        let nv = Some((NVIDIA, wgpu::Backend::Vulkan));
+        for v in ["fifo", "FIFO", " Fifo "] {
+            assert_eq!(
+                present_choice(true, nv, true, Some(v)),
+                PresentChoice {
+                    mode: PresentMode::Fifo,
+                    paced: false
+                },
+                "{v:?}"
+            );
+        }
+        for v in ["", "mailbox", "1"] {
+            assert!(present_choice(true, nv, true, Some(v)).paced, "{v:?}");
+        }
+    }
+
+    /// The boot window is built before the adapter is known, and the arrival check reads its mode
+    /// as `present_mode`'s.
+    #[test]
+    fn the_boot_mode_is_the_adapterless_choice() {
+        for vsync in [true, false] {
+            assert_eq!(
+                present_choice(vsync, None, true, None).mode,
+                present_mode(vsync)
+            );
+        }
+    }
+
+    /// The pace follows the fastest monitor and falls back to 60 Hz.
+    #[test]
+    fn the_pace_is_the_fastest_monitors_refresh_rate() {
+        assert_eq!(
+            refresh_period([Some(60_000), Some(144_000), None]),
+            Duration::from_secs_f64(1.0 / 144.0)
+        );
+        for none in [vec![], vec![None], vec![Some(0)]] {
+            assert_eq!(refresh_period(none), Duration::from_secs_f64(1.0 / 60.0));
+        }
+    }
+
+    /// A frame waits out the rest of its period, never more; the first frame and an overrun wait 0.
+    #[test]
+    fn a_frame_waits_out_the_rest_of_its_period() {
+        let t = Instant::now();
+        let period = Duration::from_millis(10);
+        assert_eq!(pace_wait(None, t, period), Duration::ZERO);
+        assert_eq!(
+            pace_wait(Some(t), t + Duration::from_millis(4), period),
+            Duration::from_millis(6)
+        );
+        assert_eq!(
+            pace_wait(Some(t), t + Duration::from_millis(25), period),
+            Duration::ZERO
+        );
     }
 
     /// `WindowMode::Fullscreen` is ignored on Wayland and panics without a monitor.

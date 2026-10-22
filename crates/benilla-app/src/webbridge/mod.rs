@@ -405,28 +405,34 @@ fn apply_synth_input(
     mut input: ResMut<BridgeInput>,
     capture: Res<UiKeyboardCapture>,
     script: Option<NonSendMut<UiScript>>,
-    player: Option<ResMut<Player>>,
     mut memo: ResMut<BridgeMemo>,
     mut out: ResMut<BridgeOutbox>,
+    // The host is lent to the VM around each command body, as the key dispatch lends it. It
+    // reads the player, so the look turn's write takes the other half of the set.
+    mut set: ParamSet<(
+        Option<crate::script_calls::ScriptCallHost>,
+        Option<ResMut<Player>>,
+    )>,
 ) {
     let mut script = script;
+    let mut host = set.p0();
     let binds = &mut *binds;
     if input.drop_holds {
         input.drop_holds = false;
         input.released.clear();
-        crate::bindings::synth_release_all(binds, &mut script);
+        crate::bindings::synth_release_all(binds, &mut script, &mut host);
         out.push(
             "input",
             PlainValue::Map(vec![("heldCleared".into(), PlainValue::Bool(true))]),
         );
     }
     for c in input.released.drain(..) {
-        crate::bindings::synth_release(binds, &mut script, &c);
+        crate::bindings::synth_release(binds, &mut script, &mut host, &c);
     }
     let prev_taps = std::mem::take(&mut input.tap_prev);
     for c in prev_taps {
         if !input.held.contains(&c) {
-            crate::bindings::synth_release(binds, &mut script, &c);
+            crate::bindings::synth_release(binds, &mut script, &mut host, &c);
         }
     }
     // With no VM there is no command table, so nothing can be pressed and nothing validated; the
@@ -456,19 +462,19 @@ fn apply_synth_input(
     }
     let held: Vec<String> = input.held.iter().cloned().collect();
     if capture.typing {
-        crate::bindings::synth_release_all(binds, &mut script);
+        crate::bindings::synth_release_all(binds, &mut script, &mut host);
         taps.clear();
     } else {
         for c in held.iter().chain(taps.iter()) {
             if known(c, script.as_deref().expect("checked above"), &mut memo, &mut out) {
-                crate::bindings::synth_press(binds, &mut script, c);
+                crate::bindings::synth_press(binds, &mut script, &mut host, c);
             }
         }
     }
     input.tap_prev = taps;
     for (c, amount) in oneshots {
-        crate::bindings::synth_press(binds, &mut script, &c);
-        crate::bindings::synth_release(binds, &mut script, &c);
+        crate::bindings::synth_press(binds, &mut script, &mut host, &c);
+        crate::bindings::synth_release(binds, &mut script, &mut host, &c);
         // The magnitude the body could not carry: a zoom's own Lua takes yards, and the page's
         // notch is not always the reference's 1.0 key step. Only the two zooms have an amount,
         // and only a non-default one is worth a second push.
@@ -483,8 +489,9 @@ fn apply_synth_input(
             }
         }
     }
+    drop(host);
     if input.look != 0.0 {
-        if let Some(mut player) = player {
+        if let Some(mut player) = set.p1() {
             player.turn_aim(input.look);
         }
         input.look = 0.0;
@@ -496,9 +503,10 @@ fn release_synth_input(
     mut binds: ResMut<BindingsState>,
     mut input: ResMut<BridgeInput>,
     script: Option<NonSendMut<UiScript>>,
+    mut host: Option<crate::script_calls::ScriptCallHost>,
 ) {
     let mut script = script;
-    crate::bindings::synth_release_all(&mut binds, &mut script);
+    crate::bindings::synth_release_all(&mut binds, &mut script, &mut host);
     input.held.clear();
     input.released.clear();
     input.taps.clear();

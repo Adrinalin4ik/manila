@@ -67,6 +67,7 @@ fn merchant_compare_renders_the_compare_shape_and_no_hover_seats_a_plate() {
             use_fork: Default::default(),
             item_class: None,
             duration_ms: None,
+            field_duration: 0,
             petition: None,
             already_bound: false,
             occupied_seats: None,
@@ -92,6 +93,7 @@ fn merchant_compare_renders_the_compare_shape_and_no_hover_seats_a_plate() {
             flags: 0,
             enchants: Vec::new(),
             spell_0: false,
+            spell_charges: [0; 5],
         },
     );
     s.set_container(
@@ -253,7 +255,12 @@ fn set_inventory_item_name_only_is_the_trimmed_build() {
             armor: 100,
             max_durability: 90,
             required_level: 40,
-            spell_triggers: vec![(1, 100, "Zap".into())],
+            spell_lines: vec![ItemSpellLine {
+                trigger: 1,
+                spell_id: 100,
+                text: "Zap".into(),
+                ..Default::default()
+            }],
             description: "Sealed.".into(),
             ..Default::default()
         },
@@ -695,11 +702,20 @@ fn item_bindings_return_the_pushed_repair_cost() {
         ..Default::default()
     });
     s.set_inventory_slots(inv.clone());
-    s.set_inspect(Some(InspectView {
-        unit: "target".into(),
-        guid: 0x42,
-        slots: inv,
-    }));
+    // A cooperative player 4 yards off, whose visible items `"target"` reads (`0x53306a`).
+    s.set_visible_equipment(0x42, Some(inv));
+    s.set_unit_guids(&UnitGuids {
+        target: 0x42,
+        held: HashMap::from([(0x42, 0)]),
+        ..Default::default()
+    });
+    s.set_unit_reach(HashMap::from([(
+        0x42,
+        UnitReach {
+            dist_sq: 16.0,
+            inspectable: true,
+        },
+    )]));
     let mut slots = HashMap::new();
     for (slot, id, name) in [(1, 8201, "Worn Helm"), (2, 8202, "Whole Helm")] {
         slots.insert(
