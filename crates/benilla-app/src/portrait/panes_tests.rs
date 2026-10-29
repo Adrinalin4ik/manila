@@ -601,6 +601,7 @@ impl Harness {
                     static_mesh: mesh,
                     skinned_mesh: None,
                     material: Handle::default(),
+                    alpha_anim: None,
                 },
             ));
             app.world_mut()

@@ -154,6 +154,8 @@ pub(crate) struct PortraitPart {
     /// `None` for a WMO-display part, which never skins; the booth draws the static twin.
     pub(crate) skinned_mesh: Option<Handle<Mesh>>,
     pub(crate) material: Handle<WowModelMaterial>,
+    /// Authored batch visibility, evaluated in the booth's own pose and clock.
+    pub(crate) alpha_anim: Option<std::sync::Arc<benilla_formats::AlphaAnim>>,
 }
 
 /// Stamped on every bone-rider mesh child (helm, shoulder, held item). A booth seats it under its
@@ -1279,8 +1281,7 @@ fn sync_portraits(
                     skinned: p.skinned_mesh.clone(),
                     static_mesh: p.static_mesh.clone(),
                     material: booth_light.studio.variant(&p.material, &mut wow_mats),
-                    // `None`: a mirrored part does not carry the batch's alpha loops.
-                    alpha_anim: None,
+                    alpha_anim: p.alpha_anim.clone(),
                     twins: BoothTwins::default(),
                     mat_anim: false,
                 })
@@ -1841,6 +1842,7 @@ mod tests {
             static_mesh: Handle::default(),
             skinned_mesh: None,
             material: Handle::default(),
+            alpha_anim: None,
         }
     }
 

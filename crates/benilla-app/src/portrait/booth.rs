@@ -453,7 +453,7 @@ pub(super) fn spawn_booth_model(
     let Some((skeleton, ibp, anims)) = rig.filter(|(s, _, _)| !s.joints.is_empty()) else {
         // No palette slot: every part draws its static twin at bind pose.
         for p in parts {
-            spawn_batch(commands, root, &layer, p, 0, instance, None);
+            spawn_batch(commands, root, &layer, p, 0, instance, (None, None));
         }
         return BoothRig {
             root,
@@ -515,8 +515,12 @@ pub(super) fn spawn_booth_model(
     // A live booth's batch alphas follow the sequence its root plays, on its clock; a still's
     // stay pinned.
     let host = (motion == BoothMotion::Loop && anims.is_some()).then_some(root);
+    let seq = anims.and_then(|a| {
+        let stand = catalog.map_or(0, |c| a.resolve(0, c).id);
+        a.find(stand).map(|clip| clip.seq_index)
+    });
     for p in parts {
-        spawn_batch(commands, root, &layer, p, rig_slot, instance, host);
+        spawn_batch(commands, root, &layer, p, rig_slot, instance, (host, seq));
     }
     let mut booth_rig = BoothRig {
         root,
@@ -573,7 +577,7 @@ fn spawn_batch(
     p: &BoothPart,
     rig_slot: u16,
     instance: BoothInstance,
-    host: Option<Entity>,
+    clock: (Option<Entity>, Option<usize>),
 ) -> Entity {
     let use_rig = p.skinned.is_some() && rig_slot != 0;
     let mut child = commands.spawn((
@@ -583,7 +587,7 @@ fn spawn_batch(
         ChildOf(root),
         BoothBatch,
     ));
-    dress_batch(&mut child, p, rig_slot, instance, host);
+    dress_batch(&mut child, p, rig_slot, instance, clock);
     if use_rig {
         child.insert(benilla_world::rig_palette::RigPart(root));
         // A skinned booth part is never frustum-culled: Bevy's bound is the bind-pose box, the
@@ -595,14 +599,14 @@ fn spawn_batch(
 }
 
 /// A batch's dressing: its material, its tag (the palette slot beside the instance alpha, or the
-/// material alpha that drives it) and its depth-prime record. `host` is the root whose player the
-/// material alpha follows, its sequence and its scene's clock; `None` pins it.
+/// material alpha that drives it) and its depth-prime record. `clock` names the player to follow
+/// and the initial sequence; a still keeps that sequence, which may differ from file slot 0.
 fn dress_batch(
     child: &mut bevy::ecs::system::EntityCommands<'_>,
     p: &BoothPart,
     rig_slot: u16,
     instance: BoothInstance,
-    host: Option<Entity>,
+    clock: (Option<Entity>, Option<usize>),
 ) {
     child.insert(MeshMaterial3d(instance.material(&p.material, &p.twins)));
     mark_mat_anim(child, p.mat_anim);
@@ -614,8 +618,8 @@ fn dress_batch(
     if let Some(anim) = &p.alpha_anim {
         // The batch's material alpha times the instance alpha, the reference's
         // `model+0x180 × the batch factor` (`0x707680`).
-        let mat_anim = benilla_world::doodad_anim::MatAnim::driving_tag(anim.clone(), 0.0, None)
-            .following_host(host);
+        let mat_anim = benilla_world::doodad_anim::MatAnim::driving_tag(anim.clone(), 0.0, clock.1)
+            .following_host(clock.0);
         child.insert((
             bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
                 tag_slot,
@@ -740,10 +744,18 @@ pub(super) fn redress_booth_batches(
                         benilla_world::doodad_anim::AnimMatPart,
                     )>()
                     .insert(Visibility::Inherited);
-                dress_batch(&mut child, p, rig_slot, instance, Some(root));
+                dress_batch(&mut child, p, rig_slot, instance, (Some(root), None));
             }
             None => {
-                spawn_batch(commands, root, layer, p, rig_slot, instance, Some(root));
+                spawn_batch(
+                    commands,
+                    root,
+                    layer,
+                    p,
+                    rig_slot,
+                    instance,
+                    (Some(root), None),
+                );
             }
         }
     }
@@ -1190,7 +1202,7 @@ mod tests {
             graph: Handle::default(),
             clips: vec![benilla_assets::AnimClip {
                 anim_id: 0,
-                seq_index: 0,
+                seq_index: 1, // Stand need not be the first file sequence (GoblinMale).
                 node: bevy::animation::graph::AnimationNodeIndex::new(1),
                 blend_node: None,
                 looping: true,
@@ -1222,7 +1234,11 @@ mod tests {
                 skinned: None,
                 static_mesh: Handle::default(),
                 material: Handle::default(),
-                alpha_anim: Some(constant_alpha(0.55)),
+                alpha_anim: benilla_formats::AlphaAnim::new(vec![
+                    benilla_formats::AlphaSeq::default(),
+                    constant_alpha(0.55).seq(None).clone(),
+                ])
+                .map(std::sync::Arc::new),
                 twins: BoothTwins::default(),
                 mat_anim: false,
             }];
@@ -1252,6 +1268,10 @@ mod tests {
             }
             queue.apply(app.world_mut());
             let mut q = app.world_mut().query::<&MatAnim>();
+            assert!(
+                q.iter(app.world()).all(|a| a.current == 0.55),
+                "both a live booth and a still seed the sequence actually posed, not file slot 0"
+            );
             let hosts: Vec<_> = q.iter(app.world()).map(MatAnim::host).collect();
             assert_eq!(
                 hosts,
