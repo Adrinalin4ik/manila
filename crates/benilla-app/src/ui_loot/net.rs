@@ -5,7 +5,7 @@ use benilla_protocol::messages::ItemPushResult;
 use benilla_protocol::{SessionEvent, SessionEventKind};
 use bevy::prelude::*;
 
-use super::{LootLatch, LootMoveStart, LootState};
+use super::{LootCloseAtRest, LootLatch, LootMoveStart, LootState};
 use crate::net::{ClientCommand, NetCommands, NetHandlerApp, SelfGuid};
 use crate::ui_action::{UiError, UiErrorKeys};
 
@@ -35,6 +35,7 @@ fn on_response(
     mut select: crate::target::SelectCommit,
     player: Option<Res<crate::player::Player>>,
     mut move_start: ResMut<LootMoveStart>,
+    mut at_rest: ResMut<LootCloseAtRest>,
     index: Res<crate::net::GuidIndex>,
     errors: Res<UiErrorKeys>,
 ) {
@@ -70,12 +71,13 @@ fn on_response(
     );
     select.select_unit(guid);
     select.seam.loot.open(guid, loot_type, gold, items);
-    if player.is_some_and(|p| {
+    // Earlier closes belong to the replaced interaction: the reference takes a precast end's
+    // close at its GO (`0x60d10b`), before this response's copier (`0x4c1cb0`).
+    at_rest.0 = false;
+    move_start.0 = player.is_some_and(|p| {
         p.foreign_mover.is_none()
             && p.move_flags() & crate::creature_anim::move_flags::STEERING != 0
-    }) {
-        move_start.0 = true;
-    }
+    });
 }
 
 fn on_error(
