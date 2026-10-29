@@ -654,7 +654,7 @@ pub(crate) struct PreviewPart {
     pub(crate) static_mesh: Handle<Mesh>,
     pub(crate) skinned_mesh: Option<Handle<Mesh>>,
     pub(crate) material: Handle<WowModelMaterial>,
-    /// The batch's animated material alpha: `None` from the character assembly, set for a pet.
+    /// The batch's animated material alpha, sampled with the body's sequence and scene clock.
     pub(crate) alpha_anim: Option<std::sync::Arc<benilla_formats::AlphaAnim>>,
     /// Translucency twins ([`BoothTwins`]), drawn when the bake's instance alpha is below 1.
     pub(crate) twins: BoothTwins,
@@ -1682,8 +1682,7 @@ pub(super) fn sync_glue_booth(
                 static_mesh: p.static_mesh.clone(),
                 material: relight(&p.material, &mut scene, &mut booth_light, &mut materials),
                 twins: relight_twins(&p.twins, &mut scene, &mut booth_light, &mut materials),
-                // `None`: the character assembly does not carry its alpha loops.
-                alpha_anim: None,
+                alpha_anim: p.alpha_anim.clone(),
                 mat_anim: false,
             });
         }
@@ -3056,6 +3055,90 @@ mod tests {
             .collect();
         out.sort_by_key(|(n, _, _)| *n);
         out
+    }
+
+    /// A character batch can be hidden in Stand and shown in another sequence (the goblin's
+    /// emote rag and spare eyelid). The booth must keep the authored mask and follow its own
+    /// player, including after a customization reuses the standing body.
+    #[test]
+    fn character_batch_visibility_follows_its_sequence() {
+        use benilla_world::doodad_anim::{sample_mat_anim, MatAnim};
+        let alpha = std::sync::Arc::new(
+            benilla_formats::AlphaAnim::new(
+                [0.0, 1.0]
+                    .into_iter()
+                    .map(|v| benilla_formats::AlphaSeq {
+                        color: Some(benilla_formats::ScalarAnim {
+                            period: 0.0,
+                            step: true,
+                            wrap: false,
+                            gseq: false,
+                            keys: vec![(0.0, v)],
+                        }),
+                        weight: None,
+                    })
+                    .collect(),
+            )
+            .expect("two different sequence masks"),
+        );
+        let (mut app, root) = booth_app();
+        // MeshPlugin supplies this in the renderer; this fixture runs without GPU plugins.
+        app.world_mut()
+            .register_required_components::<Mesh3d, Visibility>();
+        app.init_resource::<Time>().add_systems(
+            Update,
+            (sample_mat_anim, super::super::booth::push_booth_mat_alpha)
+                .chain()
+                .after(sync_glue_booth),
+        );
+        let mut masked = part(2, 11);
+        masked.alpha_anim = Some(alpha);
+        for skin in [0, 1] {
+            bake(
+                &mut app,
+                create(0, 1, skin, 0),
+                HUMAN_MALE,
+                vec![part(1, 10), masked.clone()],
+                Vec::new(),
+                [false, false],
+            );
+            let batches = worn(&mut app, root);
+            let body = batches.iter().find(|(n, _, _)| *n == 1).unwrap().1;
+            let spare = batches.iter().find(|(n, _, _)| *n == 2).unwrap().1;
+            assert_ne!(
+                app.world().get::<Visibility>(body),
+                Some(&Visibility::Hidden)
+            );
+            let anim = app
+                .world()
+                .get::<MatAnim>(spare)
+                .expect("mask reaches the booth");
+            assert_eq!(anim.host(), Some(root));
+            assert_eq!(anim.current, 0.0);
+            assert_eq!(
+                app.world().get::<Visibility>(spare),
+                Some(&Visibility::Hidden)
+            );
+
+            // The same playing node now names the other file sequence: it must reappear,
+            // rather than being permanently removed as a character-specific workaround.
+            app.world_mut()
+                .get_mut::<benilla_assets::ModelAnimations>(root)
+                .unwrap()
+                .clips[0]
+                .seq_index = 1;
+            app.update();
+            assert_eq!(app.world().get::<MatAnim>(spare).unwrap().current, 1.0);
+            assert_eq!(
+                app.world().get::<Visibility>(spare),
+                Some(&Visibility::Inherited)
+            );
+            app.world_mut()
+                .get_mut::<benilla_assets::ModelAnimations>(root)
+                .unwrap()
+                .clips[0]
+                .seq_index = 0;
+        }
     }
 
     /// The create body is one `CharacterModel` across its customizations (`0x478790` and kin

@@ -622,8 +622,8 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
             skinned_mesh: p.skinned_mesh.clone(),
             material: steady_material(p, &char_mats).unwrap_or_else(|| p.material.clone()),
             twins: part_twins(p, &char_mats),
-            // Not carried yet: a character batch's authored dimming constant previews at 1.0.
-            alpha_anim: None,
+            // Visibility follows the body's sequence too (Goblin eyelids and its emote rag).
+            alpha_anim: p.alpha_anim.clone(),
         })
         .collect();
 

@@ -864,7 +864,7 @@ fn build(
                     skinned: p.skinned_mesh.clone(),
                     static_mesh: p.static_mesh.clone(),
                     material: relight(&p.material, &mut ok),
-                    alpha_anim: None,
+                    alpha_anim: p.alpha_anim.clone(),
                     twins: BoothTwins::default(),
                     mat_anim: false,
                 })
@@ -919,7 +919,7 @@ fn build(
                     skinned: p.skinned_mesh.clone(),
                     static_mesh: p.static_mesh.clone(),
                     material: relight(&p.material, &mut ok),
-                    alpha_anim: None,
+                    alpha_anim: p.alpha_anim.clone(),
                     twins: BoothTwins::default(),
                     mat_anim: false,
                 })
